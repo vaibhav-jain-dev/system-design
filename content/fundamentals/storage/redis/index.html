@@ -1,0 +1,62 @@
+{{phase 1 "What Is Redis?" "3 min"}}
+
+{{say "Redis is an in-memory key-value store. Sub-millisecond reads. Used as a cache, session store, rate limiter, pub/sub broker, and distributed lock."}}
+
+{{qa
+  "Why Redis over Memcached?"
+  "Redis has data structures — sorted sets, lists, hashes, streams. Memcached is just key-value strings. Redis also supports persistence (RDB/AOF), replication, and pub/sub. Memcached is simpler but less capable."
+  "When would you pick Memcached?"
+  "Pure cache, nothing else. Memcached is multi-threaded (Redis is single-threaded), so it can use all CPU cores natively. If you only need GET/SET with massive throughput, Memcached wins on raw performance."
+}}
+
+{{phase 2 "Data Structures" "5 min"}}
+
+{{say "Redis isn't just key-value. Its data structures solve specific problems elegantly."}}
+
+{{table "Redis Data Structures" (rows
+  (row "Structure"   "Operations"                      "Use Case")
+  (row "String"      "GET, SET, INCR, EXPIRE"          "Cache, counters, session tokens")
+  (row "Hash"        "HGET, HSET, HGETALL"             "User profiles, config objects")
+  (row "List"        "LPUSH, RPOP, LRANGE"             "Message queues, activity feeds")
+  (row "Set"         "SADD, SMEMBERS, SINTER"          "Tags, unique visitors, social graphs")
+  (row "Sorted Set"  "ZADD, ZRANGE, ZRANGEBYSCORE"     "Leaderboards, rate limiting (sliding window)")
+  (row "Stream"      "XADD, XREAD, XREADGROUP"         "Event sourcing, log aggregation")
+)}}
+
+{{thought "Sorted sets are the most underappreciated Redis feature. Rate limiting with sliding window: ZADD timestamp, ZRANGEBYSCORE to count entries in window, ZREMRANGEBYSCORE to clean up. All atomic, all O(log N)."}}
+
+{{phase 3 "Caching Strategies" "5 min"}}
+
+{{compare "Caching Patterns" (options
+  (best "Cache-Aside (Lazy Load)" "App checks cache → miss → reads DB → writes cache. Simple, only caches what's needed. Most common.")
+  (alt "Write-Through" "App writes to cache AND DB on every write. Cache always fresh. Higher write latency.")
+  (alt "Write-Behind" "App writes to cache only. Cache async-flushes to DB. Lowest write latency but risk of data loss.")
+  (nofit "Refresh-Ahead" "Cache pre-fetches before TTL expires. Complex to tune. Rarely worth it in practice.")
+)}}
+
+{{qa
+  "What's the thundering herd problem?"
+  "When a popular cache key expires, hundreds of concurrent requests all miss the cache simultaneously and hit the DB. Fix: use a distributed lock — only one request rebuilds the cache, others wait."
+  "How do you prevent stale cache?"
+  "TTL is your friend. Set TTL based on how stale you can tolerate. For URL shortener redirects: 24h TTL is fine. For user profiles: 5-15 min. For stock prices: no cache or 1s TTL."
+}}
+
+{{phase 4 "ElastiCache vs Self-Managed" "3 min"}}
+
+{{table "ElastiCache Pricing" (rows
+  (row "Instance"      "vCPU"   "Memory"  "$/hr"     "$/month")
+  (row "cache.t3.micro" "2"     "0.5 GB"  "$0.017"   "~$12")
+  (row "cache.r6g.large" "2"    "13 GB"   "$0.126"   "~$92")
+  (row "cache.r6g.xlarge" "4"   "26 GB"   "$0.252"   "~$184")
+)}}
+
+{{avoid "Never run Redis without persistence in production. Even as a 'just a cache', cold-start after restart means every request hits your DB simultaneously. Use RDB snapshots minimum."}}
+
+{{checklist
+  "Cache-aside pattern for most read-heavy workloads"
+  "Sorted sets for rate limiting and leaderboards"
+  "TTL on every key — no TTL = memory leak"
+  "ElastiCache Multi-AZ with auto-failover for production"
+  "Monitor: eviction rate, hit ratio, memory usage"
+  "Thundering herd: distributed lock or stale-while-revalidate"
+}}

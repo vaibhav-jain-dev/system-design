@@ -1,0 +1,144 @@
+{{define "base.html"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Design Prep</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/web/static/css/style.css">
+    <script src="/static/web/static/js/htmx.min.js"></script>
+    <script defer src="/static/web/static/js/alpine.min.js"></script>
+</head>
+<body>
+    <div class="app">
+        <!-- Mobile header -->
+        <header class="app-header">
+            <button class="sidebar-toggle" onclick="document.querySelector('.app').classList.toggle('sidebar-open')">
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+            <h1 class="app-title">System Design Prep</h1>
+        </header>
+
+        <!-- Sidebar -->
+        <aside class="sidebar" x-data="{ openCats: {} }">
+            <div class="sidebar-header">
+                <h2>System Design Prep</h2>
+            </div>
+
+            {{template "sidebar.html" .}}
+        </aside>
+
+        <!-- Overlay for mobile sidebar -->
+        <div class="sidebar-overlay" onclick="document.querySelector('.app').classList.remove('sidebar-open')"></div>
+
+        <!-- Main content area -->
+        <main class="detail" id="detail">
+            {{if eq .PageType "problem"}}
+                {{template "detail_problem.html" .}}
+            {{else if eq .PageType "fundamental"}}
+                {{template "detail_fund.html" .}}
+            {{else}}
+                {{template "welcome.html" .}}
+            {{end}}
+        </main>
+    </div>
+
+    <!-- Reading Progress Cache: remembers where you were -->
+    <script>
+    (function() {
+        const STORAGE_KEY = 'sd-prep-progress';
+
+        // Load saved progress
+        function loadProgress() {
+            try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
+            catch { return {}; }
+        }
+
+        // Save progress
+        function saveProgress(data) {
+            const current = loadProgress();
+            Object.assign(current, data);
+            current.lastVisited = new Date().toISOString();
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
+        }
+
+        // Track current page
+        function trackPage() {
+            const path = window.location.pathname + window.location.search;
+            saveProgress({ lastPage: path });
+        }
+
+        // Track scroll position
+        let scrollTimeout;
+        const detail = document.getElementById('detail');
+        if (detail) {
+            detail.addEventListener('scroll', function() {
+                clearTimeout(scrollTimeout);
+                scrollTimeout = setTimeout(function() {
+                    const path = window.location.pathname;
+                    const scrollData = loadProgress().scrollPositions || {};
+                    scrollData[path] = detail.scrollTop;
+                    saveProgress({ scrollPositions: scrollData });
+                }, 300);
+            });
+        }
+
+        // Restore scroll position after HTMX swap
+        document.addEventListener('htmx:afterSwap', function(e) {
+            if (e.detail.target.id === 'detail') {
+                trackPage();
+                const path = window.location.pathname;
+                const positions = loadProgress().scrollPositions || {};
+                if (positions[path]) {
+                    setTimeout(function() {
+                        detail.scrollTop = positions[path];
+                    }, 50);
+                }
+            }
+        });
+
+        // Track sidebar expand state
+        document.addEventListener('click', function(e) {
+            const toggle = e.target.closest('.tree-toggle');
+            if (toggle) {
+                setTimeout(function() {
+                    const expanded = [];
+                    document.querySelectorAll('.sidebar-children').forEach(function(el) {
+                        if (el.style.display !== 'none' && !el.hidden) {
+                            const link = el.previousElementSibling?.querySelector('.sidebar-item');
+                            if (link) expanded.push(link.getAttribute('href'));
+                        }
+                    });
+                    saveProgress({ expandedSidebar: expanded });
+                }, 100);
+            }
+        });
+
+        // Redirect to last page on fresh visit to root
+        if (window.location.pathname === '/') {
+            const progress = loadProgress();
+            if (progress.lastPage && progress.lastPage !== '/') {
+                // Show a subtle "Continue reading" button instead of auto-redirect
+                const welcome = document.querySelector('.welcome');
+                if (welcome) {
+                    const continueDiv = document.createElement('div');
+                    continueDiv.className = 'continue-reading';
+                    continueDiv.innerHTML = '<a href="' + progress.lastPage + '" ' +
+                        'hx-get="' + progress.lastPage + '" ' +
+                        'hx-target="#detail" hx-swap="innerHTML" hx-push-url="true" ' +
+                        'class="btn btn-primary">Continue Reading →</a>' +
+                        '<span class="continue-hint">Last visited: ' +
+                        new Date(progress.lastVisited).toLocaleDateString() + '</span>';
+                    welcome.insertBefore(continueDiv, welcome.querySelector('.welcome-quick'));
+                }
+            }
+        }
+
+        // Initial track
+        trackPage();
+    })();
+    </script>
+</body>
+</html>{{end}}

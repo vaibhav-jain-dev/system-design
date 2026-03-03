@@ -1,0 +1,71 @@
+{{phase 1 "Requirements" "5 min"}}
+
+{{say "I'd start by clarifying the requirements. Are we designing just the shortening service, or also analytics, custom aliases, and expiration?"}}
+
+{{table "Functional Requirements" (rows
+  (row "Feature"       "API"                                "Priority")
+  (row "Shorten URL"   "POST /shorten → returns short URL"  "P0")
+  (row "Redirect"      "GET /{code} → 301 to original"      "P0")
+  (row "Custom alias"  "PUT /shorten?alias=my-link"          "P1")
+  (row "Analytics"     "GET /stats/{code} → click counts"    "P2")
+  (row "Expiration"    "TTL per URL, default 5 years"        "P1")
+)}}
+
+{{thought "At 100M URLs/day = ~1150 QPS writes. Read-heavy: 10:1 ratio = 11,500 QPS reads. Over 5 years: ~180B URLs. This drives our storage and caching decisions."}}
+
+{{table "Non-Functional Requirements" (rows
+  (row "Property"      "Target"                    "Reasoning")
+  (row "Availability"  "99.99%"                    "Redirect must never fail — users lose trust")
+  (row "Latency"       "< 10ms p99 redirect"       "Competes with typing full URL")
+  (row "Scale"         "100M new URLs/day"          "~1150 QPS writes, 11.5K QPS reads")
+  (row "Storage"       "~180B URLs over 5 years"    "Each ~500 bytes = ~90TB total")
+  (row "Durability"    "Never lose a URL mapping"   "Once shortened, must always resolve")
+)}}
+
+{{phase 2 "MVP Architecture" "5 min"}}
+
+{{say "For MVP, I'd keep it simple — single service, Postgres, no cache. We can add complexity as bottlenecks appear."}}
+
+{{code "sql" `CREATE TABLE urls (
+    short_code  VARCHAR(8) PRIMARY KEY,
+    original_url TEXT NOT NULL,
+    created_at   TIMESTAMP DEFAULT NOW(),
+    expires_at   TIMESTAMP,
+    click_count  BIGINT DEFAULT 0
+);
+
+-- For custom aliases
+CREATE UNIQUE INDEX idx_urls_alias ON urls(short_code);
+`}}
+
+{{avoid "Don't jump to microservices or DynamoDB in the MVP. Start with Postgres monolith. 'Premature optimization is the root of all evil.' Split when you hit a real bottleneck, not a theoretical one."}}
+
+{{compare "Database Choice" (options
+  (best "DynamoDB" "Point reads by key, auto-scale, TTL built-in, zero DBA")
+  (alt "Postgres" "MVP only — vertical scaling limit at ~5K QPS, needs sharding after")
+  (nofit "MongoDB" "Cluster ops overhead — replica sets, config servers, not worth it")
+)}}
+
+{{phase 3 "Key Generation" "5 min"}}
+
+{{say "For the short code, I'd use Base62 encoding of a counter or hash. 7 characters gives us 62^7 = 3.5 trillion unique URLs — enough for decades."}}
+
+{{qa
+  "Why Base62 and not Base64?"
+  "Base64 includes + and / which are URL-unfriendly. Base62 is alphanumeric only: a-z, A-Z, 0-9. Clean URLs."
+  "What about collisions?"
+  "Two approaches: 1) Counter-based (zero collisions but predictable), or 2) MD5 hash + take first 7 chars (rare collisions, check-and-retry). I'd go counter-based with a pre-generated key service."
+}}
+
+{{followup "What if the counter is a single point of failure?" "Use a Key Generation Service (KGS) that pre-generates batches of unique keys. Each app server requests a batch of 1000 keys. If KGS is down, servers use their local batch until it recovers."}}
+
+{{checklist
+  "Base62 encoding: 7 chars = 3.5T unique URLs"
+  "KGS pre-generates keys in batches of 1000"
+  "DynamoDB single-table: PK = short_code"
+  "ElastiCache read-through for hot URLs (top 20% = 80% reads)"
+  "CloudFront edge caching for 301 redirects"
+  "Bloom filter optional: O(1) collision check before DB write"
+}}
+
+{{key "Every URL read is a single-key lookup — this is DynamoDB's absolute sweet spot. No joins, no scans, just partition key → item."}}

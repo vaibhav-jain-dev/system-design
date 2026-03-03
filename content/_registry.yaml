@@ -1,0 +1,79 @@
+# ─── Problems (System Design) ───
+problems:
+  - slug: url-shortener
+    title: "URL Shortener"
+    description: "Design TinyURL: hashing, base62, collision handling, analytics"
+    path: problems/url-shortener
+    uses:
+      - fundamental: networking/load-balancing
+        config: "ALB with round-robin"
+        why: "Stateless API, no sticky sessions needed"
+        not_this: "NLB — no HTTP path-based routing"
+        risk: "Single AZ deployment = SPOF"
+        caveats: "Cross-AZ charges $0.01/GB. Multi-AZ ALB adds ~$16/mo"
+      - fundamental: networking/cdn/cloudfront
+        config: "Edge caching for 301 redirects"
+        why: "Redirects are highly cacheable, 80%+ cache hit rate"
+        not_this: "Akamai — overkill for single-region MVP"
+        risk: "Stale cache on URL updates, need invalidation API"
+        caveats: "Invalidation limit: 3000/mo free, $0.005 each after"
+      - fundamental: storage/redis
+        config: "ElastiCache read-through, TTL 24h"
+        why: "Hot URLs (top 20%) account for 80% reads"
+        not_this: "Memcached — no persistence on node restart"
+        risk: "Thundering herd on cache miss for viral URLs"
+        caveats: "r6g.large = $0.126/hr = ~$92/mo. Monitor eviction rate."
+
+  - slug: rate-limiter
+    title: "Rate Limiter"
+    description: "Design API rate limiting: token bucket, sliding window, distributed counters"
+    path: problems/rate-limiter
+    uses:
+      - fundamental: storage/redis
+        config: "Sorted set sliding window per user_id"
+        why: "O(1) atomic ZADD+ZCOUNT, sub-ms latency"
+        not_this: "DynamoDB — too slow for per-request check"
+        risk: "Redis down = open or closed? Choose fail-open with local fallback"
+        caveats: "ZRANGEBYSCORE cost: O(log N + M). Cleanup old entries with ZREMRANGEBYSCORE."
+      - fundamental: networking/load-balancing
+        config: "ALB with sticky sessions (rate state is per-node)"
+        why: "Local counter consistency before Redis sync"
+        not_this: "Round-robin — splits user requests across nodes, breaks local counters"
+        risk: "Sticky session + node failure = temporary over-limit"
+        caveats: "Sticky sessions via ALB cookie, not IP. Duration: 1 day."
+
+# ─── Fundamentals (hierarchical) ───
+fundamentals:
+  - slug: networking/load-balancing
+    title: "Load Balancing"
+    description: "ALB vs NLB, routing algorithms, health checks, AZ distribution"
+    path: fundamentals/networking/load-balancing
+    children:
+      - slug: networking/load-balancing/alb
+        title: "Application Load Balancer (ALB)"
+        description: "Layer 7, path-based routing, WebSocket support, gRPC, WAF integration"
+        path: fundamentals/networking/load-balancing/alb
+      - slug: networking/load-balancing/nlb
+        title: "Network Load Balancer (NLB)"
+        description: "Layer 4, static IP, ultra-low latency, TCP/UDP passthrough"
+        path: fundamentals/networking/load-balancing/nlb
+
+  - slug: networking/cdn
+    title: "CDN"
+    description: "Edge caching, Points of Presence, invalidation strategies, origin shield"
+    path: fundamentals/networking/cdn
+    children:
+      - slug: networking/cdn/cloudfront
+        title: "CloudFront"
+        description: "AWS CDN: Lambda@Edge, Origin Access Identity, geo restrictions, signed URLs"
+        path: fundamentals/networking/cdn/cloudfront
+
+  - slug: storage/redis
+    title: "Redis / ElastiCache"
+    description: "Caching strategies, data structures, clustering, persistence, pub/sub"
+    path: fundamentals/storage/redis
+
+  - slug: storage/dynamodb
+    title: "DynamoDB"
+    description: "Single-table design, GSI/LSI, TTL, streams, on-demand vs provisioned"
+    path: fundamentals/storage/dynamodb

@@ -1,0 +1,67 @@
+{{phase 1 "What Is Load Balancing?" "3 min"}}
+
+{{say "A load balancer distributes incoming traffic across multiple server instances. It sits between clients and your service fleet, ensuring no single server gets overwhelmed."}}
+
+{{qa
+  "Why do we need a load balancer?"
+  "Three reasons: 1) Distribute traffic evenly so no server is a bottleneck. 2) Health checks — route away from unhealthy instances. 3) Single entry point — clients hit one DNS name, LB handles the rest."
+  "Can't DNS round-robin do the same thing?"
+  "Partially — DNS gives you basic distribution, but no health checks, no connection draining, no sticky sessions. DNS TTL means stale entries. A real LB reacts in seconds, DNS in minutes."
+}}
+
+{{compare "Load Balancer Types" (options
+  (best "ALB (Layer 7)" "HTTP-aware: path routing, host routing, WebSocket, gRPC, WAF. Best for web services.")
+  (alt "NLB (Layer 4)" "TCP/UDP passthrough. Static IP. Ultra-low latency. Best for non-HTTP protocols.")
+  (nofit "Classic LB" "Legacy. AWS says 'migrate to ALB/NLB'. No new features since 2016.")
+)}}
+
+{{phase 2 "Routing Algorithms" "5 min"}}
+
+{{say "The routing algorithm determines HOW traffic is distributed. The right choice depends on your workload pattern."}}
+
+{{table "Routing Algorithms" (rows
+  (row "Algorithm"           "How It Works"                                    "Best For")
+  (row "Round Robin"         "Requests go to servers 1, 2, 3, 1, 2, 3..."     "Stateless APIs, uniform servers")
+  (row "Weighted Round Robin" "Server A gets 3x traffic vs Server B"          "Mixed instance sizes (c5.large + c5.xlarge)")
+  (row "Least Connections"   "Route to server with fewest active connections"  "Long-lived connections, WebSocket")
+  (row "IP Hash"             "Hash client IP → always same server"             "Sticky sessions without cookies")
+  (row "Consistent Hashing"  "Hash ring, minimal redistribution on scale"      "Cache-aware routing, Redis cluster")
+)}}
+
+{{thought "Round-robin is the default for 90% of stateless web services. Only switch to least-connections if you have long-lived requests (WebSocket, file uploads) where connection count diverges from request count."}}
+
+{{followup "When would you NOT use round-robin?" "When request processing time varies wildly. If Server A is processing a 30s video transcode while Server B is idle, round-robin still sends the next request to A. Least-connections would correctly pick B."}}
+
+{{phase 3 "Health Checks" "3 min"}}
+
+{{say "Health checks are how the load balancer knows which backends are alive. Without them, you're blindly sending traffic to potentially dead servers."}}
+
+{{table "Health Check Types" (rows
+  (row "Type"          "Checks"                          "Latency to Detect")
+  (row "TCP"           "Can establish TCP connection"     "~5s (3 failed checks × interval)")
+  (row "HTTP"          "GET /health returns 200"          "~15s (configurable)")
+  (row "gRPC"          "gRPC health check protocol"       "~10s")
+  (row "Deep/Custom"   "/health/deep checks DB + cache"   "~30s (more comprehensive)")
+)}}
+
+{{avoid "Never put expensive operations in health checks. If /health queries your database, one slow query makes the LB think your server is dead. Use a shallow check for LB, deep check for monitoring."}}
+
+{{key "Health check interval × threshold = detection time. Default: 30s interval × 3 failures = 90s. For critical services, use 10s × 2 = 20s."}}
+
+{{phase 4 "Multi-AZ and High Availability" "5 min"}}
+
+{{qa
+  "How do you make the load balancer itself highly available?"
+  "ALB is managed by AWS — it's already multi-AZ. AWS runs multiple LB nodes across AZs. If one AZ goes down, traffic routes to healthy AZs automatically. You don't manage this."
+  "What about cross-AZ data transfer costs?"
+  "Real concern. Cross-AZ is $0.01/GB each way. At 1TB/day = $20/day = $600/mo. Mitigation: use AZ-aware routing or internal ALBs within each AZ."
+}}
+
+{{checklist
+  "ALB for HTTP/HTTPS workloads (Layer 7, path routing, WebSocket)"
+  "NLB for TCP/UDP or when you need static IPs"
+  "Round-robin default, switch to least-connections for long-lived requests"
+  "Health checks: shallow for LB, deep for monitoring"
+  "Multi-AZ always — single AZ = single point of failure"
+  "Watch cross-AZ costs at high throughput ($0.01/GB)"
+}}
