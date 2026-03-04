@@ -168,7 +168,47 @@ type UsageLink struct {
     FundamentalRef *Fundamental              // Resolved pointer
     ProblemRef     *Problem                  // Resolved pointer
 }
+
+type ConceptCategory struct {
+    Category string                          // e.g. "Caching", "Data Distribution"
+    Concepts []Concept
+}
+
+type Concept struct {
+    Slug, Title, Description string
+    AppearsIn []ConceptAppearance            // Where this concept is discussed
+}
+
+type ConceptAppearance struct {
+    Type    string                            // "problem", "fundamental", "algorithm", "pattern"
+    Slug    string                            // Target slug
+    Section string                            // Section name within the content
+    Phase   int                               // Phase number (0 if N/A)
+    Title   string                            // Resolved title (auto-derived)
+    URL     string                            // Resolved route path (auto-derived)
+}
 ```
+
+### Concept Index (cross-cutting knowledge graph)
+
+Concepts are **granular topics** that cut across problems, fundamentals, algorithms, and patterns. Each concept links to specific sections/phases where it's discussed.
+
+**Route:** `/concept/{slug}` — shows a concept card with all appearances as clickable links.
+
+**YAML format:**
+```yaml
+concepts:
+  - category: "Caching"
+    concepts:
+      - slug: multi-layer-caching
+        title: "Multi-Layer Caching"
+        description: "Browser → CDN → regional cache → database"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Caching Deep Dive", phase: 5}
+          - {type: fundamental, slug: storage/redis, section: "Caching Strategies", phase: 2}
+```
+
+**Categories:** Caching, Data Distribution, Feed & Fanout, Rate Limiting, ID Generation, Availability & Resilience, CAP & Consistency, Async Processing, Cost Optimization, Security.
 
 ---
 
