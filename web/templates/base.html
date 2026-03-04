@@ -230,12 +230,135 @@
             }
         }
 
+        // ── Section anchor IDs and permalink links ──
+        function initSectionAnchors() {
+            var detail = document.getElementById('detail');
+            if (!detail) return;
+
+            // Get the current phase prefix for context (e.g., from problem slug)
+            var slug = window.location.pathname.split('/').filter(Boolean).pop() || '';
+
+            // Process phase headers — they already have IDs, just add anchor links
+            detail.querySelectorAll('.phase-header[id]').forEach(function(ph) {
+                if (ph.querySelector('.section-anchor')) return; // already processed
+                var id = ph.id;
+                var anchor = document.createElement('a');
+                anchor.className = 'section-anchor';
+                anchor.href = '#' + id;
+                anchor.textContent = '#';
+                anchor.title = 'Copy link to this section';
+                anchor.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    history.replaceState(null, '', '#' + id);
+                    ph.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    navigator.clipboard && navigator.clipboard.writeText(window.location.href);
+                });
+                // Add ID badge
+                var badge = document.createElement('span');
+                badge.className = 'section-id-badge';
+                badge.textContent = id;
+                ph.appendChild(anchor);
+                ph.appendChild(badge);
+            });
+
+            // Process h3 subsection headers — generate unique IDs
+            var h3Counter = {};
+            detail.querySelectorAll('h3').forEach(function(h3) {
+                if (h3.id && h3.querySelector('.section-anchor')) return; // already processed
+
+                // Find parent phase for context
+                var prevPhase = null;
+                var el = h3.previousElementSibling;
+                while (el) {
+                    if (el.classList && el.classList.contains('phase-header')) { prevPhase = el; break; }
+                    el = el.previousElementSibling;
+                }
+                // Walk up and backwards more broadly
+                if (!prevPhase) {
+                    var walker = h3;
+                    while (walker) {
+                        if (walker.classList && walker.classList.contains('phase-header')) { prevPhase = walker; break; }
+                        walker = walker.previousElementSibling || (walker.parentElement !== detail ? walker.parentElement : null);
+                    }
+                }
+
+                var phasePrefix = prevPhase ? prevPhase.id : 'sec';
+                var text = h3.textContent.trim().toLowerCase()
+                    .replace(/[^a-z0-9\s-]/g, '')
+                    .replace(/\s+/g, '-')
+                    .substring(0, 40);
+                var baseId = phasePrefix + '--' + text;
+
+                // Ensure uniqueness
+                if (h3Counter[baseId]) {
+                    h3Counter[baseId]++;
+                    baseId += '-' + h3Counter[baseId];
+                } else {
+                    h3Counter[baseId] = 1;
+                }
+
+                h3.id = baseId;
+                h3.style.scrollMarginTop = '80px';
+
+                var anchor = document.createElement('a');
+                anchor.className = 'section-anchor';
+                anchor.href = '#' + baseId;
+                anchor.textContent = '#';
+                anchor.title = 'Copy link to this section';
+                anchor.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    history.replaceState(null, '', '#' + baseId);
+                    h3.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    navigator.clipboard && navigator.clipboard.writeText(window.location.href);
+                });
+
+                var badge = document.createElement('span');
+                badge.className = 'section-id-badge';
+                badge.textContent = baseId;
+                h3.appendChild(anchor);
+                h3.appendChild(badge);
+            });
+        }
+
+        // ── Flow-chart hover highlighting (prev/next arrows) ──
+        function initFlowHighlight() {
+            var detail = document.getElementById('detail');
+            if (!detail) return;
+
+            detail.querySelectorAll('.d-flow, .d-flow-v').forEach(function(flow) {
+                var children = Array.from(flow.children);
+                children.forEach(function(child, idx) {
+                    if (!child.classList.contains('d-box')) return;
+
+                    child.addEventListener('mouseenter', function() {
+                        // Highlight prev and next arrows
+                        var prev = children[idx - 1];
+                        var next = children[idx + 1];
+                        if (prev && (prev.classList.contains('d-arrow') || prev.classList.contains('d-arrow-down'))) {
+                            prev.classList.add('d-arrow-active');
+                        }
+                        if (next && (next.classList.contains('d-arrow') || next.classList.contains('d-arrow-down'))) {
+                            next.classList.add('d-arrow-active');
+                        }
+                    });
+
+                    child.addEventListener('mouseleave', function() {
+                        flow.querySelectorAll('.d-arrow-active').forEach(function(a) {
+                            a.classList.remove('d-arrow-active');
+                        });
+                    });
+                });
+            });
+        }
+
         // ── HTMX swap handler ─────────────────────
         document.addEventListener('htmx:afterSwap', function(e) {
             if (e.detail.target.id === 'detail') {
                 trackPage();
                 highlightCode();
                 collapseSidebarSections();
+                initSectionAnchors();
+                initFlowHighlight();
                 requestAnimationFrame(function() { initBook(); initStageNav(); restoreScroll(); });
             }
         });
@@ -491,6 +614,8 @@
         // ── Initial setup ─────────────────────────
         trackPage();
         collapseSidebarSections();
+        initSectionAnchors();
+        initFlowHighlight();
         // Delay highlight until hljs loads
         if (typeof hljs !== 'undefined') {
             highlightCode();
