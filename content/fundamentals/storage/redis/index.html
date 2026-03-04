@@ -4,59 +4,305 @@
 
 {{qa
   "Why Redis over Memcached?"
-  "Redis has data structures — sorted sets, lists, hashes, streams. Memcached is just key-value strings. Redis also supports persistence (RDB/AOF), replication, and pub/sub. Memcached is simpler but less capable."
+  "Redis has data structures: sorted sets, lists, hashes, streams. Memcached is just key-value strings. Redis also supports persistence (RDB/AOF), replication, and pub/sub. Memcached is simpler but less capable."
   "When would you pick Memcached?"
   "Pure cache, nothing else. Memcached is multi-threaded (Redis is single-threaded), so it can use all CPU cores natively. If you only need GET/SET with massive throughput, Memcached wins on raw performance."
 }}
 
-{{phase 2 "Data Structures" "5 min"}}
-
-{{say "Redis isn't just key-value. Its data structures solve specific problems elegantly."}}
-
-{{table "Redis Data Structures" (rows
-  (row "Structure"   "Operations"                      "Use Case")
-  (row "String"      "GET, SET, INCR, EXPIRE"          "Cache, counters, session tokens")
-  (row "Hash"        "HGET, HSET, HGETALL"             "User profiles, config objects")
-  (row "List"        "LPUSH, RPOP, LRANGE"             "Message queues, activity feeds")
-  (row "Set"         "SADD, SMEMBERS, SINTER"          "Tags, unique visitors, social graphs")
-  (row "Sorted Set"  "ZADD, ZRANGE, ZRANGEBYSCORE"     "Leaderboards, rate limiting (sliding window)")
-  (row "Stream"      "XADD, XREAD, XREADGROUP"         "Event sourcing, log aggregation")
+{{table "Redis at a Glance" (rows
+  (row "Property"        "Detail")
+  (row "Type"            "In-memory key-value store with data structures")
+  (row "Latency"         "Sub-millisecond (< 0.5ms p99 typical)")
+  (row "Throughput"      "100K+ ops/sec per node (single-threaded)")
+  (row "Persistence"     "RDB snapshots + AOF append-only log")
+  (row "Replication"     "Leader-follower async replication")
+  (row "Clustering"      "Hash slots (16,384 slots across shards)")
+  (row "Max Memory"      "Configurable, typically 64GB per node")
+  (row "Protocol"        "RESP (Redis Serialization Protocol)")
 )}}
 
-{{thought "Sorted sets are the most underappreciated Redis feature. Rate limiting with sliding window: ZADD timestamp, ZRANGEBYSCORE to count entries in window, ZREMRANGEBYSCORE to clean up. All atomic, all O(log N)."}}
+{{phase 2 "Data Structures" "5 min"}}
+
+{{say "Redis is not just key-value. Its data structures solve specific problems elegantly. Understanding which structure to use for which problem is a key interview skill."}}
+
+{{table "Redis Data Structures" (rows
+  (row "Structure"   "Key Operations"                  "Time Complexity"   "Use Case")
+  (row "String"      "GET, SET, INCR, EXPIRE"          "O(1)"              "Cache, counters, session tokens")
+  (row "Hash"        "HGET, HSET, HGETALL"             "O(1) per field"    "User profiles, config objects")
+  (row "List"        "LPUSH, RPOP, LRANGE"             "O(1) push/pop"     "Message queues, activity feeds")
+  (row "Set"         "SADD, SMEMBERS, SINTER"          "O(1) add"          "Tags, unique visitors, social graphs")
+  (row "Sorted Set"  "ZADD, ZRANGE, ZRANGEBYSCORE"     "O(log N)"          "Leaderboards, rate limiting, feeds")
+  (row "Stream"      "XADD, XREAD, XREADGROUP"         "O(1) add"          "Event sourcing, log aggregation")
+  (row "HyperLogLog" "PFADD, PFCOUNT, PFMERGE"          "O(1)"              "Unique count estimates (0.81% error)")
+  (row "Bitmap"      "SETBIT, GETBIT, BITCOUNT"         "O(1) per bit"      "Feature flags, user activity tracking")
+)}}
+
+{{thought "Sorted sets are the most underappreciated Redis feature. Rate limiting with sliding window: ZADD timestamp, ZRANGEBYSCORE to count entries in window, ZREMRANGEBYSCORE to clean up. All atomic, all O(log N). Leaderboards: ZADD score, ZREVRANGE for top-N. Feed timelines: ZADD timestamp, ZREVRANGE for latest."}}
+
+{{code "python" `import redis
+import time
+
+r = redis.Redis()
+
+# --- Sorted Set: Leaderboard ---
+# ZADD adds member with score, ZREVRANGE gets top-N
+r.zadd("leaderboard", {"player_1": 1500, "player_2": 2300, "player_3": 1800})
+top_3 = r.zrevrange("leaderboard", 0, 2, withscores=True)
+# [('player_2', 2300.0), ('player_3', 1800.0), ('player_1', 1500.0)]
+
+rank = r.zrevrank("leaderboard", "player_1")  # 2 (0-indexed)
+
+# --- HyperLogLog: Unique Visitors ---
+# Counts unique items with 0.81% error using only 12KB memory
+r.pfadd("page:home:20240101", "user_1", "user_2", "user_3")
+r.pfadd("page:home:20240101", "user_1", "user_4")  # user_1 not counted twice
+unique_count = r.pfcount("page:home:20240101")  # ~4
+
+# --- Bitmap: Daily Active Users ---
+# Set bit at user_id position, 1 bit per user
+r.setbit("dau:20240101", 12345, 1)  # User 12345 was active
+r.setbit("dau:20240101", 67890, 1)  # User 67890 was active
+active_count = r.bitcount("dau:20240101")  # 2
+
+# --- Hash: User Session ---
+r.hset("session:abc123", mapping={
+    "user_id": "12345",
+    "role": "admin",
+    "login_at": str(int(time.time())),
+})
+r.expire("session:abc123", 3600)  # 1 hour TTL
+user_id = r.hget("session:abc123", "user_id")
+`}}
 
 {{phase 3 "Caching Strategies" "5 min"}}
 
+{{say "Caching is the most common use of Redis. The caching strategy you choose affects consistency, performance, and complexity. Let me walk through the four main patterns."}}
+
 {{compare "Caching Patterns" (options
-  (best "Cache-Aside (Lazy Load)" "App checks cache → miss → reads DB → writes cache. Simple, only caches what's needed. Most common.")
-  (alt "Write-Through" "App writes to cache AND DB on every write. Cache always fresh. Higher write latency.")
-  (alt "Write-Behind" "App writes to cache only. Cache async-flushes to DB. Lowest write latency but risk of data loss.")
-  (nofit "Refresh-Ahead" "Cache pre-fetches before TTL expires. Complex to tune. Rarely worth it in practice.")
+  (best "Cache-Aside (Lazy Load)" "App checks cache -> miss -> reads DB -> writes cache. Simple, only caches what is needed. Most common pattern in production.")
+  (alt "Write-Through" "App writes to cache AND DB on every write. Cache always fresh. Higher write latency but strong consistency.")
+  (alt "Write-Behind (Write-Back)" "App writes to cache only. Cache async-flushes to DB. Lowest write latency but risk of data loss if cache crashes before flush.")
+  (nofit "Refresh-Ahead" "Cache pre-fetches before TTL expires. Complex to tune, requires access pattern prediction. Rarely worth it in practice.")
 )}}
+
+{{code "python" `import redis
+import json
+
+r = redis.Redis()
+
+# Cache-Aside Pattern (most common)
+async def get_user(user_id: int) -> dict:
+    cache_key = f"user:{user_id}"
+
+    # Step 1: Check cache
+    cached = r.get(cache_key)
+    if cached:
+        return json.loads(cached)
+
+    # Step 2: Cache miss -> read from database
+    user = await db.fetch_one(
+        "SELECT * FROM users WHERE id = $1", user_id
+    )
+    if not user:
+        return None
+
+    # Step 3: Populate cache with TTL
+    r.setex(cache_key, 300, json.dumps(dict(user)))  # 5 min TTL
+
+    return dict(user)
+
+# Write-Through Pattern
+async def update_user(user_id: int, data: dict):
+    # Step 1: Write to database
+    await db.execute(
+        "UPDATE users SET bio = $1 WHERE id = $2",
+        data["bio"], user_id
+    )
+
+    # Step 2: Write to cache (same transaction boundary)
+    cache_key = f"user:{user_id}"
+    user = await db.fetch_one("SELECT * FROM users WHERE id = $1", user_id)
+    r.setex(cache_key, 300, json.dumps(dict(user)))
+
+# Cache Invalidation on Write
+async def delete_user_cache(user_id: int):
+    r.delete(f"user:{user_id}")
+`}}
 
 {{qa
-  "What's the thundering herd problem?"
-  "When a popular cache key expires, hundreds of concurrent requests all miss the cache simultaneously and hit the DB. Fix: use a distributed lock — only one request rebuilds the cache, others wait."
+  "What is the thundering herd problem?"
+  "When a popular cache key expires, hundreds of concurrent requests all miss the cache simultaneously and hit the DB. Fix: use a distributed lock so only one request rebuilds the cache, others wait. Alternative: stale-while-revalidate where the first request triggers async refresh while serving stale data."
   "How do you prevent stale cache?"
-  "TTL is your friend. Set TTL based on how stale you can tolerate. For URL shortener redirects: 24h TTL is fine. For user profiles: 5-15 min. For stock prices: no cache or 1s TTL."
+  "TTL is your friend. Set TTL based on how stale you can tolerate. URL shortener redirects: 24h TTL is fine. User profiles: 5-15 min. Stock prices: no cache or 1s TTL. On write, invalidate or update the cache key immediately."
 }}
 
-{{phase 4 "ElastiCache vs Self-Managed" "3 min"}}
+{{key "Cache-aside is the right default for 90% of use cases. Write-through adds complexity but guarantees consistency. Always set a TTL on every key, even with write-through, as a safety net against bugs."}}
 
-{{table "ElastiCache Pricing" (rows
-  (row "Instance"      "vCPU"   "Memory"  "$/hr"     "$/month")
-  (row "cache.t3.micro" "2"     "0.5 GB"  "$0.017"   "~$12")
-  (row "cache.r6g.large" "2"    "13 GB"   "$0.126"   "~$92")
-  (row "cache.r6g.xlarge" "4"   "26 GB"   "$0.252"   "~$184")
+{{phase 4 "ElastiCache Configuration" "5 min"}}
+
+{{say "AWS ElastiCache is managed Redis. You get automatic failover, patching, backups, and monitoring. Let me cover the key configuration choices."}}
+
+{{table "ElastiCache Instance Types" (rows
+  (row "Instance"         "vCPU"  "Memory"   "Network"       "$/hr"    "$/month"    "Use Case")
+  (row "cache.t4g.micro"  "2"     "0.5 GB"   "Up to 5 Gbps"  "$0.016"  "~$12"       "Dev/test")
+  (row "cache.t4g.medium" "2"     "3.09 GB"  "Up to 5 Gbps"  "$0.065"  "~$47"       "Small production")
+  (row "cache.r6g.large"  "2"     "13.07 GB" "Up to 10 Gbps"  "$0.126"  "~$92"       "Production standard")
+  (row "cache.r6g.xlarge" "4"     "26.32 GB" "Up to 10 Gbps"  "$0.252"  "~$184"      "Large working set")
+  (row "cache.r6g.2xlarge" "8"    "52.82 GB" "Up to 10 Gbps"  "$0.504"  "~$368"      "Heavy caching load")
 )}}
 
-{{avoid "Never run Redis without persistence in production. Even as a 'just a cache', cold-start after restart means every request hits your DB simultaneously. Use RDB snapshots minimum."}}
+{{table "ElastiCache Cluster Modes" (rows
+  (row "Mode"                    "Topology"                        "Max Memory"        "Use Case")
+  (row "Single node"             "1 primary, no replicas"          "Node memory"       "Dev/test only")
+  (row "Cluster mode disabled"   "1 primary + up to 5 replicas"   "Node memory"       "Read-heavy, < 100GB")
+  (row "Cluster mode enabled"    "Up to 500 shards, replicas each" "500 x node memory" "Large datasets, high write throughput")
+)}}
+
+{{code "text" `# ElastiCache Redis Configuration (recommended production settings)
+
+# Cluster: 3 shards, 2 replicas per shard = 9 nodes total
+# Instance: cache.r6g.large (13 GB each)
+# Total memory: 3 x 13 GB = 39 GB usable
+
+# Key settings
+maxmemory-policy: allkeys-lru    # Evict least recently used keys when full
+timeout: 0                       # No idle connection timeout
+tcp-keepalive: 300               # TCP keepalive every 5 minutes
+hz: 100                          # Higher event loop frequency for responsiveness
+
+# Persistence (for production)
+save: "900 1 300 10 60 10000"    # RDB snapshot schedule
+appendonly: yes                   # AOF for durability
+appendfsync: everysec             # Fsync every second (good balance)
+
+# Security
+at-rest-encryption: yes           # Encrypt data on disk
+in-transit-encryption: yes        # Encrypt data in flight (TLS)
+auth-token: <token>               # Require password
+`}}
+
+{{phase 5 "Eviction Policies" "3 min"}}
+
+{{say "When Redis runs out of memory, it needs to decide which keys to remove. The eviction policy determines this behavior."}}
+
+{{table "Redis Eviction Policies" (rows
+  (row "Policy"           "Behavior"                                    "Best For")
+  (row "allkeys-lru"      "Evict least recently used key (any key)"     "General-purpose cache (RECOMMENDED)")
+  (row "volatile-lru"     "Evict LRU key that has a TTL set"            "Mix of cache + persistent data")
+  (row "allkeys-lfu"      "Evict least frequently used key"             "Stable access patterns")
+  (row "volatile-ttl"     "Evict key with shortest remaining TTL"       "Time-sensitive data")
+  (row "noeviction"       "Return error when memory full"               "When data loss is unacceptable")
+  (row "allkeys-random"   "Evict random key"                            "Never (unless testing)")
+)}}
+
+{{avoid "Never use noeviction for a cache. When Redis fills up, every write returns an error. Your application starts failing because the cache is full. Use allkeys-lru to gracefully evict cold data and keep serving."}}
+
+{{key "Always set a TTL on every key, even if you use LRU eviction. TTL is your safety net. A key without TTL that is accessed frequently will never be evicted by LRU, even if the data is stale. TTL guarantees eventual refresh."}}
+
+{{phase 6 "Persistence and Durability" "3 min"}}
+
+{{table "Redis Persistence Options" (rows
+  (row "Option"    "How It Works"                              "Data Loss Window"      "Performance Impact")
+  (row "None"      "Pure in-memory, lost on restart"           "Everything"            "None (fastest)")
+  (row "RDB"       "Point-in-time snapshots at intervals"      "Since last snapshot"   "Brief fork() latency")
+  (row "AOF"       "Append every write to log file"            "Up to 1 second"        "fsync overhead")
+  (row "RDB + AOF" "Both: AOF for durability, RDB for backups" "Up to 1 second"        "Both overheads")
+)}}
+
+{{thought "For a pure cache (e.g., URL shortener lookups), skip persistence entirely. Cold start after restart means cache misses hit the DB, but that is acceptable. For session stores or rate limiting counters, use AOF with everysec fsync. For message queues or critical data, use RDB + AOF."}}
+
+{{qa
+  "What happens when ElastiCache primary fails?"
+  "With Multi-AZ enabled, ElastiCache automatically promotes a read replica to primary. Failover takes 10-30 seconds. DNS endpoint stays the same. During failover, writes fail but reads continue from replicas."
+  "Should I use Redis for my primary database?"
+  "Almost never. Redis is volatile (data loss risk), limited to available memory (expensive at TB scale), and lacks SQL query capabilities. Use it as a cache in front of a real database. The exceptions are session stores, rate limiting, and pub/sub where data is ephemeral."
+}}
+
+{{phase 7 "Common Interview Patterns" "5 min"}}
+
+{{say "Let me show the most common Redis patterns that come up in system design interviews."}}
+
+{{table "Redis Interview Patterns" (rows
+  (row "Pattern"                "Redis Feature"         "Example")
+  (row "Cache-aside"            "GET/SET + TTL"         "Cache DB query results")
+  (row "Distributed lock"       "SET NX EX"             "Prevent thundering herd")
+  (row "Rate limiting"          "Sorted Set + ZADD"     "Sliding window rate limiter")
+  (row "Leaderboard"            "Sorted Set + ZREVRANGE" "Top-N players by score")
+  (row "Session store"          "Hash + EXPIRE"         "User session data")
+  (row "Feed timeline"          "Sorted Set + ZADD"     "Fan-out-on-write feed")
+  (row "Pub/Sub"                "SUBSCRIBE/PUBLISH"     "Real-time notifications")
+  (row "Unique counting"        "HyperLogLog"           "Daily active users estimate")
+  (row "Feature flags"          "Bitmap"                "Per-user feature rollout")
+  (row "Queue"                  "List + BRPOP"          "Simple task queue")
+)}}
+
+{{code "python" `import redis
+import uuid
+import time
+
+r = redis.Redis()
+
+# --- Distributed Lock (prevent thundering herd) ---
+def acquire_lock(lock_name: str, timeout: int = 10) -> str:
+    lock_id = str(uuid.uuid4())
+    # SET NX = only set if not exists, EX = expire after timeout
+    acquired = r.set(f"lock:{lock_name}", lock_id, nx=True, ex=timeout)
+    return lock_id if acquired else None
+
+def release_lock(lock_name: str, lock_id: str):
+    # Lua script: only delete if we still own the lock
+    lua = """
+    if redis.call('GET', KEYS[1]) == ARGV[1] then
+        return redis.call('DEL', KEYS[1])
+    else
+        return 0
+    end
+    """
+    r.eval(lua, 1, f"lock:{lock_name}", lock_id)
+
+# --- Rate Limiter (Sliding Window with Sorted Set) ---
+def is_rate_limited(user_id: str, limit: int, window_sec: int) -> bool:
+    key = f"rate:{user_id}"
+    now = time.time()
+    window_start = now - window_sec
+
+    pipe = r.pipeline()
+    pipe.zremrangebyscore(key, 0, window_start)  # Remove old entries
+    pipe.zadd(key, {str(now): now})              # Add current request
+    pipe.zcard(key)                               # Count entries in window
+    pipe.expire(key, window_sec)                  # Auto-cleanup
+    results = pipe.execute()
+
+    count = results[2]
+    return count > limit
+`}}
+
+{{phase 8 "Failure Scenarios" "3 min"}}
+
+{{table "Redis Failure Scenarios" (rows
+  (row "Failure"                    "Impact"                              "Mitigation"                                "Recovery")
+  (row "Primary node crash"         "Writes fail for 10-30s"              "Multi-AZ auto-failover to replica"         "30 seconds")
+  (row "Network partition"          "Split-brain risk"                    "ElastiCache uses quorum for failover"      "Automatic")
+  (row "Memory exhaustion"          "Evictions or OOM errors"             "allkeys-lru eviction + monitoring alerts"  "Immediate")
+  (row "Slow Lua script"            "All operations blocked"              "lua-time-limit kills long scripts"         "Immediate")
+  (row "Hot key"                    "Single shard overwhelmed"            "Read replicas + key sharding"              "Manual intervention")
+  (row "Thundering herd"            "DB overwhelmed on cache miss"        "Distributed lock + stale-while-revalidate" "Seconds")
+  (row "Full cluster cold start"    "All requests hit DB"                 "Cache warming script, gradual traffic ramp" "Minutes")
+)}}
+
+{{avoid "Never run Redis without persistence in production, even as a cache. Cold-start after restart means every request hits your DB simultaneously. At 50K RPS, that is a guaranteed database outage. Use RDB snapshots minimum so cache is warm on restart."}}
 
 {{checklist
   "Cache-aside pattern for most read-heavy workloads"
-  "Sorted sets for rate limiting and leaderboards"
-  "TTL on every key — no TTL = memory leak"
+  "Sorted sets for rate limiting, leaderboards, and feed timelines"
+  "TTL on every key: no TTL = memory leak over time"
   "ElastiCache Multi-AZ with auto-failover for production"
-  "Monitor: eviction rate, hit ratio, memory usage"
-  "Thundering herd: distributed lock or stale-while-revalidate"
+  "allkeys-lru eviction policy for general caching"
+  "Distributed lock (SET NX EX) to prevent thundering herd"
+  "HyperLogLog for approximate unique counting (12KB per counter)"
+  "Monitor: eviction rate, cache hit ratio, memory usage, connection count"
+  "Lua scripts for atomic multi-step operations"
+  "Never use noeviction policy for cache workloads"
 }}
+
+{{key "Redis is the Swiss Army knife of system design interviews. Knowing which data structure to use for which problem is what differentiates candidates. Sorted sets for ranked data, HyperLogLog for counting, bitmaps for presence, hashes for objects."}}

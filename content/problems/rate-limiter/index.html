@@ -1,1 +1,474 @@
-<div class="no-content"><p>Content coming soon.</p></div>
+{{phase 1 "Requirements & Problem Scope" "5 min"}}
+
+{{say "Let me clarify the scope. Are we designing a rate limiter for a single service, or a distributed rate limiting platform? I will assume we are building a distributed rate limiter that can protect multiple services at scale."}}
+
+{{table "Functional Requirements" (rows
+  (row "Feature"                "Description"                                     "Priority")
+  (row "Rate limit by user"     "Limit requests per user/API key"                 "P0")
+  (row "Rate limit by IP"       "Limit anonymous/unauthenticated requests"        "P0")
+  (row "Configurable rules"     "Different limits per endpoint, tier, user"       "P0")
+  (row "Rate limit headers"     "Return X-RateLimit-* headers in responses"       "P0")
+  (row "Distributed counting"   "Consistent counts across multiple servers"       "P1")
+  (row "Multi-region support"   "Rate limits work across regions"                 "P2")
+  (row "Admin dashboard"        "View and update rate limit rules"                "P2")
+)}}
+
+{{table "Non-Functional Requirements" (rows
+  (row "Property"      "Target"                        "Reasoning")
+  (row "Latency"       "< 1ms overhead per request"    "Rate limiter is in the hot path of every request")
+  (row "Availability"  "99.999%"                       "If rate limiter is down, either all traffic passes or all is blocked")
+  (row "Throughput"    "1M+ decisions/second"           "Must handle peak traffic of all protected services")
+  (row "Accuracy"      "Allow 5% over-limit tolerance"  "Distributed counting has inherent imprecision")
+  (row "Fail-open"     "If limiter fails, allow traffic" "Availability over protection in most cases")
+)}}
+
+{{thought "Key decision: fail-open vs fail-closed. Fail-open means if Redis is down, all requests pass through. This is correct for most cases because a few seconds of unlimited traffic is better than a full outage. Exception: payment APIs should fail-closed to prevent fraud."}}
+
+{{phase 2 "Capacity Estimation" "3 min"}}
+
+{{table "Scale Math" (rows
+  (row "Metric"                     "Calculation"                     "Result")
+  (row "Total API requests"         "100K RPS across all services"    "100,000 RPS")
+  (row "Rate limit checks"         "1 check per request"             "100,000 checks/sec")
+  (row "Peak (5x)"                 "100K x 5"                        "500,000 checks/sec")
+  (row "Redis operations per check" "2-3 ops (GET + INCR + EXPIRE)"  "300K-1.5M Redis ops/sec")
+  (row "Storage per user window"    "~100 bytes per counter"          "Negligible")
+  (row "Active rate limit keys"     "10M active users x 5 endpoints"  "50M keys x 100B = 5GB")
+)}}
+
+{{say "Redis handles 100K+ ops/sec per node easily. A 3-node ElastiCache cluster gives us 300K+ ops/sec with replication. For 500K peak, we might need 6 nodes or use Lua scripts to reduce round trips."}}
+
+{{phase 3 "API Design with Rate Headers" "3 min"}}
+
+{{code "text" `-- Every API response includes rate limit headers --
+
+HTTP/1.1 200 OK
+X-RateLimit-Limit: 100          # Max requests allowed in window
+X-RateLimit-Remaining: 67       # Requests remaining in current window
+X-RateLimit-Reset: 1704067260   # Unix timestamp when window resets
+X-RateLimit-Policy: "100;w=60"  # 100 requests per 60-second window
+
+-- When rate limited --
+
+HTTP/1.1 429 Too Many Requests
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1704067260
+Retry-After: 45                 # Seconds until client should retry
+Content-Type: application/json
+{"error": "rate_limit_exceeded", "message": "Too many requests. Retry after 45 seconds."}
+`}}
+
+{{table "Rate Limit Rules Configuration" (rows
+  (row "Endpoint"          "Auth Tier"     "Limit"          "Window"      "Action")
+  (row "POST /api/*"       "Free"          "100 req"        "1 minute"    "429 response")
+  (row "POST /api/*"       "Pro"           "1000 req"       "1 minute"    "429 response")
+  (row "POST /api/*"       "Enterprise"    "10000 req"      "1 minute"    "429 response")
+  (row "GET /api/*"        "Free"          "500 req"        "1 minute"    "429 response")
+  (row "POST /login"       "Any"           "5 req"          "15 minutes"  "429 + CAPTCHA")
+  (row "Anonymous (by IP)" "None"          "50 req"         "1 minute"    "429 response")
+)}}
+
+{{phase 4 "Algorithm Deep Dive" "10 min"}}
+
+{{say "There are four main rate limiting algorithms. Each has different trade-offs for memory, accuracy, and burst handling. Let me walk through each one with code."}}
+
+{{table "Algorithm Comparison" (rows
+  (row "Algorithm"              "Memory"       "Accuracy"   "Burst Handling"   "Complexity")
+  (row "Token Bucket"           "O(1) per key" "High"       "Allows bursts"    "Simple")
+  (row "Leaky Bucket"           "O(1) per key" "High"       "Smooths bursts"   "Simple")
+  (row "Fixed Window Counter"   "O(1) per key" "Medium"     "Edge burst 2x"    "Simplest")
+  (row "Sliding Window Log"     "O(N) per key" "Highest"    "No edge burst"    "Complex")
+  (row "Sliding Window Counter" "O(1) per key" "High"       "Minimal burst"    "Medium")
+)}}
+
+{{say "Let me implement Token Bucket first. It is the most commonly used algorithm and what AWS API Gateway uses internally."}}
+
+{{code "python" `import time
+import redis
+
+class TokenBucket:
+    """
+    Token Bucket Algorithm:
+    - Bucket holds up to 'capacity' tokens
+    - Tokens refill at 'rate' tokens per second
+    - Each request consumes 1 token
+    - Request allowed if tokens >= 1, denied otherwise
+    """
+
+    def __init__(self, redis_client: redis.Redis):
+        self.redis = redis_client
+
+    def is_allowed(self, key: str, capacity: int, refill_rate: float) -> dict:
+        now = time.time()
+        bucket_key = f"rl:token:{key}"
+
+        # Lua script for atomic check-and-update
+        lua_script = """
+        local key = KEYS[1]
+        local capacity = tonumber(ARGV[1])
+        local refill_rate = tonumber(ARGV[2])
+        local now = tonumber(ARGV[3])
+
+        local bucket = redis.call('HMGET', key, 'tokens', 'last_refill')
+        local tokens = tonumber(bucket[1]) or capacity
+        local last_refill = tonumber(bucket[2]) or now
+
+        -- Refill tokens based on elapsed time
+        local elapsed = now - last_refill
+        local new_tokens = math.min(capacity, tokens + elapsed * refill_rate)
+
+        local allowed = 0
+        if new_tokens >= 1 then
+            new_tokens = new_tokens - 1
+            allowed = 1
+        end
+
+        redis.call('HMSET', key, 'tokens', new_tokens, 'last_refill', now)
+        redis.call('EXPIRE', key, math.ceil(capacity / refill_rate) + 1)
+
+        return {allowed, math.floor(new_tokens)}
+        """
+
+        result = self.redis.eval(lua_script, 1, bucket_key, capacity, refill_rate, now)
+        return {
+            "allowed": bool(result[0]),
+            "remaining": int(result[1]),
+            "limit": capacity
+        }
+`}}
+
+{{key "Token Bucket allows bursts up to the bucket capacity while enforcing an average rate. This is ideal for APIs where occasional bursts are acceptable but sustained abuse is not."}}
+
+{{say "Now the Sliding Window Counter. This is the best balance of accuracy and memory efficiency."}}
+
+{{code "python" `import time
+import redis
+
+class SlidingWindowCounter:
+    """
+    Sliding Window Counter Algorithm:
+    - Combines fixed window simplicity with sliding window accuracy
+    - Uses weighted count from current and previous window
+    - Memory: O(1) per key (just two counters)
+    - Accuracy: within 0.003% of true sliding window
+    """
+
+    def __init__(self, redis_client: redis.Redis):
+        self.redis = redis_client
+
+    def is_allowed(self, key: str, limit: int, window_sec: int) -> dict:
+        now = time.time()
+
+        lua_script = """
+        local key = KEYS[1]
+        local limit = tonumber(ARGV[1])
+        local window = tonumber(ARGV[2])
+        local now = tonumber(ARGV[3])
+
+        local current_window = math.floor(now / window) * window
+        local prev_window = current_window - window
+
+        local curr_key = key .. ":" .. current_window
+        local prev_key = key .. ":" .. prev_window
+
+        local prev_count = tonumber(redis.call('GET', prev_key) or "0")
+        local curr_count = tonumber(redis.call('GET', curr_key) or "0")
+
+        -- Weight previous window by how much of it overlaps
+        local elapsed = now - current_window
+        local weight = 1 - (elapsed / window)
+        local weighted_count = math.floor(prev_count * weight) + curr_count
+
+        if weighted_count >= limit then
+            return {0, 0, math.ceil(current_window + window - now)}
+        end
+
+        redis.call('INCR', curr_key)
+        redis.call('EXPIRE', curr_key, window * 2)
+
+        local remaining = limit - weighted_count - 1
+        return {1, remaining, math.ceil(current_window + window - now)}
+        """
+
+        result = self.redis.eval(lua_script, 1, f"rl:sw:{key}", limit, window_sec, now)
+        return {
+            "allowed": bool(result[0]),
+            "remaining": int(result[1]),
+            "reset_in": int(result[2]),
+            "limit": limit
+        }
+`}}
+
+{{say "Finally, the Fixed Window Counter. Simplest to implement but has the boundary burst problem."}}
+
+{{code "python" `import time
+import redis
+
+class FixedWindowCounter:
+    """
+    Fixed Window Counter Algorithm:
+    - Divide time into fixed windows (e.g., each minute)
+    - Count requests in current window
+    - Reset count when window changes
+    - Problem: 2x burst at window boundaries
+    """
+
+    def __init__(self, redis_client: redis.Redis):
+        self.redis = redis_client
+
+    def is_allowed(self, key: str, limit: int, window_sec: int) -> dict:
+        now = time.time()
+        window_start = int(now // window_sec) * window_sec
+        window_key = f"rl:fw:{key}:{window_start}"
+
+        lua_script = """
+        local key = KEYS[1]
+        local limit = tonumber(ARGV[1])
+        local window = tonumber(ARGV[2])
+
+        local current = tonumber(redis.call('GET', key) or "0")
+
+        if current >= limit then
+            return {0, 0}
+        end
+
+        local new_count = redis.call('INCR', key)
+        if new_count == 1 then
+            redis.call('EXPIRE', key, window)
+        end
+
+        return {1, limit - new_count}
+        """
+
+        result = self.redis.eval(lua_script, 1, window_key, limit, window_sec)
+        return {
+            "allowed": bool(result[0]),
+            "remaining": int(result[1]),
+            "limit": limit,
+            "reset_at": window_start + window_sec
+        }
+`}}
+
+{{avoid "Fixed Window has the boundary burst problem: a user can send 100 requests at 11:59:59 and 100 more at 12:00:01, effectively getting 200 requests in 2 seconds. Use Sliding Window Counter instead for accurate rate limiting."}}
+
+{{compare "Algorithm Selection" (options
+  (best "Sliding Window Counter" "Best balance: O(1) memory per key, high accuracy, no boundary burst. Used by Cloudflare and Stripe.")
+  (alt "Token Bucket" "Great for APIs that want to allow bursts. Used by AWS API Gateway. Slightly more complex state management.")
+  (alt "Fixed Window" "Simplest to implement and debug. Fine if you accept 2x burst at boundaries. Good for MVP rate limiting.")
+  (nofit "Sliding Window Log" "O(N) memory per key where N is requests in window. Does not scale for high-throughput APIs. Only use for very low rate limits like login attempts.")
+)}}
+
+{{phase 5 "Architecture (Hop-by-Hop)" "8 min"}}
+
+{{say "The rate limiter sits in the request path as middleware. Let me walk through where it fits and how the decision flows."}}
+
+{{diagram "Rate Limiter Architecture"}}
+
+{{table "Request Flow with Rate Limiting" (rows
+  (row "Hop" "Step"                                        "Service"              "Latency"   "Failure Mode")
+  (row "1"   "Client sends API request"                    "Client"               "N/A"       "N/A")
+  (row "2"   "Request hits API Gateway / Load Balancer"    "ALB / API Gateway"    "1ms"       "ALB multi-AZ, auto-heals")
+  (row "3"   "Rate limit middleware extracts user key"     "ECS App Server"       "<0.1ms"    "Parse JWT or API key")
+  (row "4"   "Lua script executes atomically in Redis"     "ElastiCache Redis"    "<1ms"      "Fail-open: allow request if Redis down")
+  (row "5a"  "If allowed: continue to application logic"   "ECS App Server"       "N/A"       "Normal request processing")
+  (row "5b"  "If denied: return 429 with rate headers"     "ECS App Server"       "<0.1ms"    "Client gets Retry-After header")
+  (row "6"   "Response includes X-RateLimit-* headers"     "ALB -> Client"        "N/A"       "Headers always present")
+)}}
+
+{{code "python" `from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
+
+# Rate limit middleware
+async def rate_limit_middleware(request: Request, call_next):
+    # Extract rate limit key
+    api_key = request.headers.get("X-API-Key")
+    if api_key:
+        key = f"api:{api_key}:{request.url.path}"
+        limit, window = get_tier_limits(api_key)
+    else:
+        key = f"ip:{request.client.host}:{request.url.path}"
+        limit, window = 50, 60  # Anonymous: 50 req/min
+
+    # Check rate limit
+    result = rate_limiter.is_allowed(key, limit, window)
+
+    if not result["allowed"]:
+        return JSONResponse(
+            status_code=429,
+            content={"error": "rate_limit_exceeded"},
+            headers={
+                "X-RateLimit-Limit": str(result["limit"]),
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": str(result.get("reset_at", "")),
+                "Retry-After": str(result.get("reset_in", 60)),
+            }
+        )
+
+    response = await call_next(request)
+
+    # Add rate limit headers to successful responses
+    response.headers["X-RateLimit-Limit"] = str(result["limit"])
+    response.headers["X-RateLimit-Remaining"] = str(result["remaining"])
+
+    return response
+`}}
+
+{{key "The rate limiter must add < 1ms latency. Using Redis Lua scripts makes the check atomic and avoids multiple round trips. A single Lua eval replaces what would be 3 separate Redis commands."}}
+
+{{phase 6 "Distributed Rate Limiting" "8 min"}}
+
+{{say "The hard problem is distributed rate limiting: ensuring accurate counts when you have multiple application servers, multiple Redis nodes, or multiple regions."}}
+
+{{table "Distributed Challenges" (rows
+  (row "Challenge"                   "Problem"                                        "Solution")
+  (row "Multiple app servers"        "Each server checks its own Redis, counts diverge" "All servers share same Redis cluster, Lua scripts ensure atomicity")
+  (row "Redis cluster sharding"     "Rate limit key may hash to different shards"     "Use hash tags: {user:123}:rate_limit ensures same slot")
+  (row "Multi-region"               "User hits US and EU servers, each with local Redis" "Sync counters via Redis Global Datastore or accept per-region limits")
+  (row "Redis failover"             "Primary fails, replica promoted, counter reset"  "Accept brief over-limit window, fail-open policy")
+  (row "Clock skew"                 "Servers disagree on current time"                "Use Redis server time (TIME command) not local clock")
+)}}
+
+{{code "python" `# Redis Lua script for atomic sliding window counter
+# Executed as single atomic operation - no race conditions
+
+SLIDING_WINDOW_LUA = """
+local key = KEYS[1]
+local limit = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local member = ARGV[4]
+
+-- Remove entries outside the window
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window * 1000)
+
+-- Count entries in current window
+local count = redis.call('ZCARD', key)
+
+if count >= limit then
+    return {0, 0, redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')[2]}
+end
+
+-- Add current request
+redis.call('ZADD', key, now, member)
+redis.call('PEXPIRE', key, window * 1000)
+
+return {1, limit - count - 1, 0}
+"""
+`}}
+
+{{thought "Multi-region rate limiting is fundamentally hard. You have two options: 1) Global rate limit with cross-region sync (adds 50-100ms latency per check), or 2) Per-region rate limits (user gets N requests per region, total is N x regions). Most companies choose option 2 and accept the over-count."}}
+
+{{table "Multi-Region Strategies" (rows
+  (row "Strategy"                 "How It Works"                                   "Accuracy"   "Latency Impact")
+  (row "Per-region limits"        "Each region enforces its own limit independently" "Low"       "Zero (local Redis)")
+  (row "Async sync (gossip)"      "Regions sync counters every 1-5 seconds"          "Medium"    "Zero (async background)")
+  (row "Global Redis"             "Single Redis cluster, cross-region reads"         "High"      "+50-100ms per request")
+  (row "Token bucket with sync"   "Each region gets a portion of total tokens"       "High"      "Zero (pre-allocated)")
+)}}
+
+{{compare "Multi-Region Approach" (options
+  (best "Async Gossip Sync" "Each region has local Redis. Background process syncs counters every 1-5 seconds. Best balance of accuracy and latency. Used by Cloudflare.")
+  (alt "Per-Region Limits" "Simplest. User gets 100 req/min in US and 100 req/min in EU. Total possible = 200/min. Fine if abuse is not critical concern.")
+  (nofit "Global Redis" "Single Redis in one region. All rate limit checks go cross-region. Adds 50-100ms to every API call. Unacceptable latency.")
+)}}
+
+{{phase 7 "Redis Configuration for Rate Limiting" "3 min"}}
+
+{{say "Let me show the ElastiCache configuration optimized for rate limiting workloads."}}
+
+{{code "text" `# ElastiCache Redis Configuration for Rate Limiting
+
+# Instance: cache.r6g.large (2 vCPU, 13 GB memory)
+# Cluster: 3 shards, 1 replica per shard = 6 nodes total
+# Mode: Cluster mode enabled (hash slot distribution)
+
+# Key configuration
+maxmemory-policy: volatile-lru    # Evict keys with TTL first
+timeout: 0                        # No idle timeout (keep connections)
+tcp-keepalive: 300                 # TCP keepalive for connection health
+lua-time-limit: 100               # Kill Lua scripts after 100ms
+
+# Persistence (for rate limiting, disable for performance)
+save: ""                          # No RDB snapshots
+appendonly: no                    # No AOF - counters are ephemeral
+
+# Performance
+hz: 100                           # Higher event loop frequency
+activedefrag: yes                 # Defragment memory proactively
+
+# Estimated capacity
+# 50M rate limit keys x 100 bytes = 5 GB
+# 13 GB per node x 3 shards = 39 GB total (7.8x headroom)
+# 100K ops/sec per node x 3 shards = 300K ops/sec
+`}}
+
+{{avoid "Do not enable Redis persistence (RDB/AOF) for rate limiting. Rate limit counters are ephemeral. Persistence adds disk I/O latency and is pointless since counters reset on window expiry anyway. If Redis restarts, counters rebuild naturally from incoming requests."}}
+
+{{phase 8 "Trade-offs & Edge Cases" "5 min"}}
+
+{{table "Key Trade-offs" (rows
+  (row "Trade-off"                          "Choice A"                              "Choice B"                              "Recommendation")
+  (row "Fail-open vs fail-closed"           "Allow traffic if Redis down"           "Block traffic if Redis down"           "Fail-open for most APIs, fail-closed for payments")
+  (row "Exact vs approximate counting"      "Lua atomic scripts (exact)"            "Local counters with periodic sync"     "Lua scripts for single-region, local counters for multi-region")
+  (row "User-level vs IP-level limiting"    "Rate limit per API key"                "Rate limit per IP address"             "Both: API key for authenticated, IP for anonymous")
+  (row "Fixed vs dynamic limits"            "Static limits in config"               "Dynamic limits from rules engine"      "Start static, add dynamic when you have usage data")
+  (row "Centralized vs sidecar"             "Shared rate limit service"             "Rate limit in each service sidecar"    "Sidecar for microservices, centralized for monolith")
+)}}
+
+{{table "Edge Cases to Handle" (rows
+  (row "Edge Case"                     "Problem"                                    "Solution")
+  (row "Distributed denial of service" "Millions of unique IPs"                     "IP rate limiting + AWS WAF + CloudFront geo-blocking")
+  (row "API key sharing"               "Multiple users share one key"               "Per-key limits + anomaly detection on usage patterns")
+  (row "Clock skew"                    "Servers disagree on time"                   "Use Redis TIME command, not local server clock")
+  (row "Hot key"                       "One user generates 50% of rate limit checks" "Redis hash tags ensure key goes to one shard, but that shard gets hot")
+  (row "Burst after window reset"      "User sends all requests at window start"    "Token bucket allows gradual refill, not instant reset")
+  (row "Webhook retry storms"          "External service retries 1000x on failure"  "Separate rate limit tier for webhooks with exponential backoff")
+)}}
+
+{{phase 9 "Cost Estimates" "2 min"}}
+
+{{table "Rate Limiter Infrastructure Cost" (rows
+  (row "Component"              "Specification"                       "Monthly Cost")
+  (row "ElastiCache Redis"      "3 shards x 2 nodes (r6g.large)"     "$550")
+  (row "ECS Fargate (sidecar)"  "CPU overhead is minimal"             "$0 (runs in existing containers)")
+  (row "CloudWatch monitoring"  "Custom metrics for rate limit hits"  "$30")
+  (row "Total"                  "Incremental cost to add rate limiting" "~$580/mo")
+)}}
+
+{{thought "Rate limiting is cheap infrastructure-wise. The main cost is the Redis cluster which you likely already have for caching. The engineering cost is in getting the algorithm right, handling edge cases, and making it operationally transparent with good dashboards and alerting."}}
+
+{{phase 10 "Interview Q&A" "5 min"}}
+
+{{qa
+  "Where should the rate limiter sit in the architecture?"
+  "Three options: 1) API Gateway level for global rate limiting. 2) Middleware in the application for per-service limits. 3) Service mesh sidecar for microservices. Most production systems use option 1 and 2 combined."
+  "How do you rate limit WebSocket connections?"
+  "Two dimensions: 1) Connection rate: limit new WebSocket connections per user per minute. 2) Message rate: limit messages per connection per second. Use token bucket for message rate since WebSocket messages are bursty by nature."
+}}
+
+{{qa
+  "How does Stripe handle rate limiting?"
+  "Stripe uses a sliding window counter with per-API-key limits. They return detailed headers (RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset). They also have tiered limits: test mode is more lenient than live mode. They fail-open except for payment creation endpoints."
+  "What about rate limiting in a serverless architecture?"
+  "Lambda functions are stateless, so you cannot do in-memory rate limiting. Use API Gateway built-in throttling (token bucket) or add a Redis check in Lambda. API Gateway supports per-API-key throttling natively at $3.50 per million requests."
+}}
+
+{{followup "How would you implement rate limiting without Redis?" "Three alternatives: 1) In-memory with consistent hashing: route each user to the same server, use local counters. Works but loses counts on restart. 2) DynamoDB atomic counters: UpdateItem with ADD. Higher latency (5ms vs 1ms) but no Redis to manage. 3) API Gateway built-in throttling: AWS manages everything, but less flexible on custom rules."}}
+
+{{checklist
+  "Sliding Window Counter is the best default algorithm"
+  "Token Bucket for APIs that need burst tolerance"
+  "Lua scripts for atomic Redis operations (no race conditions)"
+  "Always return X-RateLimit-* headers in every response"
+  "Fail-open for most services, fail-closed for payment APIs"
+  "Multi-region: async gossip sync or per-region limits"
+  "Hash tags in Redis cluster mode to co-locate related keys"
+  "Monitor: rate limit hit rate, Redis latency, false positives"
+  "Do not enable Redis persistence for rate limiting workloads"
+  "Cost is minimal: ~$580/mo for a 3-shard ElastiCache cluster"
+}}
+
+{{key "The rate limiter interview is about demonstrating you understand the algorithm trade-offs (Token Bucket vs Sliding Window), the distributed counting challenge (Lua atomicity, multi-region sync), and the operational details (fail-open, rate headers, monitoring). The algorithm implementation is just the starting point."}}

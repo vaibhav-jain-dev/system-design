@@ -1,1 +1,280 @@
-<div class="no-content"><p>Content coming soon.</p></div>
+{{phase 1 "What Is DynamoDB?" "3 min"}}
+
+{{say "DynamoDB is a fully managed NoSQL key-value and document database. Single-digit millisecond latency at any scale. No servers to manage, no connection pools, no vacuuming. It excels at known access patterns with single-key lookups."}}
+
+{{table "DynamoDB at a Glance" (rows
+  (row "Property"           "Detail")
+  (row "Type"               "Key-value and document store (NoSQL)")
+  (row "Latency"            "Single-digit ms reads/writes. DAX cache: microseconds.")
+  (row "Throughput"         "Virtually unlimited (auto-scales horizontally)")
+  (row "Max Item Size"      "400 KB per item")
+  (row "Consistency"        "Eventually consistent (default) or strongly consistent reads")
+  (row "Transactions"       "ACID transactions across up to 100 items (2x cost)")
+  (row "Global Tables"      "Multi-region active-active replication")
+  (row "Pricing"            "On-demand: $1.25/M writes, $0.25/M reads. Provisioned: cheaper at scale.")
+)}}
+
+{{qa
+  "When should you use DynamoDB vs Postgres?"
+  "DynamoDB when: 1) Your access patterns are known and key-based (get user by ID, get orders by user). 2) You need unlimited horizontal scale. 3) You want zero operational overhead. Postgres when: 1) You need complex queries with JOINs. 2) Your access patterns are not known yet. 3) You need strong consistency by default."
+  "What is the biggest mistake teams make with DynamoDB?"
+  "Treating it like a relational database. No JOINs, no ad-hoc queries. You must design your table around your access patterns first. If you do not know your access patterns, use Postgres until you do."
+}}
+
+{{phase 2 "Data Modeling: Keys and Indexes" "5 min"}}
+
+{{say "DynamoDB data modeling is fundamentally different from relational. You start with access patterns, then design your keys. Not the other way around. The partition key determines data distribution. The sort key enables range queries within a partition."}}
+
+{{table "Key Types" (rows
+  (row "Key"               "Required"  "Purpose"                                    "Example")
+  (row "Partition Key (PK)" "Yes"      "Determines which partition stores the item"  "user_id = U123")
+  (row "Sort Key (SK)"      "No"       "Enables range queries within a partition"    "order_date = 2024-01-15")
+  (row "GSI Partition Key"  "No"       "Alternative access pattern"                 "email = user@example.com")
+  (row "GSI Sort Key"       "No"       "Range queries on GSI"                       "created_at = 2024-01-15")
+  (row "LSI Sort Key"       "No"       "Alternative sort within same partition"      "status = SHIPPED")
+)}}
+
+{{table "Single-Table Design Example: E-Commerce" (rows
+  (row "Entity"     "PK"              "SK"                     "Attributes"                    "Access Pattern")
+  (row "User"       "USER#U123"       "PROFILE"                "name, email, created_at"       "Get user profile")
+  (row "Order"      "USER#U123"       "ORDER#2024-01-15#O456"  "total, status, items"          "Get user orders (sorted by date)")
+  (row "Order Item" "ORDER#O456"      "ITEM#P789"              "product_id, qty, price"        "Get items in order")
+  (row "Product"    "PRODUCT#P789"    "DETAILS"                "name, price, category"         "Get product details")
+  (row "Review"     "PRODUCT#P789"    "REVIEW#U123"            "rating, text, date"            "Get product reviews")
+)}}
+
+{{code "python" `import boto3
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('ECommerce')
+
+# Access Pattern 1: Get user profile
+response = table.get_item(Key={'PK': 'USER#U123', 'SK': 'PROFILE'})
+user = response['Item']
+
+# Access Pattern 2: Get user's recent orders (most recent first)
+response = table.query(
+    KeyConditionExpression='PK = :pk AND begins_with(SK, :sk)',
+    ExpressionAttributeValues={':pk': 'USER#U123', ':sk': 'ORDER#'},
+    ScanIndexForward=False,  # Descending order (newest first)
+    Limit=10
+)
+orders = response['Items']
+
+# Access Pattern 3: Get all items in an order
+response = table.query(
+    KeyConditionExpression='PK = :pk AND begins_with(SK, :sk)',
+    ExpressionAttributeValues={':pk': 'ORDER#O456', ':sk': 'ITEM#'}
+)
+items = response['Items']
+`}}
+
+{{thought "The PK#value SK#value pattern (like USER#U123, ORDER#2024-01-15) is the standard DynamoDB convention. The prefix prevents collisions between entity types in a single table. The sort key enables begins_with queries to fetch all entities of a type within a partition."}}
+
+{{phase 3 "Indexes: GSI and LSI" "5 min"}}
+
+{{say "Global Secondary Indexes (GSIs) enable alternative access patterns. They are like separate tables that DynamoDB maintains for you, with their own partition and sort keys. Local Secondary Indexes (LSIs) provide alternative sort keys within the same partition."}}
+
+{{table "GSI vs LSI" (rows
+  (row "Feature"              "GSI"                                   "LSI")
+  (row "Partition Key"        "Different from base table"             "Same as base table")
+  (row "Sort Key"             "Different from base table"             "Different from base table")
+  (row "Max per Table"        "20"                                    "5")
+  (row "Size Limit"           "None (separate storage)"               "10 GB per partition key")
+  (row "Consistency"          "Eventually consistent only"            "Eventually or strongly consistent")
+  (row "Throughput"           "Separate provisioned/on-demand"        "Shared with base table")
+  (row "When Created"         "Any time"                              "Table creation only")
+  (row "Write Cost"           "Additional WCU for each GSI"           "Uses base table WCU")
+)}}
+
+{{code "python" `# GSI Example: Look up user by email (GSI1: PK=email, SK=entity_type)
+response = table.query(
+    IndexName='GSI1',
+    KeyConditionExpression='GSI1PK = :email AND GSI1SK = :type',
+    ExpressionAttributeValues={
+        ':email': 'user@example.com',
+        ':type': 'USER'
+    }
+)
+
+# GSI Example: Get orders by status across all users
+# GSI2: PK=status, SK=order_date
+response = table.query(
+    IndexName='GSI2',
+    KeyConditionExpression='GSI2PK = :status AND GSI2SK BETWEEN :start AND :end',
+    ExpressionAttributeValues={
+        ':status': 'PENDING',
+        ':start': '2024-01-01',
+        ':end': '2024-01-31'
+    }
+)
+`}}
+
+{{avoid "Never create a GSI with a low-cardinality partition key (like status with 3 values). All PENDING orders land on one partition, creating a hot partition. Instead, add a shard suffix: PENDING#0, PENDING#1, ... PENDING#9 and scatter-gather across 10 shards."}}
+
+{{phase 4 "Capacity Modes and Scaling" "5 min"}}
+
+{{say "DynamoDB offers two capacity modes. On-demand scales automatically but costs more per request. Provisioned is cheaper but you manage capacity. Most teams start on-demand and switch to provisioned once traffic patterns are predictable."}}
+
+{{table "On-Demand vs Provisioned" (rows
+  (row "Feature"              "On-Demand"                           "Provisioned")
+  (row "Pricing"              "$1.25/M writes, $0.25/M reads"       "$0.00065/WCU-hr, $0.00013/RCU-hr")
+  (row "Scaling"              "Instant, no config needed"            "Auto-scaling with target utilization")
+  (row "Burst"                "Up to 2x previous peak"              "Burst pool of 300 seconds of unused capacity")
+  (row "Throttling"           "Rare (only on extreme spikes)"        "When you exceed provisioned + burst")
+  (row "Cost at 10K WPS"      "~$10,800/mo"                         "~$4,700/mo with auto-scaling")
+  (row "Best For"             "Unpredictable traffic, dev/staging"   "Steady traffic, production at scale")
+)}}
+
+{{compare "Capacity Mode" (options
+  (best "Start On-Demand, switch to Provisioned" "On-demand for launch (unknown traffic patterns). After 2-4 weeks with stable traffic, switch to provisioned with auto-scaling. Target 70% utilization. Saves 50-60% at steady state.")
+  (alt "On-Demand always" "Simpler operations. Worth the premium for spiky workloads (flash sales, viral events). No throttling risk. Good when engineering time is more expensive than AWS bill.")
+  (nofit "Provisioned without auto-scaling" "Manual capacity management is error-prone. Under-provision = throttling. Over-provision = wasted money. Always enable auto-scaling with provisioned mode.")
+)}}
+
+{{thought "DynamoDB auto-scaling has a delay of 1-2 minutes. If you get a traffic spike faster than that, you will be throttled. For predictable spikes (marketing campaign at noon), pre-warm by temporarily increasing provisioned capacity 30 minutes before the spike."}}
+
+{{phase 5 "Advanced Features" "5 min"}}
+
+{{table "Advanced DynamoDB Features" (rows
+  (row "Feature"          "What It Does"                                    "Use Case"                              "Cost Impact")
+  (row "TTL"              "Auto-delete items after expiry timestamp"         "Session tokens, temp data, event logs"  "Free (no WCU charge for TTL deletes)")
+  (row "Streams"          "Ordered log of item changes (insert/update/delete)" "Event sourcing, materialized views, sync" "$0.02 per 100K reads")
+  (row "DAX"              "In-memory cache, microsecond reads"              "Read-heavy, same query repeated"       "From $0.269/hr (dax.t3.small)")
+  (row "Global Tables"    "Multi-region active-active replication"          "Global apps, disaster recovery"        "2x write cost + cross-region transfer")
+  (row "Transactions"     "ACID across up to 100 items"                     "Financial operations, inventory"       "2x read/write cost")
+  (row "Point-in-Time Recovery" "Continuous backups, restore to any second" "Compliance, accidental deletes"        "$0.20/GB/month")
+  (row "Export to S3"     "Full table export without read capacity"         "Analytics, data lake, backup"          "$0.10/GB exported")
+)}}
+
+{{code "python" `# TTL: Auto-expire session tokens
+import time
+
+table.put_item(Item={
+    'PK': 'SESSION#abc123',
+    'SK': 'DATA',
+    'user_id': 'U123',
+    'ttl': int(time.time()) + 3600  # Expires in 1 hour
+    # DynamoDB deletes this item automatically after TTL
+    # Deletion is eventually consistent (up to 48h delay)
+})
+
+# DynamoDB Streams + Lambda: Build materialized views
+# When an order is created, update the user's order count
+def lambda_handler(event, context):
+    for record in event['Records']:
+        if record['eventName'] == 'INSERT':
+            new_item = record['dynamodb']['NewImage']
+            pk = new_item['PK']['S']
+            if pk.startswith('ORDER#'):
+                user_id = new_item['user_id']['S']
+                # Atomically increment order count
+                table.update_item(
+                    Key={'PK': f'USER#{user_id}', 'SK': 'PROFILE'},
+                    UpdateExpression='ADD order_count :inc',
+                    ExpressionAttributeValues={':inc': 1}
+                )
+`}}
+
+{{phase 6 "Hot Partition Problem" "5 min"}}
+
+{{say "The hot partition problem is the number one DynamoDB scaling issue in interviews. When one partition key gets disproportionate traffic, that partition throttles while others sit idle. Classic example: celebrity user ID getting millions of likes."}}
+
+{{table "Hot Partition Scenarios" (rows
+  (row "Scenario"                      "Why It is Hot"                          "Solution")
+  (row "Celebrity post likes"          "Millions of writes to one PK"          "Write sharding: PK=POST#123#shard_N (N=0-9)")
+  (row "Status=PENDING index"          "Low cardinality, all pending items in one partition" "Shard the status: PENDING#0 through PENDING#9")
+  (row "Today's date as PK"            "All today's events on one partition"    "Add random suffix: 2024-01-15#A through 2024-01-15#Z")
+  (row "Popular product page views"    "One product gets 90% of traffic"       "DAX cache in front to absorb reads")
+)}}
+
+{{code "python" `import random
+
+# Write Sharding: Distribute writes across N shards
+SHARD_COUNT = 10
+
+def write_like(post_id, user_id):
+    shard = random.randint(0, SHARD_COUNT - 1)
+    table.update_item(
+        Key={
+            'PK': f'POST#{post_id}#LIKES#{shard}',
+            'SK': 'COUNT'
+        },
+        UpdateExpression='ADD like_count :inc',
+        ExpressionAttributeValues={':inc': 1}
+    )
+
+def get_total_likes(post_id):
+    total = 0
+    for shard in range(SHARD_COUNT):
+        response = table.get_item(
+            Key={
+                'PK': f'POST#{post_id}#LIKES#{shard}',
+                'SK': 'COUNT'
+            }
+        )
+        total += response.get('Item', {}).get('like_count', 0)
+    return total
+    # For read-heavy: cache total in Redis, update periodically
+`}}
+
+{{key "Write sharding trades write simplicity for read complexity. Writes go to random shard (O(1)). Reads scatter-gather across all shards (O(N)). Cache the aggregated total in Redis to avoid scatter-gather on every read."}}
+
+{{phase 7 "Cost Estimates" "3 min"}}
+
+{{table "DynamoDB Monthly Cost Examples" (rows
+  (row "Workload"                    "Writes/sec"  "Reads/sec"  "Storage"     "On-Demand Cost"   "Provisioned Cost")
+  (row "MVP (small app)"             "10"          "100"        "1 GB"        "$35/mo"           "$15/mo")
+  (row "Medium (e-commerce)"         "500"         "5,000"      "50 GB"       "$1,700/mo"        "$750/mo")
+  (row "Large (social feed)"         "5,000"       "50,000"     "500 GB"      "$17,000/mo"       "$7,500/mo")
+  (row "Massive (URL shortener)"     "10,000"      "100,000"    "5 TB"        "$34,000/mo"       "$15,000/mo")
+)}}
+
+{{thought "DynamoDB storage costs $0.25/GB/month. At 5 TB that is $1,250/month for storage alone. If you are storing large items (images, documents), keep them in S3 and store only the S3 key in DynamoDB. The 400 KB item size limit enforces this naturally."}}
+
+{{table "Cost Optimization" (rows
+  (row "Strategy"                         "Savings"       "How")
+  (row "Provisioned + auto-scaling"       "50-60%"        "Switch from on-demand after traffic stabilizes")
+  (row "Reserved capacity (1-year)"       "53-76%"        "Upfront payment for guaranteed baseline capacity")
+  (row "TTL for temp data"                "Variable"      "Auto-delete expired items, no WCU charge")
+  (row "Smaller items"                    "Proportional"  "1 WCU = 1KB write. Smaller items = fewer WCUs")
+  (row "Eventually consistent reads"      "50%"           "Default mode, 0.5 RCU per 4KB vs 1.0 for strong")
+  (row "DAX for read-heavy"               "Variable"      "Cache hits avoid RCU charges entirely")
+  (row "Export to S3 for analytics"       "90%+"          "Export does not consume RCU. Athena queries S3.")
+)}}
+
+{{phase 8 "Failure Scenarios" "3 min"}}
+
+{{table "DynamoDB Failure Modes" (rows
+  (row "Failure"                    "Impact"                                "Mitigation"                              "Recovery")
+  (row "Throttling (hot partition)" "ProvisionedThroughputExceededException" "Write sharding, DAX, auto-scaling"      "Reduce traffic or increase capacity")
+  (row "Conditional check failure"  "Write rejected (optimistic lock)"       "Retry with exponential backoff"         "Immediate")
+  (row "Region outage"              "Table unavailable in that region"       "Global Tables for multi-region failover" "Automatic (global tables)")
+  (row "Stream processing lag"      "Materialized views are stale"           "Monitor IteratorAge metric, alarm at 1min" "Scale Lambda consumers")
+  (row "Item too large (>400KB)"    "ValidationException on write"           "Compress data, move large fields to S3" "Re-architect item structure")
+  (row "GSI replication lag"         "GSI reads return stale data"            "Eventually consistent by design"        "Wait (typically <1 second)")
+)}}
+
+{{phase 9 "Interview Q&A" "3 min"}}
+
+{{qa
+  "How do you handle transactions in DynamoDB?"
+  "TransactWriteItems for multi-item atomic writes (up to 100 items, 4MB total). Use for operations like transferring money between accounts where both must succeed or fail. Costs 2x normal write. For simple conditional writes, use ConditionExpression instead — it is cheaper and sufficient for most cases."
+  "How do you do analytics on DynamoDB data?"
+  "Never scan your table for analytics — it is expensive and slow. Export to S3 (free of RCU), then query with Athena or load into Redshift. For real-time analytics, use DynamoDB Streams to feed Kinesis Data Firehose to S3 to Athena."
+}}
+
+{{followup "What if you need to change your access patterns after launch?" "This is the hardest DynamoDB challenge. Options: 1) Add a GSI for the new pattern (easiest, up to 20 GSIs). 2) Migrate to a new table with a redesigned key schema (use DynamoDB Streams to replicate during migration). 3) If patterns become too complex or too many, consider moving to Postgres — DynamoDB is not the right fit for ad-hoc queries."}}
+
+{{checklist
+  "Design table around access patterns first, not entities"
+  "Use PK#value SK#value convention for single-table design"
+  "GSI for every alternative access pattern (up to 20)"
+  "Start on-demand, switch to provisioned after traffic stabilizes"
+  "TTL for all temporary data (sessions, tokens, events)"
+  "Write sharding for hot partition keys (celebrity problem)"
+  "Cache aggregated counts in Redis to avoid scatter-gather reads"
+  "Export to S3 for analytics, never scan the table"
+  "400 KB item limit — large objects go in S3, key in DynamoDB"
+  "Monitor ConsumedReadCapacityUnits, ConsumedWriteCapacityUnits, ThrottledRequests"
+}}

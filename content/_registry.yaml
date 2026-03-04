@@ -24,6 +24,36 @@ problems:
         risk: "Thundering herd on cache miss for viral URLs"
         caveats: "r6g.large = $0.126/hr = ~$92/mo. Monitor eviction rate."
 
+  - slug: instagram
+    title: "Instagram"
+    description: "Design Instagram: photo/video feed, stories, likes, comments, explore, notifications"
+    path: problems/instagram
+    uses:
+      - fundamental: networking/cdn/cloudfront
+        config: "Edge caching for images/videos, S3 origin with OAC"
+        why: "Media-heavy app — 80%+ traffic is image/video serving, CDN cuts latency to <50ms globally"
+        not_this: "Self-hosted CDN — operational nightmare at Instagram scale"
+        risk: "Cache invalidation on image deletion (GDPR compliance)"
+        caveats: "CloudFront $0.085/GB first 10TB. At 1PB/mo = ~$40K/mo. Negotiate Enterprise Discount."
+      - fundamental: networking/load-balancing
+        config: "ALB with path-based routing: /api/* → app servers, /media/* → media service"
+        why: "Different services for API vs media — ALB routes by path at L7"
+        not_this: "NLB — need HTTP path routing for microservice split"
+        risk: "Uneven load if /feed endpoint is 10x heavier than /profile"
+        caveats: "ALB $0.0225/hr + $0.008/LCU-hr. At 50K RPS ~$200/mo."
+      - fundamental: storage/redis
+        config: "Feed cache per user (sorted set), session store, like counters"
+        why: "Feed generation is expensive (fan-out-on-read). Cache assembled feeds in Redis sorted sets."
+        not_this: "Memcached — need sorted sets for ranked feeds, persistence for sessions"
+        risk: "Celebrity post = millions of fan-out writes. Use hybrid fan-out."
+        caveats: "r6g.xlarge cluster = ~$370/mo. Feed cache TTL 5min. Eviction: allkeys-lru."
+      - fundamental: storage/dynamodb
+        config: "Posts table (PK=user_id, SK=timestamp), Likes counter (atomic increment)"
+        why: "Write-heavy for likes/comments. DynamoDB handles 10K+ WPS per partition."
+        not_this: "Postgres — write amplification at scale, connection pool exhaustion"
+        risk: "Hot partition on celebrity posts — use write sharding (user_id#shard)"
+        caveats: "On-demand $1.25/M writes, $0.25/M reads. At 100K WPS = ~$10K/mo."
+
   - slug: rate-limiter
     title: "Rate Limiter"
     description: "Design API rate limiting: token bucket, sliding window, distributed counters"

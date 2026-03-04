@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 
@@ -42,8 +43,9 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
-	// Static files
-	r.Handle("/static/*", http.FileServer(http.FS(staticFS)))
+	// Static files — strip /static/ prefix and serve from web/static/ subdir
+	staticSub, _ := fs.Sub(staticFS, "web/static")
+	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
 
 	// Page routes
 	r.Get("/", h.Dashboard)

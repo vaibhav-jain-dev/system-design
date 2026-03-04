@@ -1,1 +1,172 @@
-<div class="no-content"><p>Content coming soon.</p></div>
+{{phase 1 "What Is ALB?" "3 min"}}
+
+{{say "Application Load Balancer operates at Layer 7 (HTTP/HTTPS). It inspects request content and makes intelligent routing decisions based on URL path, hostname, headers, and query strings."}}
+
+{{table "ALB Key Features" (rows
+  (row "Feature"              "Description"                                    "Use Case")
+  (row "Path-based routing"   "Route /api/* to backend, /static/* to S3"       "Microservices behind single domain")
+  (row "Host-based routing"   "Route api.example.com vs web.example.com"       "Multi-tenant, multiple services")
+  (row "Header-based routing" "Route based on custom headers or user-agent"    "A/B testing, mobile vs desktop")
+  (row "WebSocket support"    "Native upgrade from HTTP to WebSocket"          "Real-time apps, chat, gaming")
+  (row "gRPC support"         "HTTP/2 with gRPC health checks"                "Microservice-to-microservice")
+  (row "WAF integration"      "AWS WAF rules applied at ALB level"             "Block SQL injection, XSS, bots")
+  (row "Authentication"       "Built-in Cognito and OIDC integration"         "Auth before reaching your app")
+  (row "Lambda targets"       "Route directly to Lambda functions"             "Serverless backends")
+  (row "Sticky sessions"      "Cookie-based session affinity"                  "Legacy stateful applications")
+  (row "Slow start mode"      "Gradually increase traffic to new targets"     "Warm JVM, populate cache")
+)}}
+
+{{thought "ALB is the default choice for any HTTP/HTTPS workload. The only reasons to use NLB instead are: static IP requirement, non-HTTP protocol, ultra-low latency (<100us), or AWS PrivateLink."}}
+
+{{phase 2 "Routing Rules Deep Dive" "5 min"}}
+
+{{say "ALB listener rules are evaluated in priority order. First match wins. This lets you build sophisticated routing topologies with a single ALB."}}
+
+{{table "ALB Routing Rule Examples" (rows
+  (row "Priority" "Condition"                                    "Target Group"        "Use Case")
+  (row "1"        "Path = /api/v2/*"                             "API v2 service"      "Route new API version separately")
+  (row "2"        "Path = /api/v1/* AND Header: X-Beta = true"   "API beta service"    "Beta testing with feature flag")
+  (row "3"        "Path = /api/*"                                "API v1 service"      "Default API routing")
+  (row "4"        "Host = admin.example.com"                     "Admin service"       "Separate admin panel")
+  (row "5"        "Path = /ws/*"                                 "WebSocket service"   "WebSocket connections")
+  (row "6"        "Path = /health"                               "Fixed 200 response"  "LB health check response")
+  (row "99"       "Default"                                      "Web frontend"        "Catch-all for SPA")
+)}}
+
+{{code "hcl" `# Terraform: ALB with path-based routing
+resource "aws_lb" "main" {
+  name               = "app-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = var.public_subnet_ids
+
+  enable_deletion_protection = true
+
+  tags = {
+    Environment = "production"
+  }
+}
+
+resource "aws_lb_listener" "https" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = aws_acm_certificate.main.arn
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.frontend.arn
+  }
+}
+
+# Route /api/* to API service
+resource "aws_lb_listener_rule" "api" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 10
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.api.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/api/*"]
+    }
+  }
+}
+
+# Target group with health check
+resource "aws_lb_target_group" "api" {
+  name        = "api-targets"
+  port        = 8080
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+
+  health_check {
+    path                = "/health"
+    interval            = 15
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200"
+  }
+
+  deregistration_delay = 30
+
+  stickiness {
+    type            = "lb_cookie"
+    cookie_duration = 3600
+    enabled         = false
+  }
+}
+`}}
+
+{{phase 3 "WebSocket and gRPC Support" "3 min"}}
+
+{{table "Protocol Support" (rows
+  (row "Protocol"    "How ALB Handles It"                              "Configuration Needed")
+  (row "HTTP/1.1"    "Standard request-response"                       "Default, no config")
+  (row "HTTP/2"      "Multiplexed connections, header compression"     "Enable on listener, backends can be HTTP/1.1")
+  (row "WebSocket"   "Upgrade handshake, then TCP passthrough"         "No config needed, just route to WebSocket targets")
+  (row "gRPC"        "HTTP/2 based, requires gRPC health check"       "Target group protocol version = gRPC")
+)}}
+
+{{followup "Can ALB terminate WebSocket connections?" "ALB handles the HTTP upgrade handshake and then maintains the WebSocket connection. It does not inspect WebSocket frames (that would be L7 on a non-HTTP protocol). The idle timeout is 4000 seconds max. For longer connections, send periodic pings from the client."}}
+
+{{phase 4 "WAF and Authentication" "3 min"}}
+
+{{say "ALB integrates with AWS WAF for security and supports built-in authentication via Cognito or any OIDC provider. This means your backend never sees unauthenticated requests."}}
+
+{{table "WAF Rules for ALB" (rows
+  (row "Rule Type"           "What It Blocks"                    "Cost")
+  (row "AWS Managed Rules"   "SQL injection, XSS, known bad IPs" "$1/rule group/month + $0.60/M requests")
+  (row "Rate-based rule"     "DDoS: > N requests per 5 min per IP" "$1/rule + $0.60/M requests")
+  (row "IP set rule"         "Block/allow specific IP ranges"    "$1/rule")
+  (row "Geo-match rule"      "Block traffic from specific countries" "$1/rule")
+  (row "Bot Control"         "Block scrapers, automated bots"   "$10/month + $1/M requests")
+)}}
+
+{{key "ALB + WAF + Cognito auth means your application code never handles unauthenticated requests, SQL injection, or known bad IPs. These are all blocked before reaching your ECS tasks. This is defense in depth."}}
+
+{{phase 5 "Cost Breakdown" "3 min"}}
+
+{{table "ALB Pricing Components" (rows
+  (row "Component"                 "Price"                       "Example at 10K RPS")
+  (row "Base hourly charge"        "$0.0225/hr"                  "$16.20/mo")
+  (row "LCU: New connections"      "25 new conn/s per LCU"       "At 500 conn/s = 20 LCU")
+  (row "LCU: Active connections"   "3,000 active conn/min per LCU" "At 5K active = 1.67 LCU")
+  (row "LCU: Processed bytes"     "1 GB/hr per LCU"             "At 500 MB/hr = 0.5 LCU")
+  (row "LCU: Rule evaluations"    "1,000 rules/s per LCU"       "At 10 rules x 10K RPS = 100 LCU")
+  (row "LCU cost"                  "$0.008/LCU-hr"               "Based on highest LCU dimension")
+  (row "Typical total"             "Base + highest LCU"          "~$25-75/mo for most apps")
+)}}
+
+{{thought "ALB pricing is based on the highest dimension of LCU usage, not the sum. If you use 20 LCU for connections but only 0.5 LCU for bytes, you pay for 20 LCU. The rule evaluations dimension can surprise you: many routing rules with high RPS pushes up LCU."}}
+
+{{avoid "Do not create one ALB per microservice. Use path-based routing rules on a single ALB. Each additional ALB costs $16.20/mo base fee. With 10 microservices, that is $162/mo wasted. One ALB with 10 routing rules costs the same $16.20 base."}}
+
+{{phase 6 "Best Practices" "3 min"}}
+
+{{checklist
+  "Use ALB for all HTTP/HTTPS workloads (default choice)"
+  "Path-based routing: one ALB for multiple services"
+  "Enable WAF for public-facing ALBs (SQL injection, XSS, rate limiting)"
+  "Health check: shallow /health endpoint, 15s interval, 3 threshold"
+  "Deregistration delay: match your longest request timeout (default 300s is too long)"
+  "Enable access logs to S3 for debugging and compliance"
+  "Use TLS 1.3 security policy (ELBSecurityPolicy-TLS13-1-2-2021-06)"
+  "Multi-AZ: always deploy across at least 2 AZs"
+  "Slow start: enable for JVM apps or services that need cache warming"
+  "Monitor: 5XX rate, target response time, active connection count"
+}}
+
+{{qa
+  "When should I NOT use ALB?"
+  "Four scenarios: 1) You need a static IP (use NLB). 2) Non-HTTP protocol like raw TCP or UDP (use NLB). 3) You need TLS passthrough without termination (use NLB). 4) Ultra-low latency requirement under 100 microseconds (use NLB)."
+  "Can ALB handle 1 million requests per second?"
+  "ALB auto-scales, but it needs time to ramp up. For sudden spikes, pre-warm by contacting AWS support. For predictable high traffic, the ALB learns your traffic pattern and pre-scales. Sustained 1M RPS is handled across multiple ALB nodes in multiple AZs."
+}}

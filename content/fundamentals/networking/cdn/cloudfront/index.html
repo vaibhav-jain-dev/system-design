@@ -1,1 +1,302 @@
-<div class="no-content"><p>Content coming soon.</p></div>
+{{phase 1 "What Is CloudFront?" "3 min"}}
+
+{{say "CloudFront is AWS's CDN. 400+ edge locations worldwide. It caches your content at edge PoPs, so users get sub-20ms latency instead of 200ms+ round-trip to origin. It integrates natively with S3, ALB, API Gateway, and Lambda@Edge."}}
+
+{{table "CloudFront at a Glance" (rows
+  (row "Property"           "Detail")
+  (row "Edge Locations"     "400+ PoPs across 90+ cities in 47 countries")
+  (row "Origin Types"       "S3, ALB, API Gateway, EC2, custom HTTP server")
+  (row "Protocols"          "HTTP/1.1, HTTP/2, HTTP/3 (QUIC), WebSocket")
+  (row "TLS"                "Free ACM certificates, TLS 1.3, custom certs")
+  (row "Caching"            "TTL-based, query string/header/cookie forwarding")
+  (row "Edge Compute"       "Lambda@Edge (4 hooks) + CloudFront Functions (lightweight)")
+  (row "Security"           "AWS Shield Standard (free DDoS), WAF integration, OAC for S3")
+  (row "Pricing"            "$0.085/GB first 10TB (US/EU), per-request charges")
+)}}
+
+{{qa
+  "Why CloudFront over other CDNs when on AWS?"
+  "Three reasons: 1) Free data transfer from S3 to CloudFront (you only pay edge-to-user). 2) Native IAM and OAC integration for secure S3 access. 3) Lambda@Edge for request/response manipulation without managing servers."
+  "When would you NOT use CloudFront?"
+  "If you need unlimited bandwidth on a flat rate (Cloudflare Pro is $20/mo unlimited). Or if you need sub-150ms purge times (Fastly has instant purge, CloudFront takes 1-2 minutes). Or if your stack is not on AWS and you want simpler integration."
+}}
+
+{{phase 2 "Architecture: Origins and Behaviors" "5 min"}}
+
+{{say "CloudFront sits in front of your origin servers. You configure distributions with one or more origins, and behaviors that define which URL paths route to which origin and how caching works."}}
+
+{{table "Origin Types" (rows
+  (row "Origin"          "When to Use"                           "Config Notes"                          "Data Transfer Cost")
+  (row "S3 bucket"       "Static assets, media, SPA hosting"     "Use OAC (not legacy OAI). Bucket can be private." "Free (S3 to CF)")
+  (row "ALB"             "Dynamic API, server-rendered pages"    "Custom origin, HTTPS to ALB. Set Host header." "$0.01/GB (regional)")
+  (row "API Gateway"     "REST/WebSocket APIs"                   "Regional endpoint as custom origin"    "$0.09/GB API GW egress")
+  (row "EC2 / Custom"    "Legacy apps, non-AWS origins"          "Public IP required. Custom origin protocol." "$0.09/GB EC2 egress")
+  (row "MediaStore"      "Live/VOD video streaming"              "Low-latency media origin"              "Free (MediaStore to CF)")
+)}}
+
+{{table "Cache Behaviors" (rows
+  (row "Setting"              "Default"           "Common Override"                   "Impact")
+  (row "Path Pattern"         "/*"                "/api/*, /static/*, /media/*"        "Route different paths to different origins")
+  (row "Cache Policy"         "CachingDisabled"   "CachingOptimized (TTL 86400)"      "What gets cached and for how long")
+  (row "Origin Request Policy" "None"             "AllViewerExceptHostHeader"          "What headers/cookies to forward to origin")
+  (row "Viewer Protocol"      "Allow all"         "Redirect HTTP to HTTPS"            "Force HTTPS for all users")
+  (row "Compress Objects"     "No"                "Yes (Gzip + Brotli)"               "30-70% bandwidth savings")
+  (row "Function Association" "None"              "Lambda@Edge or CF Function"         "Transform requests/responses at edge")
+)}}
+
+{{code "text" `# CloudFront Distribution — Multi-Origin Setup (Terraform)
+
+resource "aws_cloudfront_distribution" "main" {
+  enabled             = true
+  default_root_object = "index.html"
+  price_class         = "PriceClass_100"  # US, EU, Asia only (cheaper)
+
+  # Origin 1: S3 for static assets
+  origin {
+    domain_name              = aws_s3_bucket.static.bucket_regional_domain_name
+    origin_id                = "s3-static"
+    origin_access_control_id = aws_cloudfront_origin_access_control.oac.id
+  }
+
+  # Origin 2: ALB for API
+  origin {
+    domain_name = aws_lb.api.dns_name
+    origin_id   = "alb-api"
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
+  # Behavior: /api/* -> ALB (no caching)
+  ordered_cache_behavior {
+    path_pattern     = "/api/*"
+    target_origin_id = "alb-api"
+    cache_policy_id  = data.aws_cloudfront_cache_policy.disabled.id
+    # Forward all headers, cookies, query strings
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+    cached_methods         = ["GET", "HEAD"]
+  }
+
+  # Default behavior: /* -> S3 (aggressive caching)
+  default_cache_behavior {
+    target_origin_id       = "s3-static"
+    cache_policy_id        = data.aws_cloudfront_cache_policy.optimized.id
+    viewer_protocol_policy = "redirect-to-https"
+    compress               = true
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+  }
+}
+`}}
+
+{{key "Always use Origin Access Control (OAC), not the legacy Origin Access Identity (OAI). OAC supports SSE-KMS encryption and S3 bucket policies. OAI is being deprecated."}}
+
+{{phase 3 "Lambda@Edge vs CloudFront Functions" "5 min"}}
+
+{{say "CloudFront has two edge compute options. Lambda@Edge for heavy logic (up to 10 seconds, 10MB body, network access). CloudFront Functions for lightweight transformations (sub-millisecond, 2MB limit, no network access). Most use cases only need CloudFront Functions."}}
+
+{{table "Edge Compute Comparison" (rows
+  (row "Feature"              "CloudFront Functions"              "Lambda@Edge")
+  (row "Runtime"              "JavaScript (ES 5.1)"               "Node.js or Python")
+  (row "Execution Location"   "218 edge locations"                "13 regional edge caches")
+  (row "Max Execution Time"   "1ms"                               "5-30 seconds")
+  (row "Max Memory"           "2MB"                               "128-10240 MB")
+  (row "Network Access"       "No"                                "Yes")
+  (row "Body Access"          "No"                                "Yes (up to 40KB viewer, 1MB origin)")
+  (row "Event Types"          "Viewer Request, Viewer Response"   "All 4 (viewer + origin request/response)")
+  (row "Price"                "$0.10 per 1M invocations"          "$0.60 per 1M + duration")
+  (row "Cold Start"           "None (sub-ms)"                     "50-200ms")
+)}}
+
+{{compare "Edge Compute Choice" (options
+  (best "CloudFront Functions" "URL rewrites, header manipulation, A/B testing, redirects, simple auth (JWT validation from KV store). No cold start, 6x cheaper. Handles 90% of edge compute needs.")
+  (alt "Lambda@Edge" "Need network access (call DynamoDB), process request/response body, complex auth (OAuth flows), image transformation, server-side rendering. Worth the cold start penalty.")
+  (nofit "Neither (origin handles all)" "If you need edge compute for auth, redirects, or A/B tests and are doing it at origin, you are adding 100-200ms latency that edge compute eliminates.")
+)}}
+
+{{code "javascript" `// CloudFront Function: URL rewrite for SPA
+// Viewer Request event — routes /dashboard, /profile, etc. to /index.html
+
+function handler(event) {
+  var request = event.request;
+  var uri = request.uri;
+
+  // If URI has no file extension, rewrite to /index.html (SPA routing)
+  if (!uri.includes('.')) {
+    request.uri = '/index.html';
+  }
+
+  return request;
+}
+`}}
+
+{{code "python" `# Lambda@Edge: Resize images on the fly
+# Origin Response event — transforms images based on query string
+
+import boto3
+from PIL import Image
+import io
+
+def handler(event, context):
+    response = event['Records'][0]['cf']['response']
+    request = event['Records'][0]['cf']['request']
+
+    # Only process images
+    if response['status'] != '200':
+        return response
+
+    width = request['querystring'].get('w', None)
+    if not width:
+        return response
+
+    # Fetch original from S3, resize, return
+    s3 = boto3.client('s3')
+    bucket = 'my-media-bucket'
+    key = request['uri'].lstrip('/')
+
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    img = Image.open(io.BytesIO(obj['Body'].read()))
+    img = img.resize((int(width), int(int(width) * img.height / img.width)))
+
+    buffer = io.BytesIO()
+    img.save(buffer, format='WEBP', quality=85)
+
+    response['body'] = buffer.getvalue()
+    response['bodyEncoding'] = 'base64'
+    response['headers']['content-type'] = [{'value': 'image/webp'}]
+    return response
+`}}
+
+{{phase 4 "Security: OAC, Signed URLs, WAF" "5 min"}}
+
+{{say "CloudFront security has three layers. OAC locks down S3 origins so only CloudFront can access them. Signed URLs and cookies restrict access to premium content. WAF blocks malicious requests at the edge."}}
+
+{{table "Security Features" (rows
+  (row "Feature"         "What It Does"                           "Use Case"                          "Cost")
+  (row "OAC"             "S3 only accessible via CloudFront"      "All S3-origin distributions"       "Free")
+  (row "Signed URLs"     "Time-limited access to specific paths"  "Premium video, downloadable content" "Free (compute for signing)")
+  (row "Signed Cookies"  "Time-limited access to multiple paths"  "Members-only section of site"      "Free")
+  (row "Geo Restriction" "Block or allow by country"              "Content licensing, compliance"      "Free")
+  (row "AWS WAF"         "Rule-based request filtering at edge"   "SQL injection, XSS, bot protection" "$5/mo + $1/rule + $0.60/M requests")
+  (row "AWS Shield Std"  "Automatic DDoS protection"              "All CloudFront distributions"      "Free (included)")
+  (row "Shield Advanced" "Enhanced DDoS, cost protection"         "High-value applications"           "$3,000/mo")
+  (row "Field-Level Encryption" "Encrypt specific POST fields at edge" "Credit card, SSN in forms" "Free")
+)}}
+
+{{code "python" `# Generate a CloudFront signed URL (Python)
+import datetime
+from botocore.signers import CloudFrontSigner
+import rsa
+
+def rsa_signer(message):
+    private_key = open('cloudfront-private-key.pem', 'rb').read()
+    return rsa.sign(message, rsa.PrivateKey.load_pkcs1(private_key), 'SHA-1')
+
+key_id = 'K2JCJMDEHXQW5F'  # CloudFront key pair ID
+cf_signer = CloudFrontSigner(key_id, rsa_signer)
+
+# URL valid for 1 hour
+url = cf_signer.generate_presigned_url(
+    'https://d111111abcdef8.cloudfront.net/premium/video.mp4',
+    date_less_than=datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+)
+`}}
+
+{{avoid "Never use Origin Access Identity (OAI) for new distributions. OAI does not support SSE-KMS, does not work with S3 bucket policies properly, and AWS is deprecating it. Use OAC."}}
+
+{{phase 5 "Origin Shield and Request Collapsing" "3 min"}}
+
+{{say "Origin Shield is an additional caching layer between edge PoPs and your origin. Without it, a cache miss from 400+ PoPs creates 400+ requests to origin. With Origin Shield, all misses go through one regional cache first."}}
+
+{{table "With vs Without Origin Shield" (rows
+  (row "Scenario"                     "Without Origin Shield"              "With Origin Shield")
+  (row "Cache miss from 50 PoPs"      "50 requests to origin"             "1 request to origin (49 served from Shield)")
+  (row "Cache hit rate at origin"     "60-70%"                            "95-99%")
+  (row "Origin load during purge"     "Spike: all PoPs refetch"           "Minimal: Shield serves to PoPs")
+  (row "Cost"                         "Higher origin egress"              "+$0.009/10K requests to Shield")
+  (row "When to enable"               "N/A"                               "Any distribution with >10 PoPs serving same content")
+)}}
+
+{{thought "Origin Shield is almost always worth it. At 100M requests/month, Origin Shield costs $90/month but can reduce origin requests by 90%, saving far more in origin compute and egress. Enable it in the region closest to your origin (e.g., us-east-1 for S3 in us-east-1)."}}
+
+{{phase 6 "Cost Optimization" "3 min"}}
+
+{{table "CloudFront Pricing (US/EU)" (rows
+  (row "Tier"          "Data Transfer/GB"    "HTTPS Requests/10K"  "Monthly Estimate (10TB, 100M req)")
+  (row "First 10TB"    "$0.085"              "$0.01"               "$850 + $100 = $950")
+  (row "Next 40TB"     "$0.080"              "$0.01"               "$3,200 + $100")
+  (row "Next 100TB"    "$0.060"              "$0.01"               "$6,000 + $100")
+  (row "Next 350TB"    "$0.040"              "$0.01"               "Negotiate")
+  (row "500TB+"        "Custom"              "Custom"              "Enterprise agreement")
+)}}
+
+{{table "Cost Optimization Strategies" (rows
+  (row "Strategy"                      "Savings"       "How")
+  (row "PriceClass_100"                "Up to 30%"     "Only use US, EU, Asia PoPs. Skip South America, Australia.")
+  (row "Compress objects"              "30-70%"        "Enable Gzip + Brotli. Smaller files = less transfer cost.")
+  (row "Origin Shield"                 "Variable"      "Fewer origin requests = less origin egress cost.")
+  (row "Longer TTLs"                   "Variable"      "Higher cache hit rate = fewer origin requests.")
+  (row "CloudFront Security Bundle"    "30%"           "Bundle WAF + Shield + Bot Control for discounted rate.")
+  (row "Reserved Capacity"             "30-40%"        "1-year commitment for predictable traffic.")
+  (row "S3 origin (not EC2)"           "100%"          "Free S3-to-CloudFront transfer. EC2-to-CF costs $0.09/GB.")
+)}}
+
+{{key "The biggest CloudFront cost mistake: serving media from EC2 instead of S3. EC2-to-CloudFront costs $0.09/GB. S3-to-CloudFront is free. Move static assets to S3 first."}}
+
+{{phase 7 "Failure Scenarios" "3 min"}}
+
+{{table "CloudFront Failure Modes" (rows
+  (row "Failure"                   "What Happens"                           "Mitigation"                                    "Recovery")
+  (row "Origin down"               "CF serves stale cache (if configured)"  "Custom error pages + stale-if-error"          "Automatic when origin recovers")
+  (row "Edge PoP outage"           "DNS routes to next nearest PoP"         "Automatic, no config needed"                  "Seconds")
+  (row "SSL cert expiry"           "502 Bad Gateway for all HTTPS"          "ACM auto-renewal + CloudWatch alarm"          "Immediate after renewal")
+  (row "Origin high latency"       "Requests queue, timeouts"               "Origin timeouts (10s read, 30s keepalive)"    "Origin scaling")
+  (row "Cache stampede after purge" "Origin overwhelmed"                    "Origin Shield + stale-while-revalidate"       "Minutes")
+  (row "Wrong cache key config"    "Wrong content served to users"          "Test cache policies in staging first"         "Invalidation (1-2 min)")
+)}}
+
+{{code "text" `# Custom Error Response — serve fallback when origin fails
+resource "aws_cloudfront_distribution" "main" {
+  custom_error_response {
+    error_code            = 503
+    response_code         = 200
+    response_page_path    = "/error/maintenance.html"
+    error_caching_min_ttl = 30  # Cache error page for 30s
+  }
+
+  custom_error_response {
+    error_code            = 404
+    response_code         = 404
+    response_page_path    = "/error/not-found.html"
+    error_caching_min_ttl = 300
+  }
+}
+`}}
+
+{{phase 8 "Interview Q&A" "3 min"}}
+
+{{qa
+  "How would you set up CloudFront for a microservices architecture?"
+  "One CloudFront distribution with multiple origins and path-based behaviors. /api/* goes to ALB origin. /static/* goes to S3 origin. /media/* goes to a separate S3 bucket or MediaStore. Each behavior has its own cache policy. API behavior has caching disabled, static has aggressive caching with long TTL."
+  "How do you handle cache invalidation in CloudFront?"
+  "Three approaches in order of preference: 1) Versioned URLs — app.abc123.js with max-age=1year. URL changes when content changes, no invalidation needed. 2) Short TTL with stale-while-revalidate for dynamic content. 3) Explicit invalidation API as last resort — takes 1-2 minutes, limited to 3000 free paths per month."
+}}
+
+{{followup "How would you handle multi-region failover with CloudFront?" "Use CloudFront origin groups with primary and secondary origins. If the primary origin returns 5xx or times out, CloudFront automatically fails over to the secondary origin. Configure health checks on both origins. For active-active multi-region, use Route 53 latency-based routing as the CloudFront origin — Route 53 routes to the nearest healthy region."}}
+
+{{checklist
+  "Use OAC (not OAI) for all S3 origins"
+  "Enable compression (Gzip + Brotli) on all distributions"
+  "Set up Origin Shield in the region closest to your origin"
+  "Use CloudFront Functions for simple URL rewrites and header manipulation"
+  "Use Lambda@Edge only when you need network access or body transformation"
+  "Signed URLs/Cookies for premium or time-limited content"
+  "Custom error pages for origin failures (503, 404)"
+  "PriceClass_100 to save 30% if you only need US/EU/Asia coverage"
+  "Free S3-to-CloudFront transfer — always prefer S3 over EC2 for static origins"
+  "Monitor cache hit ratio, error rate, and origin latency in CloudWatch"
+}}
