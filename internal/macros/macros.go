@@ -25,6 +25,7 @@ func FuncMap() template.FuncMap {
 		"details":   details,
 		"stageNav":  stageNav,
 		"anchor":    anchor,
+		"deepQA":    deepQA,
 
 		// Helpers for building structured data in templates
 		"options": optionsList,
@@ -376,4 +377,18 @@ func stageNav(args ...interface{}) template.HTML {
 // anchor creates a named anchor point for navigation.
 func anchor(id string) template.HTML {
 	return template.HTML(fmt.Sprintf(`<div id="%s" class="anchor-point"></div>`, id))
+}
+
+// deepQA renders a nested Q&A section.
+// It takes raw HTML content that should use the .dqa-* CSS classes.
+// Usage: {{deepQA "Section Title" `<div class="dqa-item">...</div>`}}
+func deepQA(title, content string) template.HTML {
+	return template.HTML(fmt.Sprintf(
+		`<div class="dqa-section">
+			<div class="dqa-header">
+				<svg class="dqa-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+				<span>%s</span>
+			</div>
+			%s
+		</div>`, title, content))
 }
