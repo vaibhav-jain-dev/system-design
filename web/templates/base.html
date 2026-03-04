@@ -146,13 +146,85 @@
             });
         }
 
+        // ── Stage Nav auto-highlight ─────────────
+        var stageObserver = null;
+        function initStageNav() {
+            if (stageObserver) { stageObserver.disconnect(); stageObserver = null; }
+            var navItems = document.querySelectorAll('.stage-nav-item');
+            if (!navItems.length) return;
+            var phases = document.querySelectorAll('.phase-header[id]');
+            if (!phases.length) return;
+
+            // Map phase id → nav item
+            var idToNav = {};
+            navItems.forEach(function(item) {
+                var href = item.getAttribute('href') || '';
+                if (href.startsWith('#')) idToNav[href.slice(1)] = item;
+            });
+
+            var currentActive = null;
+            stageObserver = new IntersectionObserver(function(entries) {
+                // Find the topmost visible phase header
+                var visible = [];
+                entries.forEach(function(entry) {
+                    if (entry.isIntersecting) visible.push(entry);
+                });
+                if (!visible.length) return;
+                // Pick the one closest to top
+                visible.sort(function(a, b) {
+                    return a.boundingClientRect.top - b.boundingClientRect.top;
+                });
+                var id = visible[0].target.id;
+                if (currentActive === id) return;
+                currentActive = id;
+                navItems.forEach(function(n) { n.classList.remove('active'); });
+                if (idToNav[id]) {
+                    idToNav[id].classList.add('active');
+                    // Scroll nav item into view
+                    idToNav[id].scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+                }
+            }, {
+                root: book.active ? document.querySelector('.book-viewport') : document.getElementById('detail'),
+                rootMargin: '-10% 0px -70% 0px',
+                threshold: 0
+            });
+
+            phases.forEach(function(ph) { stageObserver.observe(ph); });
+
+            // Also track scroll for non-intersection fallback
+            var scrollRoot = book.active ? document.querySelector('.book-viewport') : document.getElementById('detail');
+            if (scrollRoot) {
+                scrollRoot.addEventListener('scroll', function() {
+                    // Re-check which phase header is nearest top
+                    var best = null;
+                    var bestDist = Infinity;
+                    phases.forEach(function(ph) {
+                        var rect = ph.getBoundingClientRect();
+                        var dist = Math.abs(rect.top - 80);
+                        if (rect.top <= 120 && dist < bestDist) {
+                            bestDist = dist;
+                            best = ph;
+                        }
+                    });
+                    if (best && best.id !== currentActive) {
+                        currentActive = best.id;
+                        navItems.forEach(function(n) { n.classList.remove('active'); });
+                        if (idToNav[best.id]) {
+                            idToNav[best.id].classList.add('active');
+                            idToNav[best.id].scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+                        }
+                    }
+                }, { passive: true });
+            }
+        }
+
         // ── HTMX swap handler ─────────────────────
         document.addEventListener('htmx:afterSwap', function(e) {
             if (e.detail.target.id === 'detail') {
                 trackPage();
                 highlightCode();
                 collapseSidebarSections();
-                requestAnimationFrame(function() { initBook(); restoreScroll(); });
+                requestAnimationFrame(function() { initBook(); initStageNav(); restoreScroll(); });
             }
         });
 
@@ -177,7 +249,7 @@
 
         // ── Book Mode (wide screen pagination) ───
         var book = { page: 0, total: 1, active: false, colW: 0, gap: 56 };
-        var BOOK_MIN_WIDTH = 1200;
+        var BOOK_MIN_WIDTH = 1600;
 
         function initBook() {
             var d = document.getElementById('detail');
@@ -259,28 +331,55 @@
             var colW = Math.floor((vpW - gap) / 2);
             book.colW = colW;
 
-            // Step 1: Measure content height as single column
-            inner.style.columnWidth = 'auto';
-            inner.style.columnCount = '1';
-            inner.style.width = colW + 'px';
-            inner.style.height = 'auto';
-            inner.style.transform = 'none';
+            // Step 1: Measure content height in single column at column width
+            inner.style.cssText = 'width:' + colW + 'px;height:auto;column-count:1;transform:none;';
             var contentH = inner.scrollHeight;
 
-            // Step 2: Calculate columns needed
-            var numCols = Math.max(2, Math.ceil(contentH / vpH));
-            // Round up to even (each spread = 2 columns)
+            // Step 2: Account for break-before:column on phase headers
+            // Each phase-header forces a new column, which can leave partial-height gaps
+            var phaseHeaders = inner.querySelectorAll('.phase-header');
+            // Add estimated wasted space from column breaks (avg half-column per break)
+            var breakPadding = 0;
+            if (phaseHeaders.length > 1) {
+                breakPadding = (phaseHeaders.length - 1) * (vpH * 0.35);
+            }
+            var effectiveH = contentH + breakPadding;
+
+            // Step 3: Calculate columns needed
+            var numCols = Math.max(2, Math.ceil(effectiveH / vpH));
             if (numCols % 2 !== 0) numCols++;
             book.total = Math.max(1, numCols / 2);
 
-            // Step 3: Apply multi-column with enough width for all columns
-            var totalW = numCols * colW + (numCols - 1) * gap;
-            inner.style.width = totalW + 'px';
-            inner.style.height = vpH + 'px';
-            inner.style.columnWidth = colW + 'px';
-            inner.style.columnCount = '';
+            // Step 4: Apply multi-column layout with generous width
+            // Give 20% extra columns to prevent blank-page cutoff
+            var extraCols = Math.max(2, Math.ceil(numCols * 0.2));
+            if (extraCols % 2 !== 0) extraCols++;
+            var allocCols = numCols + extraCols;
+            var totalW = allocCols * colW + (allocCols - 1) * gap;
+            inner.style.cssText = 'width:' + totalW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);transition:transform 0.45s cubic-bezier(0.16,1,0.3,1);';
 
-            // Update UI
+            // Step 5: After layout, count actual used columns by finding rightmost content
+            requestAnimationFrame(function() {
+                // Walk all direct children to find the actual rightmost edge
+                var maxRight = 0;
+                var children = inner.children;
+                for (var i = 0; i < children.length; i++) {
+                    var rect = children[i].getBoundingClientRect();
+                    var innerRect = inner.getBoundingClientRect();
+                    var right = rect.right - innerRect.left;
+                    if (right > maxRight) maxRight = right;
+                }
+                // Actual columns used
+                var actualCols = Math.max(2, Math.ceil(maxRight / (colW + gap)));
+                if (actualCols % 2 !== 0) actualCols++;
+                book.total = Math.max(1, actualCols / 2);
+
+                updateBookUI();
+                bookGo(Math.min(book.page, book.total - 1));
+            });
+        }
+
+        function updateBookUI() {
             var totalEl = document.getElementById('book-total');
             var inputEl = document.getElementById('book-input');
             if (totalEl) totalEl.textContent = book.total;
@@ -301,8 +400,6 @@
                     }
                 }
             }
-
-            bookGo(Math.min(book.page, book.total - 1));
         }
 
         function bookGo(p) {
@@ -383,8 +480,8 @@
         } else {
             window.addEventListener('load', highlightCode);
         }
-        // Init book mode after content is rendered
-        requestAnimationFrame(function() { initBook(); restoreScroll(); });
+        // Init book mode + stage nav after content is rendered
+        requestAnimationFrame(function() { initBook(); initStageNav(); restoreScroll(); });
     })();
     </script>
 </body>

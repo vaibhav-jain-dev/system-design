@@ -803,3 +803,88 @@ async def resolve_short_url(short_code: str) -> str:
 }}
 
 {{key "The URL shortener interview differentiator is not the redirect (trivially simple). It is: 1) deep understanding of four-layer caching and hit rates, 2) key generation trade-offs (counter coordination, collision, guessability), 3) CAP analysis (why AP over CP), 4) async analytics pipeline, and 5) cost awareness at scale."}}
+
+{{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
+
+{{deepQA "Critical Interview Questions" `
+<div class="dqa-item">
+  <div class="dqa-q">Why DynamoDB over Postgres for URL storage at scale?</div>
+  <div class="dqa-a">
+    A URL shortener's access pattern is a near-perfect fit for a key-value store: every read is a single-key lookup by <span class="dqa-key">short_code</span>, and every write is a single-row insert. DynamoDB delivers <span class="dqa-key">single-digit millisecond reads</span> at any scale with zero operational sharding — you set a partition key and it auto-distributes across storage nodes. Postgres can match this at low QPS, but at 100K+ reads/sec you need manual <a class="dqa-link" href="/algo/consistent-hashing">consistent hashing</a> across multiple shards, connection pooling (pgBouncer), and read replicas. That is months of operational complexity you avoid entirely with DynamoDB. Additionally, DynamoDB's <span class="dqa-key">Global Tables</span> give you multi-region active-active replication with sub-second lag — replicating Postgres across 3 regions requires custom tooling (Citus, logical replication slots, conflict resolution). The trade-off: you lose SQL joins and ad-hoc queries. For a URL shortener that only does point lookups by primary key, that trade-off is overwhelmingly worthwhile.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">What if you need analytics joins — e.g., top URLs by click count per region per day?</div>
+      <div class="dqa-sub-a">
+        You do <em>not</em> force analytics into DynamoDB. Instead, use a dual-write architecture: the hot path (redirects) stays in DynamoDB for speed, while click events stream through <span class="dqa-key">Kinesis Data Streams</span> into S3 as Parquet files. For ad-hoc analytics, query S3 with <span class="dqa-key">Athena</span> (serverless Presto) — you get full SQL joins at ~$5 per TB scanned. For dashboards, materialize aggregates into a time-series store like TimescaleDB or back into DynamoDB with pre-computed rollups. This separation keeps redirect latency under 10ms while supporting complex analytics.
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">How do you handle the analytics use case without SQL if stakeholders demand real-time dashboards?</div>
+          <div class="dqa-deep-a">Layer a real-time stream processor between Kinesis and the dashboard. A Lambda consumer aggregates click events per minute into DynamoDB counters using <span class="dqa-key">atomic ADD operations</span> (no read-before-write). For richer dimensions (geo, device, referrer), use Kinesis Data Analytics (managed Apache Flink) to compute sliding-window aggregations and sink results into ElasticSearch or a pre-built DynamoDB table with composite sort keys like <code>date#region#device</code>. Dashboards read from these materialized views — never from the raw event stream. Latency: 1–2 minutes from click to dashboard. Cost at 100K QPS: ~$500/mo for Kinesis + Lambda, far cheaper than running a Postgres analytics replica.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">Base62 vs MD5-truncated vs pre-generated ID ranges: which approach and why?</div>
+  <div class="dqa-a">
+    Each strategy trades off collision risk, coordination overhead, and guessability differently. <span class="dqa-key">MD5-truncated</span> (take first 7 chars of MD5 hex) gives 16^7 = 268M combinations — collision probability hits 1% at just ~2,300 URLs (birthday paradox), so you need a DB check-and-retry loop on every write. <span class="dqa-key"><a class="dqa-link" href="/algo/base62-encoding">Base62</a> counter</span> (encode an auto-increment ID) gives 62^7 = 3.5 trillion codes with zero collisions, but requires a centralized counter — a coordination bottleneck at scale. The best approach: <span class="dqa-key">pre-generated key ranges via a Key Generation Service (KGS)</span>. KGS pre-computes batches of unique Base62 keys and hands out ranges (e.g., 1,000 keys) to app servers. Each server draws from its local batch with zero coordination, zero collisions, and non-sequential codes (harder to guess). If an app server crashes, you lose at most 1,000 unused keys — negligible out of 3.5 trillion. A <a class="dqa-link" href="/algo/bloom-filter">Bloom filter</a> can optionally provide O(1) probabilistic collision checks for custom aliases.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">What if two users submit the same long URL simultaneously — should they get the same short code?</div>
+      <div class="dqa-sub-a">
+        This is a design decision, not a bug. <span class="dqa-key">Most production shorteners (bit.ly, TinyURL) assign different short codes</span> for the same long URL submitted by different users. Why? Because each short code carries its own metadata: creator, TTL, analytics, custom alias. Deduplication would require a reverse index (long_url → short_code) adding a GSI lookup on every write — extra latency and cost for a rare scenario. If your interviewer insists on dedup, add a DynamoDB GSI on <code>long_url</code> and do a conditional check, but flag the trade-off: write latency doubles from ~5ms to ~10ms, and you lose per-user analytics isolation.
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">How do you handle idempotency — ensuring the same user submitting the same URL twice doesn't create duplicates?</div>
+          <div class="dqa-deep-a">Use a <span class="dqa-key">client-generated idempotency key</span> (UUID) passed in the <code>Idempotency-Key</code> header. On the server, before creating a new short code, check DynamoDB for a record with that idempotency key (TTL: 24 hours). If found, return the previously created short code. If not, create the new URL and store the idempotency mapping atomically using <span class="dqa-key">DynamoDB TransactWriteItems</span> — two puts in a single ACID transaction. Cost: one extra conditional read per write (~0.5ms). This is the same pattern Stripe uses for payment idempotency and works cleanly without a reverse URL index.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">Why 301 (permanent) redirect vs 302 (temporary) — and what are the hidden consequences?</div>
+  <div class="dqa-a">
+    <span class="dqa-key">301 Moved Permanently</span> tells browsers and CDNs to cache the redirect indefinitely. For a URL shortener, this means the second click by the same user <em>never hits your servers</em> — the browser resolves it locally. At scale this is enormous: if 30% of clicks are repeat visitors, 301 eliminates 30% of origin traffic. CloudFront also caches 301s at 400+ edge PoPs, so even first-time visitors in the same region get sub-10ms redirects. The trade-off: <span class="dqa-key">you lose analytics visibility</span> on cached clicks, and you cannot change the destination URL once browsers have cached it. <span class="dqa-key">302 Found</span> (temporary) forces every click through your servers — full analytics but 2–5x more origin traffic. The right answer: <strong>use 301 by default for maximum performance, switch to 302 only for URLs that need click tracking or mutable destinations</strong>. This is exactly what bit.ly does — their default redirects are 301, but their analytics-enabled links use 307.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">What if you need to change the destination URL after creation — but 301 is already cached in millions of browsers?</div>
+      <div class="dqa-sub-a">
+        This is the hardest operational problem with 301s. Browser caches are <span class="dqa-key">per-user and not under your control</span> — you cannot invalidate them. CDN caches (CloudFront) you <em>can</em> invalidate via API ($0.005 per path). Practical mitigation: 1) Set <code>Cache-Control: max-age=86400</code> on 301 responses instead of relying on infinite browser caching — this caps stale-redirect exposure to 24 hours. 2) For links that might change (enterprise customers, marketing campaigns), issue 302 from the start — charge it as a premium feature. 3) For emergency takedowns (phishing), the 301 in browser caches will eventually expire, but you should also add the URL to Google Safe Browsing so Chrome/Firefox warn users directly.
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">How do you handle link expiration when 301 responses are cached in millions of browsers?</div>
+          <div class="dqa-deep-a">Design for it upfront: always include <code>Cache-Control: max-age=86400</code> (or 604800 for 7 days) on 301 responses, never omit it. When a link expires, update DynamoDB to return <span class="dqa-key">HTTP 410 Gone</span> and invalidate CloudFront. Browsers with cached 301s will keep redirecting until their local cache expires (max 24h with the header above). After that, they hit your server and get the 410. For truly critical takedowns, serve an interstitial warning page at the destination URL itself — even cached 301s redirect users to that page. This is the approach Twitter (t.co) uses: 301 with a bounded <code>max-age</code>, plus server-side link status checks on every non-cached request.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How do you prevent abuse — spam URLs, phishing links, and bot-driven URL creation?</div>
+  <div class="dqa-a">
+    Abuse is the existential threat to any URL shortener because your domain's reputation is on the line. Layer the defenses: <span class="dqa-key">Layer 1 — Rate limiting</span>: <a class="dqa-link" href="/algo/token-bucket">Token bucket</a> at the ALB: 100 creates/min for authenticated users, 10/min for anonymous, per IP. This stops bulk creation bots. <span class="dqa-key">Layer 2 — URL scanning on creation</span>: Synchronous check against Google Safe Browsing API (~50ms) before persisting. Reject known malicious URLs with HTTP 422. <span class="dqa-key">Layer 3 — Async re-scanning</span>: A nightly Lambda job re-checks all URLs created in the last 30 days. Newly-flagged URLs get disabled (return 410 Gone). <span class="dqa-key">Layer 4 — Domain blocklist</span>: Maintain a blocklist of known phishing domains (updated daily from PhishTank, OpenPhish). <span class="dqa-key">Layer 5 — User reporting</span>: Abuse report endpoint triggers immediate review. At scale, abuse costs real money: if an attacker creates 1M spam URLs, that is 1M DynamoDB writes (~$1.25) plus storage. User quotas (10,000 URLs per account) and CAPTCHA on anonymous creation keep this bounded.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">What is the blast radius if a malicious URL goes viral before detection — say 1M clicks in 10 minutes?</div>
+      <div class="dqa-sub-a">
+        If the URL is served via 301, CloudFront caches the redirect at edge PoPs, so even after you disable the URL in DynamoDB, <span class="dqa-key">cached redirects keep serving for up to max-age seconds</span>. Blast radius: all users who received a cached 301 will keep being redirected until their browser/CDN cache expires. Mitigation: 1) CloudFront invalidation takes 5–15 seconds for a single path — do this immediately on abuse detection. 2) The 301 <code>max-age</code> of 86400 caps browser cache exposure to 24 hours. 3) For viral detection, set up a CloudWatch alarm on click rate per short_code — if any URL exceeds 10K clicks/min (99.99th percentile), trigger an automated review. 4) Consider a <a class="dqa-link" href="/algo/bloom-filter">Bloom filter</a> of known-bad URLs at the edge for O(1) blocking. Cost of a 1M-click incident: ~$0.85 in CloudFront transfer + reputation damage. The real cost is domain reputation.
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">How would you implement real-time URL reputation scoring to catch zero-day phishing URLs?</div>
+          <div class="dqa-deep-a">Build a lightweight ML scoring pipeline: on URL creation, extract features — domain age (via WHOIS API), URL entropy, path depth, presence of IP address instead of domain, homoglyph detection (paypa1.com vs paypal.com), and destination page content hash. Feed these into a pre-trained logistic regression model (~1ms inference) that returns a <span class="dqa-key">risk score 0–100</span>. Score > 80: reject immediately. Score 50–80: allow but flag for human review within 1 hour and serve via 302 (not 301) so you retain the ability to block. Score < 50: allow with 301. Re-score all URLs weekly as threat intel databases update. This approach catches ~85% of zero-day phishing URLs at creation time. For the remaining 15%, the async re-scan with updated threat feeds catches most within 24 hours. Similar to what Cloudflare's URL scanner does at their edge.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">CAP analysis: why choose AP over CP for a URL shortener, and what are the real-world consequences?</div>
+  <div class="dqa-a">
+    The core insight: a URL shortener is a <span class="dqa-key">read-heavy, latency-sensitive system where stale data is tolerable but downtime is not</span>. If a redirect fails (503), the user sees a broken link — trust is lost, the link may be in a printed QR code or a tweet seen by millions. If a redirect serves a slightly stale mapping (a URL updated 500ms ago still points to the old destination), almost no one notices. This makes <span class="dqa-key">AP (Availability + Partition tolerance)</span> the correct choice. Concretely: DynamoDB Global Tables replicate across regions with <span class="dqa-key">eventual consistency and a last-writer-wins conflict resolution</span> policy. During a network partition between us-east-1 and eu-west-1, both regions continue serving reads and accepting writes independently — availability is preserved. When the partition heals, DynamoDB reconciles using the item's timestamp. Compare this to a CP system (e.g., CockroachDB with Raft consensus): during a partition, the minority region <em>refuses writes</em> to maintain consistency. For a URL shortener, refusing to create new short URLs in an entire region is far worse than a sub-second inconsistency window. See also the <a class="dqa-link" href="/problem/instagram">Instagram design</a> for another AP system with similar trade-offs.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">What if the same short_code maps to two different long URLs during a partition — a genuine conflict?</div>
+      <div class="dqa-sub-a">
+        This can only happen if two users in different regions create the <em>same custom alias</em> during a partition (KGS-generated keys are pre-allocated per region, so they never collide). With DynamoDB Global Tables, <span class="dqa-key">last-writer-wins</span> means one mapping silently overwrites the other when the partition heals. This is the worst-case scenario. Mitigation: 1) For custom aliases, use <span class="dqa-key">DynamoDB conditional writes</span> (<code>attribute_not_exists</code>) — this works within a single region but cannot prevent cross-region conflicts during partitions. 2) After partition healing, run a conflict detector: scan the replication stream for items where the version changed in both regions. Flag these for manual review. 3) Accept that the probability is vanishingly small — it requires two users in different regions to pick the exact same custom alias within a sub-second partition window. In 10+ years of operation, bit.ly has reported zero such incidents publicly.
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">How does DynamoDB Global Tables handle conflict resolution under the hood, and can you customize it?</div>
+          <div class="dqa-deep-a">DynamoDB Global Tables V2 (2019+) uses <span class="dqa-key">last-writer-wins based on the item timestamp</span> set by the originating region. Each write carries a region-assigned timestamp, and during replication, if a conflict is detected (same PK modified in two regions), the item with the later timestamp wins. You <em>cannot</em> customize this resolution policy — there is no merge function or application-level conflict handler like in CRDTs. If you need custom resolution (e.g., keep the URL created by the higher-tier user), you must build it yourself: write both versions to a conflict log table via DynamoDB Streams + Lambda, then apply your merge logic and write the winner back. For a URL shortener, last-writer-wins is acceptable because: 1) KGS keys never conflict (different ranges per region), 2) custom alias conflicts during partitions are astronomically rare, and 3) metadata conflicts (e.g., click count) are resolved correctly by the async analytics pipeline anyway. The pragmatic answer: trust DynamoDB's default and focus engineering effort elsewhere.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
