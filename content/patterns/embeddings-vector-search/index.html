@@ -4,9 +4,21 @@
 
 {{diagram "pat-embedding-space"}}
 
-{{thought "Why embeddings matter for LLM applications: they are the foundation of semantic search, RAG retrieval, recommendation systems, clustering, and anomaly detection. Every modern LLM app that retrieves relevant context uses embeddings under the hood. Understanding embeddings is foundational to understanding RAG, vector databases, and modern search."}}
+{{think "Embeddings are the foundation of semantic search, RAG retrieval, recommendation systems, clustering, and anomaly detection. Every modern LLM app that retrieves relevant context uses embeddings under the hood. The key insight: geometric proximity maps to semantic similarity. 'How do I return an item?' and 'What is your refund policy?' land near each other in embedding space, even though they share no words."
+  (whyNot "keyword search (BM25) alone" "BM25 requires the user to use the exact words in the document. 'Refund policy' and 'return an item' describe the same intent but share no keywords. BM25 returns zero results for one while embeddings correctly identify both as semantically identical. This is the core value of dense retrieval.")
+  (whatIf "embeddings have degraded quality for your domain" "General-purpose models are trained on web text — they may underrepresent specialized vocabularies (medical, legal, financial). Measure retrieval quality on your domain before assuming the default model works. Domain-specific fine-tuned models like BioLinkBERT (medical) or LegalBERT can dramatically outperform general models in narrow domains.")
+}}
+
+{{hint "why dense vectors, not sparse?" "Sparse vectors (like TF-IDF) have one dimension per vocabulary word — 100K+ dimensions, mostly zeros. Dense embeddings use 384-3072 dimensions, all non-zero, learned by a neural network. Dense vectors capture synonymy (car ~ automobile) and analogy relationships that sparse vectors miss entirely."}}
 
 {{key "Embeddings convert text into vectors where semantic similarity maps to geometric proximity. Two sentences that mean the same thing will have vectors close together in embedding space, even if they use completely different words."}}
+
+{{triggerQs "Questions this phase could trigger"
+  "How are embeddings different from traditional TF-IDF vectors?"
+  "TF-IDF vectors are sparse — they have one dimension per word in your vocabulary (often 50,000+ dimensions) and most values are zero. Embedding vectors are dense — typically 768-3072 dimensions, all non-zero, learned by a neural network to encode semantic meaning. TF-IDF captures word frequency; embeddings capture semantic intent. A 1536-dimension dense vector carries more semantic signal than a 50,000-dimension sparse one."
+  "What does it mean for two vectors to be close in embedding space?"
+  "Closeness means semantic similarity, not lexical overlap. The model learned to place semantically equivalent texts near each other during training on billions of text pairs. Distance is usually measured with cosine similarity, which compares the direction of vectors rather than their magnitude — so a short sentence and a long sentence expressing the same idea can still be close."
+}}
 
 {{phase 2 "Embedding Models Compared" "8 min"}}
 
@@ -21,6 +33,10 @@
   (row "BGE-large-en-v1.5 (open)"       "1024"        "512"         "Free (GPU)"      "63.5"        "Best open-source option")
   (row "E5-mistral-7b (open source)"    "4096"        "32768"       "Free (GPU)"      "66.6"        "Best quality, needs large GPU")
 )}}
+
+{{hint "MTEB score is a proxy, not a guarantee" "MTEB benchmarks on public datasets. Your retrieval quality depends on how well the training distribution matches your domain. A model scoring 62 on MTEB might outperform one scoring 64 if your documents are closer to the lower-score model's training data. Always benchmark on 200+ real queries from your use case before choosing a model."}}
+
+{{hint "8191 token input limit matters" "Most embedding models truncate silently at their max token limit. A 10,000-token document fed to text-embedding-3-small loses the last 1,809 tokens with no warning. Always chunk documents to fit within the model's limit, or you are embedding incomplete content and getting degraded recall."}}
 
 {{compare "Embedding Model Selection" (options
   (best "OpenAI text-embedding-3-small" "Best starting point. $0.02 per million tokens is extremely cheap. 1536 dimensions with 8191 token input limit. Quality is good enough for 90 percent of applications. Switch only if retrieval quality is measurably insufficient.")
@@ -89,6 +105,8 @@ def euclidean_distance(a: List[float], b: List[float]) -> float:
 # print(cosine_similarity(e1, e3))  # ~0.15 (unrelated)
 `}}
 
+{{hint "batch embedding is 10-100x faster" "The OpenAI API accepts up to 2048 texts per batch request. Sending 1000 texts individually means 1000 HTTP round-trips at ~100ms each = 100 seconds. One batch request with 1000 texts takes ~2 seconds. Always batch during ingestion. Only embed one at a time for single user queries at search time."}}
+
 {{phase 3 "Vector Similarity Metrics" "5 min"}}
 
 {{table "Distance Metrics Comparison" (rows
@@ -98,7 +116,12 @@ def euclidean_distance(a: List[float], b: List[float]) -> float:
   (row "Euclidean (L2)"     "sqrt(sum((A[i]-B[i])^2))"          "[0, inf)"      "When magnitude matters (rare for text)"    "No")
 )}}
 
-{{thought "For text embeddings, always use cosine similarity (or dot product on normalized vectors since they are equivalent). Cosine ignores the magnitude of vectors and only compares direction, which is what matters for semantic meaning. Euclidean distance is sensitive to magnitude and gives misleading results when vectors have different norms."}}
+{{think "For text embeddings, always use cosine similarity (or dot product on normalized vectors — they are equivalent). Cosine ignores vector magnitude and only compares direction, which is what encodes semantic meaning. Euclidean distance is sensitive to magnitude and gives misleading results when vectors have different norms."
+  (whyNot "Euclidean distance for text" "Text embedding norms vary based on text length and vocabulary. A long document naturally has a larger-magnitude vector than a short query. Euclidean distance would penalize the length difference, making long documents appear less similar than they semantically are. Cosine normalizes away this magnitude bias.")
+  (how "verify your similarity metric is configured correctly" "Create three test pairs: two semantically identical sentences (expected: > 0.85), a related pair (expected: 0.5-0.8), an unrelated pair (expected: < 0.3). Compute all three similarities. If related > unrelated and identical > related, your metric is correctly calibrated. If numbers are inverted, you are using a distance metric where smaller is more similar.")
+}}
+
+{{hint "why cosine similarity is the default" "Cosine similarity is magnitude-invariant — it measures angle between vectors, not distance. Two documents of different lengths but same topic will have cosine similarity ~0.95. Euclidean distance would penalize the longer document even though both are about the same thing. Since OpenAI embeddings are already normalized, cosine and dot product produce identical rankings."}}
 
 {{avoid "Never compare embeddings from different models. Each model creates its own embedding space. A vector from text-embedding-3-small and one from Cohere embed-v3 cannot be meaningfully compared. If you switch models, you must re-embed your entire corpus. This is the most common and costly mistake in production vector search systems."}}
 
@@ -122,6 +145,15 @@ def euclidean_distance(a: List[float], b: List[float]) -> float:
   (alt "IVF + PQ" "Lower memory than HNSW due to product quantization compressing vectors. Good for 100M+ vectors where memory is the bottleneck. Slightly lower recall (90-95 percent). Requires retraining the index when data distribution changes.")
   (nofit "Flat / brute force" "Only viable for under 100K vectors. O(n) query time means every query scans every vector. Fine for prototypes and unit tests but not production scale.")
 )}}
+
+{{hint "HNSW m=16, ef_construction=64 as defaults" "m controls the number of connections per node in the graph — more connections means higher recall but more memory. ef_construction controls build-time search breadth — higher values build a better graph but take longer to construct. The defaults (m=16, ef_construction=64) are well-calibrated for most use cases. Increase m to 32 and ef_construction to 128 if you need higher recall and can afford 2x more memory."}}
+
+{{triggerQs "Questions this phase could trigger"
+  "What is the recall tradeoff with ANN indexes?"
+  "ANN indexes are approximate — they return results that are very likely to be the true nearest neighbors but not guaranteed. HNSW at default settings achieves 98-99.5% recall, meaning 1-2% of queries return a result that is not the true top-k. For most retrieval applications this is acceptable — the difference between the true nearest neighbor and the second-nearest is usually negligible. If you need 100% recall, use a flat index and accept O(n) query time."
+  "When should you use IVF+PQ instead of HNSW?"
+  "When memory is the binding constraint. HNSW stores 2-3x the raw vector data for the graph structure. At 100M 1536-dimension vectors, that is 1.2 TB of raw data plus 2.4-3.6 TB for the graph — 4+ TB total. IVF+PQ compresses vectors by 8-32x using product quantization, reducing the 100M vector index to 100-150 GB. The cost is 3-8% lower recall, which is acceptable for large-scale web search applications."
+}}
 
 {{phase 5 "Vector Database Comparison" "8 min"}}
 
@@ -154,9 +186,18 @@ def euclidean_distance(a: List[float], b: List[float]) -> float:
   (nofit "ChromaDB" "Embedded library, not a database. No persistence across restarts by default, no replication. Use for prototyping and local development only. Migrate to a real database before production.")
 )}}
 
+{{hint "pgvector post-filtering caveat" "pgvector applies metadata filters after the vector search, not before. If you request top-10 results but your filter removes 8, you get only 2 results. Workaround: over-fetch (request top-50, filter, take top-10) or use a database like Qdrant that supports integrated pre-filtering during the ANN search."}}
+
+{{think "pgvector is the right default for 90% of teams. The argument is simple: you already have Postgres for your application database. Adding a vector extension requires one SQL command and zero new infrastructure. The operational burden of running a second specialized database is real — monitoring, backups, failover, upgrades. Only leave pgvector when you genuinely hit its 10M vector ceiling."
+  (whyNot "Pinecone for all teams" "Pinecone solves the ops burden problem but creates a vendor lock-in problem. Your data lives in their proprietary format and their infrastructure. Migration to another system requires re-embedding your entire corpus. For most teams the operational simplicity of pgvector (already in your managed Postgres) is the better trade.")
+  (whatIf "you outgrow pgvector at 10M+ vectors" "Three options: partition pgvector by metadata field so each partition has its own smaller index. Migrate to Qdrant (open-source, self-host, similar SQL-like filtering). Migrate to Pinecone (zero-ops, higher cost). The migration is expensive — plan for it by versioning your embedding model in metadata from day one.")
+}}
+
 {{phase 6 "Complete Implementation with pgvector" "10 min"}}
 
 {{say "Here is a complete, production-ready implementation of embedding, storing, and searching with pgvector. This covers setup, ingestion, search, and metadata filtering."}}
+
+{{hint "HNSW build parameters" "m=16 and ef_construction=64 are the standard defaults. m=16 means each node connects to 16 neighbors — increasing to 32 improves recall by ~1% but doubles index memory. ef_construction=64 controls build quality — doubling it to 128 improves recall ~0.5% but doubles build time. Tune only after benchmarking on your data."}}
 
 {{code "python" `import psycopg2
 import psycopg2.extras
@@ -358,6 +399,13 @@ class VectorStore:
 # )
 `}}
 
+{{triggerQs "Questions this phase could trigger"
+  "How does the metadata @> operator work in pgvector?"
+  "The @> operator is PostgreSQL JSONB containment — it returns rows where the stored metadata contains all the key-value pairs in the filter. metadata @> '{\"category\": \"policy\"}' returns all rows where the category field equals policy. It is index-supported with a GIN index on the metadata column, so filtering does not degrade performance. You can combine vector similarity with any metadata predicate in a single query."
+  "How do you handle multi-tenancy in pgvector?"
+  "Two approaches: row-level isolation (add a tenant_id column to the chunks table, index it, and always filter by tenant_id in queries — this is simple but puts all tenants in one table) or schema-level isolation (each tenant gets their own schema and table — more isolation but harder to manage at scale). Row-level with a composite index on (tenant_id, embedding) is sufficient for up to 10M vectors per tenant."
+}}
+
 {{phase 7 "Embedding Pipeline for Production" "5 min"}}
 
 {{say "In production, you need a robust ingestion pipeline that handles document updates, incremental re-indexing, and embedding model versioning."}}
@@ -451,6 +499,8 @@ class IncrementalIndexer:
         return True  # Re-indexed
 `}}
 
+{{hint "version embedding model in metadata" "Store the model name and version in every vector's metadata row. When you upgrade models, you can identify which vectors were generated with the old model and re-embed them incrementally rather than doing a full corpus rebuild all at once. This turns a multi-day blocking operation into a background job."}}
+
 {{phase 8 "Cost Analysis Deep Dive" "5 min"}}
 
 {{say "Understanding the full cost picture of embedding-based search is critical for capacity planning and architecture decisions."}}
@@ -472,7 +522,12 @@ class IncrementalIndexer:
   (row "100M vectors"  "600 GB + index"        "N/A (too large)"    "$1,500/mo"         "$800/mo")
 )}}
 
-{{thought "Embedding API costs are negligible. At $0.02 per million tokens, embedding 1M documents costs $10. The real costs are: 1) Vector storage and compute for the database. 2) Query compute at scale. 3) Re-embedding costs when you change models. Budget for re-embedding when evaluating total cost of ownership."}}
+{{hint "Matryoshka dimensions for cost savings" "OpenAI text-embedding-3 models support Matryoshka representations — you can truncate vectors from 1536 to 512 dimensions with only ~2% quality loss. Storage drops 3x (6GB to 2GB per million vectors). For cost-sensitive workloads at scale, this is the single biggest optimization before switching databases."}}
+
+{{think "Embedding API costs are negligible. At $0.02 per million tokens, embedding 1M documents costs $10 total. The real costs: vector storage and compute for the database, query compute at scale, and re-embedding when you change models. Budget for re-embedding as a recurring cost when evaluating total cost of ownership."
+  (whyNot "the cheapest storage option always" "pgvector on a large RDS instance costs more than Qdrant self-hosted but eliminates the operational burden of managing a separate database. Factor in engineer time: a self-hosted Qdrant cluster requires monitoring, backups, upgrades, and incident response. At 40 hours of engineer time per month at $100/hr, the 'cheaper' option costs $4,000/month in labor alone.")
+  (how "estimate total cost before choosing" "Calculate: initial embedding cost (one-time), monthly embedding cost for new/updated docs, monthly storage cost at your target scale, monthly compute cost for query volume, and engineer time for operational maintenance. The lowest monthly infrastructure cost is often not the lowest total cost.")
+}}
 
 {{key "Embedding is cheap, storage is moderate, re-embedding is the hidden cost. Always version your embedding model in metadata. When you upgrade models, you must re-embed everything. Plan for this from day one by tracking which model version created each vector."}}
 
@@ -488,25 +543,29 @@ class IncrementalIndexer:
   (row "Stale embeddings"          "Document updated but vector is old"        "Vector represents outdated content"         "Incremental re-indexing pipeline")
 )}}
 
+{{hint "hybrid search with Reciprocal Rank Fusion" "Combine BM25 and embedding scores using RRF: score = 1/(k+rank_bm25) + 1/(k+rank_embedding) with k=60. This catches both exact keyword matches (product IDs, error codes) and semantic matches (paraphrased queries). Hybrid search outperforms either method alone by 5-15% on most retrieval benchmarks."}}
+
+{{hint "cross-encoder reranking" "A cross-encoder takes (query, document) as a pair and produces a relevance score. Unlike bi-encoders, cross-encoders attend across both texts jointly. Rerank the top 50-100 embedding results with a cross-encoder to produce the final top 10. This improves precision by 10-20% at ~50ms additional latency per query."}}
+
 {{avoid "Never assume embeddings handle exact keyword matching well. If a user searches for a specific product ID, error code, or person's name, BM25 keyword search will outperform embedding search. This is why hybrid search (dense + sparse) is the production standard. Use embeddings for semantic meaning and BM25 for exact matches."}}
 
 {{phase 10 "Interview Q&A" "5 min"}}
 
 {{qa
   "How would you build semantic search for an e-commerce site?"
-  "Embed product titles plus descriptions with text-embedding-3-small. Store in pgvector with HNSW index. On search, embed the query, find top-50 by vector similarity, then rerank with a cross-encoder for precision. Filter by category, price range, and availability using metadata. Use hybrid search combining embeddings plus BM25 to catch both semantic matches and exact product names or SKUs."
+  "Embed product titles plus descriptions with text-embedding-3-small. Store in pgvector with HNSW index. On search, embed the query, find top-50 by vector similarity, then rerank with a cross-encoder for precision. Filter by category, price range, and availability using metadata filters. Use hybrid search combining embeddings plus BM25 to catch both semantic matches and exact product names, SKUs, and model numbers."
   "How do you evaluate embedding quality for your use case?"
-  "Build an evaluation set: 200+ query and relevant document pairs from real user data. Measure recall at k (what percentage of relevant docs appear in top k results) and Mean Reciprocal Rank (how high does the first relevant result appear). Compare multiple models on your data because benchmark scores like MTEB may not reflect your specific domain. A model that scores lower on MTEB might perform better on your data if your domain is well-represented in its training."
+  "Build an evaluation set: 200+ query and relevant document pairs from real user data. Measure recall@k (what percentage of relevant docs appear in top-k results) and Mean Reciprocal Rank (how high does the first relevant result appear). Compare multiple models on your data because benchmark scores like MTEB may not reflect your specific domain. Always evaluate on your own queries — general benchmarks are starting points, not conclusions."
 }}
 
 {{qa
   "What happens when you run out of pgvector capacity?"
-  "pgvector struggles above 10M vectors on a single instance due to HNSW index memory requirements. Three options: 1) Upgrade to a larger RDS instance (r6g.2xlarge has 52 GB RAM). 2) Partition the table by a metadata field (like tenant_id) so each partition has its own smaller index. 3) Migrate to a dedicated vector database like Qdrant or Pinecone that handles horizontal scaling natively."
+  "pgvector struggles above 10M vectors on a single instance due to HNSW index memory requirements. Three options: upgrade to a larger RDS instance (r6g.2xlarge has 52 GB RAM). Partition the table by a metadata field (like tenant_id) so each partition has its own smaller index. Migrate to Qdrant or Pinecone which handle horizontal scaling natively. Plan for this from day one — migrating vector stores under production load is painful."
   "How do you handle embedding model upgrades?"
-  "Version everything. Tag each vector with the model name and version in metadata. When upgrading: 1) Embed a test set with the new model and compare retrieval quality. 2) If better, re-embed the entire corpus in a new table or namespace. 3) Swap traffic to the new index atomically. 4) Keep the old index for rollback. Never try to mix embeddings from different models in the same index."
+  "Version everything. Tag each vector with the model name and version in metadata. When upgrading: embed a test set with the new model and compare retrieval quality on your evaluation set. If measurably better, re-embed the entire corpus in a new table or namespace. Swap traffic to the new index atomically. Keep the old index for 24-48 hours for rollback. Never mix embeddings from different models in the same index."
 }}
 
-{{followup "How would you implement real-time embedding updates?" "Use a Change Data Capture pipeline. When a document changes in your source database (Postgres, MongoDB), a CDC tool like Debezium captures the change event and publishes it to a Kafka topic. A consumer service reads the event, re-embeds the changed document, and upserts the new vector into pgvector. This keeps your vector index in sync with your source data with seconds of lag. For high-volume changes, batch the re-embedding calls to reduce API costs."}}
+{{followup "How would you implement real-time embedding updates?" "Change Data Capture pipeline. When a document changes in your source database, a CDC tool like Debezium captures the change event and publishes it to Kafka. A consumer service reads the event, re-embeds the changed document, and upserts the new vector into pgvector. This keeps your vector index in sync with seconds of lag. For high-volume changes, batch the re-embedding calls (100 documents per API call) to reduce cost and latency. Use the IncrementalIndexer's content hash to skip re-embedding documents that have not actually changed."}}
 
 {{checklist
   "Start with text-embedding-3-small (cheap, good quality)"

@@ -8,7 +8,11 @@
 
 {{diagram "ig-nfr-estimates"}}
 
-{{thought "Read-heavy but write volume is non-trivial: 58K read RPS vs 6K write RPS. The write amplification from fan-out makes writes the real scaling challenge. At 200TB/day media, S3 costs alone reach $55K/mo after one year. CDN transfer at $0.085/GB for 500M users loading 10 images/feed is the dominant cost."}}
+{{think "Read-heavy but write volume is non-trivial: 58K read RPS vs 6K write RPS. The write amplification from fan-out makes writes the real scaling challenge. At 200TB/day media, S3 costs alone reach $55K/mo after one year. CDN transfer at $0.085/GB for 500M users loading 10 images/feed is the dominant cost."
+  (whyNot "optimize for writes first" "Writes are only 6K RPS at the surface, but fan-out-on-write amplifies each post to N follower feed updates. A user with 1K followers turns 1 write into 1,001 writes. Optimizing reads first (caching, CDN) gives you 10x headroom before you need to solve the write amplification problem.")
+  (whatIf "CDN costs dominate at scale" "At 500M users loading 10 images per feed view, CDN transfer reaches ~4PB/month. At $0.085/GB that is $340K/month on CDN alone. Negotiate reserved capacity pricing with CloudFront ($0.025/GB at commitment), use WebP/AVIF to cut image sizes by 40%, and implement aggressive client-side caching with ETags.")
+  (how "estimate storage growth" "200TB/day × 365 = 73PB/year of raw media. With 4 resize variants per image, that is ~290PB. S3 Standard at $0.023/GB = $6.7M/year. Move images older than 90 days to S3 Infrequent Access ($0.0125/GB) and older than 1 year to Glacier ($0.004/GB) using lifecycle policies to cut costs by 60%.")
+}}
 
 {{phase 2 "Stage 1: MVP (0-1M users)" "5 min"}}
 
@@ -20,6 +24,8 @@
   (nofit "DynamoDB at MVP" "Over-engineering. DynamoDB requires upfront access pattern design, has no JOINs (feed query becomes N+1), costs more at low scale ($1.25/M writes vs Postgres flat rate), and you lose SQL flexibility for ad-hoc analytics.")
   (nofit "MongoDB" "Schema flexibility sounds appealing but social data is inherently relational (users follow users, users like posts). Mongo forces denormalization, leading to update anomalies. Postgres JSONB gives flexibility where needed without sacrificing joins.")
 )}}
+
+{{hint "why Postgres over DynamoDB at MVP?" "Postgres handles 5K QPS on a single instance with ACID guarantees, JOINs for feed queries, and costs $200/month on RDS. DynamoDB requires upfront access pattern design, has no JOINs (forcing N+1 queries for feed), and costs more at low scale. Instagram itself ran Postgres until 10M+ users. Switch to DynamoDB only when write throughput exceeds 10-15K WPS."}}
 
 {{diagram "ig-mvp-architecture"}}
 
@@ -116,6 +122,8 @@ CREATE INDEX idx_likes_post ON likes(post_id);
 -- We use Elasticsearch for full-text search at scale instead.
 `}}
 
+{{hint "why composite PK on likes?" "PRIMARY KEY (user_id, post_id) on the likes table serves double duty: it prevents double-likes at the database level (unique constraint) and provides an efficient lookup for 'did this user like this post?' without a separate index. This is cheaper and more reliable than application-level deduplication."}}
+
 {{key "MVP feed is pull-based: query follows table to get followee IDs, then query posts WHERE user_id IN (...) ORDER BY created_at DESC LIMIT 20. Simple, no infrastructure overhead."}}
 
 {{code "sql" `-- MVP Feed Query (pull-based, fan-out-on-read)
@@ -138,6 +146,15 @@ LIMIT 20 OFFSET :offset;
 
 {{avoid "Do not over-engineer the MVP. No Kafka, no DynamoDB, no microservices. Postgres handles 5K QPS easily. Instagram ran on a single Django/Postgres stack until 10M users."}}
 
+{{hint "why S3 for media storage?" "S3 gives you 11 nines durability, automatic cross-AZ replication, and lifecycle policies to move old photos to Glacier. EBS or local disk would require manual replication and has single-AZ blast radius. At $0.023/GB with unlimited storage, S3 is cheaper than any self-managed option at scale."}}
+
+{{triggerQs "MVP design questions"
+  "Why not start with microservices from day one?"
+  "Microservices add network latency (gRPC calls), deployment complexity (container orchestration, service discovery), distributed tracing, and operational overhead that requires 3-5 engineers just to maintain. At <1M users, a monolith deploys faster, debugs easier (single process, single log stream), and Postgres handles all query patterns. Split when team size exceeds 15 engineers or deployment frequency needs to exceed what a single deployable allows."
+  "When should you add Redis caching to the MVP?"
+  "Add Redis when your Postgres CPU consistently exceeds 60% or P99 query latency exceeds 100ms. For a social app, this typically happens around 500K-1M DAU. Start by caching user profiles (most frequently read, rarely updated) and hot post metadata. The feed query is the last thing to cache because it changes on every followee post."
+}}
+
 {{phase 3 "Stage 1: Upload Flow (Hop-by-Hop)" "5 min"}}
 
 {{say "Let me walk through the upload flow hop by hop, showing each service, its purpose, failure modes, and cost."}}
@@ -149,6 +166,8 @@ LIMIT 20 OFFSET :offset;
 {{diagram "ig-read-path"}}
 
 {{diagram "ig-cdn-media-pipeline"}}
+
+{{hint "why pre-signed URLs for upload?" "Pre-signed URLs let clients upload directly to S3, bypassing your application servers entirely. This avoids the bottleneck of proxying multi-MB image files through your API tier, reduces server CPU and bandwidth costs, and lets S3 handle the heavy lifting of multipart uploads with built-in retry."}}
 
 {{phase 4 "Stage 2: Growing (1M-50M users)" "8 min"}}
 
@@ -162,7 +181,13 @@ LIMIT 20 OFFSET :offset;
 
 {{diagram "ig-hybrid-fanout"}}
 
-{{thought "Fan-out math: Average user follows 200 people. Fan-out-on-read = 200 queries per feed load. At 10M DAU x 10 loads/day = 100M feed loads = 20B DB queries/day = 230K QPS just for feed. Postgres cannot handle this. Fan-out-on-write pre-computes: each new post writes to ~200 follower feeds in Redis. At 50K posts/day = 10M Redis writes/day = 115 WPS. Much more manageable."}}
+{{hint "why Redis sorted sets for feed?" "A feed is a ranked, bounded list — exactly what a Redis sorted set (ZSET) models. ZADD is O(log N), ZREVRANGE for pagination is O(log N + M), and ZREMRANGEBYRANK caps memory per user. Memcached would require serializing/deserializing the entire feed on every update, creating read-modify-write race conditions."}}
+
+{{think "Fan-out math: Average user follows 200 people. Fan-out-on-read = 200 queries per feed load. At 10M DAU x 10 loads/day = 100M feed loads = 20B DB queries/day = 230K QPS just for feed. Postgres cannot handle this. Fan-out-on-write pre-computes: each new post writes to ~200 follower feeds in Redis. At 50K posts/day = 10M Redis writes/day = 115 WPS. Much more manageable."
+  (whyNot "fan-out-on-read with aggressive caching" "Caching fan-out-on-read results helps repeat loads, but invalidation is the killer. When any of your 200 followees posts, the cached feed is stale. With 200 followees each posting once/day, the cache invalidates ~200 times/day per user — every 7 minutes. Cache hit ratio drops below 30%, negating most of the benefit.")
+  (whatIf "a celebrity posts" "Fan-out-on-write to 10M followers means 10M cache writes per post. At 100 posts/day from top celebrities, that is 1B cache writes/day just for celebrities. Use a hybrid approach: fan-out-on-write for normal users, fan-out-on-read for accounts with >100K followers.")
+  (how "detect celebrity accounts" "Set a follower threshold (e.g., 100K). When a user crosses the threshold, flip a flag in the user table. The posting service checks the flag: below threshold -> fan-out-on-write, above threshold -> skip fan-out, let the feed service pull on read.")
+}}
 
 {{table "Stage 2 Architecture Changes" (rows
   (row "Change"                     "Why"                                          "New Service/Tech")
@@ -248,6 +273,17 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
   (row "Total"           "All components"                      "~$12,500/mo")
 )}}
 
+{{hint "why SQS for async likes/comments?" "Likes on viral posts spike to 100K+/sec. Writing each directly to the DB would exhaust connections. SQS absorbs the burst, and a Lambda consumer batch-writes at a steady 1K/sec. Users see an optimistic UI update instantly while the actual write is queued — the 2-3 second delay is invisible."}}
+
+{{triggerQs "Questions about feed design"
+  "How do you handle feed for inactive users?"
+  "Stop pre-computing feeds for users who haven't opened the app in 7+ days. When they return, compute their feed on-demand (fan-out-on-read for that first load), then resume pre-computation. This saves ~40% of fan-out write volume since most registered users are inactive."
+  "What happens when a user unfollows someone?"
+  "Remove the unfollowed user's posts from the follower's pre-computed feed cache immediately using ZREM on the Redis sorted set. For the fan-out-on-read path (celebrity posts), the feed merge query simply stops including that user's posts. Both paths converge on the same result within one feed refresh cycle."
+  "How do you rank posts in the feed beyond chronological?"
+  "Add a ranking score to each post combining recency (exponential decay), engagement rate (likes + comments / impressions), and user affinity (how often the viewer interacts with the poster). Store the score as the ZSET score instead of raw timestamp. Recompute scores periodically via a batch job and update the sorted set."
+}}
+
 {{phase 5 "Stage 3: Scaling (50M-500M users)" "8 min"}}
 
 {{say "At 50M+ users, Postgres becomes the bottleneck. We need to shard the database, move to microservices, and add proper message queuing for async processing."}}
@@ -263,11 +299,15 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
   (row "Search/Explore"     "Hashtags, user search, trending"     "Elasticsearch"                       "Full-text search with autocomplete (prefix queries), faceted filtering, and relevance scoring. Postgres full-text is too slow at this scale.")
 )}}
 
+{{hint "why each service owns its DB?" "Shared databases create hidden coupling: one service's schema change or heavy query can break another service. With owned databases, each service can choose the optimal storage engine (Postgres for relational, DynamoDB for key-value, Redis for cache) and scale independently. The trade-off is no cross-service JOINs — you use Kafka events for data propagation instead."}}
+
 {{diagram "ig-service-db-ownership"}}
 
 {{diagram "ig-microservices-architecture"}}
 
 {{key "Each microservice owns its database. No shared DB. Services communicate via Kafka events (post_created, user_followed, post_liked) and synchronous gRPC for real-time reads."}}
+
+{{hint "why Kafka over SQS for inter-service events?" "Kafka provides ordered, replayable event streams partitioned by key (user_id). Multiple consumers (feed service, notification service, analytics) each read independently at their own pace. SQS is point-to-point: each message goes to one consumer. With Kafka, adding a new consumer (e.g., ML training pipeline) requires zero changes to producers."}}
 
 {{table "Write Path at Scale: Photo Upload" (rows
   (row "Hop" "What Happens"                                   "Service"             "AWS Tech"                      "Failure"                          "Cost Impact")
@@ -293,11 +333,21 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
 
 {{diagram "ig-notification-flow"}}
 
+{{triggerQs "Microservices scaling questions"
+  "How do you handle distributed transactions across services?"
+  "Avoid distributed transactions entirely. Use the saga pattern: each service performs its local transaction and publishes an event. If a downstream step fails, publish a compensating event to undo previous steps. For example, if post creation succeeds but fan-out fails, the post remains visible but feeds catch up when the fan-out consumer recovers — no rollback needed because eventual consistency is acceptable for feeds."
+  "How do you debug issues across multiple services?"
+  "Distributed tracing with a correlation ID (trace_id) propagated through every gRPC call and Kafka message header. Use OpenTelemetry to instrument all services, send traces to Jaeger or AWS X-Ray. When a feed load is slow, the trace shows exactly which service call took the most time — e.g., Post Service hydration at 45ms instead of the expected 10ms."
+}}
+
 {{phase 6 "Stage 4: Handling Peak Hours" "5 min"}}
 
 {{say "Peak hours for Instagram: 6-9 PM local time, New Year midnight, Super Bowl, celebrity announcements. We need to handle 5-10x normal traffic without degradation."}}
 
-{{thought "Normal: 58K feed RPS. Peak (10x): 580K RPS. Super Bowl: a single viral post can generate 1M likes/second. New Year midnight across time zones = sustained 3x for 12 hours as each timezone hits midnight."}}
+{{think "Normal: 58K feed RPS. Peak (10x): 580K RPS. Super Bowl: a single viral post can generate 1M likes/second. New Year midnight across time zones = sustained 3x for 12 hours as each timezone hits midnight."
+  (whyNot "just over-provision for peak" "10x capacity means 10x cost 24/7. At $12.5K/month baseline, that is $125K/month to handle peaks that occur <5% of the time. Auto-scaling with SQS write buffering handles the same peaks at ~$15K/month — the buffer absorbs spikes while new instances launch in 2-3 minutes.")
+  (whatIf "multiple viral events happen simultaneously" "Super Bowl halftime + celebrity announcement = 15-20x normal load. Pre-warm ECS capacity 30 minutes before known events using scheduled scaling. For unpredictable events, circuit breakers degrade gracefully: stop fan-out-on-write entirely, serve cached feeds, and queue all writes. Recovery takes 5-10 minutes after the spike subsides.")
+}}
 
 {{table "Peak Traffic Strategies" (rows
   (row "Strategy"                   "Handles"                                "How")
@@ -343,9 +393,18 @@ class ShardedCounter:
         return total
 `}}
 
+{{hint "why 100 shards for counters?" "With 1M likes/sec on a viral post, a single Redis key serializes all writes to one CPU core — max ~100K ops/sec. Splitting into 100 shards distributes writes across keys (and potentially nodes), giving 100x throughput. The trade-off is reads require aggregating all 100 shards, but this is cached for 5 seconds and takes <1ms with a pipeline."}}
+
 {{followup "What if Redis goes down during peak?" "Three-layer defense: 1) Local in-memory cache (Caffeine) serves stale feed for 30s. 2) Circuit breaker trips, feed service returns cached-at-CDN feed. 3) If all caches cold, degrade to Trending feed from pre-computed batch (DynamoDB). Users see content, just not personalized."}}
 
 {{diagram "ig-caching-strategy"}}
+
+{{triggerQs "Peak traffic questions"
+  "How do you pre-warm for known events like the Super Bowl?"
+  "Schedule ECS auto-scaling to spin up 3x capacity 30 minutes before the event. Pre-populate CDN caches by issuing synthetic requests for trending content across all edge PoPs. Increase Redis cluster node count and SQS throughput limits. After the event, scale down over 2 hours to avoid premature termination of in-flight requests."
+  "What gets degraded first under extreme load?"
+  "Degrade in order of user impact: (1) stop pre-computing explore/trending pages (batch job), (2) increase write buffer batch size (likes appear 10s late instead of 3s), (3) serve cached feeds without real-time celebrity post merge, (4) disable story view tracking. Core feed serving and post uploads are the last to degrade."
+}}
 
 {{avoid "Never design for peak as your baseline. You will burn money 95% of the time. Design for normal load, scale for peak. Auto-scaling + write buffering + circuit breakers handle the delta."}}
 
@@ -363,6 +422,8 @@ class ShardedCounter:
 
 {{diagram "ig-multi-region"}}
 
+{{hint "why shard users by region?" "Sharding user data by region keeps most reads local — a user in India reads their own profile, feed, and followers from ap-south-1 without cross-region latency. Cross-region reads only happen for cross-region follows (e.g., Indian user following a US user), which are served from replicated DynamoDB Global Tables with <1s lag."}}
+
 {{table "Global Data Strategy" (rows
   (row "Data Type"           "Strategy"                                     "Consistency")
   (row "User profiles"       "Sharded by user_id, read-local-write-primary" "Strong (read-your-writes)")
@@ -373,6 +434,8 @@ class ShardedCounter:
 )}}
 
 {{key "Use CRDTs (Conflict-free Replicated Data Types) for counters and sets. A like counter is a grow-only counter: increments from any region merge without conflict. No coordination needed."}}
+
+{{hint "why CRDTs for multi-region counters?" "Traditional counters require coordination (locking or consensus) across regions, adding 100-300ms latency per increment. CRDTs (specifically G-Counters) allow each region to increment independently and merge by taking the max per region. The total count is the sum of all region maxes. No coordination, no conflicts, no lost writes — at the cost of brief staleness during merge propagation."}}
 
 {{qa
   "How do you handle a user in India following someone in the US?"
@@ -413,6 +476,8 @@ async def mark_viewed(story_id: str, user_id: int):
     await redis_client.expire(f"story_views:{story_id}", 90000)
 `}}
 
+{{hint "why Redis bitmaps for story views?" "A bitmap uses 1 bit per user_id to track who has viewed a story. For 500M users, that is only 62.5MB per story. Compare to a Set of user_ids: at 8 bytes per ID, 1M viewers would consume 8MB per story vs 62.5MB fixed for the bitmap. Bitmaps win when viewer count is high relative to total users, and the auto-expire TTL (25h) means zero cleanup code."}}
+
 {{diagram "ig-sub-problems"}}
 
 {{phase 9 "Explore & Search" "3 min"}}
@@ -427,6 +492,8 @@ async def mark_viewed(story_id: str, user_id: int):
 )}}
 
 {{diagram "ig-explore-search"}}
+
+{{hint "why Elasticsearch over Postgres full-text?" "Postgres full-text search (tsvector/tsquery) works at small scale but lacks autocomplete, relevance tuning, and horizontal scaling. Elasticsearch provides prefix-based autocomplete for usernames, inverted indexes for hashtag search, and distributes across nodes. At 500M posts, a single Postgres instance cannot build and maintain a GIN index fast enough for real-time search."}}
 
 {{phase 10 "Bottlenecks & Deep Trade-offs" "8 min"}}
 
@@ -461,6 +528,13 @@ async def mark_viewed(story_id: str, user_id: int):
 
 {{diagram "ig-distributed-counter"}}
 
+{{triggerQs "Bottleneck deep-dive questions"
+  "How do you handle hot partitions in DynamoDB?"
+  "DynamoDB partitions by hash of the partition key. A celebrity's user_id becomes a hot key — all their post reads/writes hit one partition. Fix with write sharding: append a random suffix (PK = user_id#shard_0 through user_id#shard_9). Reads scatter-gather across all 10 shards and merge. DynamoDB adaptive capacity also helps by redistributing throughput to hot partitions, but it reacts slowly (minutes) — sharding is proactive."
+  "What is the most cost-effective way to handle DB connection exhaustion?"
+  "PgBouncer in transaction mode pools connections: 200 ECS tasks each wanting 20 connections = 4,000 connections, but PgBouncer maps them to 200 actual Postgres connections. Postgres max_connections above 500 degrades performance due to process-per-connection architecture. PgBouncer is a single binary with <1ms overhead per query. Combined with read replicas, this handles 50K+ QPS."
+}}
+
 {{diagram "ig-scaling-timeline"}}
 
 {{phase 11 "Distributed System Vision" "5 min"}}
@@ -484,6 +558,8 @@ async def mark_viewed(story_id: str, user_id: int):
   "What happens if Kafka goes down?"
   "Services have a local write-ahead buffer (in-memory + disk) that holds events until Kafka recovers. MSK has 99.95% SLA with multi-AZ replication. If a consumer falls behind, Kafka retains messages for 7 days. The feed might lag by minutes during an outage, but no data is lost. For likes/comments, we also write directly to DynamoDB (dual-write) so the source-of-truth database always has the data."
 }}
+
+{{hint "why gRPC for sync reads, Kafka for async writes?" "Reads need low latency (<10ms) and immediate responses — gRPC with protobuf gives you binary serialization, HTTP/2 multiplexing, and generated client/server stubs. Writes can tolerate delay — Kafka provides durability (replicated log), ordering (per-partition), and fan-out (multiple consumers). Using Kafka for reads would add 100ms+ latency from consumer polling. Using gRPC for writes would couple services and lose the replay/audit trail."}}
 
 {{key "The distributed system vision is: event-driven microservices where each service owns its data, communicates changes through Kafka, and is independently deployable and scalable. Reads are synchronous gRPC for low latency, writes are asynchronous events for reliability. Every write is idempotent, every read has a cache fallback."}}
 
