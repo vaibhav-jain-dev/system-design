@@ -1,90 +1,253 @@
-{{stageNav "Requirements & Problem Scope" 1 "Capacity Estimation" 2 "API Design with Rate Headers" 3 "Algorithm Deep Dive" 4 "Architecture (Hop-by-Hop)" 5 "Distributed Rate Limiting" 6 "Redis Configuration for Rate Limiting" 7 "Trade-offs & Edge Cases" 8 "Cost Estimates" 9 "Interview Q&A" 10}}
+{{stageNav "Requirements & Problem Scope" 1 "Capacity Estimation" 2 "API Design with Rate Headers" 3 "Algorithm Deep Dive" 4 "Architecture (Hop-by-Hop)" 5 "Distributed Rate Limiting" 6 "Data Model & Redis Schema" 7 "Redis Configuration" 8 "Trade-offs & Edge Cases" 9 "Cost Estimates" 10 "Sub-Problems & Building Blocks" 11 "Interview Deep-Dive Q&A" 12}}
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
 {{say "Let me clarify the scope. Are we designing a rate limiter for a single service, or a distributed rate limiting platform? I will assume we are building a distributed rate limiter that can protect multiple services at scale."}}
 
-{{table "Functional Requirements" (rows
-  (row "Feature"                "Description"                                     "Priority")
-  (row "Rate limit by user"     "Limit requests per user/API key"                 "P0")
-  (row "Rate limit by IP"       "Limit anonymous/unauthenticated requests"        "P0")
-  (row "Configurable rules"     "Different limits per endpoint, tier, user"       "P0")
-  (row "Rate limit headers"     "Return X-RateLimit-* headers in responses"       "P0")
-  (row "Distributed counting"   "Consistent counts across multiple servers"       "P1")
-  (row "Multi-region support"   "Rate limits work across regions"                 "P2")
-  (row "Admin dashboard"        "View and update rate limit rules"                "P2")
-)}}
-
-{{table "Non-Functional Requirements" (rows
-  (row "Property"      "Target"                        "Reasoning")
-  (row "Latency"       "< 1ms overhead per request"    "Rate limiter is in the hot path of every request")
-  (row "Availability"  "99.999%"                       "If rate limiter is down, either all traffic passes or all is blocked")
-  (row "Throughput"    "1M+ decisions/second"           "Must handle peak traffic of all protected services")
-  (row "Accuracy"      "Allow 5% over-limit tolerance"  "Distributed counting has inherent imprecision")
-  (row "Fail-open"     "If limiter fails, allow traffic" "Availability over protection in most cases")
-)}}
+{{diagram "Functional & Non-Functional Requirements" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">P0 &#8212; Core (Must Have)</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Rate limit by user/API key</div>
+        <div class="d-box green">Rate limit by IP (anonymous)</div>
+        <div class="d-box green">Configurable rules per endpoint/tier</div>
+        <div class="d-box green">Return X-RateLimit-* headers</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">P1 &#8212; Important</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">Distributed counting across servers</div>
+        <div class="d-box blue">Fail-open when Redis is down</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">P2 &#8212; Nice to Have</div>
+      <div class="d-flow-v">
+        <div class="d-box gray">Multi-region rate limiting</div>
+        <div class="d-box gray">Admin dashboard for rules</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Non-Functional Targets</div>
+      <div class="d-flow-v">
+        <div class="d-box purple">Latency: &lt; 1ms overhead per request</div>
+        <div class="d-box purple">Availability: 99.999% (in hot path)</div>
+        <div class="d-box purple">Throughput: 1M+ decisions/second</div>
+        <div class="d-box amber">Accuracy: Allow 5% over-limit tolerance</div>
+        <div class="d-box amber">Fail-open: If limiter fails, allow traffic</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Key Decisions</div>
+      <div class="d-flow-v">
+        <div class="d-box red">Fail-open vs Fail-closed?</div>
+        <div class="d-label">Fail-open for most APIs, fail-closed for payments</div>
+        <div class="d-box red">Exact vs Approximate counting?</div>
+        <div class="d-label">Lua atomic scripts for single-region accuracy</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
 {{thought "Key decision: fail-open vs fail-closed. Fail-open means if Redis is down, all requests pass through. This is correct for most cases because a few seconds of unlimited traffic is better than a full outage. Exception: payment APIs should fail-closed to prevent fraud."}}
 
 {{phase 2 "Capacity Estimation" "3 min"}}
 
-{{table "Scale Math" (rows
-  (row "Metric"                     "Calculation"                     "Result")
-  (row "Total API requests"         "100K RPS across all services"    "100,000 RPS")
-  (row "Rate limit checks"         "1 check per request"             "100,000 checks/sec")
-  (row "Peak (5x)"                 "100K x 5"                        "500,000 checks/sec")
-  (row "Redis operations per check" "2-3 ops (GET + INCR + EXPIRE)"  "300K-1.5M Redis ops/sec")
-  (row "Storage per user window"    "~100 bytes per counter"          "Negligible")
-  (row "Active rate limit keys"     "10M active users x 5 endpoints"  "50M keys x 100B = 5GB")
-)}}
+{{diagram "Back-of-Envelope Estimates" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Traffic</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">100K RPS across all services</div>
+        <div class="d-box blue">Peak (5x) = 500K checks/sec</div>
+        <div class="d-box purple">2-3 Redis ops per check</div>
+        <div class="d-box purple">= 300K&#8211;1.5M Redis ops/sec peak</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Storage</div>
+      <div class="d-flow-v">
+        <div class="d-box amber">~100 bytes per counter</div>
+        <div class="d-box amber">10M active users &#215; 5 endpoints</div>
+        <div class="d-box amber">= 50M keys &#215; 100B = 5 GB</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Redis Capacity</div>
+      <div class="d-flow-v">
+        <div class="d-box green">100K+ ops/sec per node</div>
+        <div class="d-box green">3-node cluster = 300K ops/sec</div>
+        <div class="d-box green">6 nodes for 500K peak</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
 {{say "Redis handles 100K+ ops/sec per node easily. A 3-node ElastiCache cluster gives us 300K+ ops/sec with replication. For 500K peak, we might need 6 nodes or use Lua scripts to reduce round trips."}}
 
 {{phase 3 "API Design with Rate Headers" "3 min"}}
 
-{{code "text" `-- Every API response includes rate limit headers --
-
-HTTP/1.1 200 OK
-X-RateLimit-Limit: 100          # Max requests allowed in window
-X-RateLimit-Remaining: 67       # Requests remaining in current window
-X-RateLimit-Reset: 1704067260   # Unix timestamp when window resets
-X-RateLimit-Policy: "100;w=60"  # 100 requests per 60-second window
-
--- When rate limited --
-
-HTTP/1.1 429 Too Many Requests
+{{diagram "Rate Limit Headers (Every Response)" `
+<div class="d-flow-v">
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">200 OK (Allowed)</div>
+        <div class="d-flow-v">
+          <div class="d-box green" style="font-family:var(--font-mono);font-size:0.78rem;text-align:left;white-space:pre">HTTP/1.1 200 OK
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 67
+X-RateLimit-Reset: 1704067260
+X-RateLimit-Policy: "100;w=60"</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">429 Too Many Requests</div>
+        <div class="d-flow-v">
+          <div class="d-box red" style="font-family:var(--font-mono);font-size:0.78rem;text-align:left;white-space:pre">HTTP/1.1 429 Too Many Requests
 X-RateLimit-Limit: 100
 X-RateLimit-Remaining: 0
 X-RateLimit-Reset: 1704067260
-Retry-After: 45                 # Seconds until client should retry
-Content-Type: application/json
-{"error": "rate_limit_exceeded", "message": "Too many requests. Retry after 45 seconds."}
+Retry-After: 45</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 `}}
 
-{{table "Rate Limit Rules Configuration" (rows
-  (row "Endpoint"          "Auth Tier"     "Limit"          "Window"      "Action")
-  (row "POST /api/*"       "Free"          "100 req"        "1 minute"    "429 response")
-  (row "POST /api/*"       "Pro"           "1000 req"       "1 minute"    "429 response")
-  (row "POST /api/*"       "Enterprise"    "10000 req"      "1 minute"    "429 response")
-  (row "GET /api/*"        "Free"          "500 req"        "1 minute"    "429 response")
-  (row "POST /login"       "Any"           "5 req"          "15 minutes"  "429 + CAPTCHA")
-  (row "Anonymous (by IP)" "None"          "50 req"         "1 minute"    "429 response")
-)}}
+{{diagram "Rate Limit Rules Configuration" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">By Auth Tier</div>
+      <div class="d-flow-v">
+        <div class="d-box gray">Free: 100 req/min</div>
+        <div class="d-box blue">Pro: 1,000 req/min</div>
+        <div class="d-box green">Enterprise: 10,000 req/min</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">By Endpoint Type</div>
+      <div class="d-flow-v">
+        <div class="d-box green">GET /api/*: 500 req/min</div>
+        <div class="d-box amber">POST /api/*: 100 req/min</div>
+        <div class="d-box red">POST /login: 5 req/15min + CAPTCHA</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">By Identity</div>
+      <div class="d-flow-v">
+        <div class="d-box purple">By API Key: per-key limits</div>
+        <div class="d-box amber">By IP: 50 req/min (anonymous)</div>
+        <div class="d-box red">By IP + Path: login brute-force</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
 {{phase 4 "Algorithm Deep Dive" "10 min"}}
 
-{{say "There are four main rate limiting algorithms. Each has different trade-offs for memory, accuracy, and burst handling. Let me walk through each one with code."}}
+{{say "There are four main rate limiting algorithms. Each has different trade-offs for memory, accuracy, and burst handling. Let me walk through each one visually."}}
 
-{{table "Algorithm Comparison" (rows
-  (row "Algorithm"              "Memory"       "Accuracy"   "Burst Handling"   "Complexity")
-  (row "Token Bucket"           "O(1) per key" "High"       "Allows bursts"    "Simple")
-  (row "Leaky Bucket"           "O(1) per key" "High"       "Smooths bursts"   "Simple")
-  (row "Fixed Window Counter"   "O(1) per key" "Medium"     "Edge burst 2x"    "Simplest")
-  (row "Sliding Window Log"     "O(N) per key" "Highest"    "No edge burst"    "Complex")
-  (row "Sliding Window Counter" "O(1) per key" "High"       "Minimal burst"    "Medium")
-)}}
+{{diagram "Algorithm Comparison Overview" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Token Bucket</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Memory: O(1) per key</div>
+        <div class="d-box green">Allows controlled bursts</div>
+        <div class="d-box blue">Used by: AWS API Gateway</div>
+        <div class="d-label">Best for: APIs that tolerate bursts</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Sliding Window Counter &#9733;</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Memory: O(1) per key</div>
+        <div class="d-box green">No boundary burst problem</div>
+        <div class="d-box blue">Used by: Cloudflare, Stripe</div>
+        <div class="d-label">Best for: Most use cases (recommended)</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Fixed Window Counter</div>
+      <div class="d-flow-v">
+        <div class="d-box amber">Memory: O(1) per key</div>
+        <div class="d-box red">2x burst at boundaries!</div>
+        <div class="d-box gray">Simplest to implement</div>
+        <div class="d-label">Best for: MVP only</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Sliding Window Log</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Highest accuracy</div>
+        <div class="d-box red">Memory: O(N) per key!</div>
+        <div class="d-box gray">N = requests in window</div>
+        <div class="d-label">Best for: Low-rate limits (login)</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
-{{say "Let me implement Token Bucket first. It is the most commonly used algorithm and what AWS API Gateway uses internally."}}
+{{diagram "Token Bucket &#8212; How It Works" `
+<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-box indigo" style="min-width:140px;text-align:center">
+      <strong>Bucket</strong><br>
+      capacity: 10<br>
+      tokens: 7
+    </div>
+    <div class="d-arrow">&#8592;</div>
+    <div class="d-box green" style="min-width:120px;text-align:center">
+      <strong>Refill</strong><br>
+      +2 tokens/sec
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595; request arrives</div>
+  <div class="d-flow">
+    <div class="d-branch">
+      <div class="d-branch-arm">
+        <div class="d-box green">tokens &#8805; 1?</div>
+        <div class="d-arrow-down">&#8595; YES</div>
+        <div class="d-box green">tokens-- &#8594; ALLOW</div>
+      </div>
+      <div class="d-branch-arm">
+        <div class="d-box red">tokens &lt; 1?</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box red">REJECT (429)</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-label">Burst: can send up to 'capacity' requests instantly, then rate-limited to refill_rate/sec</div>
+</div>
+`}}
 
 {{code "python" `import time
 import redis
@@ -142,7 +305,34 @@ class TokenBucket:
 
 {{key "Token Bucket allows bursts up to the bucket capacity while enforcing an average rate. This is ideal for APIs where occasional bursts are acceptable but sustained abuse is not."}}
 
-{{say "Now the Sliding Window Counter. This is the best balance of accuracy and memory efficiency."}}
+{{diagram "Sliding Window Counter &#8212; How It Works" `
+<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-group" style="flex:1">
+      <div class="d-group-title">Previous Window</div>
+      <div class="d-box amber" style="text-align:center">
+        count = 84<br>
+        <small>11:00 &#8212; 12:00</small>
+      </div>
+    </div>
+    <div class="d-group" style="flex:1">
+      <div class="d-group-title">Current Window</div>
+      <div class="d-box blue" style="text-align:center">
+        count = 36<br>
+        <small>12:00 &#8212; 13:00</small>
+      </div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box purple" style="text-align:center">
+    <strong>Weighted Count</strong><br>
+    now = 12:15 &#8594; 75% of prev window overlaps<br>
+    weighted = 84 &#215; 0.75 + 36 = <strong>99</strong><br>
+    limit = 100 &#8594; <strong>ALLOW</strong> (1 remaining)
+  </div>
+  <div class="d-label">Eliminates boundary burst: smoothly transitions between windows using time-weighted average</div>
+</div>
+`}}
 
 {{code "python" `import time
 import redis
@@ -202,54 +392,40 @@ class SlidingWindowCounter:
         }
 `}}
 
-{{say "Finally, the Fixed Window Counter. Simplest to implement but has the boundary burst problem."}}
-
-{{code "python" `import time
-import redis
-
-class FixedWindowCounter:
-    """
-    Fixed Window Counter Algorithm:
-    - Divide time into fixed windows (e.g., each minute)
-    - Count requests in current window
-    - Reset count when window changes
-    - Problem: 2x burst at window boundaries
-    """
-
-    def __init__(self, redis_client: redis.Redis):
-        self.redis = redis_client
-
-    def is_allowed(self, key: str, limit: int, window_sec: int) -> dict:
-        now = time.time()
-        window_start = int(now // window_sec) * window_sec
-        window_key = f"rl:fw:{key}:{window_start}"
-
-        lua_script = """
-        local key = KEYS[1]
-        local limit = tonumber(ARGV[1])
-        local window = tonumber(ARGV[2])
-
-        local current = tonumber(redis.call('GET', key) or "0")
-
-        if current >= limit then
-            return {0, 0}
-        end
-
-        local new_count = redis.call('INCR', key)
-        if new_count == 1 then
-            redis.call('EXPIRE', key, window)
-        end
-
-        return {1, limit - new_count}
-        """
-
-        result = self.redis.eval(lua_script, 1, window_key, limit, window_sec)
-        return {
-            "allowed": bool(result[0]),
-            "remaining": int(result[1]),
-            "limit": limit,
-            "reset_at": window_start + window_sec
-        }
+{{diagram "Fixed Window &#8212; The Boundary Burst Problem" `
+<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-group" style="flex:1">
+      <div class="d-group-title">Window 1 (11:00&#8211;12:00)</div>
+      <div class="d-flow-v">
+        <div class="d-box gray" style="text-align:center">
+          &#8230; quiet &#8230;<br>
+          <small>0 requests until 11:59</small>
+        </div>
+        <div class="d-box red" style="text-align:center">
+          <strong>11:59:30 &#8594; 100 requests!</strong><br>
+          <small>All at end of window</small>
+        </div>
+      </div>
+    </div>
+    <div class="d-group" style="flex:1">
+      <div class="d-group-title">Window 2 (12:00&#8211;13:00)</div>
+      <div class="d-flow-v">
+        <div class="d-box red" style="text-align:center">
+          <strong>12:00:01 &#8594; 100 requests!</strong><br>
+          <small>Counter reset to 0</small>
+        </div>
+        <div class="d-box gray" style="text-align:center">
+          &#8230; rest of window &#8230;
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-box red" style="text-align:center">
+    <strong>Result: 200 requests in ~30 seconds!</strong><br>
+    Limit was 100/min but user got 2x at the boundary
+  </div>
+</div>
 `}}
 
 {{avoid "Fixed Window has the boundary burst problem: a user can send 100 requests at 11:59:59 and 100 more at 12:00:01, effectively getting 200 requests in 2 seconds. Use Sliding Window Counter instead for accurate rate limiting."}}
@@ -265,56 +441,74 @@ class FixedWindowCounter:
 
 {{say "The rate limiter sits in the request path as middleware. Let me walk through where it fits and how the decision flows."}}
 
-{{diagram "Rate Limiter Architecture" `
-<div class="d-cols">
-  <div class="d-col">
-    <div class="d-group">
-      <div class="d-group-title">WRITE PATH (Rate Check)</div>
-      <div class="d-flow-v">
-        <div class="d-box blue">Client Request</div>
-        <div class="d-arrow-down">↓</div>
-        <div class="d-box gray">Route 53 (DNS)</div>
-        <div class="d-arrow-down">↓</div>
-        <div class="d-box green">ALB</div>
-        <div class="d-arrow-down">↓</div>
-        <div class="d-box indigo">API Server</div>
-        <div class="d-arrow-down">↓</div>
-        <div class="d-box amber">Rate Limit Middleware</div>
-        <div class="d-arrow-down">↓</div>
-        <div class="d-box red">Redis (counters via Lua script)</div>
+{{diagram "Rate Limiter Architecture &#8212; Full Request Path" `
+<div class="d-flow-v">
+  <div class="d-box blue" style="text-align:center"><strong>Client Request</strong></div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box gray" style="text-align:center">Route 53 (DNS)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box green" style="text-align:center">ALB (Load Balancer)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box indigo" style="text-align:center"><strong>API Server (ECS)</strong></div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box amber" style="text-align:center;border:2px solid var(--amber)">
+    <strong>Rate Limit Middleware</strong><br>
+    Extract key (API key or IP) &#8594; Check rules &#8594; Query Redis
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-flow">
+    <div class="d-branch">
+      <div class="d-branch-arm">
+        <div class="d-box red" style="text-align:center">
+          <strong>Redis</strong><br>
+          Lua script (atomic)<br>
+          INCR + EXPIRE
+        </div>
+        <div class="d-arrow-down">&#8595; response</div>
       </div>
     </div>
   </div>
-  <div class="d-col">
-    <div class="d-group">
-      <div class="d-group-title">READ PATH (Decision)</div>
-      <div class="d-flow-v">
-        <div class="d-box red">Redis Response</div>
-        <div class="d-arrow-down">↓</div>
-        <div class="d-box amber">Rate Limit Middleware</div>
-        <div class="d-arrow-down">↓</div>
-        <div class="d-row">
-          <div class="d-box green">ALLOW: Continue to Application Logic</div>
-          <div class="d-box purple">REJECT: 429 Too Many Requests</div>
+  <div class="d-flow">
+    <div class="d-branch">
+      <div class="d-branch-arm">
+        <div class="d-box green" style="text-align:center">
+          <strong>ALLOW</strong><br>
+          Continue to app logic<br>
+          Add X-RateLimit-* headers
         </div>
-        <div class="d-arrow-down">↓</div>
-        <div class="d-box blue">Response with X-RateLimit-* Headers</div>
+      </div>
+      <div class="d-branch-arm">
+        <div class="d-box red" style="text-align:center">
+          <strong>REJECT</strong><br>
+          429 Too Many Requests<br>
+          + Retry-After header
+        </div>
       </div>
     </div>
   </div>
 </div>
 `}}
 
-{{table "Request Flow with Rate Limiting" (rows
-  (row "Hop" "Step"                                        "Service"              "Latency"   "Failure Mode")
-  (row "1"   "Client sends API request"                    "Client"               "N/A"       "N/A")
-  (row "2"   "Request hits API Gateway / Load Balancer"    "ALB / API Gateway"    "1ms"       "ALB multi-AZ, auto-heals")
-  (row "3"   "Rate limit middleware extracts user key"     "ECS App Server"       "<0.1ms"    "Parse JWT or API key")
-  (row "4"   "Lua script executes atomically in Redis"     "ElastiCache Redis"    "<1ms"      "Fail-open: allow request if Redis down")
-  (row "5a"  "If allowed: continue to application logic"   "ECS App Server"       "N/A"       "Normal request processing")
-  (row "5b"  "If denied: return 429 with rate headers"     "ECS App Server"       "<0.1ms"    "Client gets Retry-After header")
-  (row "6"   "Response includes X-RateLimit-* headers"     "ALB -> Client"        "N/A"       "Headers always present")
-)}}
+{{diagram "Request Flow (Hop-by-Hop Detail)" `
+<div class="d-flow-v">
+  <div class="d-box blue">H1: Client sends API request with API key or JWT</div>
+  <div class="d-label">HTTPS &#8594; TLS termination at ALB</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box gray">H2: ALB routes to healthy ECS container</div>
+  <div class="d-label">Round-robin or least-connections &#8226; Health check: /health</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box indigo">H3: Middleware extracts rate limit key</div>
+  <div class="d-label">Parse JWT &#8594; user_id OR API-Key header &#8594; key OR IP fallback</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box amber">H4: Lua script executes atomically in Redis</div>
+  <div class="d-label">&lt; 1ms &#8226; Single eval replaces 3 separate commands &#8226; No race conditions</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box green">H5a: ALLOWED &#8594; Continue to application logic</div>
+  <div class="d-box red">H5b: REJECTED &#8594; Return 429 with Retry-After</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box blue">H6: Response includes X-RateLimit-* headers (always)</div>
+</div>
+`}}
 
 {{code "python" `from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -362,14 +556,78 @@ async def rate_limit_middleware(request: Request, call_next):
 
 {{say "The hard problem is distributed rate limiting: ensuring accurate counts when you have multiple application servers, multiple Redis nodes, or multiple regions."}}
 
-{{table "Distributed Challenges" (rows
-  (row "Challenge"                   "Problem"                                        "Solution")
-  (row "Multiple app servers"        "Each server checks its own Redis, counts diverge" "All servers share same Redis cluster, Lua scripts ensure atomicity")
-  (row "Redis cluster sharding"     "Rate limit key may hash to different shards"     "Use hash tags: {user:123}:rate_limit ensures same slot")
-  (row "Multi-region"               "User hits US and EU servers, each with local Redis" "Sync counters via Redis Global Datastore or accept per-region limits")
-  (row "Redis failover"             "Primary fails, replica promoted, counter reset"  "Accept brief over-limit window, fail-open policy")
-  (row "Clock skew"                 "Servers disagree on current time"                "Use Redis server time (TIME command) not local clock")
-)}}
+{{diagram "Distributed Challenges & Solutions" `
+<div class="d-flow-v">
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Challenge: Multiple App Servers</div>
+        <div class="d-flow-v">
+          <div class="d-flow">
+            <div class="d-box blue">Server A</div>
+            <div class="d-box blue">Server B</div>
+            <div class="d-box blue">Server C</div>
+          </div>
+          <div class="d-arrow-down">&#8595; all share</div>
+          <div class="d-box red" style="text-align:center"><strong>Same Redis Cluster</strong><br>Lua scripts &#8594; atomic counting</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Challenge: Redis Sharding</div>
+        <div class="d-flow-v">
+          <div class="d-box amber" style="text-align:center">Key: <code>rl:{user:123}:api</code></div>
+          <div class="d-label">Hash tags {user:123} ensure same slot</div>
+          <div class="d-flow">
+            <div class="d-box gray">Shard 1</div>
+            <div class="d-box green">Shard 2 &#10003;</div>
+            <div class="d-box gray">Shard 3</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
+
+{{diagram "Multi-Region Rate Limiting Strategies" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">&#9733; Async Gossip Sync (Recommended)</div>
+      <div class="d-flow-v">
+        <div class="d-flow">
+          <div class="d-box blue" style="text-align:center">US-East<br>Redis (local)</div>
+          <div class="d-box blue" style="text-align:center">EU-West<br>Redis (local)</div>
+        </div>
+        <div class="d-flow">
+          <div class="d-arrow">&#8596; sync every 1-5s</div>
+        </div>
+        <div class="d-box green" style="text-align:center">Zero latency impact &#8226; Medium accuracy &#8226; Used by Cloudflare</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Per-Region Limits (Simplest)</div>
+      <div class="d-flow-v">
+        <div class="d-flow">
+          <div class="d-box amber" style="text-align:center">US: 100/min</div>
+          <div class="d-box amber" style="text-align:center">EU: 100/min</div>
+        </div>
+        <div class="d-box red" style="text-align:center">Total possible = 200/min &#8226; Acceptable for most APIs</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Global Redis (Avoid)</div>
+      <div class="d-flow-v">
+        <div class="d-box red" style="text-align:center">+50-100ms per request! &#8226; Cross-region latency &#8226; Unacceptable</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
 {{code "python" `# Redis Lua script for atomic sliding window counter
 # Executed as single atomic operation - no race conditions
@@ -401,23 +659,128 @@ return {1, limit - count - 1, 0}
 
 {{thought "Multi-region rate limiting is fundamentally hard. You have two options: 1) Global rate limit with cross-region sync (adds 50-100ms latency per check), or 2) Per-region rate limits (user gets N requests per region, total is N x regions). Most companies choose option 2 and accept the over-count."}}
 
-{{table "Multi-Region Strategies" (rows
-  (row "Strategy"                 "How It Works"                                   "Accuracy"   "Latency Impact")
-  (row "Per-region limits"        "Each region enforces its own limit independently" "Low"       "Zero (local Redis)")
-  (row "Async sync (gossip)"      "Regions sync counters every 1-5 seconds"          "Medium"    "Zero (async background)")
-  (row "Global Redis"             "Single Redis cluster, cross-region reads"         "High"      "+50-100ms per request")
-  (row "Token bucket with sync"   "Each region gets a portion of total tokens"       "High"      "Zero (pre-allocated)")
-)}}
+{{phase 7 "Data Model & Redis Schema" "3 min"}}
 
-{{compare "Multi-Region Approach" (options
-  (best "Async Gossip Sync" "Each region has local Redis. Background process syncs counters every 1-5 seconds. Best balance of accuracy and latency. Used by Cloudflare.")
-  (alt "Per-Region Limits" "Simplest. User gets 100 req/min in US and 100 req/min in EU. Total possible = 200/min. Fine if abuse is not critical concern.")
-  (nofit "Global Redis" "Single Redis in one region. All rate limit checks go cross-region. Adds 50-100ms to every API call. Unacceptable latency.")
-)}}
+{{diagram "Data Model (Redis Key Schema)" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-entity">
+      <div class="d-entity-header red">Token Bucket (HASH)</div>
+      <div class="d-entity-body">
+        <div class="pk">KEY: rl:token:{user}:{endpoint}</div>
+        <div class="idx idx-hash">tokens FLOAT</div>
+        <div class="idx idx-hash">last_refill FLOAT (unix ts)</div>
+        <div>TTL: ceil(capacity / refill_rate) + 1</div>
+      </div>
+    </div>
+    <div class="d-entity">
+      <div class="d-entity-header blue">Sliding Window (STRING)</div>
+      <div class="d-entity-body">
+        <div class="pk">KEY: rl:sw:{user}:{endpoint}:{window_ts}</div>
+        <div class="idx idx-hash">value INTEGER (counter)</div>
+        <div>TTL: window_sec &#215; 2</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-entity">
+      <div class="d-entity-header green">Rate Limit Rules (JSON/Config)</div>
+      <div class="d-entity-body">
+        <div class="pk">endpoint VARCHAR</div>
+        <div class="idx">tier ENUM (free|pro|enterprise)</div>
+        <div>limit INTEGER</div>
+        <div>window_sec INTEGER</div>
+        <div>algorithm ENUM (token|sliding|fixed)</div>
+        <div>fail_mode ENUM (open|closed)</div>
+      </div>
+    </div>
+    <div class="d-entity">
+      <div class="d-entity-header amber">Fixed Window (STRING)</div>
+      <div class="d-entity-body">
+        <div class="pk">KEY: rl:fw:{user}:{endpoint}:{window_start}</div>
+        <div class="idx idx-hash">value INTEGER (counter)</div>
+        <div>TTL: window_sec</div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="d-er-lines">
+  <div class="d-er-connector">
+    <span class="d-er-from">Rate Limit Rules</span>
+    <span class="d-er-type">1:N</span>
+    <span class="d-er-to">Token Bucket / Sliding Window keys</span>
+  </div>
+</div>
+`}}
 
-{{phase 7 "Redis Configuration for Rate Limiting" "3 min"}}
+{{diagram "Redis Lua Script Execution Flow" `
+<div class="d-flow-v">
+  <div class="d-box blue" style="text-align:center"><strong>App Server</strong><br>EVAL lua_script 1 key limit window now</div>
+  <div class="d-arrow-down">&#8595; single TCP round-trip</div>
+  <div class="d-box red" style="text-align:center;border:2px solid var(--red)">
+    <strong>Redis (Atomic Execution)</strong><br>
+    No other commands execute during Lua script
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-flow-v">
+        <div class="d-box amber">1. HMGET key tokens last_refill</div>
+        <div class="d-box amber">2. Calculate refilled tokens</div>
+        <div class="d-box amber">3. Check if tokens &#8805; 1</div>
+        <div class="d-box amber">4. HMSET key new_tokens now</div>
+        <div class="d-box amber">5. EXPIRE key ttl</div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-flow-v">
+        <div class="d-box green" style="text-align:center">
+          <strong>Why Lua?</strong><br>
+          &#10003; Atomic (no race conditions)<br>
+          &#10003; 1 round-trip vs 3-5<br>
+          &#10003; Server-side execution<br>
+          &#10003; No distributed locks needed
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box blue" style="text-align:center">Return {allowed, remaining}</div>
+</div>
+`}}
+
+{{phase 8 "Redis Configuration" "3 min"}}
 
 {{say "Let me show the ElastiCache configuration optimized for rate limiting workloads."}}
+
+{{diagram "ElastiCache Cluster Topology" `
+<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-group" style="flex:1">
+      <div class="d-group-title">Shard 1 (slots 0&#8211;5460)</div>
+      <div class="d-flow-v">
+        <div class="d-box red" style="text-align:center"><strong>Primary</strong><br>r6g.large</div>
+        <div class="d-box gray" style="text-align:center">Replica<br>r6g.large</div>
+      </div>
+    </div>
+    <div class="d-group" style="flex:1">
+      <div class="d-group-title">Shard 2 (slots 5461&#8211;10922)</div>
+      <div class="d-flow-v">
+        <div class="d-box red" style="text-align:center"><strong>Primary</strong><br>r6g.large</div>
+        <div class="d-box gray" style="text-align:center">Replica<br>r6g.large</div>
+      </div>
+    </div>
+    <div class="d-group" style="flex:1">
+      <div class="d-group-title">Shard 3 (slots 10923&#8211;16383)</div>
+      <div class="d-flow-v">
+        <div class="d-box red" style="text-align:center"><strong>Primary</strong><br>r6g.large</div>
+        <div class="d-box gray" style="text-align:center">Replica<br>r6g.large</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-label">3 shards &#215; 2 nodes = 6 nodes total &#8226; 300K+ ops/sec &#8226; 39 GB memory</div>
+</div>
+`}}
 
 {{code "text" `# ElastiCache Redis Configuration for Rate Limiting
 
@@ -447,56 +810,195 @@ activedefrag: yes                 # Defragment memory proactively
 
 {{avoid "Do not enable Redis persistence (RDB/AOF) for rate limiting. Rate limit counters are ephemeral. Persistence adds disk I/O latency and is pointless since counters reset on window expiry anyway. If Redis restarts, counters rebuild naturally from incoming requests."}}
 
-{{phase 8 "Trade-offs & Edge Cases" "5 min"}}
+{{phase 9 "Trade-offs & Edge Cases" "5 min"}}
 
-{{table "Key Trade-offs" (rows
-  (row "Trade-off"                          "Choice A"                              "Choice B"                              "Recommendation")
-  (row "Fail-open vs fail-closed"           "Allow traffic if Redis down"           "Block traffic if Redis down"           "Fail-open for most APIs, fail-closed for payments")
-  (row "Exact vs approximate counting"      "Lua atomic scripts (exact)"            "Local counters with periodic sync"     "Lua scripts for single-region, local counters for multi-region")
-  (row "User-level vs IP-level limiting"    "Rate limit per API key"                "Rate limit per IP address"             "Both: API key for authenticated, IP for anonymous")
-  (row "Fixed vs dynamic limits"            "Static limits in config"               "Dynamic limits from rules engine"      "Start static, add dynamic when you have usage data")
-  (row "Centralized vs sidecar"             "Shared rate limit service"             "Rate limit in each service sidecar"    "Sidecar for microservices, centralized for monolith")
-)}}
+{{diagram "Key Trade-offs Matrix" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Fail-open vs Fail-closed</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Fail-open: allow traffic if Redis down</div>
+        <div class="d-label">&#10003; Most APIs: availability &gt; protection</div>
+        <div class="d-box red">Fail-closed: block traffic if Redis down</div>
+        <div class="d-label">&#10003; Payment APIs: prevent fraud</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Centralized vs Sidecar</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">Centralized rate limit service</div>
+        <div class="d-label">&#10003; Monolith: single place to manage</div>
+        <div class="d-box purple">Sidecar (Envoy/Istio filter)</div>
+        <div class="d-label">&#10003; Microservices: per-service limits</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Exact vs Approximate</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Lua atomic scripts (exact)</div>
+        <div class="d-label">&#10003; Single-region accuracy</div>
+        <div class="d-box amber">Local counters + sync (approximate)</div>
+        <div class="d-label">&#10003; Multi-region: accept 5% error</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
-{{table "Edge Cases to Handle" (rows
-  (row "Edge Case"                     "Problem"                                    "Solution")
-  (row "Distributed denial of service" "Millions of unique IPs"                     "IP rate limiting + AWS WAF + CloudFront geo-blocking")
-  (row "API key sharing"               "Multiple users share one key"               "Per-key limits + anomaly detection on usage patterns")
-  (row "Clock skew"                    "Servers disagree on time"                   "Use Redis TIME command, not local server clock")
-  (row "Hot key"                       "One user generates 50% of rate limit checks" "Redis hash tags ensure key goes to one shard, but that shard gets hot")
-  (row "Burst after window reset"      "User sends all requests at window start"    "Token bucket allows gradual refill, not instant reset")
-  (row "Webhook retry storms"          "External service retries 1000x on failure"  "Separate rate limit tier for webhooks with exponential backoff")
-)}}
+{{diagram "Edge Cases & Mitigations" `
+<div class="d-flow-v">
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">DDoS (Millions of IPs)</div>
+        <div class="d-flow-v">
+          <div class="d-box red">IP rate limiting alone won't work</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green">AWS WAF + CloudFront geo-blocking</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Hot Key Problem</div>
+        <div class="d-flow-v">
+          <div class="d-box red">One user = 50% of checks on 1 shard</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green">Local cache (10ms TTL) + hash tags</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Clock Skew</div>
+        <div class="d-flow-v">
+          <div class="d-box red">Servers disagree on time</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green">Use Redis TIME command, not local clock</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">API Key Sharing</div>
+        <div class="d-flow-v">
+          <div class="d-box red">Multiple users share one key</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green">Per-key limits + anomaly detection</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Webhook Retry Storms</div>
+        <div class="d-flow-v">
+          <div class="d-box red">External service retries 1000x</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green">Separate tier + exponential backoff</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Redis Failover</div>
+        <div class="d-flow-v">
+          <div class="d-box red">Primary fails, counter reset</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green">Fail-open + counters rebuild</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
-{{phase 9 "Cost Estimates" "2 min"}}
+{{phase 10 "Cost Estimates" "2 min"}}
 
-{{table "Rate Limiter Infrastructure Cost" (rows
-  (row "Component"              "Specification"                       "Monthly Cost")
-  (row "ElastiCache Redis"      "3 shards x 2 nodes (r6g.large)"     "$550")
-  (row "ECS Fargate (sidecar)"  "CPU overhead is minimal"             "$0 (runs in existing containers)")
-  (row "CloudWatch monitoring"  "Custom metrics for rate limit hits"  "$30")
-  (row "Total"                  "Incremental cost to add rate limiting" "~$580/mo")
-)}}
+{{diagram "Infrastructure Cost Breakdown" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Monthly Infrastructure</div>
+      <div class="d-flow-v">
+        <div class="d-box red" style="text-align:center"><strong>ElastiCache Redis</strong><br>3 shards &#215; 2 nodes (r6g.large)<br><strong>$550/mo</strong></div>
+        <div class="d-box gray" style="text-align:center"><strong>ECS Fargate (sidecar)</strong><br>CPU overhead minimal<br><strong>$0</strong> (existing containers)</div>
+        <div class="d-box blue" style="text-align:center"><strong>CloudWatch</strong><br>Custom metrics for hits<br><strong>$30/mo</strong></div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Total</div>
+      <div class="d-flow-v">
+        <div class="d-box green" style="text-align:center;font-size:1.1rem"><strong>~$580/month</strong><br>incremental cost to add rate limiting</div>
+        <div class="d-label">Rate limiting is cheap. The Redis cluster is likely already present for caching. Engineering cost in algorithms and edge cases is the real investment.</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
 {{thought "Rate limiting is cheap infrastructure-wise. The main cost is the Redis cluster which you likely already have for caching. The engineering cost is in getting the algorithm right, handling edge cases, and making it operationally transparent with good dashboards and alerting."}}
 
-{{phase 10 "Interview Q&A" "5 min"}}
+{{phase 11 "Sub-Problems & Building Blocks" "3 min"}}
 
-{{qa
-  "Where should the rate limiter sit in the architecture?"
-  "Three options: 1) API Gateway level for global rate limiting. 2) Middleware in the application for per-service limits. 3) Service mesh sidecar for microservices. Most production systems use option 1 and 2 combined."
-  "How do you rate limit WebSocket connections?"
-  "Two dimensions: 1) Connection rate: limit new WebSocket connections per user per minute. 2) Message rate: limit messages per connection per second. Use token bucket for message rate since WebSocket messages are bursty by nature."
-}}
-
-{{qa
-  "How does Stripe handle rate limiting?"
-  "Stripe uses a sliding window counter with per-API-key limits. They return detailed headers (RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset). They also have tiered limits: test mode is more lenient than live mode. They fail-open except for payment creation endpoints."
-  "What about rate limiting in a serverless architecture?"
-  "Lambda functions are stateless, so you cannot do in-memory rate limiting. Use API Gateway built-in throttling (token bucket) or add a Redis check in Lambda. API Gateway supports per-API-key throttling natively at $3.50 per million requests."
-}}
-
-{{followup "How would you implement rate limiting without Redis?" "Three alternatives: 1) In-memory with consistent hashing: route each user to the same server, use local counters. Works but loses counts on restart. 2) DynamoDB atomic counters: UpdateItem with ADD. Higher latency (5ms vs 1ms) but no Redis to manage. 3) API Gateway built-in throttling: AWS manages everything, but less flexible on custom rules."}}
+{{diagram "Rate Limiter Sub-Problems & Building Blocks" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-subproblem green">
+      <div class="d-subproblem-icon">&#9889;</div>
+      <div class="d-subproblem-text">
+        <div class="d-subproblem-title">Algorithm Selection</div>
+        <div class="d-subproblem-desc">Token Bucket vs Sliding Window vs Fixed Window &#8212; trade-offs in burst tolerance, memory, accuracy</div>
+      </div>
+    </div>
+    <div class="d-subproblem blue">
+      <div class="d-subproblem-icon">&#128274;</div>
+      <div class="d-subproblem-text">
+        <div class="d-subproblem-title">Atomic Counting</div>
+        <div class="d-subproblem-desc">Redis Lua scripts for race-free increment + check. Single round-trip replaces 3-5 commands</div>
+      </div>
+    </div>
+    <div class="d-subproblem purple">
+      <div class="d-subproblem-icon">&#127760;</div>
+      <div class="d-subproblem-text">
+        <div class="d-subproblem-title">Multi-Region Sync</div>
+        <div class="d-subproblem-desc">Gossip-based async sync vs per-region limits vs global Redis. Latency vs accuracy trade-off</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-subproblem amber">
+      <div class="d-subproblem-icon">&#9888;</div>
+      <div class="d-subproblem-text">
+        <div class="d-subproblem-title">Failure Handling</div>
+        <div class="d-subproblem-desc">Fail-open vs fail-closed. Circuit breaker on Redis connection. Local cache fallback</div>
+      </div>
+    </div>
+    <div class="d-subproblem red">
+      <div class="d-subproblem-icon">&#128736;</div>
+      <div class="d-subproblem-text">
+        <div class="d-subproblem-title">Rule Configuration</div>
+        <div class="d-subproblem-desc">Per-endpoint, per-tier, per-identity limits. Hot-reload without restart. A/B testing of limits</div>
+      </div>
+    </div>
+    <div class="d-subproblem indigo">
+      <div class="d-subproblem-icon">&#128200;</div>
+      <div class="d-subproblem-text">
+        <div class="d-subproblem-title">Observability</div>
+        <div class="d-subproblem-desc">Hit rate metrics, false positive tracking, per-key analytics dashboard, alerting on anomalies</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
 {{checklist
   "Sliding Window Counter is the best default algorithm"
@@ -512,3 +1014,112 @@ activedefrag: yes                 # Defragment memory proactively
 }}
 
 {{key "The rate limiter interview is about demonstrating you understand the algorithm trade-offs (Token Bucket vs Sliding Window), the distributed counting challenge (Lua atomicity, multi-region sync), and the operational details (fail-open, rate headers, monitoring). The algorithm implementation is just the starting point."}}
+
+{{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
+
+{{deepQA "Rate Limiting Algorithms & Trade-offs" `
+<div class="dqa-item">
+  <div class="dqa-q">Why is Sliding Window Counter preferred over Token Bucket for most production rate limiters?</div>
+  <div class="dqa-a">
+    <span class="dqa-key">Sliding Window Counter</span> provides the best balance of accuracy and simplicity. It uses only <span class="dqa-key">O(1) memory per key</span> (two counters: current window + previous window), eliminates the <span class="dqa-key">boundary burst problem</span> of Fixed Window, and requires no complex state management like Token Bucket's floating-point token tracking. Cloudflare and Stripe both use variants of this algorithm. The weighted average calculation <code>prev_count × weight + curr_count</code> achieves within <span class="dqa-key">0.003% accuracy</span> of a true sliding window log while using constant memory.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">When would you choose Token Bucket over Sliding Window Counter?</div>
+      <div class="dqa-sub-a">
+        Choose <span class="dqa-key">Token Bucket</span> when your API explicitly wants to <span class="dqa-key">allow controlled bursts</span>. For example, AWS API Gateway uses Token Bucket because API consumers often need to send a batch of requests quickly (e.g., uploading 10 images at once), then slow down. The bucket capacity controls burst size while refill rate controls sustained throughput. This is a deliberate product decision, not a technical one.
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">How do you prevent Token Bucket from being exploited by saving up tokens?</div>
+          <div class="dqa-deep-a">Set <span class="dqa-key">capacity = refill_rate × small_window</span> (e.g., 2× the per-second rate). This means a user can burst at most 2 seconds worth of requests. Also consider <span class="dqa-key">dual-rate limiting</span>: Token Bucket for burst control + a Sliding Window for sustained rate, and the stricter limit wins. <span class="dqa-link">See: Distributed Rate Limiting for multi-layer strategies</span>.</div>
+        </div>
+      </div>
+      <div class="dqa-sub-q">What is the exact formula for Sliding Window Counter accuracy?</div>
+      <div class="dqa-sub-a">
+        The error bound is <code>|estimated - actual| ≤ (prev_window_count × elapsed_fraction / window_size)</code>. In practice, the maximum error occurs when traffic is perfectly periodic. For <span class="dqa-key">random traffic patterns</span> (which is the real world), the error approaches zero. Cloudflare published benchmarks showing &lt;0.003% error at 10K RPS.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="dqa-item">
+  <div class="dqa-q">How do you handle rate limiting in a multi-region deployment without adding latency?</div>
+  <div class="dqa-a">
+    The three approaches are: <span class="dqa-key">per-region limits</span> (simplest, user gets N req/region), <span class="dqa-key">async gossip sync</span> (regions sync counters every 1-5 seconds, used by Cloudflare), and <span class="dqa-key">global Redis</span> (single source of truth, +50-100ms latency). The recommended approach is <span class="dqa-key">async gossip sync</span>: each region maintains a local Redis with accurate local counts, and a background process propagates deltas to other regions. The trade-off is a 1-5 second window where a user could exceed the global limit by up to <span class="dqa-key">N × regions</span>.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">Why not use Redis Global Datastore for cross-region consistency?</div>
+      <div class="dqa-sub-a">
+        <span class="dqa-key">Redis Global Datastore</span> provides async replication (not sync), so you still get eventual consistency. It also adds complexity: you need to handle <span class="dqa-key">conflict resolution</span> for INCR operations (last-writer-wins can lose counts). Custom gossip sync is simpler because you control the merge strategy: <span class="dqa-key">SUM deltas</span> rather than last-writer-wins.
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">How does Cloudflare's actual multi-region rate limiter work?</div>
+          <div class="dqa-deep-a">Cloudflare uses a <span class="dqa-key">hierarchical approach</span>: each PoP (200+ locations) has local counting, PoPs in the same region aggregate to a regional counter every ~1s, and regional counters sync globally every ~5s. They accept that a determined attacker can get <span class="dqa-key">~3× the limit</span> for a few seconds, but their DDoS mitigation layer catches volumetric attacks before the rate limiter is even involved. <span class="dqa-link">See: Edge Cases for DDoS handling</span>.</div>
+        </div>
+      </div>
+      <div class="dqa-sub-q">How do you test multi-region rate limiting accuracy?</div>
+      <div class="dqa-sub-a">
+        Use <span class="dqa-key">chaos engineering</span>: inject artificial latency between regions (tc netem), simulate region failures, and measure over-limit percentage. Key metric: <span class="dqa-key">"over-limit ratio"</span> = requests allowed above the configured limit / total requests. Target: &lt;5% over-limit during normal operation, &lt;20% during region failover.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="dqa-item">
+  <div class="dqa-q">Why use Redis Lua scripts instead of distributed locks for atomic rate limiting?</div>
+  <div class="dqa-a">
+    <span class="dqa-key">Lua scripts execute atomically on the Redis server</span> — no other commands run during execution. This eliminates race conditions without locks. A distributed lock (e.g., Redlock) would add <span class="dqa-key">2-3 extra round trips</span> (acquire + release + fencing), increasing latency from &lt;1ms to 5-10ms. Locks also introduce deadlock risk, require timeouts, and reduce throughput due to contention. Lua scripts are the <span class="dqa-key">correct primitive</span> for rate limiting because the operation is simple and short-lived.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">What happens if a Lua script takes too long in Redis?</div>
+      <div class="dqa-sub-a">
+        Redis has a <span class="dqa-key">lua-time-limit</span> config (default 5s, we set 100ms for rate limiting). If exceeded, Redis starts accepting read-only commands but the script continues until completion. It does NOT kill the script — it only unblocks other reads. For rate limiting Lua scripts, execution should be &lt;0.1ms because we're doing 2-3 simple operations. If your Lua script approaches 100ms, you have a design problem.
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">Can EVALSHA improve performance over EVAL?</div>
+          <div class="dqa-deep-a">Yes. <span class="dqa-key">EVALSHA</span> sends only the SHA1 hash of the script (40 bytes) instead of the full script text (~500 bytes). On first call, use <span class="dqa-key">SCRIPT LOAD</span> to cache the script. Subsequent calls use EVALSHA with the hash. This reduces network bandwidth by ~92% per rate limit check. At 500K checks/sec, that's saving ~220 MB/sec of network traffic. All production rate limiters should use EVALSHA.</div>
+        </div>
+      </div>
+      <div class="dqa-sub-q">How do you handle Redis cluster mode with Lua scripts?</div>
+      <div class="dqa-sub-a">
+        Redis Cluster requires all keys in a Lua script to hash to the <span class="dqa-key">same slot</span>. Use <span class="dqa-key">hash tags</span>: <code>rl:{user:123}:endpoint</code> — the <code>{user:123}</code> part determines the slot. This ensures all rate limit operations for a user go to the same shard. Caveat: if one user generates disproportionate traffic, their shard becomes a <span class="dqa-key">hot key</span> problem.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="dqa-item">
+  <div class="dqa-q">How should the rate limiter behave when Redis is completely down?</div>
+  <div class="dqa-a">
+    Implement a <span class="dqa-key">circuit breaker pattern</span>. After N consecutive Redis failures (e.g., 3), trip the circuit to "open" state: <span class="dqa-key">bypass Redis entirely</span> and either fail-open (allow all traffic) or fail-closed (reject all) based on the endpoint's configured policy. After a cooldown (e.g., 30s), enter "half-open" state: send one probe request to Redis. If it succeeds, close the circuit and resume normal operation.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">Can you do rate limiting without Redis at all, as a fallback?</div>
+      <div class="dqa-sub-a">
+        Yes, use <span class="dqa-key">local in-memory counters</span> as a degraded mode. Each app server maintains its own token bucket with <code>limit / num_servers</code> capacity. This is less accurate (each server allows its fraction independently) but provides basic protection. Combine with <span class="dqa-key">consistent hashing</span> at the load balancer to route the same user to the same server, improving accuracy of local counters.
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">What about using DynamoDB atomic counters as a Redis alternative?</div>
+          <div class="dqa-deep-a"><span class="dqa-key">DynamoDB UpdateItem with ADD</span> is atomic and durable. Latency is 5-10ms (vs Redis &lt;1ms), which is too high for hot-path rate limiting. But it works well for <span class="dqa-key">low-rate limits</span> like login attempts (5/15min) where 5ms extra is negligible. DynamoDB also gives you built-in TTL for automatic key expiration. Cost: $1.25 per million writes vs Redis flat rate — cheaper at low scale, expensive at high scale. <span class="dqa-link">See: Cost Estimates for comparison</span>.</div>
+        </div>
+      </div>
+      <div class="dqa-sub-q">How do you monitor rate limiter health?</div>
+      <div class="dqa-sub-a">
+        Key metrics: <span class="dqa-key">rate_limit_decisions_total</span> (counter, labels: allowed/rejected), <span class="dqa-key">rate_limit_latency_ms</span> (histogram, p50/p99), <span class="dqa-key">redis_connection_errors</span> (counter), <span class="dqa-key">circuit_breaker_state</span> (gauge: closed/open/half-open). Alert on: rejection rate spike (&gt;10% of traffic), Redis latency &gt;5ms p99, circuit breaker tripping. Dashboard should show per-endpoint and per-tier breakdowns.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="dqa-item">
+  <div class="dqa-q">How does rate limiting differ for WebSocket connections vs HTTP APIs?</div>
+  <div class="dqa-a">
+    WebSockets have <span class="dqa-key">two rate limiting dimensions</span>: connection rate (new connections/min) and message rate (messages/sec per connection). For connection rate, use standard Sliding Window Counter at the HTTP upgrade endpoint. For message rate, use <span class="dqa-key">Token Bucket per connection</span> because WebSocket messages are inherently bursty (e.g., typing indicators, real-time updates). The token bucket allows short bursts while capping sustained throughput.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">Where do you enforce WebSocket message rate limits — server-side or client-side?</div>
+      <div class="dqa-sub-a">
+        <span class="dqa-key">Both</span>. Client-side: implement backpressure with a message queue and send rate. Server-side: Token Bucket in the WebSocket handler. If the server rejects a message, send a <span class="dqa-key">rate_limit frame</span> back to the client with retry-after info. Unlike HTTP 429, there's no standard WebSocket rate limit frame, so define it in your protocol (e.g., JSON <code>{"type":"rate_limited","retry_ms":500}</code>).
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">How do gaming companies handle rate limiting for real-time multiplayer?</div>
+          <div class="dqa-deep-a">Gaming uses <span class="dqa-key">leaky bucket per player per action type</span>. Movement updates: 60/sec (tick rate). Chat: 1/sec. Ability use: per-cooldown. The rate limiter is embedded in the game server (not external Redis) for &lt;0.01ms overhead. Cheating detection layers above the rate limiter look for impossible action sequences. <span class="dqa-link">This intersects with distributed counting in the multiplayer server mesh</span>.</div>
+        </div>
+      </div>
+      <div class="dqa-sub-q">How do you rate limit GraphQL APIs where one request can be cheap or expensive?</div>
+      <div class="dqa-sub-a">
+        GraphQL needs <span class="dqa-key">query complexity scoring</span> instead of simple request counting. Assign a cost to each field/resolver (e.g., user=1, user.posts=10, user.posts.comments=50). Sum the query cost and deduct from a Token Bucket. GitHub's GraphQL API uses this: 5000 points/hour, each query costs variable points. This prevents abuse via deeply nested queries while allowing many cheap queries.
+      </div>
+    </div>
+  </div>
+</div>
+`}}
