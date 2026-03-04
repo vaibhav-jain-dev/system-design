@@ -2,7 +2,10 @@
 
 {{say "An LLM agent is a system where the model decides what actions to take, executes those actions via tools, observes the results, and iterates until the task is complete. Instead of a single prompt-response cycle, the agent runs an autonomous loop: reason about what to do, call a tool, observe the result, then decide the next step."}}
 
-{{thought "The key insight is that the LLM becomes a controller, not just a text generator. It reads the user's request, selects the right tool from a defined set, formats the tool call, interprets the result, and decides whether to call another tool or return a final answer. This is the foundation of Claude's tool use, OpenAI function calling, and every AI assistant that can browse the web or run code."}}
+{{think "The key insight: the LLM becomes a controller, not just a text generator. It reads the user's request, selects the right tool from a defined set, formats the tool call, interprets the result, and decides whether to call another tool or return a final answer. This is the foundation of Claude's tool use, OpenAI function calling, and every AI assistant that can browse the web or run code."
+  (whyNot "a single large prompt" "A single prompt cannot access real-time data, execute code, or query a database. The model's knowledge is frozen at training time. Tools break that limitation — the agent becomes a real-time actor, not a static text predictor.")
+  (whatIf "the task steps are predictable" "Use prompt chaining instead. Agents are for tasks where you cannot know the sequence of steps before seeing the input. If you can draw the flowchart before the user speaks, you do not need an agent — a deterministic chain is cheaper, faster, and easier to debug.")
+}}
 
 {{table "Agent Pattern vs Other LLM Patterns" (rows
   (row "Pattern"           "LLM Calls"  "Control Flow"            "Use Case"                          "Example")
@@ -13,6 +16,13 @@
 )}}
 
 {{key "Use the agent pattern when you cannot predict the sequence of steps needed to complete a task. If the steps are predictable, use prompt chaining instead. Agents shine when different user inputs require different tool combinations and orderings."}}
+
+{{triggerQs "Questions this phase could trigger"
+  "How do you decide between an agent and prompt chaining?"
+  "Prompt chaining when the steps are fixed — extract then classify then generate. Agent when steps depend on intermediate results. A research task might need 2 searches or 10 depending on the topic. If you can draw the flowchart before seeing the input, use chaining. If not, use an agent."
+  "What is the main operational risk of agents vs chains?"
+  "Unbounded cost. A chain makes exactly N LLM calls. An agent can loop indefinitely, each iteration burning tokens. Without hard limits on iterations, tokens, and wall time, a single adversarial prompt can trigger hundreds of LLM calls. Always set budgets before deploying any agent to production."
+}}
 
 {{phase 2 "Agent Architecture: The ReAct Loop" "8 min"}}
 
@@ -28,9 +38,11 @@
   (row "Terminate"    "LLM decides the task is complete"                "LLM returns text without tool call"      "Set max iterations to prevent loops")
 )}}
 
+{{hint "max_iterations = 10-20" "Most legitimate agent tasks complete in 3-7 iterations. Setting a hard cap at 10-20 catches infinite loops without frustrating users on complex tasks. If you see requests hitting the cap regularly, your task decomposition is wrong — the agent is stuck in a loop trying to recover from a bad tool call or unclear instructions."}}
+
 {{phase 3 "Tool Definition & Function Calling" "8 min"}}
 
-{{say "Tools are defined with a name, description, and a JSON schema for parameters. The LLM reads these definitions and decides which tool to call based on the user request. Good tool descriptions are critical since the LLM uses them to select the right tool."}}
+{{say "Tools are defined with a name, description, and a JSON schema for parameters. The LLM reads these definitions and decides which tool to call based on the user request. Good tool descriptions are critical — the LLM uses them to select the right tool."}}
 
 {{code "python" `# Tool definitions using JSON schema format
 # Works with both OpenAI and Anthropic APIs
@@ -145,7 +157,14 @@ TOOLS = [
   (row "Database write"    "CRUD operations"                   "Data corruption, mass deletes"         "Transaction limits, approval workflow")
 )}}
 
-{{avoid "Vague tool descriptions cause the LLM to pick the wrong tool. Bad: 'Search for things.' Good: 'Search the web for current information. Use when you need up-to-date facts, prices, or data that may have changed recently.' The description is the LLM's only guide for tool selection, so make it specific about when to use and when not to use each tool."}}
+{{avoid "Vague tool descriptions cause the LLM to pick the wrong tool. Bad: 'Search for things.' Good: 'Search the web for current information. Use when you need up-to-date facts, prices, or data that may have changed recently.' The description is the LLM's only guide for tool selection — make it specific about when to use and when NOT to use each tool."}}
+
+{{triggerQs "Questions this phase could trigger"
+  "How do you prevent the agent from calling a dangerous tool by mistake?"
+  "Three layers: write descriptions that explicitly state when NOT to call the tool (e.g., 'Only use when user explicitly asks to send an email'). Validate inputs server-side regardless of what the LLM passes. For destructive operations, require a separate human-in-the-loop confirmation step before executing. Never trust the LLM's judgment alone on write or mutation operations."
+  "How many tools should an agent have?"
+  "3-7 tools is the practical limit before tool selection quality degrades. More tools means more context consumed by tool definitions and a higher probability of choosing the wrong one. If you need many tools, use a router pattern: a lightweight classifier selects the relevant subset of tools before the main agent loop begins."
+}}
 
 {{phase 4 "Complete Agent Implementation (OpenAI)" "10 min"}}
 
@@ -396,6 +415,11 @@ TOOL_HANDLERS = {
 `}}
 
 {{key "Every tool must have: 1) Input validation to prevent misuse. 2) Output truncation to prevent context overflow. 3) Timeout to prevent hanging. 4) Error handling that returns useful messages the LLM can reason about. Never let a tool silently fail."}}
+
+{{think "Tool error messages are part of the agent's context — they must be informative. A generic 'error occurred' forces the agent to guess what went wrong. A specific 'Error: Only SELECT queries are allowed' lets the agent correct its approach on the next iteration without wasting a full LLM call to diagnose."
+  (whatIf "a tool returns a very large result" "Truncate to 5000 characters and append '...[truncated]'. The agent receives a signal that there is more data without blowing up the context window. Design your tools to summarize or paginate large results rather than dumping everything into context.")
+  (how "test tool reliability" "Write unit tests for each tool with: valid input (happy path), invalid input (bad SQL, missing params), empty results, and timeout scenarios. The agent cannot be more reliable than its tools. Flaky tools cause the agent to loop trying to recover from transient failures.")
+}}
 
 {{phase 6 "Agent with Anthropic Claude" "5 min"}}
 
@@ -656,6 +680,13 @@ class SafeAgent(Agent):
 
 {{avoid "Never give an agent unrestricted access to tools without budget controls. A single adversarial prompt can cause the agent to loop 100+ times, each calling an expensive model. Always set max_iterations, max_tokens, max_tool_calls, and wall_time limits. Log every tool call for audit."}}
 
+{{triggerQs "Questions this phase could trigger"
+  "How do you prevent prompt injection through tool results?"
+  "Three layers: sanitize tool outputs by stripping known injection patterns before they enter the conversation. Use XML or delimiter tags to clearly separate tool results from instructions — the model can visually distinguish data from instructions. Use a secondary classifier to flag suspicious tool outputs before injecting them into context. No single layer is sufficient."
+  "What budget limits should you set for a production agent?"
+  "Start conservative: max_iterations=10, max_tokens=30000, max_tool_calls=15, wall_time=45s. Then measure your p95 iteration count on real traffic and loosen limits to p95 + 50% headroom. The goal is catching pathological cases without breaking legitimate complex requests. Alert when requests approach 80% of any budget limit."
+}}
+
 {{phase 8 "Agent Observability" "5 min"}}
 
 {{say "Agents are hard to debug because the execution path is non-deterministic. The same input can produce different tool call sequences on different runs. You need structured logging and tracing."}}
@@ -748,23 +779,21 @@ class TracedAgent(SafeAgent):
   (nofit "Multi-Agent" "Avoid unless you truly need parallel collaborative work. Multi-agent systems are hard to debug, expensive, and often slower than a well-designed single agent. Hype exceeds practical value for most use cases.")
 )}}
 
+{{think "Multi-agent is the right architecture for exactly one scenario: genuinely parallel subtasks that can run concurrently and whose results must be synthesized. Orchestrator assigns tasks to specialized workers, each running independently. For anything sequential or where one step's output feeds the next, a single agent or prompt chain is strictly better."
+  (whyNot "multi-agent by default" "Multi-agent adds message passing overhead, makes failures harder to diagnose (which agent failed?), and compounds cost — every agent call is a full LLM inference. A well-designed single agent with 5 focused tools is faster, cheaper, and easier to debug than two agents talking to each other.")
+  (whatIf "you need specialized expertise per subtask" "Use a router agent instead. A fast, cheap model classifies the request, then routes to a specialized single agent (legal agent, code agent, data agent) each with domain-specific tools and system prompts. Same cost as multi-agent but linearly debuggable.")
+}}
+
 {{phase 10 "Interview Q&A" "5 min"}}
 
 {{qa
-  "How do you decide between an agent and prompt chaining?"
-  "Use prompt chaining when the steps are predictable and fixed, like extract then classify then generate. Use an agent when the steps depend on intermediate results. For example, a research task might need 2 searches or 10 depending on the topic. If you can draw the flowchart before seeing the input, use chaining. If not, use an agent."
-  "How do you prevent prompt injection through tool results?"
-  "Three layers: 1) Sanitize tool outputs by stripping known injection patterns. 2) Use XML or delimiter tags to clearly separate tool results from instructions in the conversation. 3) Use a secondary classifier to flag suspicious tool outputs before injecting them into context."
-}}
-
-{{qa
   "What is the cost of running an agent in production?"
-  "An agent averages 3-5 LLM calls per request. With GPT-4o at roughly 2K tokens per call, that is 10K tokens per request or about $0.05-0.10 per request. At 100K requests per month, expect $5K-10K in LLM costs alone. Use GPT-4o-mini for simpler tool selections to cut costs by 10x."
+  "An agent averages 3-5 LLM calls per request. With GPT-4o at roughly 2K tokens per call, that is 10K tokens per request or about $0.05-0.10. At 100K requests per month, expect $5K-10K in LLM costs alone. Use GPT-4o-mini for simpler tool selections to cut costs by 10x — only escalate to the expensive model for final answer synthesis."
   "How do you test agents?"
-  "Three levels: 1) Unit tests for individual tools with mocked inputs and outputs. 2) Integration tests with a small set of end-to-end scenarios and expected tool call sequences. 3) Evaluation harness that runs 200+ test queries and measures task completion rate, tool selection accuracy, and cost per query."
+  "Three levels: unit tests for individual tools with mocked inputs and expected outputs. Integration tests with a small set of end-to-end scenarios and the expected tool call sequence (e.g., 'for this query, the agent should call web_search then execute_python'). Evaluation harness running 200+ test queries measuring task completion rate, tool selection accuracy, and cost per query. Record all tool call traces to replay deterministically in tests."
 }}
 
-{{followup "How would you handle long-running agent tasks?" "Use an async architecture. The agent request goes to a task queue like SQS or Celery. A worker picks it up and runs the agent loop. The user gets a task ID and polls for completion or receives a webhook callback. Store intermediate results in a database so the agent can resume if the worker crashes. This also lets you set longer timeouts since the user is not waiting synchronously."}}
+{{followup "How would you handle long-running agent tasks?" "Async architecture. The agent request goes to a task queue (SQS or Celery). A worker picks it up and runs the agent loop. The user gets a task ID and polls for completion or receives a webhook callback. Store intermediate results so the agent can resume if the worker crashes. This also enables longer timeouts since the user is not waiting synchronously — the agent can run for minutes without a timeout error."}}
 
 {{checklist
   "Define tools with clear descriptions telling the LLM when to use each"

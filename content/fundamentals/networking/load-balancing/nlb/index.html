@@ -16,9 +16,21 @@
   (row "Cross-zone LB"        "Distribute across AZs (optional)"                "Even distribution at cost of cross-AZ fee")
 )}}
 
-{{thought "NLB is the right choice whenever you need something ALB cannot provide: static IPs, non-HTTP protocols, TLS passthrough, or latency under 100 microseconds. For everything else, ALB is better because it gives you L7 routing intelligence."}}
+{{think "Is NLB the right tool or am I avoiding ALB for the wrong reason?"
+  (whyNot "NLB for a REST API to avoid complexity" "NLB gives you less, not more simplicity for HTTP. No path routing, no WAF, no auth integration, no gRPC health checks. ALB is simpler for HTTP workloads.")
+  (whatIf "My team says we need static IPs but we also need path routing" "Use NLB -> ALB chain. NLB provides static Elastic IPs. ALB behind it provides L7 routing and WAF. You get both.")
+  (how "What is the definitive list of valid NLB reasons?" "Static IP required. Non-HTTP protocol (MQTT, FIX, custom TCP/UDP). TLS passthrough for mTLS or compliance. AWS PrivateLink. Sub-100us latency. Connection rate exceeding ALB capacity.")
+}}
+
+{{hint "NLB is a deliberate choice, not a default" "Default to ALB for HTTP. Reach for NLB when a specific constraint makes ALB impossible or inadequate."}}
 
 {{phase 2 "When to Use NLB" "3 min"}}
+
+{{triggerQs "NLB Use Case Identification"
+  "My partner requires whitelisting our IP — does that mean NLB?" "Yes. ALB has dynamic IPs that change when it scales. NLB lets you assign static Elastic IPs per AZ. Those IPs never change."
+  "I have a gaming server using custom UDP — can ALB handle this?" "No. ALB is HTTP-only. NLB handles raw UDP. For game servers using custom binary protocols over UDP, NLB is the only AWS load balancer option."
+  "What is PrivateLink and why does it require NLB?" "PrivateLink lets customers in other AWS accounts connect to your service via a private VPC endpoint without traversing the public internet. AWS requires NLB as the backend for PrivateLink — ALB is not supported."
+}}
 
 {{compare "NLB vs ALB Decision" (options
   (best "NLB for these cases" "Static IP needed for firewall rules. Non-HTTP protocol (TCP, UDP, MQTT, custom). TLS passthrough required. PrivateLink service. Latency-critical (gaming, HFT). Connection rate > 1M/sec.")
@@ -43,6 +55,12 @@
 
 {{say "NLB gives you a choice that ALB does not: TLS passthrough. The encrypted traffic goes straight to your backend without the LB decrypting it."}}
 
+{{triggerQs "TLS Mode Selection"
+  "When is TLS passthrough required, not just preferred?" "When you need mutual TLS (mTLS). If the backend must verify the client certificate, the NLB cannot terminate TLS — doing so strips the client cert before it reaches the backend."
+  "What compliance standards mandate TLS passthrough?" "PCI-DSS and HIPAA often require end-to-end encryption with no intermediate decryption. TLS passthrough satisfies this; NLB termination does not count as end-to-end."
+  "Does TLS passthrough prevent health checks?" "TCP health checks still work — NLB checks if the TCP port accepts connections. HTTP health checks require TLS termination since NLB cannot read HTTP when traffic is encrypted."
+}}
+
 {{table "TLS Handling Options" (rows
   (row "Mode"              "TLS Terminated At"   "NLB Sees Content?"  "Use Case"                            "Performance")
   (row "TLS Passthrough"   "Backend server"       "No (encrypted)"    "Mutual TLS, end-to-end encryption"   "No LB overhead for TLS")
@@ -50,11 +68,25 @@
   (row "TLS Re-encryption" "Both"                 "Yes at NLB"        "Decrypt at NLB, re-encrypt to backend" "Double TLS overhead")
 )}}
 
-{{followup "When would you use TLS passthrough?" "Two main cases: 1) Mutual TLS (mTLS) where the backend needs to verify the client certificate. NLB termination would strip the client cert. 2) Compliance requirements that mandate end-to-end encryption where no intermediate can decrypt. Common in healthcare (HIPAA) and finance (PCI-DSS)."}}
+{{think "Should I terminate TLS at NLB or pass it through?"
+  (whyNot "TLS passthrough by default" "If you terminate at NLB, you can do TCP health checks and NLB handles the TLS handshake load. Passthrough pushes TLS compute cost to every backend instance.")
+  (whatIf "My backend certificates expire — does passthrough make this harder?" "Yes. With passthrough, certificate rotation happens on every backend instance independently. With termination, you rotate one certificate on the NLB (via ACM).")
+  (how "Can I mix passthrough and termination?" "Yes. Different listeners on the same NLB can use different TLS modes. Port 443 can terminate for regular HTTPS, port 8443 can pass through for mTLS.")
+}}
+
+{{hint "ACM auto-rotation only works with termination" "If you terminate TLS at the NLB and use ACM certificates, renewal is automatic. With passthrough, you manage certificate rotation on every backend instance yourself."}}
+
+{{followup "When would you use TLS passthrough?" "Two main cases: 1) mTLS where the backend must verify the client certificate. NLB termination strips the client cert. 2) Compliance requirements mandating end-to-end encryption with no intermediate decryption. Common in healthcare (HIPAA) and finance (PCI-DSS)."}}
 
 {{phase 4 "PrivateLink" "3 min"}}
 
 {{say "PrivateLink is one of the most important NLB features. It lets you expose your service to other AWS accounts without traversing the public internet."}}
+
+{{triggerQs "PrivateLink Architecture"
+  "Why do enterprise SaaS companies care about PrivateLink?" "Enterprise customers have strict security policies: no traffic to external IPs, all traffic must stay on private networks. PrivateLink satisfies this — traffic never leaves the AWS network."
+  "Can I use ALB for PrivateLink?" "No. AWS PrivateLink requires an NLB as the service endpoint. ALB is not supported. This is the primary reason SaaS companies use NLB for HTTP services."
+  "Who controls which customers can connect?" "The service provider. You configure `allowed_principals` in the VPC Endpoint Service. You can require acceptance for each new connection request or auto-accept specific accounts."
+}}
 
 {{table "PrivateLink Architecture" (rows
   (row "Component"           "Role"                                        "Location")
@@ -66,7 +98,13 @@
 
 {{diagram "fund-nlb-privatelink"}}
 
-{{key "PrivateLink requires NLB. You cannot use ALB for PrivateLink. This is the primary reason SaaS companies use NLB even for HTTP services. They want to offer private API access to enterprise customers."}}
+{{think "When should I build a PrivateLink service?"
+  (whyNot "PrivateLink for internal microservices in the same account" "PrivateLink is for cross-account or cross-VPC access. For services in the same VPC, use internal ALB/NLB directly. PrivateLink adds unnecessary complexity.")
+  (whatIf "My enterprise customer refuses to use public endpoints" "PrivateLink is the right solution. They create a VPC endpoint in their account, you approve it, and they access your service via a private IP in their own VPC.")
+  (how "What does the consumer pay vs the provider?" "Consumer pays $0.01/hr per AZ for the VPC endpoint plus $0.01/GB data processed. Provider pays for the NLB. Costs are split between accounts.")
+}}
+
+{{key "PrivateLink requires NLB. You cannot use ALB for PrivateLink. This is the primary reason SaaS companies use NLB even for HTTP services — they offer private API access to enterprise customers."}}
 
 {{code "hcl" `# Terraform: NLB with static IP for PrivateLink
 resource "aws_lb" "service" {
@@ -131,7 +169,13 @@ resource "aws_vpc_endpoint_service" "main" {
   (row "Typical total"            "Base + highest NLCU"         "~$20-50/mo for most apps")
 )}}
 
-{{avoid "Cross-zone load balancing on NLB is disabled by default (unlike ALB where it is on). If your backends are unevenly distributed across AZs, enable it. But be aware: cross-AZ traffic costs $0.01/GB. At high throughput this adds up fast."}}
+{{think "Is cross-zone load balancing worth the cross-AZ cost?"
+  (whyNot "Cross-zone LB on NLB by default" "Unlike ALB, NLB has cross-zone off by default. At high throughput, $0.01/GB each way adds up fast. At 1TB/day bidirectional = $600/mo.")
+  (whatIf "My targets are 80% in AZ-a and 20% in AZ-b" "Traffic is distributed per AZ, not per target. AZ-b targets get overwhelmed. Enable cross-zone to distribute evenly, or rebalance your targets.")
+  (how "How do I decide whether to enable cross-zone?" "Compare cost of cross-AZ data transfer vs cost of running imbalanced targets. If your targets are evenly distributed across AZs, you may not need it.")
+}}
+
+{{avoid "Cross-zone load balancing on NLB is disabled by default. If your backends are unevenly distributed across AZs, enable it. But be aware: cross-AZ traffic costs $0.01/GB. At high throughput this adds up fast."}}
 
 {{phase 6 "NLB vs ALB Summary" "2 min"}}
 
@@ -166,7 +210,7 @@ resource "aws_vpc_endpoint_service" "main" {
 
 {{qa
   "Can NLB and ALB be used together?"
-  "Yes. NLB can target an ALB. Common pattern: NLB (static IP + PrivateLink) -> ALB (L7 routing + WAF). NLB forwards TCP to ALB. You get static IPs and L7 features. Additional cost: ~$16/mo for the NLB plus cross-LB data transfer."
+  "Yes. NLB can target an ALB. Pattern: NLB (static IP + PrivateLink) -> ALB (L7 routing + WAF). NLB forwards TCP to ALB. You get static IPs and L7 features. Additional cost: ~$16/mo for the NLB plus cross-LB data transfer."
   "How does NLB handle sudden traffic spikes?"
-  "NLB scales instantly, no pre-warming needed (unlike ALB). It is designed for millions of requests per second out of the box. This is because L4 forwarding is much simpler than L7 inspection. AWS pre-provisions NLB capacity."
+  "NLB scales instantly with no pre-warming needed. It is designed for millions of requests per second from the start. L4 forwarding is far simpler than L7 inspection — AWS pre-provisions NLB capacity at scale."
 }}

@@ -2,7 +2,10 @@
 
 {{say "Prompt chaining breaks a complex task into a sequence of focused LLM calls, where each step's output feeds into the next step's input. Instead of asking one massive prompt to do everything, you decompose the task into smaller, well-defined steps that are easier to debug, validate, and optimize individually."}}
 
-{{thought "Why not a single prompt? A single prompt handling multiple subtasks often produces lower quality results because the model has to juggle too many instructions at once. Chaining gives each step a focused prompt with clear instructions. You can also validate intermediate outputs and retry individual steps without repeating the entire pipeline."}}
+{{think "Why not a single prompt? A single prompt handling multiple subtasks often produces lower quality results because the model has to juggle too many instructions at once. Chaining gives each step a focused prompt with clear instructions. You can also validate intermediate outputs and retry individual steps without repeating the entire pipeline."
+  (whyNot "single large prompt" "Models under high instruction load make more errors on each individual task. A prompt that says 'extract, classify, summarize, then write a response' is forcing the model to context-switch. Each chained step can be independently retried, tuned, and tested — a monolithic prompt cannot.")
+  (whatIf "the number of steps is unknown at design time" "Use an agent instead. Chaining is for tasks where you can draw the flowchart before the user's input arrives. The moment you need the LLM to decide 'how many steps this requires', you have left chaining territory and entered agent territory.")
+}}
 
 {{table "Prompt Chaining vs Other Patterns" (rows
   (row "Pattern"          "Steps"       "Control Flow"              "When to Use"                           "Cost")
@@ -16,6 +19,13 @@
 
 {{key "Prompt chaining is the right pattern when the task has a predictable structure with 2-6 well-defined steps. Each step should have a single responsibility: extract, classify, generate, or validate. If you cannot predict the steps ahead of time, use an agent instead."}}
 
+{{triggerQs "Questions this phase could trigger"
+  "How do you decide how many steps to use in a chain?"
+  "One step per distinct responsibility. If a step is doing more than one thing — extracting AND classifying — split it. The test: can you write a single clear sentence describing what the step does? If not, it needs to be decomposed. In practice, 3-5 steps handles 90% of production use cases. Adding a 6th or 7th step adds latency and cost with diminishing quality returns."
+  "What happens when an intermediate step fails?"
+  "The chain should abort and return an error indicating which step failed. Never silently pass bad output to the next step — errors compound. Each step should have a validator that checks the output before passing it downstream. If validation fails, retry that step up to 2-3 times with format reminders before aborting the chain."
+}}
+
 {{phase 2 "Core Chaining Patterns" "8 min"}}
 
 {{say "There are four foundational chaining patterns. Most production LLM pipelines are combinations of these."}}
@@ -27,6 +37,8 @@
   (row "Conditional"       "A -> if X then B else C"       "Classify -> route to handler"               "Different paths for different inputs")
   (row "Gate (quality)"    "A -> Check -> retry or next"   "Generate -> Validate -> retry if bad"       "Quality control between steps")
 )}}
+
+{{hint "conditional chaining for routing" "The classify-then-route pattern is extremely powerful. Run a fast, cheap model to classify the input type (billing question, technical issue, sales inquiry), then route to a specialized chain with domain-specific context. This beats a single chain that tries to handle all cases because each specialized chain can be tuned for its specific domain."}}
 
 {{phase 3 "Chaining Framework Implementation" "10 min"}}
 
@@ -303,6 +315,18 @@ print("Total tokens:", result.total_tokens)
 print("Total latency: {:.0f}ms".format(result.total_latency_ms))
 `}}
 
+{{think "Use cheap models for extraction and classification, expensive models for generation. Extract and classify are essentially structured output tasks — they follow rules. Generation requires nuance, empathy, and judgment. GPT-4o-mini handles the first two at 1/15th the cost of GPT-4o. The quality difference only matters for the writing step."
+  (whyNot "gpt-4o-mini for the generation step" "The cost savings are real — about 15x. But customer-facing responses are where quality directly impacts satisfaction and retention. Run both models on a sample of 50 emails and have humans rate the responses. If mini is indistinguishable, switch. If reviewers prefer GPT-4o, the cost is justified.")
+  (how "measure quality by step" "Log tokens, latency, and success rate per step. High failure rates on extract (JSON parse errors) indicate unclear output instructions — add format examples. High failure rates on validate indicate the generation step produces inconsistent quality — add more specific criteria or increase retries.")
+}}
+
+{{triggerQs "Questions this phase could trigger"
+  "Why not run extract and classify in a single step?"
+  "Single-responsibility steps are easier to debug and tune. When the combined step fails, you do not know if extraction was wrong, classification was wrong, or both. Separate steps let you isolate the failure. The cost difference is negligible — one extra LLM call with a cheap model adds $0.001 and 200ms. The debuggability improvement is substantial."
+  "How do you handle the case where classification says requires_human=true?"
+  "Add a conditional step after classify that checks the requires_human flag. If true, route to a human queue instead of generating an automated response. This is the classify-then-route pattern — the classification step acts as a router that determines which downstream processing happens. The chain framework handles this with a conditional step or by checking the context dict before adding subsequent steps."
+}}
+
 {{phase 5 "The Gate Pattern: Quality Control" "5 min"}}
 
 {{say "The gate pattern adds a validation step between chain stages. An LLM or rule-based checker evaluates the intermediate output. If it fails, the step retries with feedback about what went wrong. This is how you get reliable outputs from unreliable models."}}
@@ -371,6 +395,8 @@ chain.add_step(
 
 {{key "The gate pattern is the most important reliability technique for prompt chains. Without gates, errors compound: a bad extraction leads to a bad classification which leads to a bad response. Gates catch errors early and either retry or abort, preventing garbage from propagating through the chain."}}
 
+{{hint "LLM-as-judge uses gpt-4o-mini" "The judge only needs to classify pass/fail and give a brief reason. GPT-4o-mini handles this at 1/15th the cost of GPT-4o. Using the same expensive model for both generation and judging doubles cost with no quality benefit for the judging task."}}
+
 {{phase 6 "Parallel Chains" "5 min"}}
 
 {{say "When subtasks are independent, run them in parallel to reduce latency. Then merge the results in a final step."}}
@@ -438,6 +464,13 @@ async def parallel_chain(
   (row "Mixed"         "Parallel group + Sequential"   "Same"            "Some independent, some dependent")
 )}}
 
+{{triggerQs "Questions this phase could trigger"
+  "When should you parallelize chain steps?"
+  "When the inputs are independent — each step does not need the output of another step to start. Classic examples: summarizing multiple documents before merging, running multiple classifiers simultaneously, generating multiple response variants for A/B testing. The total token cost is identical; you only save wall-clock latency. If steps are dependent, parallelization is impossible."
+  "What is the risk of parallel chains?"
+  "Rate limits and cost spikes. Firing 10 parallel LLM calls simultaneously can hit API rate limits and produce a burst of cost that looks alarming on dashboards. Add concurrency limits (asyncio.Semaphore) to cap simultaneous calls. Also: asyncio.gather fails fast by default — if one parallel task fails, the whole gather raises. Use return_exceptions=True to collect partial results."
+}}
+
 {{phase 7 "When to Chain vs Single Prompt vs Agent" "5 min"}}
 
 {{table "Decision Guide" (rows
@@ -471,7 +504,10 @@ async def parallel_chain(
   (row "Full chain with retries"                   "4-8"    "Mixed"       "~10K"     "$0.04"    "Highest quality")
 )}}
 
-{{thought "The key optimization: use cheaper, faster models (GPT-4o-mini, Claude Haiku) for extraction and classification steps, then use the expensive model (GPT-4o, Claude Sonnet) only for the final generation step. Classification rarely needs the most powerful model, but writing a nuanced customer response does. This can cut costs by 50-70 percent while maintaining output quality."}}
+{{think "The key optimization: use cheap models (GPT-4o-mini, Claude Haiku) for extraction and classification, expensive model (GPT-4o, Claude Sonnet) only for the final generation step. Classification rarely needs the most powerful model, but writing a nuanced customer response does. This cuts costs 50-70% while maintaining output quality."
+  (whyNot "cheap model for all steps" "The generation step is where quality matters most — it is what the user sees. GPT-4o-mini produces noticeably worse writing quality for long-form responses, nuanced explanations, and empathetic customer communication. Benchmark your specific use case but plan to use the expensive model for any step that requires synthesis, creativity, or judgment.")
+  (how "find the optimal model per step" "Build a 50-example test set with human quality ratings. Run each step independently with both models. Calculate per-step quality delta and cost delta. Steps where the quality delta is under 5% justify switching to the cheap model. Steps where quality delta exceeds 10% warrant keeping the expensive model.")
+}}
 
 {{code "python" `# Cost-optimized chain: cheap models for simple steps,
 # expensive model only where quality matters most
@@ -542,19 +578,19 @@ chain.add_step(
 
 {{qa
   "How do you debug a failing prompt chain?"
-  "Log every step's input, output, tokens, and latency. When the chain produces a bad result, trace backwards from the final output to find which step first went wrong. Fix that step's prompt, parser, or validator. This is why chaining is easier to debug than a single large prompt: you can isolate the failure to one specific step."
+  "Log every step's input, output, tokens, and latency. When the chain produces a bad result, trace backwards from the final output to find which step first went wrong. Fix that step's prompt, parser, or validator. This is why chaining is easier to debug than a single large prompt — you can isolate the failure to one specific step and test it in isolation."
   "What is the latency impact of prompt chaining?"
-  "Each step adds 500ms-2s of LLM call latency. A 4-step chain takes 2-8 seconds end-to-end. Mitigate with: 1) Use streaming for the final step so users see partial results. 2) Parallelize independent steps. 3) Use faster models for extraction and classification. 4) Cache repeated inputs at the step level."
+  "Each step adds 500ms-2s of LLM call latency. A 4-step chain takes 2-8 seconds end-to-end. Mitigate with: streaming the final step so users see partial results, parallelizing independent steps, using faster models (gpt-4o-mini adds ~400ms vs gpt-4o's ~1-2s), and caching repeated inputs at the step level for high-traffic pipelines."
 }}
 
 {{qa
   "How do you handle partial failures in a chain?"
-  "Three strategies: 1) Retry the failed step with a modified prompt that includes error feedback. 2) Use a fallback model if the primary model fails. 3) Return a partial result with a warning that some steps failed. Never silently return a bad result. Always surface which step failed and why."
+  "Three strategies: retry the failed step with a modified prompt that includes error feedback (what went wrong and what format is expected). Use a fallback model if the primary model fails. Return a partial result with a warning indicating which steps failed. Never silently return a bad result — always surface the failure point."
   "Can you chain prompts across different models?"
-  "Yes, and you should. Use cheap models like GPT-4o-mini or Claude Haiku for extraction and classification, then an expensive model like GPT-4o or Claude Sonnet for the final generation step. This cuts cost by 50-70 percent while maintaining quality where it matters most."
+  "Yes, and you should. Use cheap models (GPT-4o-mini, Claude Haiku) for extraction and classification, expensive models (GPT-4o, Claude Sonnet) for the final generation step. This cuts cost 50-70% while maintaining quality where it matters. The LLMChain framework's model_override parameter enables per-step model selection."
 }}
 
-{{followup "How would you implement prompt chaining with streaming?" "Stream only the final step. Steps 1 through N-1 run normally since you need their complete output before the next step can begin. For the last step, use the streaming API so the user sees tokens appear as they are generated. This gives the perception of lower latency even though total pipeline time is the same. In a web app, show a progress indicator during the earlier steps then switch to streaming text for the final generation."}}
+{{followup "How would you implement prompt chaining with streaming?" "Stream only the final step. Steps 1 through N-1 run normally since you need their complete output before the next step can begin. For the last step, use the streaming API so the user sees tokens appear as they are generated. In a web app, show a progress indicator (step 1 of 4, step 2 of 4...) during earlier steps, then switch to streaming text for the final generation. Total pipeline time is unchanged but perceived latency drops significantly."}}
 
 {{checklist
   "Decompose complex tasks into 2-6 focused steps"

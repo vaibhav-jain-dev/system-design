@@ -331,41 +331,56 @@
             var colW = Math.floor((vpW - gap) / 2);
             book.colW = colW;
 
-            // Step 1: Give the inner element a very wide width so CSS columns
-            // can flow ALL content without truncation. We use a large fixed
-            // number of columns (200) as an upper bound.
-            var maxCols = 200;
-            var hugeW = maxCols * colW + (maxCols - 1) * gap;
-            inner.style.cssText = 'width:' + hugeW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);';
+            // ── Sentinel-based column measurement ──
+            // Remove any old sentinel
+            var old = inner.querySelector('.book-sentinel');
+            if (old) old.remove();
 
-            // Step 2: After layout, measure how wide the content actually spread.
-            // Use a range to find the last character position — this is the most
-            // reliable way to get the true content extent in CSS multi-column.
+            // Add a tiny sentinel at the very end of content
+            var sentinel = document.createElement('div');
+            sentinel.className = 'book-sentinel';
+            sentinel.style.cssText = 'height:1px;width:1px;clear:both;break-inside:avoid;';
+            inner.appendChild(sentinel);
+
+            // Step 1: Measure content height in single-column mode
+            inner.style.cssText = 'width:' + colW + 'px;height:auto;column-count:1;';
+
             requestAnimationFrame(function() {
-                // Method: walk ALL leaf elements and find the rightmost bounding box
-                var innerRect = inner.getBoundingClientRect();
-                var maxRight = 0;
-                var allEls = inner.querySelectorAll('*');
-                for (var i = 0; i < allEls.length; i++) {
-                    var r = allEls[i].getBoundingClientRect();
-                    // Only consider elements with actual size (skip hidden/zero-size)
-                    if (r.width > 0 && r.height > 0) {
-                        var right = r.right - innerRect.left;
-                        if (right > maxRight) maxRight = right;
-                    }
-                }
+                var singleH = inner.scrollHeight;
 
-                // Actual columns used based on measured content width
-                var actualCols = Math.max(2, Math.ceil(maxRight / (colW + gap)));
-                if (actualCols % 2 !== 0) actualCols++;
+                // Step 2: Estimate columns needed with generous buffer
+                // Account for phase-header break-before gaps
+                var phases = inner.querySelectorAll('.phase-header').length;
+                var breakWaste = Math.max(0, phases - 1) * (vpH * 0.5);
+                var estCols = Math.ceil((singleH + breakWaste) / vpH);
+                estCols = Math.ceil(estCols * 1.5); // 50% safety margin
+                if (estCols % 2 !== 0) estCols++;
+                estCols = Math.max(4, estCols);
 
-                // Now set the width to exactly fit the actual columns
-                var totalW = actualCols * colW + (actualCols - 1) * gap;
-                inner.style.cssText = 'width:' + totalW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);transition:transform 0.45s cubic-bezier(0.16,1,0.3,1);';
+                // Step 3: Apply multi-column with generous width
+                var totalW = estCols * colW + (estCols - 1) * gap;
+                inner.style.cssText = 'width:' + totalW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);';
 
-                book.total = Math.max(1, actualCols / 2);
-                updateBookUI();
-                bookGo(Math.min(book.page, book.total - 1));
+                // Step 4: Wait for multi-column layout, then measure sentinel position
+                requestAnimationFrame(function() {
+                requestAnimationFrame(function() {
+                    var innerRect = inner.getBoundingClientRect();
+                    var sRect = sentinel.getBoundingClientRect();
+                    var contentRight = sRect.right - innerRect.left;
+
+                    // Actual columns from sentinel position
+                    var actualCols = Math.max(2, Math.ceil(contentRight / (colW + gap)));
+                    if (actualCols % 2 !== 0) actualCols++;
+
+                    // Set final width to exactly fit
+                    var finalW = actualCols * colW + (actualCols - 1) * gap;
+                    inner.style.cssText = 'width:' + finalW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);transition:transform 0.45s cubic-bezier(0.16,1,0.3,1);';
+
+                    book.total = Math.max(1, actualCols / 2);
+                    updateBookUI();
+                    bookGo(Math.min(book.page, book.total - 1));
+                });
+                });
             });
         }
 
