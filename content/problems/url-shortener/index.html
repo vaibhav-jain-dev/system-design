@@ -327,6 +327,15 @@ async def resolve_short_url(short_code: str) -> str:
 
 {{followup "What happens if DynamoDB is down?" "DynamoDB has 99.999% SLA with Global Tables. But if it degrades: 1) ElastiCache serves cached URLs (95% of reads still work). 2) KGS has pre-generated keys locally, so writes buffer in SQS until DB recovers. 3) For the 5% cache-miss reads, return a friendly error page with retry. Most users never notice."}}
 
+{{hint "why circuit breaker over simple retry?" "A simple retry loop hammers a degraded service, making the outage worse. A circuit breaker (Hystrix/Resilience4j) stops sending requests after N consecutive failures, waits a cooldown period, then sends a single probe request. If the probe succeeds, traffic resumes. This gives the downstream service time to recover instead of drowning it with retries."}}
+
+{{triggerQs "Questions about reliability"
+  "How do you test failover before it happens in production?"
+  "Run chaos engineering experiments: inject AZ failures with AWS Fault Injection Simulator, kill ECS tasks with Chaos Monkey, throttle DynamoDB with IAM policy changes. Validate that ALB reroutes in under 60 seconds, cache failover promotes replica, and KGS local batches sustain writes. Run these monthly in a staging environment that mirrors production topology."
+  "What is the difference between graceful degradation and failover?"
+  "Failover replaces a failed component with a standby (e.g., ElastiCache replica promotion). Graceful degradation reduces functionality while staying available (e.g., serve cached URLs but reject new URL creation when DynamoDB is throttled). Failover is for component-level failures; graceful degradation is for partial system-level outages where no single failover fixes the problem."
+}}
+
 {{phase 8 "Edge Cases & Security" "5 min"}}
 
 {{say "Edge cases and security are where interviews go deep. Let me cover the critical ones."}}
@@ -342,9 +351,18 @@ async def resolve_short_url(short_code: str) -> str:
 
 {{qa
   "How do you handle a URL shortener that serves as an open redirect vulnerability?"
-  "Open redirect is the biggest security risk. Attackers create short URLs pointing to phishing sites that look legitimate because the domain is ours. Mitigation: 1) Preview page for untrusted URLs (GET /{code}+ shows destination before redirecting). 2) Google Safe Browsing API check on creation. 3) Periodic re-scan of existing URLs. 4) User reporting + automated takedown."
+  "Attackers create short URLs pointing to phishing sites that look legitimate because the domain is yours. Mitigation: 1) Preview page for untrusted URLs (GET /{code}+ shows destination before redirecting). 2) Google Safe Browsing API check on creation. 3) Periodic re-scan of existing URLs. 4) User reporting + automated takedown."
   "Should you support URL preview before redirect?"
   "Yes, add a preview endpoint: GET /preview/{code} returns an HTML page showing the destination URL. Users click to proceed. This protects against phishing. Many shorteners (bit.ly, t.co) do this."
+}}
+
+{{hint "why conditional PutItem for custom aliases?" "DynamoDB conditional writes (attribute_not_exists) are strongly consistent within a region and atomic — no race condition between two users trying to claim the same alias simultaneously. This eliminates the need for distributed locks or two-phase checks. The trade-off: conditional writes cost the same as regular writes but return a ConditionalCheckFailedException on conflict, which you map to HTTP 409."}}
+
+{{triggerQs "Questions about security"
+  "How do you handle URL shortener abuse for SEO spam?"
+  "Spammers create thousands of short URLs pointing to link farms to inflate PageRank. Defense: 1) Add rel='nofollow' to all redirect responses so search engines do not pass link equity. 2) Rate limit creation per IP and per account. 3) Flag accounts that create URLs pointing to domains on known spam lists (Spamhaus DBL). 4) Require email verification for accounts creating more than 50 URLs/day."
+  "Should you validate that the destination URL actually exists before shortening?"
+  "No for the default case. HEAD-requesting every destination URL adds 100-2000ms latency on creation and breaks URLs behind auth walls, VPNs, or firewalls your server cannot reach. Instead, validate URL format (valid scheme, hostname, no javascript: URIs) synchronously, and check Google Safe Browsing asynchronously. Only do existence checks as a premium feature for enterprise customers."
 }}
 
 {{phase 9 "Analytics Pipeline" "3 min"}}
@@ -376,6 +394,15 @@ async def resolve_short_url(short_code: str) -> str:
   "AP — we prioritize availability over consistency. A redirect must always work, even if it serves a slightly stale mapping during a partition. In practice, DynamoDB Global Tables replicate in under 1 second, so inconsistency windows are tiny. The only CP operation is URL creation (conditional write ensures no duplicate short_codes), but this is a local operation within a single region."
   "What happens if a URL is created in us-east-1 but a user in eu-west-1 tries to access it immediately?"
   "DynamoDB Global Tables replicate within 1 second. If the user clicks within that 1-second window, they get a 404. This is extremely rare (sub-second race condition). Mitigation: CloudFront can be configured to retry the origin on 404 with a 1-second delay. Or accept the edge case — it self-heals in under 1 second."
+}}
+
+{{hint "why last-writer-wins is acceptable here?" "URL mappings are write-once, read-many. Once created, a short_code-to-URL mapping almost never changes. The only conflict scenario is two users in different regions creating the same custom alias during a network partition — astronomically rare. For KGS-generated keys, conflicts are impossible because each region gets non-overlapping key ranges."}}
+
+{{triggerQs "Questions about geo-distribution"
+  "How do you route users to the nearest region?"
+  "Route 53 latency-based routing measures RTT from the user's DNS resolver to each region and returns the IP of the lowest-latency region. CloudFront handles this at the edge layer automatically — users hit the nearest of 400+ PoPs regardless of which region the origin is in. For writes, Route 53 routes to the nearest region's ALB."
+  "What is the cost of running multi-region vs single-region?"
+  "DynamoDB Global Tables charges standard write pricing in each region plus $0.725 per million replicated write units. For 1,157 writes/sec across 3 regions, replication adds ~$2,500/month. ElastiCache needs a separate cluster per region (~$735/month each). Total multi-region premium: roughly 2.5x the single-region cost. Only justified when you need sub-50ms global latency or regulatory data residency."
 }}
 
 {{phase 11 "Cost Estimates" "3 min"}}
