@@ -72,6 +72,18 @@ func slugIcon(slug string) template.HTML {
 		"icon-fundamental":   `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>`,
 		"icon-instagram":     `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5"/><circle cx="12" cy="12" r="5"/><circle cx="17.5" cy="6.5" r="1.5"/></svg>`,
 		"icon-problem":       `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><circle cx="12" cy="12" r="10"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
+		"icon-algorithm":     `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M8 7h8M8 11h6M8 15h4"/></svg>`,
+		"icon-base62":        `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/><line x1="14" y1="4" x2="10" y2="20"/></svg>`,
+		"icon-token-bucket":  `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><circle cx="12" cy="14" r="3"/></svg>`,
+		"icon-consistent-hash": `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="5" r="1.5" fill="currentColor"/><circle cx="18" cy="10" r="1.5" fill="currentColor"/><circle cx="16" cy="17" r="1.5" fill="currentColor"/><circle cx="7" cy="16" r="1.5" fill="currentColor"/><circle cx="5" cy="9" r="1.5" fill="currentColor"/></svg>`,
+		"icon-bloom-filter":  `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="6" x2="6" y2="18"/><line x1="10" y1="6" x2="10" y2="18"/><line x1="14" y1="6" x2="14" y2="18"/><line x1="18" y1="6" x2="18" y2="18"/><circle cx="6" cy="10" r="1" fill="currentColor"/><circle cx="14" cy="10" r="1" fill="currentColor"/><circle cx="10" cy="14" r="1" fill="currentColor"/><circle cx="18" cy="14" r="1" fill="currentColor"/></svg>`,
+		"icon-snowflake-id":  `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/><line x1="19.07" y1="4.93" x2="4.93" y2="19.07"/></svg>`,
+		"icon-pattern":       `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.57-3.25 3.92L12 22"/><path d="M12 2a4 4 0 0 0-4 4c0 1.95 1.4 3.57 3.25 3.92"/><circle cx="12" cy="14" r="2"/><line x1="8" y1="18" x2="16" y2="18"/></svg>`,
+		"icon-rag":           `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="8" x2="14" y2="8"/><line x1="8" y1="11" x2="14" y2="11"/><line x1="8" y1="14" x2="12" y2="14"/></svg>`,
+		"icon-agent-tools":   `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`,
+		"icon-prompt-chain":  `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`,
+		"icon-guardrails":    `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>`,
+		"icon-embeddings":    `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><line x1="9" y1="6" x2="15" y2="6"/><line x1="6" y1="9" x2="6" y2="15"/><line x1="18" y1="9" x2="18" y2="15"/><line x1="9" y1="18" x2="15" y2="18"/><line x1="9" y1="8" x2="15" y2="16"/></svg>`,
 	}
 
 	slugToIcon := map[string]string{
@@ -89,6 +101,18 @@ func slugIcon(slug string) template.HTML {
 		"instagram":                  "icon-instagram",
 		"problem":                    "icon-problem",
 		"fundamental":                "icon-fundamental",
+		"algorithm":                  "icon-algorithm",
+		"base62-encoding":            "icon-base62",
+		"token-bucket":               "icon-token-bucket",
+		"consistent-hashing":         "icon-consistent-hash",
+		"bloom-filter":               "icon-bloom-filter",
+		"snowflake-id":               "icon-snowflake-id",
+		"pattern":                    "icon-pattern",
+		"rag":                        "icon-rag",
+		"agent-tools":                "icon-agent-tools",
+		"prompt-chaining":            "icon-prompt-chain",
+		"guardrails":                 "icon-guardrails",
+		"embeddings-vector-search":   "icon-embeddings",
 	}
 
 	iconName := ""
@@ -261,12 +285,21 @@ func tableMacro(title string, rows []TableRow) template.HTML {
 	return template.HTML(sb.String())
 }
 
-// diagram renders an SVG-based diagram from node/edge definitions.
-// For now returns a placeholder — will be expanded with full SVG rendering.
-func diagram(title string) template.HTML {
+// diagram renders an ASCII art diagram in a styled container.
+// Usage: {{diagram "Title" `ascii art here`}}
+// If only title is given (no art), renders a placeholder.
+func diagram(title string, args ...string) template.HTML {
+	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+		return template.HTML(fmt.Sprintf(
+			`<div class="diagram-container">
+				<div class="diagram-title">%s</div>
+				<div class="diagram-placeholder">Diagram: %s</div>
+			</div>`, title, title))
+	}
+	art := template.HTMLEscapeString(args[0])
 	return template.HTML(fmt.Sprintf(
 		`<div class="diagram-container">
 			<div class="diagram-title">%s</div>
-			<div class="diagram-placeholder">Diagram: %s</div>
-		</div>`, title, title))
+			<pre class="diagram-art">%s</pre>
+		</div>`, title, art))
 }

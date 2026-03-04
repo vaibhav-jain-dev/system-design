@@ -1,0 +1,349 @@
+{{phase 1 "Token Bucket Concept" "3 min"}}
+
+{{say "The token bucket algorithm controls request rate by modeling a bucket that fills with tokens at a steady rate. Each request consumes one token. If the bucket is empty, the request is rejected. The bucket has a maximum capacity, which allows short bursts."}}
+
+{{diagram "Token Bucket: Fill and Drain" `
+  Bucket Capacity: 10 tokens
+  Refill Rate: 2 tokens/second
+
+  Time 0s:  [**********]  10/10 tokens (full)
+             Request! -1 token
+  Time 0s:  [********* ]   9/10 tokens
+
+             Burst of 8 requests! -8 tokens
+  Time 0s:  [*         ]   1/10 tokens
+
+             No tokens added yet (same second)
+             Request!
+  Time 0s:  [          ]   0/10 tokens
+
+             Request! --> REJECTED (bucket empty)
+
+             ...2 seconds pass, +4 tokens refilled...
+
+  Time 2s:  [****      ]   4/10 tokens (refilled)
+             Request! -1 token
+  Time 2s:  [***       ]   3/10 tokens
+
+  Key insight: bucket allows bursts UP TO capacity,
+  but sustained rate cannot exceed refill_rate.
+`}}
+
+{{table "Token Bucket Parameters" (rows
+  (row "Parameter"     "Also Called"        "Controls"                         "Example")
+  (row "bucket_size"   "capacity, burst"    "Maximum burst size"               "100 requests")
+  (row "refill_rate"   "rate, tokens/sec"   "Sustained throughput limit"       "10 requests/sec")
+  (row "tokens"        "available"          "Current tokens in bucket"         "0-100")
+  (row "last_refill"   "last_update"        "Timestamp of last refill calc"    "Unix timestamp")
+)}}
+
+{{key "Token bucket has two knobs: bucket_size controls burst tolerance, refill_rate controls sustained throughput. A bucket with size=100 and rate=10/sec allows a burst of 100 requests instantly, then sustains 10 per second."}}
+
+{{phase 2 "The Algorithm" "3 min"}}
+
+{{say "The algorithm uses lazy refill: instead of running a background timer to add tokens, we calculate how many tokens should have been added since the last request."}}
+
+{{table "Algorithm Steps" (rows
+  (row "Step"  "Action"                                                    "Why")
+  (row "1"     "Calculate elapsed time since last_refill"                  "Determine how many tokens to add")
+  (row "2"     "Add elapsed * refill_rate tokens, cap at bucket_size"      "Lazy refill: no background thread needed")
+  (row "3"     "If tokens >= 1: subtract 1, allow request"                "Request consumes a token")
+  (row "4"     "If tokens < 1: reject request, return retry-after"        "Bucket is empty, rate exceeded")
+  (row "5"     "Update last_refill timestamp"                             "For next refill calculation")
+)}}
+
+{{thought "The lazy refill approach is critical. You do NOT need a background thread adding tokens every millisecond. On each request, compute how many tokens WOULD have been added since the last check. This makes the algorithm stateless between requests and trivial to implement in Redis."}}
+
+{{phase 3 "Python Implementation (Thread-Safe)" "8 min"}}
+
+{{say "Here is a complete thread-safe implementation suitable for a single-server deployment. For distributed systems, see the Redis version in Phase 5."}}
+
+{{code "python" `import time
+import threading
+
+
+class TokenBucket:
+    """Thread-safe token bucket rate limiter.
+
+    Args:
+        capacity: Maximum tokens (burst size).
+        refill_rate: Tokens added per second (sustained rate).
+    """
+
+    def __init__(self, capacity: float, refill_rate: float):
+        self.capacity = capacity
+        self.refill_rate = refill_rate
+        self.tokens = capacity       # Start full
+        self.last_refill = time.monotonic()
+        self.lock = threading.Lock()
+
+    def _refill(self):
+        """Add tokens based on elapsed time since last refill."""
+        now = time.monotonic()
+        elapsed = now - self.last_refill
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
+        self.last_refill = now
+
+    def allow(self, tokens_needed: int = 1) -> dict:
+        """Check if a request should be allowed.
+
+        Args:
+            tokens_needed: Tokens this request costs (default 1).
+
+        Returns:
+            dict with allowed, remaining, and retry_after keys.
+        """
+        with self.lock:
+            self._refill()
+
+            if self.tokens >= tokens_needed:
+                self.tokens -= tokens_needed
+                return {
+                    "allowed": True,
+                    "remaining": int(self.tokens),
+                    "retry_after": 0,
+                }
+
+            # Calculate wait time until enough tokens refill
+            deficit = tokens_needed - self.tokens
+            wait_seconds = deficit / self.refill_rate
+            return {
+                "allowed": False,
+                "remaining": 0,
+                "retry_after": round(wait_seconds, 2),
+            }
+
+
+class RateLimiter:
+    """Manages one token bucket per user/key."""
+
+    def __init__(self, capacity: float, refill_rate: float):
+        self.capacity = capacity
+        self.refill_rate = refill_rate
+        self.buckets = {}
+        self.lock = threading.Lock()
+
+    def is_allowed(self, key: str) -> dict:
+        with self.lock:
+            if key not in self.buckets:
+                self.buckets[key] = TokenBucket(
+                    self.capacity, self.refill_rate
+                )
+        return self.buckets[key].allow()
+
+
+# --- Usage ---
+limiter = RateLimiter(capacity=10, refill_rate=2.0)
+
+for i in range(15):
+    result = limiter.is_allowed("user:123")
+    status = "OK" if result["allowed"] else "REJECTED"
+    print("Request {}: {} (remaining: {})".format(
+        i + 1, status, result["remaining"]
+    ))
+# Output: first 10 requests ALLOW, then 5 REJECT
+# Wait 5 seconds -> 10 tokens refill -> all requests allowed again
+`}}
+
+{{phase 4 "Algorithm Comparison" "5 min"}}
+
+{{say "There are four main rate limiting algorithms. Each makes a different trade-off between burst handling, memory usage, and accuracy."}}
+
+{{compare "Rate Limiting Algorithm" (options
+  (best "Token Bucket" "Allows controlled bursts up to bucket capacity while enforcing sustained rate. O(1) memory per key. Used by AWS API Gateway, Stripe, and most production APIs.")
+  (alt "Sliding Window Counter" "Weighted count from current and previous time windows. No burst problem at window boundaries. O(1) memory per key. Used by Cloudflare.")
+  (alt "Leaky Bucket" "Processes requests at a fixed rate like water dripping from a bucket. Smooths all bursts completely. Good for systems that need uniform output rate.")
+  (nofit "Fixed Window Counter" "Counts requests per fixed time window. Has the boundary burst problem: 2x the limit is possible across two adjacent window edges. Only acceptable for MVP.")
+)}}
+
+{{table "Algorithm Comparison" (rows
+  (row "Algorithm"               "Memory/Key"  "Burst Handling"         "Accuracy"    "Complexity")
+  (row "Token Bucket"            "O(1)"        "Allows bursts up to cap" "High"       "Simple")
+  (row "Leaky Bucket"            "O(1)"        "Smooths all bursts"     "High"        "Simple")
+  (row "Fixed Window Counter"    "O(1)"        "2x burst at boundary"   "Medium"      "Simplest")
+  (row "Sliding Window Log"      "O(N)"        "Exact, no burst issue"  "Perfect"     "Memory-heavy")
+  (row "Sliding Window Counter"  "O(1)"        "Minimal edge burst"     "High"        "Medium")
+)}}
+
+{{diagram "Token Bucket vs Leaky Bucket" `
+  TOKEN BUCKET                        LEAKY BUCKET
+  (allows bursts)                     (smooths output)
+
+  Incoming:  |||||| || |  | |||       Incoming:  |||||| || |  | |||
+               |                                    |
+               v                                    v
+          +----------+                         +----------+
+          | Tokens:5 |                         | Queue:5  |
+          | Cap: 10  |                         | Cap: 10  |
+          +----+-----+                         +----+-----+
+               |                                    |
+               v                                    v
+  Outgoing: |||||| || |  | |||       Outgoing:  | | | | | | | | | |
+            (bursty, mirrors input)             (constant rate output)
+
+  Token bucket: if tokens available, request passes immediately.
+  Leaky bucket: requests queue and drain at a fixed rate.
+`}}
+
+{{phase 5 "Distributed Token Bucket with Redis" "8 min"}}
+
+{{say "For distributed systems with multiple app servers, the bucket state must live in Redis. A Lua script ensures atomic check-and-update with no race conditions."}}
+
+{{code "python" `import time
+import redis
+
+
+class DistributedTokenBucket:
+    """Distributed token bucket using Redis + Lua script.
+
+    All state lives in Redis. The Lua script ensures atomicity.
+    No race conditions between multiple app servers.
+    """
+
+    LUA_SCRIPT = """
+    local key = KEYS[1]
+    local capacity = tonumber(ARGV[1])
+    local refill_rate = tonumber(ARGV[2])
+    local now = tonumber(ARGV[3])
+    local requested = tonumber(ARGV[4])
+
+    -- Get current bucket state
+    local bucket = redis.call('HMGET', key, 'tokens', 'last_refill')
+    local tokens = tonumber(bucket[1])
+    local last_refill = tonumber(bucket[2])
+
+    -- First request: initialize full bucket
+    if tokens == nil then
+        tokens = capacity
+        last_refill = now
+    end
+
+    -- Lazy refill based on elapsed time
+    local elapsed = math.max(0, now - last_refill)
+    tokens = math.min(capacity, tokens + elapsed * refill_rate)
+
+    -- Check and consume tokens
+    local allowed = 0
+    local retry_after = 0
+    if tokens >= requested then
+        tokens = tokens - requested
+        allowed = 1
+    else
+        retry_after = math.ceil((requested - tokens) / refill_rate)
+    end
+
+    -- Save state with TTL for auto-cleanup of idle buckets
+    redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now)
+    redis.call('EXPIRE', key, math.ceil(capacity / refill_rate) * 2)
+
+    return {allowed, math.floor(tokens), retry_after}
+    """
+
+    def __init__(self, redis_client: redis.Redis):
+        self.redis = redis_client
+        self.script = self.redis.register_script(self.LUA_SCRIPT)
+
+    def is_allowed(
+        self, key: str, capacity: int, refill_rate: float,
+        tokens_needed: int = 1,
+    ) -> dict:
+        """Check if request is allowed.
+
+        Args:
+            key: Rate limit key (e.g. "rl:user:123").
+            capacity: Max burst size.
+            refill_rate: Tokens per second (sustained rate).
+            tokens_needed: Cost of this request.
+        """
+        now = time.time()
+        result = self.script(
+            keys=[key],
+            args=[capacity, refill_rate, now, tokens_needed],
+        )
+        return {
+            "allowed": bool(result[0]),
+            "remaining": int(result[1]),
+            "retry_after": int(result[2]),
+            "limit": capacity,
+        }
+
+
+# --- Usage across multiple API servers ---
+r = redis.Redis(host="localhost", port=6379)
+limiter = DistributedTokenBucket(r)
+
+# Pro tier: 100 burst, 10/sec sustained
+result = limiter.is_allowed("rl:user:42", capacity=100, refill_rate=10)
+if result["allowed"]:
+    print("Allowed, {} remaining".format(result["remaining"]))
+else:
+    print("Rate limited, retry in {}s".format(result["retry_after"]))
+`}}
+
+{{avoid "Never implement distributed rate limiting with separate GET and SET commands. Between reading the token count and updating it, another server can read the same stale value. Both servers allow the request, double-spending the last token. Always use a Lua script or MULTI/EXEC for atomicity."}}
+
+{{phase 6 "System Design Integration" "5 min"}}
+
+{{say "Token bucket rate limiting appears in API rate limiter interviews. Here is how it fits as middleware in the request path."}}
+
+{{diagram "Token Bucket in API Architecture" `
+  Client Request
+       |
+       v
+  +---------+
+  |   ALB   |   Load Balancer
+  +---------+
+       |
+       v
+  +-------------------+
+  |   API Server      |
+  |  +--------------+ |
+  |  | Rate Limit   |-+--------> Redis (Lua script)
+  |  | Middleware    | |          HMGET + HMSET atomic
+  |  +------+-------+ |
+  |         |          |
+  |    +----+----+     |
+  |    |         |     |
+  |    v         v     |
+  |  ALLOW    REJECT   |
+  |  (app)    (429)    |
+  +-------------------+
+
+  Rate limit headers on EVERY response:
+    X-RateLimit-Limit: 100
+    X-RateLimit-Remaining: 73
+    X-RateLimit-Reset: 1704067260
+    Retry-After: 8  (only on 429 responses)
+`}}
+
+{{table "Configuration by API Tier" (rows
+  (row "API Tier"      "Bucket Size (burst)"  "Refill Rate"      "Effective Limit"              "Use Case")
+  (row "Free"          "20 requests"          "1 req/sec"        "20 burst, 60/min sustained"   "Hobbyist developers")
+  (row "Pro"           "100 requests"         "10 req/sec"       "100 burst, 600/min sustained"  "Production apps")
+  (row "Enterprise"    "500 requests"         "50 req/sec"       "500 burst, 3000/min sustained" "High-traffic services")
+  (row "Login"         "5 requests"           "0.1 req/sec"      "5 burst, 6/min sustained"     "Brute-force protection")
+)}}
+
+{{qa
+  "Why choose token bucket over sliding window for API rate limiting?"
+  "Token bucket naturally allows bursts, which matches real API usage patterns. A mobile app may batch 20 requests on launch, then go quiet. Sliding window would reject some of those burst requests even if the user is well under the sustained rate limit."
+  "What happens when Redis is down?"
+  "Fail-open: allow all requests through. A few seconds of unlimited traffic is better than a total outage. Exception: payment and authentication endpoints should fail-closed to prevent abuse or fraud."
+}}
+
+{{followup "How do you rate limit across multiple regions?" "Two approaches: 1) Per-region buckets where each region has its own bucket. A user gets N tokens per region. Total possible is N times the number of regions. Simple but over-counts. 2) Async sync where regions share token counts via a gossip protocol every 1-5 seconds. Most companies use approach 1 and accept the over-count because cross-region sync adds latency to every request."}}
+
+{{phase 7 "Interview Checklist" "2 min"}}
+
+{{checklist
+  "Two parameters: bucket_size (burst) and refill_rate (sustained)"
+  "Lazy refill: calculate tokens on demand, no background timer"
+  "Thread-safe: mutex lock (single server) or Lua script (distributed)"
+  "O(1) time and O(1) space per rate limit key"
+  "Allows bursts up to bucket capacity, then enforces sustained rate"
+  "Return X-RateLimit-* and Retry-After headers on every API response"
+  "Fail-open on Redis failure for most APIs, fail-closed for payments"
+  "Used by AWS API Gateway, Stripe, GitHub, and most production rate limiters"
+}}
+
+{{key "The token bucket interview tests whether you understand the two knobs (burst vs sustained rate), why lazy refill eliminates background threads, and how Redis Lua scripts prevent race conditions in distributed deployments. Always discuss fail-open vs fail-closed as a design decision."}}

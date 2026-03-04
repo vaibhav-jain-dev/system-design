@@ -1,0 +1,292 @@
+{{phase 1 "The Problem: Why Not Modulo Hashing?" "3 min"}}
+
+{{say "When distributing keys across N servers, the naive approach is hash(key) % N. The problem: when you add or remove a server, N changes and almost every key remaps to a different server. Consistent hashing solves this by only moving K/N keys when a node changes."}}
+
+{{table "Modulo Hashing Failure Modes" (rows
+  (row "Scenario"               "Keys Remapped"                "Impact")
+  (row "3 servers, add 1"       "~75% of keys move"            "Cache stampede, massive DB load")
+  (row "10 servers, lose 1"     "~90% of keys move"            "Near-total cache invalidation")
+  (row "100 servers, add 1"     "~99% of keys move"            "Catastrophic rebalancing event")
+  (row "Consistent hashing"     "Only K/N keys move"           "Minimal disruption, no stampede")
+)}}
+
+{{thought "With modulo hashing on 100 cache servers, losing one node remaps 99% of keys. Every key misses cache and hits the database simultaneously. This thundering herd takes down production systems. Consistent hashing limits the blast radius to 1/N of keys."}}
+
+{{key "Consistent hashing is the go-to algorithm whenever you distribute data across a cluster that can grow or shrink. Used by DynamoDB, Cassandra, Memcached, Redis Cluster, Akamai CDN, and Discord."}}
+
+{{phase 2 "The Hash Ring Concept" "5 min"}}
+
+{{say "Consistent hashing maps both servers and keys onto a circular hash space called a ring, ranging from 0 to 2^32. To find which server owns a key, walk clockwise from the key's hash position until you hit a server."}}
+
+{{diagram "Consistent Hash Ring" `
+                    0 / 2^32
+                      |
+                 -----+-----
+              /       |       \
+           /          |          \
+         /     Node A (pos 800)    \
+        |        *                  |
+        |                           |
+  270---|                           |---90
+        |                           |
+        |        key "user:42"      |
+        |          x (pos 520)      |
+         \                         /
+           \   Node C (pos 400)  /
+              \   *            /
+                 -----+-----
+                      |
+                 Node B (pos 200)
+                    180
+
+  key "user:42" hashes to position 520.
+  Walk clockwise: next node is A at 800.
+  So Node A owns "user:42".
+
+  If Node A is removed:
+  Walk clockwise from 520, wrapping around -> Node B at 200.
+  Only keys between C(400) and A(800) are reassigned.
+  Keys owned by B and C do not move at all.
+`}}
+
+{{say "Every node and every key is hashed to a position on the ring. A key belongs to the first node found clockwise from its position. When a node joins, it only takes keys from its clockwise neighbor. When a node leaves, its keys move to the next clockwise node."}}
+
+{{phase 3 "Virtual Nodes" "5 min"}}
+
+{{say "With only physical nodes on the ring, distribution is uneven. A node might own a huge arc or a tiny one depending on random hash placement. Virtual nodes fix this by placing 150-200 points per physical node on the ring."}}
+
+{{diagram "Virtual Nodes on the Ring" `
+  Without virtual nodes (3 physical nodes):
+
+       A owns 60%          B owns 15%     C owns 25%
+  |-----AAAAAAAAAA---------|--BBB--|------CCCCC------|
+  0                                                 2^32
+  Unbalanced! Node A is overloaded.
+
+  With 150 virtual nodes per physical node (450 total points):
+
+  |aBcAaCbBaCcAbBaAcCaBbCaAbBcAaCbBaCcAbBaAcCaBbCa|
+  0                                                2^32
+
+  a,A = Node A vnodes (150 points scattered across ring)
+  b,B = Node B vnodes (150 points scattered across ring)
+  c,C = Node C vnodes (150 points scattered across ring)
+
+  Each node now owns roughly 33% of the ring.
+  Standard deviation drops from ~58% to ~5%.
+`}}
+
+{{table "Virtual Node Count Trade-offs" (rows
+  (row "Vnodes/Server"  "Load Std Dev"   "Memory per Node"  "Lookup Time"     "Recommendation")
+  (row "1"              "~58% (terrible)" "Minimal"         "O(log N)"        "Never in production")
+  (row "50"             "~10% (fair)"    "~4KB"             "O(log 50N)"      "Small clusters only")
+  (row "150"            "~5% (good)"     "~12KB"            "O(log 150N)"     "Recommended default")
+  (row "200"            "~3.5% (great)"  "~16KB"            "O(log 200N)"     "Large clusters")
+  (row "500"            "~2% (perfect)"  "~40KB"            "O(log 500N)"     "Diminishing returns")
+)}}
+
+{{thought "150-200 virtual nodes per server is the sweet spot. At 200 vnodes with 1000 servers, the ring has 200K entries at ~40 bytes each (32-byte hash + 8-byte pointer) = ~8MB. Negligible memory for excellent load balance."}}
+
+{{phase 4 "Full Python Implementation" "8 min"}}
+
+{{say "Here is a production-style implementation with virtual nodes, sorted ring, and binary search for O(log N) lookups."}}
+
+{{code "python" `import hashlib
+import bisect
+from collections import defaultdict
+
+
+class ConsistentHashRing:
+    """Consistent hash ring with configurable virtual nodes.
+
+    Args:
+        nodes: Initial physical node names.
+        num_vnodes: Virtual nodes per physical node (default 150).
+    """
+
+    def __init__(self, nodes=None, num_vnodes=150):
+        self.num_vnodes = num_vnodes
+        self.ring = {}           # hash_value -> physical node name
+        self.sorted_keys = []    # sorted hash positions for binary search
+        self.nodes = set()
+
+        if nodes:
+            for node in nodes:
+                self.add_node(node)
+
+    def _hash(self, key: str) -> int:
+        """Hash a string to a 32-bit integer on the ring."""
+        digest = hashlib.md5(key.encode()).hexdigest()
+        return int(digest[:8], 16)
+
+    def add_node(self, node: str):
+        """Add a physical node with all its virtual nodes."""
+        self.nodes.add(node)
+        for i in range(self.num_vnodes):
+            vnode_key = "{}:vn{}".format(node, i)
+            h = self._hash(vnode_key)
+            self.ring[h] = node
+            bisect.insort(self.sorted_keys, h)
+
+    def remove_node(self, node: str):
+        """Remove a node and all its virtual nodes from the ring."""
+        self.nodes.discard(node)
+        for i in range(self.num_vnodes):
+            vnode_key = "{}:vn{}".format(node, i)
+            h = self._hash(vnode_key)
+            if h in self.ring:
+                del self.ring[h]
+                self.sorted_keys.remove(h)
+
+    def get_node(self, key: str) -> str:
+        """Find which node owns the given key.
+
+        Walks clockwise from the key's hash position.
+        Time: O(log(N * num_vnodes)) via binary search.
+        """
+        if not self.ring:
+            return None
+
+        h = self._hash(key)
+        idx = bisect.bisect_right(self.sorted_keys, h)
+
+        # Wrap around to start of ring
+        if idx == len(self.sorted_keys):
+            idx = 0
+
+        return self.ring[self.sorted_keys[idx]]
+
+    def get_replicas(self, key: str, count: int = 3) -> list:
+        """Get multiple nodes for replication (walk clockwise)."""
+        if not self.ring:
+            return []
+
+        h = self._hash(key)
+        idx = bisect.bisect_right(self.sorted_keys, h)
+        replicas = []
+        seen = set()
+
+        for _ in range(len(self.sorted_keys)):
+            if idx == len(self.sorted_keys):
+                idx = 0
+            node = self.ring[self.sorted_keys[idx]]
+            if node not in seen:
+                replicas.append(node)
+                seen.add(node)
+                if len(replicas) == count:
+                    break
+            idx += 1
+
+        return replicas
+
+    def get_distribution(self) -> dict:
+        """Show how many virtual slots each physical node owns."""
+        counts = defaultdict(int)
+        for node in self.ring.values():
+            counts[node] += 1
+        return dict(counts)
+
+
+# --- Usage ---
+ring = ConsistentHashRing(["cache-1", "cache-2", "cache-3"])
+
+for key in ["user:1001", "user:1002", "session:abc", "post:999"]:
+    node = ring.get_node(key)
+    replicas = ring.get_replicas(key, count=2)
+    print("{} -> primary: {}, replicas: {}".format(key, node, replicas))
+
+# Add a node: only ~1/4 of keys move
+ring.add_node("cache-4")
+
+# Remove a node: only its keys move to next clockwise node
+ring.remove_node("cache-2")
+`}}
+
+{{phase 5 "Rebalancing Analysis" "5 min"}}
+
+{{say "The key property of consistent hashing is minimal disruption. When adding or removing a node with N total nodes, only K/N keys need to move on average."}}
+
+{{table "Rebalancing: Keys Moved" (rows
+  (row "Operation"              "Nodes Before"  "Nodes After"  "Keys Moved"       "Percentage")
+  (row "Add 1 node"             "3"             "4"            "K/4"              "25%")
+  (row "Add 1 node"             "10"            "11"           "K/11"             "9.1%")
+  (row "Add 1 node"             "100"           "101"          "K/101"            "~1%")
+  (row "Remove 1 node"          "4"             "3"            "K/4"              "25%")
+  (row "Remove 1 node"          "10"            "9"            "K/10"             "10%")
+  (row "Modulo: add 1 to 10"    "10"            "11"           "~9K/10"           "~90%")
+)}}
+
+{{diagram "Node Addition: Before and After" `
+  BEFORE (3 nodes, even distribution with vnodes):
+
+     A ------- B ------- C -------
+     33%       33%       33%
+
+  AFTER adding D (4 nodes):
+
+     A ------ D --- B ------- C -------
+     25%      8%    25%       25%
+
+  Node D takes ~8% of keys from B (its clockwise neighbor).
+  Nodes A and C are completely unaffected.
+  Total keys moved: ~25% (K/4). Not 75% like modulo.
+`}}
+
+{{avoid "Do not use too few virtual nodes. With only 1 virtual node per server on a 3-node cluster, one node might own 60% of the keyspace. The standard deviation of load is approximately 1/sqrt(vnodes). At 150 vnodes it is about 8%. At 1 vnode it is 100%."}}
+
+{{phase 6 "Comparison: Hashing Strategies" "5 min"}}
+
+{{compare "Data Distribution Strategy" (options
+  (best "Consistent Hashing + Virtual Nodes" "Only K/N keys move on topology change. Virtual nodes ensure even distribution. O(log N) lookup. Industry standard for caches, databases, and CDNs.")
+  (alt "Rendezvous Hashing (HRW)" "Compute hash(key, node) for all nodes, pick highest. No ring structure needed. But O(N) per lookup since you evaluate every node. Works for small N under 50.")
+  (alt "Jump Consistent Hash" "O(1) memory, O(ln N) time. Excellent for fixed-size clusters. Cannot support arbitrary node removal or weighted nodes easily.")
+  (nofit "Modulo Hashing (key % N)" "Nearly all keys remap when N changes. Only viable if cluster size never changes, which is unrealistic in production distributed systems.")
+)}}
+
+{{table "Strategy Comparison" (rows
+  (row "Property"                "Consistent Hash"       "Rendezvous (HRW)"     "Jump Hash"           "Modulo")
+  (row "Lookup time"             "O(log N)"              "O(N)"                 "O(ln N)"             "O(1)")
+  (row "Keys moved on add"       "K/N"                   "K/N"                  "K/N"                 "K*(N-1)/N")
+  (row "Memory"                  "O(N * vnodes)"         "O(N)"                 "O(1)"                "O(1)")
+  (row "Weighted nodes"          "Yes (vary vnodes)"     "Yes (adjust hash)"    "No"                  "No")
+  (row "Arbitrary node removal"  "Yes"                   "Yes"                  "Difficult"           "Remaps everything")
+  (row "Used by"                 "Cassandra, DynamoDB"   "Twitter, Akamai"      "Google"              "Legacy systems")
+)}}
+
+{{phase 7 "Real-World Applications" "5 min"}}
+
+{{say "Consistent hashing appears in three main system design contexts: cache distribution, database sharding, and load balancing."}}
+
+{{table "Where Consistent Hashing Is Used" (rows
+  (row "System"               "What Is Hashed"         "What Are Nodes"          "Why Consistent Hashing")
+  (row "Memcached / Redis"    "Cache key"              "Cache servers"           "Add/remove nodes without full invalidation")
+  (row "Cassandra"            "Partition key"          "Storage nodes"           "Data distribution and replication across ring")
+  (row "DynamoDB"             "Partition key"          "Storage partitions"      "Auto-scaling partitions with minimal shuffle")
+  (row "Nginx upstream"       "Request URL or IP"      "Backend servers"         "Sticky routing that survives backend changes")
+  (row "Akamai CDN"           "Content URL"            "Edge servers"            "Route content to assigned edge node")
+  (row "Kafka"                "Message key"            "Partitions"              "Partition assignment during rebalancing")
+)}}
+
+{{qa
+  "How does Cassandra use consistent hashing?"
+  "Cassandra places each node on a token ring. The partition key is hashed with Murmur3 to determine a token. The node owning that token range stores the data. Replication factor N means the data is also copied to the next N-1 nodes clockwise on the ring."
+  "What happens if a node fails before data is replicated?"
+  "With replication factor R=3, each key is stored on 3 consecutive clockwise nodes. If one fails, reads and writes are served by the remaining replicas. The coordinator detects failure via gossip protocol and streams missing data to a replacement node."
+}}
+
+{{followup "How would you implement weighted consistent hashing?" "Assign more virtual nodes to more powerful servers. If server A has 2x the capacity of server B, give A 300 virtual nodes and B 150. Server A will own roughly twice the ring space and handle twice the keys. This is how heterogeneous clusters balance load across different hardware generations."}}
+
+{{phase 8 "Interview Checklist" "2 min"}}
+
+{{checklist
+  "Hash ring: keys and nodes mapped to circular space (0 to 2^32)"
+  "Lookup: walk clockwise from key hash to find assigned node"
+  "Virtual nodes (150-200 per server) fix uneven load distribution"
+  "Node add/remove only moves K/N keys (not all keys like modulo)"
+  "O(log N) lookup with binary search on sorted ring positions"
+  "Replication: store each key on R consecutive clockwise nodes"
+  "Rendezvous hashing is an alternative with O(N) lookup but simpler structure"
+  "Used by: DynamoDB, Cassandra, Memcached, Redis Cluster, CDNs"
+}}
+
+{{key "Consistent hashing interviews test whether you understand why naive modulo fails at scale, how virtual nodes fix load imbalance, and how the ring minimizes data movement during cluster changes. Always quantify: adding a node to a 10-node cluster moves only 10% of keys, not 90%."}}

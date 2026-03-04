@@ -50,18 +50,41 @@ type Fundamental struct {
 	UsedBy      []UsageLink   `yaml:"-"`
 }
 
+type Algorithm struct {
+	Slug        string   `yaml:"slug"`
+	Title       string   `yaml:"title"`
+	Description string   `yaml:"description"`
+	Path        string   `yaml:"path"`
+	UsedIn      []string `yaml:"used_in"`
+	// Resolved references (populated after load)
+	UsedInProblems []*Problem `yaml:"-"`
+}
+
+type Pattern struct {
+	Slug        string `yaml:"slug"`
+	Title       string `yaml:"title"`
+	Description string `yaml:"description"`
+	Path        string `yaml:"path"`
+}
+
 type registryFile struct {
 	Problems     []Problem     `yaml:"problems"`
 	Fundamentals []Fundamental `yaml:"fundamentals"`
+	Algorithms   []Algorithm   `yaml:"algorithms"`
+	Patterns     []Pattern     `yaml:"patterns"`
 }
 
 // Registry holds the loaded knowledge graph.
 type Registry struct {
 	Problems     []*Problem
 	Fundamentals []*Fundamental
+	Algorithms   []*Algorithm
+	Patterns     []*Pattern
 
 	problemsBySlug     map[string]*Problem
 	fundamentalsBySlug map[string]*Fundamental
+	algorithmsBySlug   map[string]*Algorithm
+	patternsBySlug     map[string]*Pattern
 }
 
 // Load parses _registry.yaml and builds the knowledge graph with reverse links.
@@ -79,6 +102,8 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 	reg := &Registry{
 		problemsBySlug:     make(map[string]*Problem),
 		fundamentalsBySlug: make(map[string]*Fundamental),
+		algorithmsBySlug:   make(map[string]*Algorithm),
+		patternsBySlug:     make(map[string]*Pattern),
 	}
 
 	// Index fundamentals (including children)
@@ -105,6 +130,25 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 				f.UsedBy = append(f.UsedBy, reverseLink)
 			}
 		}
+	}
+
+	// Index algorithms and resolve problem references
+	for i := range raw.Algorithms {
+		a := &raw.Algorithms[i]
+		reg.Algorithms = append(reg.Algorithms, a)
+		reg.algorithmsBySlug[a.Slug] = a
+		for _, problemSlug := range a.UsedIn {
+			if p, ok := reg.problemsBySlug[problemSlug]; ok {
+				a.UsedInProblems = append(a.UsedInProblems, p)
+			}
+		}
+	}
+
+	// Index patterns
+	for i := range raw.Patterns {
+		pt := &raw.Patterns[i]
+		reg.Patterns = append(reg.Patterns, pt)
+		reg.patternsBySlug[pt.Slug] = pt
 	}
 
 	return reg, nil
@@ -160,6 +204,16 @@ func (r *Registry) TopLevelCategories() map[string][]*Fundamental {
 		cats[categoryFromSlug(f.Slug)] = append(cats[categoryFromSlug(f.Slug)], f)
 	}
 	return cats
+}
+
+// GetAlgorithm returns an algorithm by slug.
+func (r *Registry) GetAlgorithm(slug string) *Algorithm {
+	return r.algorithmsBySlug[slug]
+}
+
+// GetPattern returns a pattern by slug.
+func (r *Registry) GetPattern(slug string) *Pattern {
+	return r.patternsBySlug[slug]
 }
 
 func categoryFromSlug(slug string) string {

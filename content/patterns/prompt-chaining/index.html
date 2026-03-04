@@ -1,0 +1,182 @@
+{{phase 1 "What Is Prompt Chaining?" "3 min"}}
+
+{{say "Prompt chaining breaks a complex task into a sequence of simpler LLM calls, where each step's output feeds into the next step's input. Each step has a focused prompt, producing higher quality than a single monolithic prompt."}}
+
+{{diagram "Prompt Chain: Document Summarization" `
+  Input Document (5000 words)
+       |
+       v
+  +-------------+     +-------------+     +-----------+     +---------+
+  | Step 1:     |---->| Step 2:     |---->| Step 3:   |---->| Step 4: |
+  | Extract key |     | Categorize  |     | Generate  |     | Format  |
+  | facts       |     | by topic    |     | summary   |     | as JSON |
+  +-------------+     +-------------+     +-----------+     +---------+
+       |                    |                   |                |
+  "15 key facts"     "3 categories"       "250-word            "{title,
+                                           summary"             sections,
+                                                                bullets}"
+`}}
+
+{{key "Single prompt = one chance to get it right. Prompt chaining = multiple focused steps, each verifiable. Quality improves because each LLM call has a narrow, well-defined task."}}
+
+{{phase 2 "When to Chain vs Single Prompt" "3 min"}}
+
+{{table "Chain vs Single Prompt" (rows
+  (row "Factor"             "Single Prompt"                    "Prompt Chain")
+  (row "Task complexity"    "Simple, well-defined"              "Multi-step, requires reasoning")
+  (row "Output quality"     "Good for short tasks"              "Better for complex tasks")
+  (row "Latency"            "1 round trip"                      "N round trips (slower)")
+  (row "Cost"               "1 API call"                        "N API calls (more expensive)")
+  (row "Debuggability"      "Hard (one black box)"              "Easy (inspect each step)")
+  (row "Error handling"     "All or nothing"                    "Retry individual steps")
+)}}
+
+{{compare "Execution Strategy" (options
+  (best "Sequential chain" "Steps run one after another. Output of step N is input to step N+1. Simple, easy to debug. Use for most cases.")
+  (alt "Parallel chain" "Independent steps run concurrently, results merged. Example: analyze sentiment AND extract entities in parallel, then combine. Faster but harder to implement.")
+  (nofit "Single monolithic prompt" "Asking the LLM to do everything in one shot. Works for simple tasks but quality degrades for complex multi-step reasoning.")
+)}}
+
+{{phase 3 "Implementation" "5 min"}}
+
+{{code "python" `from anthropic import Anthropic
+
+client = Anthropic()
+
+def llm_call(prompt: str, system: str = "") -> str:
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=2048,
+        system=system,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.content[0].text
+
+
+def chain_summarize(document: str) -> dict:
+    """4-step chain: extract -> categorize -> summarize -> format."""
+
+    # Step 1: Extract key facts
+    facts = llm_call(
+        prompt="Extract the 10-15 most important facts from this document. "
+               "Return as a numbered list.\n\n" + document,
+        system="You are a fact extraction expert. Only extract stated facts."
+    )
+    print("Step 1 done: extracted facts")
+
+    # Step 2: Categorize by topic
+    categories = llm_call(
+        prompt="Group these facts into 3-5 topic categories. "
+               "Return as category headers with facts listed under each.\n\n" + facts,
+        system="You are an information organizer."
+    )
+    print("Step 2 done: categorized")
+
+    # Step 3: Generate summary
+    summary = llm_call(
+        prompt="Write a 200-word executive summary based on these categorized facts. "
+               "Be concise and actionable.\n\n" + categories,
+        system="You are a business writer. Write clear, concise summaries."
+    )
+    print("Step 3 done: summary written")
+
+    # Step 4: Format as structured JSON
+    structured = llm_call(
+        prompt="Convert this summary into JSON with fields: "
+               "title, executive_summary, key_points (array), "
+               "action_items (array).\n\n" + summary,
+        system="Return valid JSON only. No markdown, no explanation."
+    )
+    print("Step 4 done: formatted")
+
+    import json
+    return json.loads(structured)
+`}}
+
+{{phase 4 "Gate Pattern: Quality Checks Between Steps" "5 min"}}
+
+{{say "The gate pattern adds a validation step between chain steps. If the output does not meet quality criteria, retry or abort. This prevents error propagation through the chain."}}
+
+{{diagram "Chain with Gates" `
+  Step 1: Extract   --> Gate: Has 10+ facts? --NO--> Retry Step 1
+       |                        |
+      YES                      YES
+       |                        |
+       v                        v
+  Step 2: Classify  --> Gate: All facts categorized? --NO--> Retry Step 2
+       |                        |
+      YES                      YES
+       |                        v
+  Step 3: Summarize --> Gate: Under 300 words? --NO--> Retry with stricter prompt
+       |
+      YES
+       v
+  Final Output
+`}}
+
+{{code "python" `def gated_chain_step(prompt, system, validator, max_retries=3):
+    """Run an LLM step with validation gate."""
+    for attempt in range(max_retries):
+        result = llm_call(prompt, system)
+
+        is_valid, error = validator(result)
+        if is_valid:
+            return result
+
+        # Retry with feedback
+        prompt = (
+            "Your previous output had this issue: {}\n"
+            "Please fix it and try again.\n\n"
+            "Previous output:\n{}".format(error, result)
+        )
+
+    raise ValueError("Step failed after {} retries".format(max_retries))
+
+
+# Example validator
+def validate_json(output):
+    import json
+    try:
+        json.loads(output)
+        return True, None
+    except json.JSONDecodeError as e:
+        return False, "Invalid JSON: {}".format(str(e))
+
+# Usage
+result = gated_chain_step(
+    prompt="Convert to JSON: ...",
+    system="Return valid JSON only.",
+    validator=validate_json,
+    max_retries=3
+)
+`}}
+
+{{phase 5 "Common Chain Patterns" "3 min"}}
+
+{{table "Chain Patterns" (rows
+  (row "Pattern"              "Steps"                                    "Use Case")
+  (row "Map-Reduce"           "Map: process each chunk. Reduce: combine." "Summarize long documents beyond context window")
+  (row "Extract-Transform"    "Extract structured data, then transform"  "Parse invoices, contracts, forms")
+  (row "Generate-Critique"    "Generate draft, critique it, improve"     "Writing, code generation")
+  (row "Classify-Route"       "Classify intent, route to specialized chain" "Customer support, multi-domain QA")
+  (row "Translate-Verify"     "Translate text, back-translate to verify" "High-quality translation")
+)}}
+
+{{phase 6 "Interview Q&A" "3 min"}}
+
+{{qa
+  "When would you use prompt chaining vs a single long prompt?"
+  "Chain when: 1) task has distinct steps (extract then summarize), 2) you need to validate intermediate results, 3) different steps need different model parameters (temperature). Single prompt when: task is simple, latency matters, and the whole task fits naturally in one instruction."
+  "How do you handle errors in the middle of a chain?"
+  "Three strategies: 1) Retry the failed step with error feedback (gate pattern). 2) Fall back to a simpler approach for that step. 3) Return partial results with an error indicator so the user can decide. Never silently skip a failed step."
+}}
+
+{{checklist
+  "Break complex tasks into focused single-purpose steps"
+  "Each step has its own system prompt optimized for that task"
+  "Gate pattern: validate output between steps, retry on failure"
+  "Pass only relevant output forward (not the entire conversation)"
+  "Use smaller/cheaper models for simple steps (classification, formatting)"
+  "Log each step's input/output for debugging"
+  "Set max retries per step (typically 2-3)"
+}}

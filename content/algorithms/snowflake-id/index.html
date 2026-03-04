@@ -1,0 +1,184 @@
+{{phase 1 "What Is Snowflake ID?" "3 min"}}
+
+{{say "Snowflake ID is a distributed unique ID generation algorithm created by Twitter. It produces 64-bit, time-sorted, globally unique IDs without coordination between machines. Each machine generates IDs independently at up to 4096 IDs per millisecond."}}
+
+{{diagram "Snowflake ID: 64-Bit Layout" `
+  63                                                              0
+  +--+----------------------------------------+----------+----------+
+  |0 |          41 bits: timestamp             | 10 bits  | 12 bits  |
+  |  |       (ms since custom epoch)           | machine  | sequence |
+  +--+----------------------------------------+----------+----------+
+   ^              ^                                ^          ^
+   |              |                                |          |
+  unused     69 years of                     1024 machines  4096 IDs
+  (sign)     milliseconds                                   per ms
+                                                            per machine
+
+  Total: 1 + 41 + 10 + 12 = 64 bits
+  Max IDs/sec = 1000ms * 4096 = 4,096,000 per machine
+`}}
+
+{{table "Bit Field Breakdown" (rows
+  (row "Field"      "Bits"  "Max Value"     "Purpose"                              "Exhaustion")
+  (row "Sign"       "1"     "0"             "Always 0 (positive number)"           "N/A")
+  (row "Timestamp"  "41"    "2^41 - 1"      "Milliseconds since custom epoch"      "69 years from epoch")
+  (row "Machine ID" "10"    "1023"          "Unique per machine/process"            "1024 machines max")
+  (row "Sequence"   "12"    "4095"          "Counter within same millisecond"       "4096 IDs/ms then wait")
+)}}
+
+{{key "Snowflake IDs are time-sorted by construction. The timestamp is the most significant bits, so IDs are monotonically increasing. This means they work as database primary keys with good B-tree insert performance (no random page splits like UUID v4)."}}
+
+{{phase 2 "Python Implementation" "5 min"}}
+
+{{code "python" `import time
+import threading
+
+# Custom epoch: 2024-01-01 00:00:00 UTC
+CUSTOM_EPOCH = 1704067200000  # milliseconds
+
+TIMESTAMP_BITS = 41
+MACHINE_BITS = 10
+SEQUENCE_BITS = 12
+
+MAX_MACHINE_ID = (1 << MACHINE_BITS) - 1   # 1023
+MAX_SEQUENCE = (1 << SEQUENCE_BITS) - 1     # 4095
+
+class SnowflakeGenerator:
+    def __init__(self, machine_id: int):
+        if machine_id < 0 or machine_id > MAX_MACHINE_ID:
+            raise ValueError("machine_id must be 0-1023")
+
+        self.machine_id = machine_id
+        self.sequence = 0
+        self.last_timestamp = -1
+        self.lock = threading.Lock()
+
+    def _current_millis(self) -> int:
+        return int(time.time() * 1000)
+
+    def _wait_next_millis(self, last_ts: int) -> int:
+        ts = self._current_millis()
+        while ts <= last_ts:
+            ts = self._current_millis()
+        return ts
+
+    def generate(self) -> int:
+        with self.lock:
+            ts = self._current_millis()
+
+            if ts < self.last_timestamp:
+                raise Exception("Clock moved backwards!")
+
+            if ts == self.last_timestamp:
+                # Same millisecond: increment sequence
+                self.sequence = (self.sequence + 1) & MAX_SEQUENCE
+                if self.sequence == 0:
+                    # Sequence exhausted, wait for next ms
+                    ts = self._wait_next_millis(self.last_timestamp)
+            else:
+                # New millisecond: reset sequence
+                self.sequence = 0
+
+            self.last_timestamp = ts
+
+            # Build the 64-bit ID
+            snowflake_id = (
+                ((ts - CUSTOM_EPOCH) << (MACHINE_BITS + SEQUENCE_BITS)) |
+                (self.machine_id << SEQUENCE_BITS) |
+                self.sequence
+            )
+            return snowflake_id
+
+    @staticmethod
+    def parse(snowflake_id: int) -> dict:
+        """Extract fields from a Snowflake ID."""
+        sequence = snowflake_id & MAX_SEQUENCE
+        machine_id = (snowflake_id >> SEQUENCE_BITS) & MAX_MACHINE_ID
+        timestamp = (snowflake_id >> (MACHINE_BITS + SEQUENCE_BITS)) + CUSTOM_EPOCH
+        return {
+            "timestamp_ms": timestamp,
+            "machine_id": machine_id,
+            "sequence": sequence,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S",
+                                  time.gmtime(timestamp / 1000))
+        }
+
+
+# --- Demo ---
+gen = SnowflakeGenerator(machine_id=1)
+
+ids = [gen.generate() for _ in range(5)]
+for sid in ids:
+    print("ID: {}  Parsed: {}".format(sid, SnowflakeGenerator.parse(sid)))
+
+# IDs are always increasing
+assert ids == sorted(ids), "IDs must be time-sorted!"
+`}}
+
+{{phase 3 "Clock Skew Problem" "3 min"}}
+
+{{say "The biggest risk with Snowflake IDs is clock skew. If the system clock jumps backward (NTP correction, VM migration), you could generate duplicate IDs. This is the most common interview follow-up question."}}
+
+{{table "Clock Skew Handling" (rows
+  (row "Strategy"                   "How It Works"                                          "Trade-off")
+  (row "Refuse to generate"         "Throw error if clock < last_timestamp"                 "Safe but causes downtime")
+  (row "Wait for clock to catch up" "Spin-wait until clock >= last_timestamp"                "Brief pause, no duplicates")
+  (row "Use logical clock"          "Increment a counter instead of wall clock"              "Breaks time-ordering")
+  (row "Lease-based timestamps"     "Get timestamps from a central time authority"           "Adds latency, SPOF risk")
+  (row "Hybrid Logical Clock (HLC)" "Combines wall clock + logical counter"                  "Best of both worlds, complex to implement")
+)}}
+
+{{avoid "Never trust that system clocks are monotonic across machines. NTP can adjust clocks backward by seconds. VMs pausing and resuming can cause time jumps. Always check for backward clock movement in your Snowflake implementation."}}
+
+{{phase 4 "Comparison: ID Generation Strategies" "5 min"}}
+
+{{compare "Distributed ID Generation" (options
+  (best "Snowflake ID" "Time-sorted, 64-bit, no coordination, 4M IDs/sec per machine. Industry standard: Twitter, Discord, Instagram all use Snowflake variants. Perfect for system design interviews.")
+  (alt "UUID v4" "128-bit random, universally unique, no coordination. But: not time-sorted (terrible B-tree insert performance), 36 characters long, and wastes space in indexes. Use only when you truly need zero coordination AND do not care about ordering.")
+  (alt "ULID" "128-bit, time-sorted (48-bit timestamp + 80-bit random). Better than UUID v4 for databases because time-sorting gives good B-tree locality. But still 128 bits (overkill for most apps) and 26 characters as string.")
+  (nofit "Auto-increment" "Simple but requires coordination (single database). Bottleneck at high write rates. Reveals total count. Only use for small-scale or with pre-allocated ranges.")
+)}}
+
+{{table "ID Strategy Comparison" (rows
+  (row "Strategy"        "Size"      "Sorted"  "Coordination"    "IDs/sec"         "String Length")
+  (row "Snowflake"       "64-bit"    "Yes"     "Machine ID only" "4M per machine"  "up to 19 digits")
+  (row "UUID v4"         "128-bit"   "No"      "None"            "Unlimited"        "36 chars")
+  (row "ULID"            "128-bit"   "Yes"     "None"            "Unlimited"        "26 chars")
+  (row "Auto-increment"  "64-bit"    "Yes"     "Single DB"       "Limited by DB"    "up to 19 digits")
+  (row "Snowflake + Base62" "64-bit" "Yes"     "Machine ID only" "4M per machine"  "7-11 chars")
+)}}
+
+{{thought "Snowflake + Base62 is the best combo for URL shorteners. Generate Snowflake ID (unique, sorted, 64-bit), then Base62 encode it to get a short string (7-11 chars). No collisions, no DB lookups for uniqueness, time-sorted for analytics."}}
+
+{{phase 5 "Real-World Variants" "3 min"}}
+
+{{table "Snowflake Variants in Production" (rows
+  (row "Company"     "Format"                                      "Epoch"         "Customization")
+  (row "Twitter"     "41 ts + 5 datacenter + 5 worker + 12 seq"   "2010-11-04"    "Original Snowflake")
+  (row "Discord"     "42 ts + 10 worker + 12 seq"                 "2015-01-01"    "Worker ID from process")
+  (row "Instagram"   "41 ts + 13 shard + 10 seq"                  "2011-01-01"    "Shard ID from Postgres")
+  (row "Sony (Sonyflake)" "39 ts + 8 seq + 16 machine"            "Configurable"  "10ms resolution, more machines")
+  (row "Baidu (UidGenerator)" "28 ts + 22 worker + 13 seq"        "Configurable"  "Second resolution, more workers")
+)}}
+
+{{phase 6 "Interview Q&A" "3 min"}}
+
+{{qa
+  "Why not just use UUID v4 for everything?"
+  "UUIDs are 128 bits and random. In a B-tree index, random inserts cause page splits on every write — terrible write performance. Snowflake IDs are time-sorted, so inserts always go to the rightmost leaf page — like an auto-increment but distributed. At scale this is a 5-10x write performance difference."
+  "How do you assign machine IDs in a cloud environment?"
+  "Three options: 1) ZooKeeper or etcd: each machine registers and gets a unique ID (0-1023). 2) Use the last 10 bits of the private IP address. 3) Kubernetes pod ordinal index if running a StatefulSet. Option 1 is most reliable. Option 2 risks collision in large VPCs."
+}}
+
+{{followup "What if you need more than 1024 machines?" "Customize the bit layout. Steal bits from timestamp or sequence. Example: 39 bits timestamp (17 years) + 14 bits machine (16384 machines) + 10 bits sequence (1024 IDs/ms). Or use a 128-bit Snowflake variant. Discord uses 42-bit timestamp + 10-bit worker + 12-bit sequence because they need fewer machines but more time range."}}
+
+{{checklist
+  "64-bit: 1 sign + 41 timestamp + 10 machine + 12 sequence"
+  "Time-sorted: timestamp is most significant bits"
+  "4096 IDs/ms per machine = 4M IDs/sec"
+  "41-bit timestamp = 69 years from custom epoch"
+  "Clock skew is the biggest risk — always check for backward time"
+  "No coordination needed (just unique machine IDs)"
+  "B-tree friendly: sequential inserts avoid page splits"
+  "Combine with Base62 for short URL-safe strings"
+}}

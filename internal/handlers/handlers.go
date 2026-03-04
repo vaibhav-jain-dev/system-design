@@ -29,6 +29,8 @@ func New(reg *registry.Registry, templateFS, contentFS fs.FS, funcMap template.F
 			"web/templates/welcome.html",
 			"web/templates/detail_problem.html",
 			"web/templates/detail_fund.html",
+			"web/templates/detail_algo.html",
+			"web/templates/detail_pattern.html",
 			"web/templates/context_card.html",
 			"web/templates/doc_card.html",
 		))
@@ -51,6 +53,8 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 	data := map[string]interface{}{
 		"Problems":     h.reg.Problems,
 		"Fundamentals": h.reg.Fundamentals,
+		"Algorithms":   h.reg.Algorithms,
+		"Patterns":     h.reg.Patterns,
 		"Content":      template.HTML(""),
 		"ActiveSlug":   "",
 		"PageType":     "welcome",
@@ -78,6 +82,8 @@ func (h *Handler) ProblemDetail(w http.ResponseWriter, r *http.Request) {
 		"Content":      content,
 		"Problems":     h.reg.Problems,
 		"Fundamentals": h.reg.Fundamentals,
+		"Algorithms":   h.reg.Algorithms,
+		"Patterns":     h.reg.Patterns,
 		"ActiveSlug":   slug,
 		"PageType":     "problem",
 	}
@@ -139,6 +145,8 @@ func (h *Handler) FundamentalDetail(w http.ResponseWriter, r *http.Request) {
 		"Content":           content,
 		"Problems":          h.reg.Problems,
 		"Fundamentals":      h.reg.Fundamentals,
+		"Algorithms":        h.reg.Algorithms,
+		"Patterns":          h.reg.Patterns,
 		"ActiveSlug":        slug,
 		"PageType":          "fundamental",
 		"FromProblem":       fromProblem,
@@ -201,6 +209,78 @@ func (h *Handler) renderContent(contentPath string) template.HTML {
 	}
 
 	return template.HTML(sb.String())
+}
+
+// AlgorithmDetail renders an algorithm's detail view.
+func (h *Handler) AlgorithmDetail(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	algo := h.reg.GetAlgorithm(slug)
+	if algo == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	content := h.renderContent(algo.Path)
+
+	data := map[string]interface{}{
+		"Algorithm":    algo,
+		"Content":      content,
+		"Problems":     h.reg.Problems,
+		"Fundamentals": h.reg.Fundamentals,
+		"Algorithms":   h.reg.Algorithms,
+		"Patterns":     h.reg.Patterns,
+		"ActiveSlug":   slug,
+		"PageType":     "algorithm",
+	}
+
+	if isHTMX(r) {
+		if err := h.templates.ExecuteTemplate(w, "detail_algo.html", data); err != nil {
+			log.Printf("Template error: %v", err)
+			http.Error(w, "Internal error", 500)
+		}
+		return
+	}
+
+	if err := h.templates.ExecuteTemplate(w, "base.html", data); err != nil {
+		log.Printf("Template error: %v", err)
+		http.Error(w, "Internal error", 500)
+	}
+}
+
+// PatternDetail renders a design pattern's detail view.
+func (h *Handler) PatternDetail(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	pattern := h.reg.GetPattern(slug)
+	if pattern == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	content := h.renderContent(pattern.Path)
+
+	data := map[string]interface{}{
+		"Pattern":      pattern,
+		"Content":      content,
+		"Problems":     h.reg.Problems,
+		"Fundamentals": h.reg.Fundamentals,
+		"Algorithms":   h.reg.Algorithms,
+		"Patterns":     h.reg.Patterns,
+		"ActiveSlug":   slug,
+		"PageType":     "pattern",
+	}
+
+	if isHTMX(r) {
+		if err := h.templates.ExecuteTemplate(w, "detail_pattern.html", data); err != nil {
+			log.Printf("Template error: %v", err)
+			http.Error(w, "Internal error", 500)
+		}
+		return
+	}
+
+	if err := h.templates.ExecuteTemplate(w, "base.html", data); err != nil {
+		log.Printf("Template error: %v", err)
+		http.Error(w, "Internal error", 500)
+	}
 }
 
 // Placeholder handlers for PDF generation (Phase 4)

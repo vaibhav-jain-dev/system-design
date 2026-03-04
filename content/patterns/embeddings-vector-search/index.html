@@ -1,0 +1,212 @@
+{{phase 1 "What Are Embeddings?" "3 min"}}
+
+{{say "Embeddings are dense vector representations of text. Each piece of text is mapped to a point in high-dimensional space where similar texts are close together. This enables semantic search — finding documents by meaning, not just keywords."}}
+
+{{diagram "Embedding Space (Simplified to 2D)" `
+  Meaning axis 2
+       ^
+       |    "refund policy"  *  * "return process"
+       |                      *
+       |              "money back guarantee"
+       |
+       |
+       |                          * "product specs"
+       |                        * "item dimensions"
+       |
+       +----------------------------------------------> Meaning axis 1
+       |
+       |  * "weather forecast"
+       |    * "temperature today"
+       |
+       |
+
+  Similar concepts cluster together.
+  Cosine similarity between "refund policy" and
+  "return process" is ~0.92 (very similar).
+  Between "refund policy" and "weather" is ~0.15 (unrelated).
+`}}
+
+{{table "Popular Embedding Models" (rows
+  (row "Model"                       "Dimensions"  "Max Tokens"  "Cost per 1M Tokens"  "Quality (MTEB)")
+  (row "OpenAI text-embedding-3-small" "1536"      "8191"        "$0.02"               "Good")
+  (row "OpenAI text-embedding-3-large" "3072"      "8191"        "$0.13"               "Best (commercial)")
+  (row "Cohere embed-v3"              "1024"        "512"         "$0.10"               "Very good")
+  (row "BGE-large (open source)"      "1024"        "512"         "Free (self-host)"    "Very good")
+  (row "E5-mistral (open source)"     "4096"        "32768"       "Free (self-host)"    "Excellent")
+)}}
+
+{{key "text-embedding-3-small is the best starting point: cheap ($0.02/1M tokens), good quality, 1536 dimensions. Switch to 3-large or open-source E5 only if retrieval quality is insufficient."}}
+
+{{phase 2 "Vector Similarity" "5 min"}}
+
+{{table "Distance Metrics" (rows
+  (row "Metric"          "Formula"                              "Range"           "When to Use")
+  (row "Cosine similarity" "dot(A,B) / (||A|| * ||B||)"        "[-1, 1]"         "Default for text. Ignores magnitude.")
+  (row "Dot product"      "sum(A[i] * B[i])"                   "(-inf, inf)"     "When vectors are normalized (same as cosine)")
+  (row "Euclidean (L2)"   "sqrt(sum((A[i]-B[i])^2))"           "[0, inf)"        "When magnitude matters")
+)}}
+
+{{code "python" `import numpy as np
+
+def cosine_similarity(a, b):
+    a, b = np.array(a), np.array(b)
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+# Example: compare three sentences
+from openai import OpenAI
+client = OpenAI()
+
+def embed(text):
+    return client.embeddings.create(
+        model="text-embedding-3-small", input=text
+    ).data[0].embedding
+
+e1 = embed("How do I return an item?")
+e2 = embed("What is the refund process?")
+e3 = embed("What is the weather today?")
+
+print("return vs refund:", cosine_similarity(e1, e2))  # ~0.89
+print("return vs weather:", cosine_similarity(e1, e3))  # ~0.15
+`}}
+
+{{phase 3 "Vector Index Types" "5 min"}}
+
+{{say "Searching by brute-force cosine similarity is O(n) per query — too slow for millions of vectors. Vector indexes provide approximate nearest neighbor (ANN) search in O(log n) time."}}
+
+{{table "Index Types" (rows
+  (row "Index"       "How It Works"                                  "Build Time"  "Query Time"       "Recall"    "Memory")
+  (row "Flat (brute)" "Compare against every vector"                 "O(1)"        "O(n)"            "100%"       "Minimal")
+  (row "IVF"         "Cluster vectors, search nearest clusters only" "O(n)"        "O(sqrt(n))"      "95-99%"     "Minimal")
+  (row "HNSW"        "Navigable small world graph, multi-layer"      "O(n log n)"  "O(log n)"        "98-99.5%"   "2-3x vectors")
+  (row "PQ"          "Compress vectors with product quantization"     "O(n)"        "O(n) but fast"   "90-95%"     "8-32x compression")
+)}}
+
+{{compare "Index Choice" (options
+  (best "HNSW" "Best query latency (O(log n)), highest recall (99%+). Default for most vector databases. Trade-off: 2-3x memory overhead for the graph structure. Use for anything under 100M vectors.")
+  (alt "IVF + PQ" "Lower memory than HNSW (product quantization compresses vectors). Good for 100M+ vectors where memory is constrained. Slightly lower recall (95-98%).")
+  (nofit "Flat/brute force" "Only viable for < 100K vectors. Query time is linear. Fine for prototypes but not production scale.")
+)}}
+
+{{phase 4 "Vector Database Comparison" "5 min"}}
+
+{{table "Vector Database Options" (rows
+  (row "Database"    "Type"              "Index"      "Max Vectors"   "Pricing"                      "Best For")
+  (row "pgvector"    "Postgres extension" "IVF, HNSW" "~10M"         "RDS cost ($0.10/GB)"          "Already on Postgres, < 10M vectors")
+  (row "Pinecone"    "Managed SaaS"       "Proprietary" "1B+"        "$0.33/GB + $8/M queries"      "Zero ops, serverless scaling")
+  (row "Qdrant"      "Self-hosted/cloud"  "HNSW"       "100M+"      "Open source or managed"        "High performance, filtering")
+  (row "Weaviate"    "Self-hosted/cloud"  "HNSW"       "100M+"      "Open source or managed"        "Multi-modal (text + images)")
+  (row "Milvus"      "Self-hosted/cloud"  "IVF, HNSW"  "1B+"        "Open source"                  "Largest scale deployments")
+  (row "ChromaDB"    "Embedded"           "HNSW"       "~1M"        "Free (in-process)"             "Prototyping, small projects")
+)}}
+
+{{phase 5 "Full Implementation with pgvector" "5 min"}}
+
+{{code "python" `import psycopg2
+import psycopg2.extras
+from openai import OpenAI
+
+client = OpenAI()
+conn = psycopg2.connect("postgresql://localhost/mydb")
+cur = conn.cursor()
+
+# --- Setup ---
+cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS documents (
+        id SERIAL PRIMARY KEY,
+        content TEXT NOT NULL,
+        metadata JSONB DEFAULT '{}',
+        embedding vector(1536)
+    )
+""")
+cur.execute("""
+    CREATE INDEX IF NOT EXISTS docs_hnsw_idx
+    ON documents USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64)
+""")
+conn.commit()
+
+# --- Ingest ---
+def ingest(texts: list[str], metadata: list[dict] = None):
+    """Embed and store a batch of texts."""
+    response = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=texts
+    )
+    for i, emb_data in enumerate(response.data):
+        meta = metadata[i] if metadata else {}
+        cur.execute(
+            "INSERT INTO documents (content, metadata, embedding) VALUES (%s, %s, %s)",
+            (texts[i], psycopg2.extras.Json(meta), emb_data.embedding)
+        )
+    conn.commit()
+
+# --- Search ---
+def search(query: str, top_k: int = 5, filter_metadata: dict = None):
+    """Semantic search with optional metadata filtering."""
+    query_emb = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=query
+    ).data[0].embedding
+
+    sql = """
+        SELECT content, metadata,
+               1 - (embedding <=> %s::vector) AS similarity
+        FROM documents
+    """
+    params = [query_emb]
+
+    if filter_metadata:
+        sql += " WHERE metadata @> %s"
+        params.append(psycopg2.extras.Json(filter_metadata))
+
+    sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
+    params.extend([query_emb, top_k])
+
+    cur.execute(sql, params)
+    return cur.fetchall()
+
+
+# --- Usage ---
+ingest(
+    ["Returns accepted within 30 days", "Free shipping over $50"],
+    [{"category": "policy"}, {"category": "shipping"}]
+)
+
+results = search("How do I return an item?", top_k=3)
+for content, meta, score in results:
+    print("{:.3f} | {} | {}".format(score, content, meta))
+`}}
+
+{{phase 6 "Cost Analysis" "3 min"}}
+
+{{table "Embedding + Vector Search Costs" (rows
+  (row "Component"          "Service"                         "Cost"                       "At 1M Documents")
+  (row "Embedding (ingest)" "text-embedding-3-small"          "$0.02/1M tokens"            "~$2 one-time")
+  (row "Embedding (query)"  "text-embedding-3-small"          "$0.02/1M tokens"            "$0.002/1K queries")
+  (row "Vector storage"     "pgvector on RDS (db.r6g.large)"  "$0.10/GB + $0.15/hr"        "~$115/month")
+  (row "Vector storage"     "Pinecone Serverless"             "$0.33/GB stored"            "~$2/month + queries")
+  (row "Vector storage"     "Qdrant Cloud"                    "$0.045/GB + compute"        "~$25/month")
+)}}
+
+{{thought "pgvector is the cheapest option if you already run Postgres. For 1M documents with 1536-dim vectors, storage is about 6 GB (1M * 1536 * 4 bytes). HNSW index adds ~2x overhead = 18 GB total. Fits comfortably on a db.r6g.large RDS instance."}}
+
+{{phase 7 "Interview Q&A" "3 min"}}
+
+{{qa
+  "How would you build a semantic search for an e-commerce site?"
+  "Embed product titles + descriptions with text-embedding-3-small. Store in pgvector with HNSW index. On search, embed the query, find top-50 by vector similarity, then rerank with a cross-encoder. Filter by category, price range, and availability using metadata. Hybrid search (embeddings + BM25 keyword) catches both semantic matches and exact product names."
+  "When do embeddings fail?"
+  "Embeddings struggle with: 1) Exact keyword matching — searching for error code ERR_1234 needs BM25, not embeddings. 2) Negation — not good and good have similar embeddings. 3) Very domain-specific jargon without fine-tuning. Always combine with keyword search for production systems."
+}}
+
+{{checklist
+  "Start with text-embedding-3-small (cheap, good quality)"
+  "Cosine similarity is the default metric for text embeddings"
+  "HNSW index for <100M vectors, IVF+PQ for larger"
+  "pgvector if already on Postgres, Pinecone for zero-ops"
+  "Batch embed during ingest, single embed per query"
+  "Hybrid search: combine dense (embeddings) + sparse (BM25)"
+  "Rerank top-50 candidates with cross-encoder for best results"
+  "Monitor recall and latency as your index grows"
+}}

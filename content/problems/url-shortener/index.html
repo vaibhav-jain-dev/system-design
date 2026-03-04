@@ -132,7 +132,30 @@ def base62_decode(s: str) -> int:
 
 {{say "Let me walk through the architecture hop by hop, starting with the write path for creating a short URL, then the read path for redirects."}}
 
-{{diagram "URL Shortener Architecture"}}
+{{diagram "URL Shortener Architecture" `
+  WRITE PATH (Create Short URL)              READ PATH (Redirect)
+
+  Client                                     Client
+    |                                          |
+    | POST /api/shorten                        | GET /abc123
+    v                                          v
+ +------------+                            +------------+
+ | CloudFront |                            | CloudFront |---> Cache HIT? 301
+ +-----+------+                            +-----+------+
+       |                                         | MISS
+       v                                         v
+ +----------+    +--------------+          +----------+    +---------+
+ |   ALB    |--->|  API Server  |          |   ALB    |--->|   API   |
+ +----------+    +------+-------+          +----------+    +----+----+
+                        |                                       |
+               +--------+--------+                    +---------+---------+
+               |                 |                    |                   |
+               v                 v                    v                   v
+        +----------+      +-----------+         +----------+       +-----------+
+        | Postgres |      | ID Service|         |  Redis   |       | Postgres  |
+        | (store)  |      | (Base62)  |         | (cache)  |       | (fallback)|
+        +----------+      +-----------+         +----------+       +-----------+
+`}}
 
 {{table "Write Path: Creating a Short URL" (rows
   (row "Hop" "Step"                                        "AWS Service"         "Why This Service"                        "Failure Mode"                         "Cost Estimate")

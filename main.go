@@ -30,7 +30,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load registry: %v", err)
 	}
-	log.Printf("Loaded %d problems, %d fundamentals", len(reg.Problems), len(reg.AllFundamentals()))
+	log.Printf("Loaded %d problems, %d fundamentals, %d algorithms, %d patterns",
+		len(reg.Problems), len(reg.AllFundamentals()), len(reg.Algorithms), len(reg.Patterns))
 
 	// Build template macros
 	funcMap := macros.FuncMap()
@@ -51,6 +52,8 @@ func main() {
 	r.Get("/", h.Dashboard)
 	r.Get("/problem/{slug}", h.ProblemDetail)
 	r.Get("/fund/*", h.FundamentalDetail)
+	r.Get("/algo/{slug}", h.AlgorithmDetail)
+	r.Get("/pattern/{slug}", h.PatternDetail)
 
 	// API routes
 	r.Post("/api/generate/{slug}", h.GeneratePDF)

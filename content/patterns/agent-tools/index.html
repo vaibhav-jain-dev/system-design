@@ -1,0 +1,225 @@
+{{phase 1 "What Is the Agent Pattern?" "3 min"}}
+
+{{say "An LLM agent is a system where the model decides which actions to take. Instead of a fixed pipeline, the LLM reasons about the user request, calls tools (APIs, databases, code execution), observes the results, and iterates until the task is complete."}}
+
+{{diagram "Agent Loop (ReAct Pattern)" `
+  User: "What is the weather in Tokyo and convert it to Fahrenheit?"
+       |
+       v
+  +------------------+
+  |    LLM Reason    |  "I need to get Tokyo weather first"
+  +--------+---------+
+           |
+           v
+  +------------------+
+  |   Tool: weather  |  get_weather("Tokyo") -> 22C
+  |   API call       |
+  +--------+---------+
+           |
+           v
+  +------------------+
+  |  LLM Observe     |  "Got 22C. Now I need to convert."
+  +--------+---------+
+           |
+           v
+  +------------------+
+  |  Tool: calculator|  celsius_to_fahrenheit(22) -> 71.6F
+  +--------+---------+
+           |
+           v
+  +------------------+
+  |  LLM Respond     |  "It is 22C (71.6F) in Tokyo."
+  +------------------+
+`}}
+
+{{key "The ReAct pattern: Reason (think about what to do) -> Act (call a tool) -> Observe (read the result) -> repeat until done. This is the foundation of every LLM agent framework."}}
+
+{{phase 2 "Tool Definition" "5 min"}}
+
+{{say "Tools are functions the LLM can call. Each tool has a name, description, and parameter schema. The LLM reads these descriptions to decide which tool to use. Good descriptions are critical — they are the LLM's instruction manual."}}
+
+{{code "python" `# Tool definitions for Claude / OpenAI function calling
+tools = [
+    {
+        "name": "search_web",
+        "description": "Search the web for current information. Use when the user asks about recent events, current data, or anything that requires up-to-date information.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query"
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "run_sql",
+        "description": "Execute a read-only SQL query against the analytics database. Use when the user asks about metrics, counts, or data analysis.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "SQL SELECT query (read-only)"
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "send_email",
+        "description": "Send an email. Only use when the user explicitly asks to send a message.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "description": "Recipient email"},
+                "subject": {"type": "string"},
+                "body": {"type": "string"}
+            },
+            "required": ["to", "subject", "body"]
+        }
+    }
+]
+`}}
+
+{{phase 3 "Agent Loop Implementation" "5 min"}}
+
+{{code "python" `from anthropic import Anthropic
+
+client = Anthropic()
+
+# Tool implementations
+def search_web(query: str) -> str:
+    # Call your search API
+    return "Tokyo weather: 22C, partly cloudy"
+
+def run_sql(query: str) -> str:
+    # Execute against read-only replica
+    import sqlite3
+    conn = sqlite3.connect("analytics.db")
+    results = conn.execute(query).fetchall()
+    return str(results)
+
+TOOL_MAP = {
+    "search_web": search_web,
+    "run_sql": run_sql,
+}
+
+def agent_loop(user_message: str, max_turns: int = 10) -> str:
+    messages = [{"role": "user", "content": user_message}]
+
+    for turn in range(max_turns):
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4096,
+            tools=tools,
+            messages=messages,
+        )
+
+        # Check if the model wants to use a tool
+        if response.stop_reason == "tool_use":
+            # Execute each tool call
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    tool_fn = TOOL_MAP.get(block.name)
+                    if tool_fn:
+                        result = tool_fn(**block.input)
+                    else:
+                        result = "Error: unknown tool"
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": str(result),
+                    })
+
+            # Add assistant response and tool results
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": tool_results})
+        else:
+            # Model is done, return final text
+            return response.content[0].text
+
+    return "Agent reached max turns without completing."
+
+# Run it
+answer = agent_loop("How many users signed up last week?")
+print(answer)
+`}}
+
+{{phase 4 "Common Tool Patterns" "5 min"}}
+
+{{table "Common Agent Tools" (rows
+  (row "Tool"              "Use Case"                          "Risk"                                  "Mitigation")
+  (row "Web search"        "Current events, recent data"       "Unreliable sources"                    "Verify with multiple sources")
+  (row "SQL query"         "Analytics, data lookup"            "SQL injection, data leaks"              "Read-only replica, parameterized queries")
+  (row "Code execution"    "Math, data processing"             "Arbitrary code execution"               "Sandboxed environment (Docker/Firecracker)")
+  (row "API calls"         "External services (Stripe, etc)"   "Unintended actions (charges, deletes)" "Require user confirmation for mutations")
+  (row "File read/write"   "Document processing"               "Path traversal, sensitive files"        "Allowlist directories, read-only by default")
+  (row "Database write"    "CRUD operations"                   "Data corruption, mass deletes"          "Transaction limits, approval workflow")
+)}}
+
+{{avoid "Never let an LLM agent execute write operations (database inserts, API mutations, sending messages) without explicit user confirmation. The agent might misinterpret intent or hallucinate parameters. Always require human-in-the-loop for side effects."}}
+
+{{phase 5 "Error Handling and Safety" "3 min"}}
+
+{{table "Agent Failure Modes" (rows
+  (row "Failure"               "What Happens"                           "Fix")
+  (row "Infinite loop"         "Agent keeps calling tools without progress" "Max turns limit (10), detect repetition")
+  (row "Tool error"            "API returns 500, query fails"            "Return error to LLM, let it reason about alternatives")
+  (row "Hallucinated tool"     "LLM invents a tool that does not exist"  "Validate tool name against allowed list")
+  (row "Wrong parameters"      "LLM passes invalid arguments"            "Schema validation before execution")
+  (row "Cost explosion"        "Agent makes 100 LLM calls"               "Token budget, max turns, cost alerts")
+  (row "Prompt injection"      "Tool result contains adversarial text"    "Sanitize tool outputs, separate system context")
+)}}
+
+{{phase 6 "Architecture for Production" "3 min"}}
+
+{{diagram "Production Agent Architecture" `
+  User Request
+       |
+       v
+  +-----------+
+  | Guardrails|  Input validation, PII check
+  +-----+-----+
+        |
+        v
+  +-----------+     +----------+
+  |   Agent   |<--->|  Tools   |
+  |   Loop    |     | Registry |
+  |  (LLM)   |     +----------+
+  +-----+-----+         |
+        |          +-----+-----+-----+
+        |          |     |     |     |
+        |        Web   SQL   API   Code
+        |       Search Query Call  Exec
+        v
+  +-----------+
+  | Guardrails|  Output validation, content safety
+  +-----+-----+
+        |
+        v
+  User Response
+`}}
+
+{{phase 7 "Interview Q&A" "3 min"}}
+
+{{qa
+  "How would you build a customer support agent?"
+  "Define tools: search_knowledge_base (RAG over help docs), lookup_order (query orders DB), create_ticket (write to ticketing system). The agent reasons about user intent, searches for relevant help articles, looks up their order if needed, and either answers directly or creates a support ticket. All write operations require confirmation."
+  "How do you prevent an agent from going rogue?"
+  "Four layers: 1) Max turns limit (10 iterations). 2) Token budget per session. 3) Tool allowlist — agent cannot call tools not in its registry. 4) Human-in-the-loop for any write/mutation operations. Log every tool call for audit."
+}}
+
+{{checklist
+  "ReAct loop: Reason -> Act (tool call) -> Observe -> Repeat"
+  "Clear tool descriptions — the LLM reads these to decide which tool to use"
+  "Max turns limit to prevent infinite loops (typically 10)"
+  "Validate tool names and parameters before execution"
+  "Human-in-the-loop for all write/mutation operations"
+  "Sanitize tool outputs to prevent prompt injection"
+  "Token budget and cost monitoring per agent session"
+  "Log every tool call and result for debugging and audit"
+}}
