@@ -33,6 +33,7 @@ func New(reg *registry.Registry, templateFS, contentFS fs.FS, funcMap template.F
 			"web/templates/detail_pattern.html",
 			"web/templates/context_card.html",
 			"web/templates/doc_card.html",
+			"web/templates/detail_concept.html",
 		))
 
 	return &Handler{
@@ -48,17 +49,23 @@ func isHTMX(r *http.Request) bool {
 	return r.Header.Get("HX-Request") == "true"
 }
 
-// Dashboard renders the full page with sidebar and welcome view.
-func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
-	data := map[string]interface{}{
+// baseData returns common template data shared by all handlers.
+func (h *Handler) baseData() map[string]interface{} {
+	return map[string]interface{}{
 		"Problems":     h.reg.Problems,
 		"Fundamentals": h.reg.Fundamentals,
 		"Algorithms":   h.reg.Algorithms,
 		"Patterns":     h.reg.Patterns,
-		"Content":      template.HTML(""),
-		"ActiveSlug":   "",
-		"PageType":     "welcome",
+		"Concepts":     h.reg.Concepts,
 	}
+}
+
+// Dashboard renders the full page with sidebar and welcome view.
+func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
+	data := h.baseData()
+	data["Content"] = template.HTML("")
+	data["ActiveSlug"] = ""
+	data["PageType"] = "welcome"
 	if err := h.templates.ExecuteTemplate(w, "base.html", data); err != nil {
 		log.Printf("Template error: %v", err)
 		http.Error(w, "Internal error", 500)
@@ -77,16 +84,11 @@ func (h *Handler) ProblemDetail(w http.ResponseWriter, r *http.Request) {
 	// Render content from HTML file
 	content := h.renderContent(problem.Path)
 
-	data := map[string]interface{}{
-		"Problem":      problem,
-		"Content":      content,
-		"Problems":     h.reg.Problems,
-		"Fundamentals": h.reg.Fundamentals,
-		"Algorithms":   h.reg.Algorithms,
-		"Patterns":     h.reg.Patterns,
-		"ActiveSlug":   slug,
-		"PageType":     "problem",
-	}
+	data := h.baseData()
+	data["Problem"] = problem
+	data["Content"] = content
+	data["ActiveSlug"] = slug
+	data["PageType"] = "problem"
 
 	if isHTMX(r) {
 		if err := h.templates.ExecuteTemplate(w, "detail_problem.html", data); err != nil {
@@ -140,20 +142,15 @@ func (h *Handler) FundamentalDetail(w http.ResponseWriter, r *http.Request) {
 
 	content := h.renderContent(fund.Path)
 
-	data := map[string]interface{}{
-		"Fundamental":       fund,
-		"Content":           content,
-		"Problems":          h.reg.Problems,
-		"Fundamentals":      h.reg.Fundamentals,
-		"Algorithms":        h.reg.Algorithms,
-		"Patterns":          h.reg.Patterns,
-		"ActiveSlug":        slug,
-		"PageType":          "fundamental",
-		"FromProblem":       fromProblem,
-		"FromProblemRef":    fromProblemRef,
-		"HighlightContext":  highlightContext,
-		"HighlightKeywords": highlightKeywords,
-	}
+	data := h.baseData()
+	data["Fundamental"] = fund
+	data["Content"] = content
+	data["ActiveSlug"] = slug
+	data["PageType"] = "fundamental"
+	data["FromProblem"] = fromProblem
+	data["FromProblemRef"] = fromProblemRef
+	data["HighlightContext"] = highlightContext
+	data["HighlightKeywords"] = highlightKeywords
 
 	if isHTMX(r) {
 		if err := h.templates.ExecuteTemplate(w, "detail_fund.html", data); err != nil {
@@ -222,16 +219,11 @@ func (h *Handler) AlgorithmDetail(w http.ResponseWriter, r *http.Request) {
 
 	content := h.renderContent(algo.Path)
 
-	data := map[string]interface{}{
-		"Algorithm":    algo,
-		"Content":      content,
-		"Problems":     h.reg.Problems,
-		"Fundamentals": h.reg.Fundamentals,
-		"Algorithms":   h.reg.Algorithms,
-		"Patterns":     h.reg.Patterns,
-		"ActiveSlug":   slug,
-		"PageType":     "algorithm",
-	}
+	data := h.baseData()
+	data["Algorithm"] = algo
+	data["Content"] = content
+	data["ActiveSlug"] = slug
+	data["PageType"] = "algorithm"
 
 	if isHTMX(r) {
 		if err := h.templates.ExecuteTemplate(w, "detail_algo.html", data); err != nil {
@@ -258,19 +250,54 @@ func (h *Handler) PatternDetail(w http.ResponseWriter, r *http.Request) {
 
 	content := h.renderContent(pattern.Path)
 
-	data := map[string]interface{}{
-		"Pattern":      pattern,
-		"Content":      content,
-		"Problems":     h.reg.Problems,
-		"Fundamentals": h.reg.Fundamentals,
-		"Algorithms":   h.reg.Algorithms,
-		"Patterns":     h.reg.Patterns,
-		"ActiveSlug":   slug,
-		"PageType":     "pattern",
-	}
+	data := h.baseData()
+	data["Pattern"] = pattern
+	data["Content"] = content
+	data["ActiveSlug"] = slug
+	data["PageType"] = "pattern"
 
 	if isHTMX(r) {
 		if err := h.templates.ExecuteTemplate(w, "detail_pattern.html", data); err != nil {
+			log.Printf("Template error: %v", err)
+			http.Error(w, "Internal error", 500)
+		}
+		return
+	}
+
+	if err := h.templates.ExecuteTemplate(w, "base.html", data); err != nil {
+		log.Printf("Template error: %v", err)
+		http.Error(w, "Internal error", 500)
+	}
+}
+
+// ConceptDetail renders a concept's detail view showing all appearances.
+func (h *Handler) ConceptDetail(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	concept := h.reg.GetConcept(slug)
+	if concept == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Find which category this concept belongs to
+	var category string
+	for _, cat := range h.reg.Concepts {
+		for _, c := range cat.Concepts {
+			if c.Slug == slug {
+				category = cat.Category
+				break
+			}
+		}
+	}
+
+	data := h.baseData()
+	data["Concept"] = concept
+	data["ConceptCategory"] = category
+	data["ActiveSlug"] = "concept-" + slug
+	data["PageType"] = "concept"
+
+	if isHTMX(r) {
+		if err := h.templates.ExecuteTemplate(w, "detail_concept.html", data); err != nil {
 			log.Printf("Template error: %v", err)
 			http.Error(w, "Internal error", 500)
 		}

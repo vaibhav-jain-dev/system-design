@@ -57,6 +57,7 @@ func main() {
 	r.Get("/fund/*", h.FundamentalDetail)
 	r.Get("/algo/{slug}", h.AlgorithmDetail)
 	r.Get("/pattern/{slug}", h.PatternDetail)
+	r.Get("/concept/{slug}", h.ConceptDetail)
 
 	// API routes
 	r.Post("/api/generate/{slug}", h.GeneratePDF)
