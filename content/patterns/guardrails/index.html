@@ -2,11 +2,21 @@
 
 {{say "Guardrails are input and output validation layers around your LLM. They catch dangerous, off-topic, or malformed inputs before they reach the model, and filter unsafe, hallucinated, or incorrectly formatted outputs before they reach the user. Think of guardrails as middleware for LLM applications."}}
 
-{{thought "Every production LLM application needs guardrails. Without them, you are one creative user prompt away from data leaks, offensive content, or hallucinated answers going to production. Guardrails are not optional. They are as essential as input validation in a web application."}}
+{{think "Every production LLM application needs guardrails. Without them, you are one creative user prompt away from data leaks, offensive content, or hallucinated answers going to production. Guardrails are not optional — they are as essential as input validation in a web application."
+  (whyNot "relying on the system prompt alone for safety" "System prompts can be overridden by prompt injection. The LLM is a statistical model — it does not have a hardcoded rule engine. A sufficiently clever user input can cause the model to ignore its instructions. The system prompt is a first line of defense, not a complete safety solution.")
+  (whatIf "guardrails add too much latency" "Run cheap checks first (regex, length, format) in parallel. Only invoke expensive checks (LLM classifiers, hallucination judges) when the cheap checks pass. For most requests, total guardrail overhead is 20-80ms. Reserve the 500ms+ hallucination check for RAG applications where grounding matters most.")
+}}
 
 {{diagram "pat-guardrail-pipeline"}}
 
 {{key "Every production LLM app needs guardrails. Run cheap checks first (regex, length) to filter obviously bad inputs before expensive checks (LLM classifiers, hallucination judges). This fan-out pattern minimizes average cost while maintaining safety."}}
+
+{{triggerQs "Questions this phase could trigger"
+  "What is the difference between guardrails and fine-tuning for safety?"
+  "Guardrails are runtime checks: they filter inputs and outputs without changing the model. Fine-tuning changes model weights to be inherently safer. Use both: fine-tuning reduces the base rate of unsafe outputs, guardrails catch remaining edge cases. Guardrails are faster to deploy, update, and audit — you can add a new rule in minutes without retraining."
+  "How do guardrails handle false positives?"
+  "Track false positive rate as a metric. When a guardrail blocks too many legitimate requests (over 2%), either tune the threshold or add a secondary check for borderline cases before blocking. Always log blocked requests so you can review patterns and tune regularly. Over-aggressive guardrails harm user experience as much as under-aggressive ones."
+}}
 
 {{phase 2 "Input Guardrails" "8 min"}}
 
@@ -20,6 +30,8 @@
   (row "Topic filtering"      "Off-topic or disallowed subjects"     "Classifier or keyword list"          "10-50ms"    "Redirect to allowed topics")
   (row "Language detection"    "Unsupported languages"                "Language classifier"                 "5-10ms"     "Respond in supported lang only")
 )}}
+
+{{hint "cheap checks first" "Ordering guardrails cheapest-to-most-expensive means most requests see only the fast regex/length checks. An expensive LLM classifier that costs $0.001 per call and runs on every request costs $100/day at 100K requests/day. Running it only when heuristics flag uncertainty (5-10% of traffic) costs $5-10/day. The fan-out approach saves 90% of guardrail cost."}}
 
 {{code "python" `import re
 from typing import List, Tuple, Optional
@@ -352,6 +364,13 @@ class OutputGuardrails:
         )
 `}}
 
+{{triggerQs "Questions this phase could trigger"
+  "How do you handle PII in LLM applications?"
+  "Three layers: detect and mask PII in user input before it reaches the LLM using regex and NER models. Use a system prompt that instructs the model never to repeat personal information. Scan LLM output for PII before returning to the user. For RAG apps, also scrub PII from your document index before embedding — otherwise the model retrieves and surfaces it."
+  "What is the cost of running output guardrails on every response?"
+  "Format validation and PII detection are free — regex runs locally in under 1ms. Content safety via the OpenAI Moderation API is free and adds 100-200ms. The hallucination check (LLM-as-judge with gpt-4o-mini) costs $0.50 per 1000 requests and adds 500-1000ms — run this only for RAG apps. Total overhead for a typical request is under $0.001 and 200-300ms."
+}}
+
 {{phase 4 "Prompt Injection Defense In Depth" "8 min"}}
 
 {{say "Prompt injection is the most dangerous attack on LLM applications. The attacker embeds instructions in user input that override your system prompt. Defense requires multiple layers since no single technique is sufficient."}}
@@ -460,8 +479,13 @@ class PromptInjectionDetector:
 {{compare "Injection Defense Strategy" (options
   (best "Multi-layer defense" "Heuristic regex (fast, cheap) catches 80 percent of attacks. LLM classifier (slower, moderate cost) catches subtle attacks the regex misses. Output monitoring catches anything that slips through. Belt and suspenders is the only safe approach.")
   (alt "LLM-as-judge only" "Use a separate LLM call to evaluate every input. High accuracy but adds 500ms+ latency and cost to every request. Best as a secondary check for high-risk operations, not as the only layer.")
-  (nofit "Keyword blocklist only" "Attackers easily bypass with synonyms, typos, Unicode tricks, and encoding. A blocklist gives false confidence while providing minimal actual protection against determined attackers.")
+  (nofit "Keyword blocklist only" "Attackers easily bypass with synonyms, typos, Unicode tricks, and encoding. A blocklist gives false confidence while providing minimal protection against determined attackers.")
 )}}
+
+{{think "The heuristic-first approach catches 80% of injections at near-zero cost. The LLM classifier only runs on the 10-20% of requests that look suspicious. This tiered approach keeps average guardrail cost under $0.0001 per request while maintaining high detection rates for sophisticated attacks."
+  (whyNot "LLM classifier on every request" "At 100K requests per day, running gpt-4o-mini on every request costs ~$500/month for the injection check alone. The heuristic layer catches the obvious attacks for free, leaving the expensive classifier only for edge cases. The marginal safety improvement from running the LLM on clearly benign inputs is zero.")
+  (whatIf "an attacker uses encoded payloads (Base64, Unicode)" "Add a decoding step before heuristic checks. Base64-decode, normalize Unicode, strip HTML entities, then run your patterns on the normalized text. Attackers routinely use encoding to bypass naive keyword filters. Normalize first, scan second.")
+}}
 
 {{phase 5 "Complete Guardrail Pipeline" "8 min"}}
 
@@ -578,8 +602,8 @@ class GuardedLLM:
         # All retries failed
         return GuardedResponse(
             answer=(
-                "I apologize, but I was unable to generate "
-                "a safe response. Please try a different question."
+                "I was unable to generate a safe response. "
+                "Please try a different question."
             ),
             input_pii=input_result.pii_found,
             output_pii=[],
@@ -628,7 +652,10 @@ class GuardedLLM:
   (row "Hallucination check"    "LLM-as-judge"             "500-1000ms"      "$0.50"                  "RAG applications only")
 )}}
 
-{{thought "The total guardrail overhead for a typical request is 50-300ms and under $0.001 in compute cost. The hallucination check is the expensive one at $0.50 per 1000 requests, but it only applies to RAG applications. The cost of NOT having guardrails is much higher: a single PII leak or harmful output can cost thousands in incident response and reputation damage."}}
+{{think "Total guardrail overhead for a typical request: 50-300ms and under $0.001. The hallucination check is the expensive outlier at $0.50 per 1000 requests — but it only applies to RAG. The cost of NOT having guardrails is much higher: a single PII leak or harmful output can trigger incident response costing thousands and permanent reputation damage."
+  (whatIf "hallucination check latency is unacceptable" "Run it asynchronously. Return the LLM response immediately, then run the hallucination check in the background. If it fails, send a follow-up message or flag the response in the UI. This works for use cases where a brief delay in flagging is acceptable, like a review-before-sending workflow.")
+  (how "tune guardrail thresholds" "Set thresholds based on measured false positive rates on production traffic. Start strict (high sensitivity), then loosen based on what you learn. Track: input_block_rate (should be under 10%), output_block_rate (under 5%), false_positive_rate (under 2%). Alert when any rate deviates more than 2x from baseline.")
+}}
 
 {{phase 8 "Monitoring and Improvement" "5 min"}}
 
@@ -711,23 +738,23 @@ class GuardrailMonitor:
   (row "False positive rate"       "Legitimate inputs wrongly blocked"          "> 2% (loosen rules for that pattern)")
 )}}
 
+{{triggerQs "Questions this phase could trigger"
+  "How do you prevent indirect prompt injection in RAG?"
+  "Indirect injection happens when a document in your index contains adversarial instructions. Four defenses: delimit retrieved context in the prompt using XML tags so the model knows it is data not instructions. Instruct the model in the system prompt that context is data, not commands. Run the injection detector on retrieved chunks before including them. Use a separate system prompt instruction that context cannot override."
+  "How do you handle false positives that are blocking legitimate users?"
+  "When false positive rate exceeds 2%, review the blocked requests manually. Identify which patterns are triggering incorrectly. Either make the regex more specific (reduce false positives on that pattern) or add an allowlist for confirmed safe patterns. For borderline cases, add a secondary LLM classifier that only runs when the primary heuristic fires — human review for high-value customers."
+}}
+
 {{phase 9 "Interview Q&A" "5 min"}}
 
 {{qa
-  "How do you handle PII in LLM applications?"
-  "Three layers: 1) Detect and mask PII in user input before it reaches the LLM using regex and NER models like Presidio. 2) Use a system prompt that instructs the model to never repeat personal information. 3) Scan the LLM output for PII before returning to the user. For RAG apps, also scrub PII from your document index before embedding."
-  "What is the difference between guardrails and fine-tuning for safety?"
-  "Guardrails are runtime checks: they filter inputs and outputs without changing the model. Fine-tuning changes the model weights to be inherently safer. Use both: fine-tuning reduces the base rate of unsafe outputs, guardrails catch the remaining edge cases. Guardrails are faster to deploy, update, and audit."
-}}
-
-{{qa
   "How do you handle false positives in guardrails?"
-  "Track false positive rate as a metric. When a guardrail blocks too many legitimate requests, you have two options: 1) Tune the threshold to be less aggressive. 2) Add an exception path where borderline cases get a secondary, more expensive check before being blocked. Always log blocked requests so you can review and tune regularly."
-  "How do you prevent indirect prompt injection in RAG?"
-  "Indirect injection happens when a document in your index contains adversarial instructions. Defense: 1) Clearly delimit retrieved context in the prompt using XML tags or markers. 2) Instruct the model that context is data, not instructions. 3) Run the injection detector on retrieved chunks before including them in the prompt. 4) Use a separate system prompt that the context cannot override."
+  "Track false positive rate as a metric. When a guardrail blocks too many legitimate requests, tune the threshold to be less aggressive or add a secondary, more expensive check before blocking borderline cases. Always log blocked requests so you can review and tune regularly. A 2% false positive rate means 2 in 100 users get incorrectly blocked — that is significant and needs addressing."
+  "How do you implement guardrails for a multi-tenant LLM platform?"
+  "Per-tenant guardrail configuration. Each tenant gets their own rules: which topics are allowed, PII handling preferences, custom blocklists, output format requirements. Store guardrail configs in a database keyed by tenant ID. Load the config at request time and apply tenant-specific rules. An enterprise customer can block financial advice while a healthcare customer blocks non-medical topics. Shared infrastructure, customized safety."
 }}
 
-{{followup "How would you implement guardrails for a multi-tenant LLM platform?" "Per-tenant guardrail configuration. Each tenant gets their own set of rules: which topics are allowed, PII handling preferences, custom blocklists, and output format requirements. Store guardrail configs in a database keyed by tenant ID. Load the config at request time and apply tenant-specific rules. This lets an enterprise customer block financial advice while a healthcare customer blocks non-medical topics. Shared infrastructure, customized safety."}}
+{{followup "How would you handle PII that needs to stay in context for the LLM to give a useful answer?" "Tokenized PII with a lookup table. Replace PII with tokens (SSN_1, EMAIL_1) before sending to the LLM. The LLM reasons about the token references. Before returning the response to the user, replace the tokens back with the original values. This lets the model say 'The account for SSN_1 is overdue' which you then render as 'The account for 123-45-6789 is overdue' only for the authorized user. The LLM never sees raw PII and your logs never capture it."}}
 
 {{checklist
   "PII detection on BOTH input and output (regex + NER model)"

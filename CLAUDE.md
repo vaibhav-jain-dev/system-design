@@ -373,17 +373,213 @@ Template data always includes: `Problems`, `Fundamentals`, `Algorithms`, `Patter
 
 ---
 
+## Gold Standard: Writing Content
+
+### Problem File Structure (content/problems/{slug}/index.html)
+
+Every problem file follows this exact structure with 12 phases:
+
+```html
+{{stageNav "Requirements & Problem Scope" 1 "Phase Title" 2 ... "Interview Deep-Dive Q&A" 12}}
+
+{{phase 1 "Requirements & Problem Scope" "5 min"}}
+
+{{say "Opening statement clarifying scope and assumptions..."}}
+
+{{diagram "prefix-requirements"}}
+
+{{think "Core design decision reasoning..."
+  (whyNot "rejected alternative" "specific reason with numbers")
+  (whatIf "failure scenario" "concrete response with fallback strategy")
+}}
+
+{{hint "why this choice?" "Detailed explanation of thought process — include numbers, latency, cost."}}
+
+{{triggerQs "Questions this section might trigger"
+  "Specific question an interviewer would ask?"
+  "Direct answer. No filler. Start with the technical fact. Include numbers. 2-4 sentences."
+  "Second question?"
+  "Direct answer with specifics."
+}}
+
+{{phase 2 "Next Phase" "X min"}}
+... (repeat pattern for phases 2-11)
+
+{{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
+
+{{deepQA "Critical Interview Questions" `
+<div class="dqa-item">
+  <div class="dqa-q">Top-level question?</div>
+  <div class="dqa-a">Direct answer with specifics.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">Follow-up question?</div>
+    <div class="dqa-sub-a">Answer with <span class="dqa-key">highlighted terms</span>.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">Deep follow-up?</div>
+      <div class="dqa-deep-a">Deepest answer.</div>
+    </div>
+  </div>
+</div>
+... (exactly 5 dqa-items, each with 3-level nesting)
+`}}
+
+{{key "One-sentence key takeaway for the entire problem."}}
+```
+
+**Required elements per problem file:**
+- `{{stageNav}}` with exactly 12 phases
+- Phase 12 is always "Interview Deep-Dive Q&A" with `{{deepQA}}` (5 items, 3-level nesting)
+- Every phase opens with `{{say "..."}}` (what to literally say in interview)
+- `{{hint}}` on every design decision (2-3 per phase minimum)
+- `{{think}}` replaces `{{thought}}` — always include at least 1 `whyNot` or `whatIf` chain
+- `{{triggerQs}}` on 5-6 key phases with 2-3 Q&A pairs each
+- `{{diagram "slug"}}` for every visual (never inline HTML)
+- `{{code "lang" "..."}}` for implementations
+- `{{compare}}` for technology/algorithm selection decisions
+- `{{table}}` for structured data (requirements, estimates, etc.)
+- One `{{checklist}}` for section summaries
+- One `{{key}}` as closing takeaway
+- Q&A answers are ALWAYS direct — no "great question", no "this is the hardest", start with the answer
+
+**Phase timing convention:**
+- Requirements: 5 min
+- Core algorithm/architecture phases: 8-10 min
+- Supporting phases: 3-5 min
+- Interview Q&A: 10 min
+
+### Fundamental File Structure (content/fundamentals/{path}/index.html)
+
+Fundamentals use 8 phases (NOT 12), no `{{stageNav}}`, no `{{deepQA}}`:
+
+```html
+{{phase 1 "What Is {Topic}?" "3 min"}}
+
+{{say "Opening explanation..."}}
+
+{{diagram "fund-topic-overview"}}
+
+{{think "Key concept reasoning..."
+  (whyNot "common misconception" "why it's wrong")
+  (how "core mechanism" "how it actually works")
+}}
+
+{{hint "why this matters?" "Interview relevance explanation."}}
+
+{{phase 2 "Core Concepts" "5 min"}}
+
+{{table "Comparison" (rows
+  (row "Feature" "Option A" "Option B")
+  (row "Latency" "1ms" "10ms")
+)}}
+
+{{triggerQs "Interview Questions"
+  "Question?" "Direct answer."
+}}
+
+... (8 phases total)
+
+{{checklist "Summary point 1" "Summary point 2"}}
+
+{{key "Key takeaway."}}
+```
+
+**Required elements per fundamental file:**
+- 8 phases (not 12)
+- `{{hint}}` 1-2 per phase
+- `{{think}}` with chains (replacing all `{{thought}}`)
+- `{{triggerQs}}` on 3-4 phases
+- `{{qa}}` inline throughout (not deferred to end)
+- `{{table}}` for structured comparisons (heavy use)
+- `{{diagram "slug"}}` for visuals
+- One `{{checklist}}` and one `{{key}}` at end
+
+### Algorithm File Structure (content/algorithms/{slug}/index.html)
+
+Same as fundamentals (8 phases, no stageNav, no deepQA) but with emphasis on:
+- Full implementation in `{{code}}` (the centerpiece)
+- Complexity analysis in `{{table}}`
+- `{{compare}}` for algorithm alternatives
+- `{{hint}}` on data structure and parameter choices
+
+### Diagram Registration (internal/diagrams/{domain}.go)
+
+```go
+func registerNewDomain(r *Registry) {
+    r.Register(&Diagram{
+        Slug:        "prefix-diagram-name",     // prefix matches domain
+        Title:       "Human Readable Title",
+        Description: "What this diagram shows",
+        ContentFile: "problems/slug",            // or "fundamentals/path"
+        Type:        TypeHTML,
+        HTML:        `<div class="d-flow">
+            <div class="d-box blue">Component A</div>
+            <div class="d-arrow">→</div>
+            <div class="d-box green">Component B</div>
+        </div>`,
+    })
+}
+```
+
+**Diagram slug conventions:**
+| Prefix | Domain | File |
+|--------|--------|------|
+| `rl-` | Rate Limiter | `rate_limiter.go` |
+| `ig-` | Instagram | `instagram.go` |
+| `url-` | URL Shortener | `url_shortener.go` |
+| `algo-` | Algorithms | `algorithms.go` |
+| `fund-` | Fundamentals | `fundamentals.go` |
+| `pat-` | Patterns | `patterns.go` |
+
+**For a new problem**, create a new file `internal/diagrams/{domain}.go` with a `registerDomain(r *Registry)` function, and add it to `BuildDefault()` in `registry.go`.
+
+### Registry Entry (_registry.yaml)
+
+```yaml
+# New problem
+problems:
+  - slug: chat-system
+    title: "Chat System"
+    description: "Design WhatsApp: real-time messaging, presence, group chats"
+    path: problems/chat-system
+    uses:
+      - fundamental: storage/redis
+        config: "Pub/Sub for real-time message delivery"
+        why: "Sub-ms publish to connected WebSocket sessions"
+        not_this: "Polling — adds 1-5 second latency to message delivery"
+        risk: "Redis Pub/Sub is fire-and-forget — message loss on disconnect"
+        caveats: "Pub/Sub does not persist. Use Kafka for message durability."
+
+# New fundamental
+fundamentals:
+  - slug: messaging/kafka
+    title: "Apache Kafka"
+    description: "Distributed event streaming, partitions, consumer groups"
+    path: fundamentals/messaging/kafka
+```
+
+### Writing Guidelines for Q&A
+
+**DO:**
+- "Redis sorted sets store members with float64 scores. ZADD is O(log N). For 1M members, that's ~20 comparisons per insert."
+- "Fan-out-on-write for < 100K followers costs at most 100K Redis writes per post. At 1ms each = 100 seconds of background work."
+
+**DON'T:**
+- "This is the hardest DynamoDB challenge." (just explain why it's hard)
+- "Great question!" (remove entirely)
+- "Let me think about this..." (just give the answer)
+- "There are several approaches..." (name the best one first)
+
 ## Common Tasks
 
 ### Add a new problem
 1. Add entry to `content/_registry.yaml` under `problems:` with slug, title, description, path, and `uses:` links
-2. Create `content/problems/{slug}/index.html` with macro-based content
-3. Create diagram entries in a new or existing `internal/diagrams/*.go` file
+2. Create `content/problems/{slug}/index.html` following the Gold Standard above (12 phases, stageNav, deepQA)
+3. Create `internal/diagrams/{domain}.go` with diagram registrations, add to `BuildDefault()` in `registry.go`
 4. Restart server
 
 ### Add a new fundamental
 1. Add entry to `content/_registry.yaml` under `fundamentals:` (optionally with `children:`)
-2. Create `content/fundamentals/{path}/index.html`
+2. Create `content/fundamentals/{path}/index.html` following the Gold Standard (8 phases, no stageNav)
 3. Add `uses:` entries in any problems that reference it
 4. Restart server — reverse links are auto-derived
 

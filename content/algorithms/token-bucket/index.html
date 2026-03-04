@@ -12,7 +12,21 @@
   (row "last_refill"   "last_update"        "Timestamp of last refill calc"    "Unix timestamp")
 )}}
 
+{{think "Two separate knobs — burst and sustained rate — is what makes token bucket the right choice for most APIs. A mobile app opens and fires 20 requests immediately on launch. With a fixed-window counter, those 20 burst requests exceed the per-second limit and get rejected even though the user has been idle. Token bucket handles this naturally: the bucket accumulated tokens during idle time."
+  (whyNot "a fixed-window counter" "Fixed-window counters have a boundary burst problem: a user can fire 2x the limit across two adjacent window edges (N requests at end of window t, N requests at start of window t+1). Token bucket has no windows — the token balance is continuous.")
+  (whatIf "you want zero burst tolerance (smooth output rate)" "Use a leaky bucket instead. Leaky bucket drains at a fixed rate regardless of token accumulation. Every request is queued and processed at exactly 1/rate seconds per request. Used for traffic shaping where a downstream system cannot handle spikes.")
+}}
+
+{{hint "two knobs" "bucket_size and refill_rate are independent. You can set bucket_size=1000 (large burst) with refill_rate=1 (1 req/sec sustained). This allows a one-time burst of 1000 then limits to 60 per minute. Useful for scheduled jobs that fire all at once then go quiet."}}
+
 {{key "Token bucket has two knobs: bucket_size controls burst tolerance, refill_rate controls sustained throughput. A bucket with size=100 and rate=10/sec allows a burst of 100 requests instantly, then sustains 10 per second."}}
+
+{{triggerQs "Questions this overview triggers"
+  "What is the difference between burst capacity and sustained rate?"
+  "Burst capacity (bucket_size) is the maximum requests allowed in a single instant — it depletes immediately. Sustained rate (refill_rate) is how many tokens accumulate per second over time. A bucket with size=100 and rate=10/sec allows 100 requests right now, but only 600 per minute on average."
+  "When would you choose token bucket over leaky bucket?"
+  "Token bucket when clients have bursty traffic patterns — mobile apps, batch jobs, retry storms after outages. Leaky bucket when the downstream system needs a smooth, predictable input rate — video encoding pipelines, payment processors, or any queue-based consumer. Most API gateways use token bucket."
+}}
 
 {{phase 2 "The Algorithm" "3 min"}}
 
@@ -27,7 +41,13 @@
   (row "5"     "Update last_refill timestamp"                             "For next refill calculation")
 )}}
 
-{{thought "The lazy refill approach is critical. You do NOT need a background thread adding tokens every millisecond. On each request, compute how many tokens WOULD have been added since the last check. This makes the algorithm stateless between requests and trivial to implement in Redis."}}
+{{think "Lazy refill is the key insight. You do not need a background thread adding tokens every millisecond. On each request, compute how many tokens WOULD have accumulated since last check. This makes the implementation stateless between requests — perfect for Redis, where you cannot run background threads."
+  (how "is retry-after calculated?" "deficit = tokens_needed - current_tokens. retry_after = deficit / refill_rate. If the bucket has 3 tokens and the request needs 5, deficit = 2, retry_after = 2/refill_rate seconds. Return this in the Retry-After HTTP header.")
+  (whatIf "the refill rate is very high and elapsed time is very large" "Cap at bucket_size: tokens = min(bucket_size, tokens + elapsed * refill_rate). Without the cap, an idle client could accumulate years of tokens and fire millions of requests. The cap enforces the burst limit regardless of idle time.")
+  (whyNot "a background timer that adds tokens every millisecond" "Background timers in distributed systems require either a dedicated thread per bucket (impractical at 10 million users) or a shared timer that updates all buckets (lock contention nightmare). Lazy refill is mathematically equivalent and requires zero background work.")
+}}
+
+{{hint "time.monotonic vs time.time" "Use time.monotonic() for the single-server implementation. It is guaranteed never to go backward (unlike time.time() which NTP can adjust). For the Redis implementation, time.time() is necessary because all servers must share the same clock reference."}}
 
 {{phase 3 "Python Implementation (Thread-Safe)" "8 min"}}
 
@@ -92,6 +112,11 @@ for i in range(15):
 # First 10 ALLOW, then 5 REJECT. Wait 5s -> 10 tokens refill.
 `}}
 
+{{think "The RateLimiter class has two locks: one coarse lock to create buckets, and each TokenBucket has its own fine-grained lock. This prevents two threads from simultaneously creating a bucket for the same key while allowing different users' buckets to be checked concurrently."
+  (whatIf "you have 10 million active users and each has a bucket in memory" "At ~100 bytes per TokenBucket (two floats + lock overhead) and 10M users, that is ~1 GB RAM. Manageable on a single server, but a distributed cache (Redis) is better for horizontal scaling. Also add TTL cleanup: remove buckets for users inactive for > bucket_capacity/refill_rate seconds.")
+  (how "do you return rate limit headers to the client?" "Populate standard HTTP headers from the allow() response: X-RateLimit-Limit: {capacity}, X-RateLimit-Remaining: {remaining}, X-RateLimit-Reset: {unix_timestamp_when_full}, Retry-After: {retry_after} (only on 429 responses).")
+}}
+
 {{phase 4 "Algorithm Comparison" "5 min"}}
 
 {{say "There are four main rate limiting algorithms. Each makes a different trade-off between burst handling, memory usage, and accuracy."}}
@@ -99,8 +124,8 @@ for i in range(15):
 {{compare "Rate Limiting Algorithm" (options
   (best "Token Bucket" "Allows controlled bursts up to bucket capacity while enforcing sustained rate. O(1) memory per key. Used by AWS API Gateway, Stripe, and most production APIs.")
   (alt "Sliding Window Counter" "Weighted count from current and previous time windows. No burst problem at window boundaries. O(1) memory per key. Used by Cloudflare.")
-  (alt "Leaky Bucket" "Processes requests at a fixed rate like water dripping from a bucket. Smooths all bursts completely. Good for systems that need uniform output rate.")
-  (nofit "Fixed Window Counter" "Counts requests per fixed time window. Has the boundary burst problem: 2x the limit is possible across two adjacent window edges. Only acceptable for MVP.")
+  (alt "Leaky Bucket" "Processes requests at a fixed rate. Smooths all bursts. Good for systems that need uniform output rate.")
+  (nofit "Fixed Window Counter" "Counts requests per fixed time window. Has the boundary burst problem: 2x the limit possible across two adjacent window edges. Only acceptable for MVP or internal tooling.")
 )}}
 
 {{table "Algorithm Comparison" (rows
@@ -113,6 +138,18 @@ for i in range(15):
 )}}
 
 {{diagram "algo-token-vs-leaky-bucket"}}
+
+{{think "Sliding Window Counter is the main alternative to token bucket when burst behavior is a concern. It stores just two counters (current window count + previous window count) and weights them by how far into the current window you are. The boundary burst problem shrinks to near zero without storing per-request timestamps like Sliding Window Log."
+  (whyNot "Sliding Window Log" "Stores a timestamp for every request in the current window. At 1000 req/min per user, that is 1000 timestamps in memory per user. O(N) memory per key makes it impractical at scale. Only use for very low-volume, high-accuracy requirements.")
+  (how "does Cloudflare's Sliding Window Counter work?" "Two Redis keys per user per window: one for the current window, one for the previous. On each request: weight = (window_size - elapsed_in_current_window) / window_size. effective_count = prev_count * weight + curr_count. Allow if effective_count < limit.")
+}}
+
+{{triggerQs "Questions this phase triggers"
+  "What is the fixed window boundary burst problem?"
+  "A user can make N requests at 11:59:59.999 (end of minute 1) and N more at 12:00:00.001 (start of minute 2). Both windows see N requests — under the limit. But in a 2-millisecond window, 2N requests were served. Token bucket prevents this because the burst draws down accumulated tokens regardless of window boundaries."
+  "When would you choose sliding window counter over token bucket?"
+  "When you need to enforce an exact requests-per-time-window SLA (e.g., exactly 1000 per minute with no burst above that). Token bucket allows capacity-sized bursts that a sliding window would block. Cloudflare uses sliding window for its simplicity and the near-elimination of the boundary burst problem."
+}}
 
 {{phase 5 "Distributed Token Bucket with Redis" "8 min"}}
 
@@ -176,7 +213,22 @@ else:
     print("Rate limited, retry in {}s".format(result["retry_after"]))
 `}}
 
+{{think "The Lua script executes atomically in Redis — Redis is single-threaded, so a Lua script cannot be interrupted. This replaces the need for MULTI/EXEC transactions. The EXPIRE is set to 2 * (capacity / refill_rate): the time it takes to refill a fully empty bucket. After that, the user has been idle long enough that the bucket would be full anyway."
+  (whyNot "GET + SET without Lua" "Between GET (read tokens) and SET (write new token count), another Redis client can read the same stale value. Both allow the request. Both write back token-1. You served 2 requests for the price of 1 token. This is a race condition that doubles your effective rate limit.")
+  (whyNot "MULTI/EXEC transactions" "MULTI/EXEC uses optimistic locking with WATCH. If the key is modified between WATCH and EXEC, the transaction is aborted and must retry. Under high concurrency, this causes retry storms. Lua scripts are simpler and have no retry overhead.")
+  (whatIf "Redis is unavailable" "Fail-open: allow the request through. Brief Redis downtime means a few seconds of unthrottled traffic, which is acceptable for most APIs. Exception: payment endpoints and authentication — fail-closed to prevent abuse. Implement with a try/except around the Redis call.")
+}}
+
+{{hint "EXPIRE formula" "The EXPIRE is set to ceil(capacity / refill_rate) * 2. For capacity=100 and rate=10/sec, that is ceil(10) * 2 = 20 seconds. After 20 seconds of inactivity, the key expires. When the user makes a new request, the missing key initializes the bucket to full capacity — the user gets a fresh start, which is the correct behavior."}}
+
 {{avoid "Never implement distributed rate limiting with separate GET and SET commands. Between reading the token count and updating it, another server can read the same stale value. Both servers allow the request, double-spending the last token. Always use a Lua script or MULTI/EXEC for atomicity."}}
+
+{{triggerQs "Questions this phase triggers"
+  "Why does the Lua script use math.max(0, now - last_refill) for elapsed?"
+  "Redis timestamps come from time.time() on the application server, not from Redis itself. If two app servers have slightly different clocks, now could be slightly less than last_refill stored in Redis. math.max(0, elapsed) prevents a negative elapsed time from subtracting tokens instead of adding them."
+  "How do you handle Redis cluster (multiple shards) for rate limiting?"
+  "Hash the rate limit key to always route to the same Redis shard using hash tags: key = 'rl:{user:42}' — Redis Cluster hashes only the part in braces. All keys for the same user land on the same shard. The Lua script runs atomically within that shard. No cross-shard coordination needed."
+}}
 
 {{phase 6 "System Design Integration" "5 min"}}
 
@@ -192,14 +244,19 @@ else:
   (row "Login"         "5 requests"           "0.1 req/sec"      "5 burst, 6/min sustained"     "Brute-force protection")
 )}}
 
-{{qa
-  "Why choose token bucket over sliding window for API rate limiting?"
-  "Token bucket naturally allows bursts, which matches real API usage patterns. A mobile app may batch 20 requests on launch, then go quiet. Sliding window would reject some of those burst requests even if the user is well under the sustained rate limit."
-  "What happens when Redis is down?"
-  "Fail-open: allow all requests through. A few seconds of unlimited traffic is better than a total outage. Exception: payment and authentication endpoints should fail-closed to prevent abuse or fraud."
+{{think "The Login tier configuration is a common interview point. Brute-force protection needs a very small burst (5 attempts) and a very slow refill (0.1/sec = 1 attempt per 10 seconds). This matches real threat models: an attacker can try 5 passwords instantly, but then faces 10-second waits between each additional attempt — making dictionary attacks impractical."
+  (whatIf "you rate limit by IP instead of by user for login" "Rate limiting by IP catches bot attacks but allows password spraying (attacker uses many IPs, one attempt per IP). Rate limit by both: IP-level limit (5 attempts across all accounts from one IP) AND account-level limit (10 attempts per account from any IP). Both layers are needed.")
+  (how "do you expose rate limit status to the client?" "Return HTTP headers on every response: X-RateLimit-Limit (bucket_size), X-RateLimit-Remaining (current tokens), X-RateLimit-Reset (Unix timestamp when bucket is full), Retry-After (seconds, only on 429). This allows clients to implement backoff without guessing.")
 }}
 
-{{followup "How do you rate limit across multiple regions?" "Two approaches: 1) Per-region buckets where each region has its own bucket. A user gets N tokens per region. Total possible is N times the number of regions. Simple but over-counts. 2) Async sync where regions share token counts via a gossip protocol every 1-5 seconds. Most companies use approach 1 and accept the over-count because cross-region sync adds latency to every request."}}
+{{qa
+  "Why choose token bucket over sliding window for API rate limiting?"
+  "Token bucket naturally allows bursts, which matches real API usage. A mobile app may batch 20 requests on launch, then go quiet for an hour. Sliding window would reject some of those burst requests even though the user is well under the sustained rate limit. Token bucket handles this correctly."
+  "What happens when Redis is down?"
+  "Fail-open: allow all requests through. A few seconds of unlimited traffic is better than a total outage. Exception: payment and authentication endpoints should fail-closed to prevent fraud and brute-force attacks."
+}}
+
+{{followup "How do you rate limit across multiple regions?" "Two approaches: 1) Per-region buckets — each region has its own Redis and its own bucket per user. A user gets N tokens per region. Total possible is N times the number of regions. Simple but over-counts. 2) Async sync — regions share token counts via gossip or a global Redis every 1-5 seconds. Most companies use per-region buckets and accept the over-count because cross-region sync adds latency to every request."}}
 
 {{phase 7 "Interview Checklist" "2 min"}}
 
@@ -209,9 +266,9 @@ else:
   "Thread-safe: mutex lock (single server) or Lua script (distributed)"
   "O(1) time and O(1) space per rate limit key"
   "Allows bursts up to bucket capacity, then enforces sustained rate"
-  "Return X-RateLimit-* and Retry-After headers on every API response"
+  "Return X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After headers"
   "Fail-open on Redis failure for most APIs, fail-closed for payments"
   "Used by AWS API Gateway, Stripe, GitHub, and most production rate limiters"
 }}
 
-{{key "The token bucket interview tests whether you understand the two knobs (burst vs sustained rate), why lazy refill eliminates background threads, and how Redis Lua scripts prevent race conditions in distributed deployments. Always discuss fail-open vs fail-closed as a design decision."}}
+{{key "The token bucket interview tests whether you understand the two knobs (burst vs sustained rate), why lazy refill eliminates background threads, and how Redis Lua scripts prevent race conditions in distributed deployments. Always discuss fail-open vs fail-closed as a deliberate design decision."}}

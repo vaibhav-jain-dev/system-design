@@ -14,16 +14,30 @@
   (row "Pricing"            "$0.085/GB first 10TB (US/EU), per-request charges")
 )}}
 
+{{think "Should I use CloudFront or another CDN?"
+  (whyNot "Cloudflare for an AWS-native stack" "Cloudflare requires DNS delegation to Cloudflare nameservers, separating your DNS from Route 53. CloudFront integrates directly with ACM, S3 OAC, Lambda@Edge, WAF, and Shield within one AWS account and billing.")
+  (whatIf "My bandwidth costs are very high" "At 10TB+/month, Cloudflare Pro at $20/mo flat becomes cheaper than CloudFront's per-GB pricing. The break-even is approximately 235GB/month.")
+  (how "When does Fastly beat CloudFront?" "When you need sub-150ms cache invalidation. CloudFront invalidation takes 1-2 minutes. Fastly's instant purge is a real differentiator for frequently updated content like news feeds.")
+}}
+
+{{hint "Free S3-to-CloudFront transfer" "S3 egress to the internet costs $0.09/GB. S3-to-CloudFront is free. CloudFront-to-user costs $0.085/GB. For S3-hosted content, CloudFront is always cheaper than serving from S3 directly."}}
+
 {{qa
   "Why CloudFront over other CDNs when on AWS?"
-  "Three reasons: 1) Free data transfer from S3 to CloudFront (you only pay edge-to-user). 2) Native IAM and OAC integration for secure S3 access. 3) Lambda@Edge for request/response manipulation without managing servers."
+  "Three reasons: 1) Free data transfer from S3 to CloudFront (you only pay edge-to-user). 2) Native OAC integration for secure private S3 access. 3) Lambda@Edge for request/response manipulation without managing servers."
   "When would you NOT use CloudFront?"
-  "If you need unlimited bandwidth on a flat rate (Cloudflare Pro is $20/mo unlimited). Or if you need sub-150ms purge times (Fastly has instant purge, CloudFront takes 1-2 minutes). Or if your stack is not on AWS and you want simpler integration."
+  "Unlimited bandwidth at flat rate (Cloudflare Pro is $20/mo unlimited). Sub-150ms purge times (Fastly has instant purge, CloudFront takes 1-2 minutes). Stack not on AWS and you want simpler integration."
 }}
 
 {{phase 2 "Architecture: Origins and Behaviors" "5 min"}}
 
 {{say "CloudFront sits in front of your origin servers. You configure distributions with one or more origins, and behaviors that define which URL paths route to which origin and how caching works."}}
+
+{{triggerQs "Origin and Behavior Configuration"
+  "How many origins can one CloudFront distribution have?" "Up to 25 origins per distribution. One distribution handles your S3 static assets, ALB API, and MediaStore video origin with path-based behavior routing."
+  "What is the difference between a cache policy and an origin request policy?" "Cache policy controls what gets cached and for how long (TTL, cache key headers/cookies). Origin request policy controls what gets forwarded to origin on a miss (headers, cookies, query strings the origin needs but you may not want in the cache key)."
+  "When should I use a custom origin instead of S3?" "For dynamic content: ALB serving an API, EC2 running a legacy app, or any HTTP server not hosted on S3. Custom origins require an HTTPS endpoint and can forward any HTTP headers."
+}}
 
 {{table "Origin Types" (rows
   (row "Origin"          "When to Use"                           "Config Notes"                          "Data Transfer Cost")
@@ -43,6 +57,14 @@
   (row "Compress Objects"     "No"                "Yes (Gzip + Brotli)"               "30-70% bandwidth savings")
   (row "Function Association" "None"              "Lambda@Edge or CF Function"         "Transform requests/responses at edge")
 )}}
+
+{{think "Should I cache my API responses at CloudFront?"
+  (whyNot "Caching API responses that include user-specific data" "If any user data is in the response body, caching it serves user A's data to user B. Use Cache-Control: private for authenticated endpoints, and never forward the Authorization header as part of the cache key without understanding the implications.")
+  (whatIf "I want to cache API responses but they are slightly personalized" "Vary the cache key by a non-sensitive identifier. Cache per user tier or locale rather than per user. Or cache only the non-personalized portion and have the frontend merge in personalized data.")
+  (how "How do I cache an API response for 60 seconds?" "Set a cache policy with TTL min=0, default=60, max=60. Set Cache-Control: public, s-maxage=60 on the origin response. Disable forwarding of Authorization header so caching is not blocked.")
+}}
+
+{{hint "CachingDisabled for API, CachingOptimized for static" "Default behavior to CachingDisabled prevents accidents. Explicitly set CachingOptimized for /static/* and /media/* behaviors. Never apply aggressive caching to /* by default."}}
 
 {{diagram "fund-cloudfront-multi-origin"}}
 
@@ -99,7 +121,13 @@ resource "aws_cloudfront_distribution" "main" {
 
 {{phase 3 "Lambda@Edge vs CloudFront Functions" "5 min"}}
 
-{{say "CloudFront has two edge compute options. Lambda@Edge for heavy logic (up to 10 seconds, 10MB body, network access). CloudFront Functions for lightweight transformations (sub-millisecond, 2MB limit, no network access). Most use cases only need CloudFront Functions."}}
+{{say "CloudFront has two edge compute options. Lambda@Edge for heavy logic (up to 30 seconds, 10MB body, network access). CloudFront Functions for lightweight transformations (sub-millisecond, 2MB limit, no network access). Most use cases only need CloudFront Functions."}}
+
+{{triggerQs "Edge Compute Selection"
+  "What is the most common CloudFront Function use case?" "URL rewriting for SPAs: rewrite /dashboard, /profile, /settings to /index.html so the SPA router handles navigation. No cold start, runs at all 218+ edge locations, costs $0.10/1M invocations."
+  "When does Lambda@Edge justify the cold start penalty?" "When you need network access (DynamoDB lookup for auth, S3 fetch for content), request/response body transformation (image resizing, PDF generation), or OAuth flows that require external HTTP calls."
+  "Can CloudFront Functions access external services?" "No. CloudFront Functions have no network access and no filesystem. They can only transform the request/response in-memory. For external calls, use Lambda@Edge."
+}}
 
 {{table "Edge Compute Comparison" (rows
   (row "Feature"              "CloudFront Functions"              "Lambda@Edge")
@@ -114,12 +142,20 @@ resource "aws_cloudfront_distribution" "main" {
   (row "Cold Start"           "None (sub-ms)"                     "50-200ms")
 )}}
 
+{{think "CloudFront Function or Lambda@Edge for my use case?"
+  (whyNot "Lambda@Edge for simple URL rewrites" "Cold starts of 50-200ms add latency to a viewer request. CloudFront Functions have zero cold start and run at 6x more edge locations. For pure URL manipulation, they are strictly better.")
+  (whatIf "I need to validate a JWT at the edge before forwarding to origin" "CloudFront Function can validate a JWT if you embed the public key in the function code. No network call needed — just verify the signature locally. This works and avoids Lambda@Edge cold start.")
+  (how "What is the four-hook model for Lambda@Edge?" "Viewer Request (before cache check), Origin Request (on cache miss, before hitting origin), Origin Response (after origin responds, before caching), Viewer Response (before returning to client). Most use cases need only Viewer Request.")
+}}
+
+{{hint "CloudFront Functions handle 90% of edge compute needs" "URL rewrites, header manipulation, A/B testing, redirects, simple JWT validation. No cold start, 6x cheaper than Lambda@Edge, runs at every edge location."}}
+
 {{diagram "fund-cloudfront-event-hooks"}}
 
 {{compare "Edge Compute Choice" (options
-  (best "CloudFront Functions" "URL rewrites, header manipulation, A/B testing, redirects, simple auth (JWT validation from KV store). No cold start, 6x cheaper. Handles 90% of edge compute needs.")
+  (best "CloudFront Functions" "URL rewrites, header manipulation, A/B testing, redirects, simple auth (JWT validation from embedded key). No cold start, 6x cheaper. Handles 90% of edge compute needs.")
   (alt "Lambda@Edge" "Need network access (call DynamoDB), process request/response body, complex auth (OAuth flows), image transformation, server-side rendering. Worth the cold start penalty.")
-  (nofit "Neither (origin handles all)" "If you need edge compute for auth, redirects, or A/B tests and are doing it at origin, you are adding 100-200ms latency that edge compute eliminates.")
+  (nofit "Neither (origin handles all)" "If you need edge compute for auth, redirects, or A/B tests but are doing it at origin, you are adding 100-200ms of round-trip latency that edge compute eliminates.")
 )}}
 
 {{code "javascript" `// CloudFront Function: URL rewrite for SPA
@@ -179,6 +215,12 @@ def handler(event, context):
 
 {{say "CloudFront security has three layers. OAC locks down S3 origins so only CloudFront can access them. Signed URLs and cookies restrict access to premium content. WAF blocks malicious requests at the edge."}}
 
+{{triggerQs "CloudFront Security Configuration"
+  "Why use OAC over a public S3 bucket?" "A public bucket exposes your origin — anyone who discovers the S3 URL bypasses CloudFront, WAF, and signed URL protection. OAC makes the bucket private and only CloudFront can read it via IAM."
+  "Signed URLs vs signed cookies — which should I use?" "Signed URLs for single file access (one video, one download). Signed cookies for access to a section of your site (all videos in a subscription, members-only area). Cookies avoid per-URL signing overhead."
+  "Is AWS Shield Standard sufficient or do I need Shield Advanced?" "Shield Standard (free) handles most volumetric DDoS automatically. Shield Advanced ($3,000/mo) adds 24/7 DRT support, cost protection (AWS credits DDoS-related overage), and more granular attack visibility. Only worth it for high-value targets."
+}}
+
 {{table "Security Features" (rows
   (row "Feature"         "What It Does"                           "Use Case"                          "Cost")
   (row "OAC"             "S3 only accessible via CloudFront"      "All S3-origin distributions"       "Free")
@@ -190,6 +232,14 @@ def handler(event, context):
   (row "Shield Advanced" "Enhanced DDoS, cost protection"         "High-value applications"           "$3,000/mo")
   (row "Field-Level Encryption" "Encrypt specific POST fields at edge" "Credit card, SSN in forms" "Free")
 )}}
+
+{{think "Do I need WAF at CloudFront if I already have it at ALB?"
+  (whyNot "ALB-only WAF for publicly routed traffic" "Traffic still traverses the internet to your origin region before being blocked. CloudFront WAF blocks at the edge — blocked requests never reach your AWS region, saving bandwidth and compute.")
+  (whatIf "I have both CloudFront and ALB with WAF at both" "Defense in depth. CloudFront WAF blocks volumetric attacks and known bad IPs at the edge. ALB WAF is a second layer for anything that gets through. For most apps, CloudFront WAF alone is sufficient.")
+  (how "What is the minimum WAF config for a public CloudFront distribution?" "Enable AWS Managed Rules (AWSManagedRulesCommonRuleSet) and one rate-based rule at 1000 requests per 5 minutes per IP. That covers the most common attack vectors for ~$2/mo.")
+}}
+
+{{hint "OAC is required for SSE-KMS buckets" "If your S3 bucket uses KMS encryption, OAC is mandatory — OAI cannot assume the IAM role needed for KMS decryption. OAI is also being deprecated, so there is no reason to use it on new distributions."}}
 
 {{code "python" `# Generate a CloudFront signed URL (Python)
 import datetime
@@ -216,6 +266,12 @@ url = cf_signer.generate_presigned_url(
 
 {{say "Origin Shield is an additional caching layer between edge PoPs and your origin. Without it, a cache miss from 400+ PoPs creates 400+ requests to origin. With Origin Shield, all misses go through one regional cache first."}}
 
+{{triggerQs "Origin Shield Design"
+  "Which region should I enable Origin Shield in?" "The region closest to your origin. If your S3 bucket and ALB are in us-east-1, enable Origin Shield in us-east-1. This minimizes the latency between Origin Shield and your origin on cache misses."
+  "Is Origin Shield worth the added cost?" "Almost always. At 100M requests/month, Origin Shield costs $90/month but can reduce origin requests by 90%, saving far more in EC2/ECS compute and egress costs."
+  "What is request collapsing?" "When multiple PoPs get a cache miss for the same object simultaneously, Origin Shield collapses those into a single origin request and fans out the response to all waiting PoPs. Without Shield, each PoP makes a separate origin request."
+}}
+
 {{table "With vs Without Origin Shield" (rows
   (row "Scenario"                     "Without Origin Shield"              "With Origin Shield")
   (row "Cache miss from 50 PoPs"      "50 requests to origin"             "1 request to origin (49 served from Shield)")
@@ -225,9 +281,15 @@ url = cf_signer.generate_presigned_url(
   (row "When to enable"               "N/A"                               "Any distribution with >10 PoPs serving same content")
 )}}
 
-{{diagram "fund-cloudfront-origin-shield"}}
+{{think "Will Origin Shield actually reduce my origin load?"
+  (whyNot "Origin Shield for purely dynamic uncacheable content" "If every request is a cache miss (no-cache API responses, personalized content), Origin Shield adds a hop without reducing origin requests.")
+  (whatIf "I enable Origin Shield but my cache hit rate is still low" "The issue is TTL or cache key configuration, not Origin Shield. Origin Shield only helps with cache misses — if you have a low hit rate, fix your Cache-Control headers and cache policy first.")
+  (how "How much does Origin Shield save in origin compute?" "At 100M requests/month with 90% hit rate, without Shield each of your 400 PoPs independently fetches misses. With Shield, ~10M origin requests become ~1M. Your ECS tasks handle 10x less load.")
+}}
 
-{{thought "Origin Shield is almost always worth it. At 100M requests/month, Origin Shield costs $90/month but can reduce origin requests by 90%, saving far more in origin compute and egress. Enable it in the region closest to your origin (e.g., us-east-1 for S3 in us-east-1)."}}
+{{hint "Enable Origin Shield before a high-traffic launch" "Cold cache after a new deployment means all 400+ PoPs miss on first requests. With Origin Shield, those misses collapse to one origin request per object. Without it, your origin gets a thundering herd on every deploy."}}
+
+{{diagram "fund-cloudfront-origin-shield"}}
 
 {{phase 6 "Cost Optimization" "3 min"}}
 
@@ -250,6 +312,12 @@ url = cf_signer.generate_presigned_url(
   (row "Reserved Capacity"             "30-40%"        "1-year commitment for predictable traffic.")
   (row "S3 origin (not EC2)"           "100%"          "Free S3-to-CloudFront transfer. EC2-to-CF costs $0.09/GB.")
 )}}
+
+{{think "Where do CloudFront costs hide?"
+  (whyNot "EC2 as CloudFront origin for static files" "EC2-to-CloudFront costs $0.09/GB egress. S3-to-CloudFront is free. Serving the same 10TB/month from S3 vs EC2 saves $900/mo in origin transfer alone.")
+  (whatIf "I only have users in US and Europe" "Set price_class = PriceClass_100 to limit PoPs to US, EU, and Asia. You save 30% by skipping South America, Africa, and Australia PoPs that your users never reach.")
+  (how "Is reserved capacity worth it for CloudFront?" "For stable, predictable high-traffic distributions, 1-year reserved capacity saves 30-40%. Calculate your average monthly bill and compare. Break-even is typically at $200+/month.")
+}}
 
 {{key "The biggest CloudFront cost mistake: serving media from EC2 instead of S3. EC2-to-CloudFront costs $0.09/GB. S3-to-CloudFront is free. Move static assets to S3 first."}}
 
@@ -287,12 +355,12 @@ resource "aws_cloudfront_distribution" "main" {
 
 {{qa
   "How would you set up CloudFront for a microservices architecture?"
-  "One CloudFront distribution with multiple origins and path-based behaviors. /api/* goes to ALB origin. /static/* goes to S3 origin. /media/* goes to a separate S3 bucket or MediaStore. Each behavior has its own cache policy. API behavior has caching disabled, static has aggressive caching with long TTL."
+  "One CloudFront distribution with multiple origins and path-based behaviors. /api/* goes to ALB origin with caching disabled. /static/* goes to S3 origin with CachingOptimized policy. /media/* goes to a separate S3 bucket or MediaStore. Each behavior has its own cache policy. API behavior has caching disabled, static has aggressive caching with long TTL."
   "How do you handle cache invalidation in CloudFront?"
   "Three approaches in order of preference: 1) Versioned URLs — app.abc123.js with max-age=1year. URL changes when content changes, no invalidation needed. 2) Short TTL with stale-while-revalidate for dynamic content. 3) Explicit invalidation API as last resort — takes 1-2 minutes, limited to 3000 free paths per month."
 }}
 
-{{followup "How would you handle multi-region failover with CloudFront?" "Use CloudFront origin groups with primary and secondary origins. If the primary origin returns 5xx or times out, CloudFront automatically fails over to the secondary origin. Configure health checks on both origins. For active-active multi-region, use Route 53 latency-based routing as the CloudFront origin — Route 53 routes to the nearest healthy region."}}
+{{followup "How would you handle multi-region failover with CloudFront?" "Use CloudFront origin groups with primary and secondary origins. If the primary origin returns 5xx or times out, CloudFront automatically fails over to the secondary. Configure health checks on both. For active-active multi-region, use Route 53 latency-based routing as the CloudFront origin — Route 53 routes to the nearest healthy region."}}
 
 {{checklist
   "Use OAC (not OAI) for all S3 origins"
