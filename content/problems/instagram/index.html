@@ -2,36 +2,81 @@
 
 {{say "Let me clarify the scope. Are we designing Instagram's full platform or focusing on specific features? I will assume we are building the core: photo/video sharing with a feed, stories, likes, comments, and explore."}}
 
-{{table "Functional Requirements" (rows
-  (row "Feature"         "API"                                   "Priority")
-  (row "Upload Photo"    "POST /api/v1/media -> returns media_id" "P0")
-  (row "User Feed"       "GET /api/v1/feed -> paginated feed"     "P0")
-  (row "Follow/Unfollow" "POST /api/v1/follow/{user_id}"         "P0")
-  (row "Like"            "POST /api/v1/like/{post_id}"           "P0")
-  (row "Comment"         "POST /api/v1/comment/{post_id}"        "P0")
-  (row "Stories"         "POST /api/v1/stories -> 24hr content"  "P1")
-  (row "Explore/Search"  "GET /api/v1/explore -> trending"       "P1")
-  (row "Notifications"   "GET /api/v1/notifications (SSE/WS)"   "P1")
-  (row "DMs"             "POST /api/v1/messages/{user_id}"       "P2")
-  (row "Reels/Video"     "POST /api/v1/reels"                    "P2")
-)}}
+{{diagram "API Design" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">P0 — Core (Must Have)</div>
+      <div class="d-flow-v">
+        <div class="d-box green">POST /api/v1/media &#8594; upload photo, returns media_id</div>
+        <div class="d-box green">GET /api/v1/feed &#8594; paginated feed (cursor-based)</div>
+        <div class="d-box green">POST /api/v1/follow/{user_id} &#8594; follow/unfollow</div>
+        <div class="d-box green">POST /api/v1/like/{post_id} &#8594; toggle like</div>
+        <div class="d-box green">POST /api/v1/comment/{post_id} &#8594; add comment</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">P1 — Important</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">POST /api/v1/stories &#8594; 24hr ephemeral content</div>
+        <div class="d-box blue">GET /api/v1/explore &#8594; trending + personalized</div>
+        <div class="d-box blue">GET /api/v1/notifications &#8594; SSE/WebSocket</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">P2 — Nice to Have</div>
+      <div class="d-flow-v">
+        <div class="d-box gray">POST /api/v1/messages/{user_id} &#8594; DMs</div>
+        <div class="d-box gray">POST /api/v1/reels &#8594; short video</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
-{{table "Non-Functional Requirements" (rows
-  (row "Property"      "Target"                          "Reasoning")
-  (row "Availability"  "99.99% (52 min downtime/yr)"     "Social apps must always be up or users switch to TikTok")
-  (row "Latency"       "Feed load < 200ms p99"           "Users scroll fast, any lag means churn")
-  (row "Scale"         "2B MAU, 500M DAU"                "Instagram-scale from day 1 design")
-  (row "Upload Rate"   "100M photos/day"                 "~1,150 uploads/sec avg, 5x peak = 5,750/sec")
-  (row "Read:Write"    "100:1 ratio"                     "Reads dominate: feed, explore, profiles")
-  (row "Storage"       "Each photo ~2MB avg (multiple sizes)" "100M/day x 2MB = 200TB/day new media")
-  (row "Consistency"   "Eventual for feed, strong for likes" "Feed can lag 5s, but double-like is bad UX")
-)}}
+{{diagram "Non-Functional Requirements & Back-of-Envelope Estimates" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">NFR Targets</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Availability: 99.99% (52 min downtime/yr)</div>
+        <div class="d-box green">Latency: Feed load &lt; 200ms p99</div>
+        <div class="d-box blue">Scale: 2B MAU, 500M DAU</div>
+        <div class="d-box blue">Read:Write ratio: 100:1</div>
+        <div class="d-box amber">Consistency: Eventual for feed, strong for likes</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Back-of-Envelope Math</div>
+      <div class="d-flow-v">
+        <div class="d-box purple">500M DAU &#215; 10 loads/day = 5B feed req/day &#8776; 58K RPS</div>
+        <div class="d-box purple">100M photos/day &#8776; 1,150 uploads/sec (5x peak = 5,750/sec)</div>
+        <div class="d-box purple">Likes/comments add 10x writes &#8594; total ~6K write RPS</div>
+        <div class="d-box amber">100M/day &#215; 2MB avg = 200 TB/day new media</div>
+        <div class="d-box amber">Year 1 storage: ~73 PB (200TB &#215; 365)</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
-{{thought "Back-of-envelope: 500M DAU x 10 feed loads/day = 5B feed requests/day = ~58K RPS. At 100:1 read:write, that is 580 write RPS for posts. But likes/comments add 10x more writes. Total write RPS ~6K, read RPS ~58K. This is read-heavy but write volume is non-trivial."}}
+{{thought "Read-heavy but write volume is non-trivial: 58K read RPS vs 6K write RPS. The write amplification from fan-out makes writes the real scaling challenge. At 200TB/day media, S3 costs alone reach $55K/mo after one year. CDN transfer at $0.085/GB for 500M users loading 10 images/feed is the dominant cost."}}
 
 {{phase 2 "Stage 1: MVP (0-1M users)" "5 min"}}
 
 {{say "For MVP, I would build a monolith with Postgres, a single S3 bucket, and CloudFront. The goal is shipping fast with a clean data model we can shard later."}}
+
+{{compare "Why Postgres for MVP?" (options
+  (best "Postgres" "ACID transactions for likes (no double-like), JSONB for flexible metadata, mature ecosystem, free. Instagram itself ran on Postgres until 10M+ users. B-tree indexes handle our query patterns. Supports partial indexes, covering indexes, and has a sophisticated query planner.")
+  (alt "MySQL" "Simpler replication setup, but lacks JSONB, partial indexes, and has weaker MVCC. Postgres wins on features for a social app that needs complex queries (JOINs for feed) and flexible schema evolution.")
+  (nofit "DynamoDB at MVP" "Over-engineering. DynamoDB requires upfront access pattern design, has no JOINs (feed query becomes N+1), costs more at low scale ($1.25/M writes vs Postgres flat rate), and you lose SQL flexibility for ad-hoc analytics.")
+  (nofit "MongoDB" "Schema flexibility sounds appealing but social data is inherently relational (users follow users, users like posts). Mongo forces denormalization, leading to update anomalies. Postgres JSONB gives flexibility where needed without sacrificing joins.")
+)}}
 
 {{diagram "MVP Architecture" `
 <div class="d-cols">
@@ -77,6 +122,37 @@
   (row "Total"         "All components"                 "~$500/mo")
 )}}
 
+{{diagram "Data Model (Entity Relationships)" `
+<div class="d-flow-v">
+  <div class="d-row">
+    <div class="d-box blue">users (id, username, email)</div>
+    <div class="d-arrow">&#8594; 1:N &#8594;</div>
+    <div class="d-box green">posts (id, user_id, media_url)</div>
+  </div>
+  <div class="d-row">
+    <div class="d-box blue">users</div>
+    <div class="d-arrow">&#8594; M:N &#8594;</div>
+    <div class="d-box purple">follows (follower_id, followee_id)</div>
+    <div class="d-arrow">&#8592; M:N &#8592;</div>
+    <div class="d-box blue">users</div>
+  </div>
+  <div class="d-row">
+    <div class="d-box blue">users</div>
+    <div class="d-arrow">&#8594; M:N &#8594;</div>
+    <div class="d-box amber">likes (user_id, post_id)</div>
+    <div class="d-arrow">&#8592; N:1 &#8592;</div>
+    <div class="d-box green">posts</div>
+  </div>
+  <div class="d-row">
+    <div class="d-box blue">users</div>
+    <div class="d-arrow">&#8594; 1:N &#8594;</div>
+    <div class="d-box red">comments (id, user_id, post_id, text)</div>
+    <div class="d-arrow">&#8592; N:1 &#8592;</div>
+    <div class="d-box green">posts</div>
+  </div>
+</div>
+`}}
+
 {{code "sql" `-- MVP Schema (Postgres)
 CREATE TABLE users (
     id          BIGSERIAL PRIMARY KEY,
@@ -108,6 +184,7 @@ CREATE TABLE likes (
     post_id     BIGINT REFERENCES posts(id),
     created_at  TIMESTAMP DEFAULT NOW(),
     PRIMARY KEY (user_id, post_id)
+    -- Composite PK = unique constraint: prevents double-likes at DB level
 );
 
 CREATE TABLE comments (
@@ -117,12 +194,41 @@ CREATE TABLE comments (
     text        TEXT NOT NULL,
     created_at  TIMESTAMP DEFAULT NOW()
 );
+`}}
 
--- Key indexes
+{{code "sql" `-- Indexes with justification
+-- All indexes are B-tree (Postgres default) unless noted.
+-- B-tree chosen over Hash because: supports range scans (ORDER BY, >,<),
+-- equality lookups, and prefix matching. Hash only supports equality.
+
+-- Feed query: "get posts by user, newest first"
+-- B-tree on (user_id, created_at DESC) = covering index for the feed subquery.
+-- Postgres scans the B-tree in order, no sort needed. O(log N) seek + sequential scan.
 CREATE INDEX idx_posts_user_time ON posts(user_id, created_at DESC);
+
+-- Reverse lookup: "who follows this user?" (for fan-out-on-write)
+-- PK is (follower_id, followee_id), but we need lookup by followee_id.
+-- Without this index, fan-out requires a full table scan.
 CREATE INDEX idx_follows_followee ON follows(followee_id);
+
+-- Comments: "show comments on a post, newest first"
+-- B-tree on (post_id, created_at DESC) supports paginated comment loading.
+-- Avoids sorting 10K comments per viral post on every request.
 CREATE INDEX idx_comments_post ON comments(post_id, created_at DESC);
+
+-- Like count: "how many likes does this post have?"
+-- B-tree on (post_id) enables COUNT(*) WHERE post_id = X using index-only scan.
+-- Also supports "did this user like this post?" via PK (user_id, post_id).
 CREATE INDEX idx_likes_post ON likes(post_id);
+
+-- Why NOT Hash indexes?
+-- Postgres hash indexes: no WAL logging before v10 (crash-unsafe),
+-- no range queries, no composite keys. B-tree is strictly better here.
+
+-- Why NOT GIN/GiST?
+-- GIN = inverted index, for full-text search or JSONB containment.
+-- GiST = geometric/range queries. Neither applies to our access patterns.
+-- We use Elasticsearch for full-text search at scale instead.
 `}}
 
 {{key "MVP feed is pull-based: query follows table to get followee IDs, then query posts WHERE user_id IN (...) ORDER BY created_at DESC LIMIT 20. Simple, no infrastructure overhead."}}
@@ -315,14 +421,14 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
 {{say "At 50M+ users, Postgres becomes the bottleneck. We need to shard the database, move to microservices, and add proper message queuing for async processing."}}
 
 {{table "Microservices Split" (rows
-  (row "Service"            "Owns"                                "Database"                           "Why Separate")
-  (row "User Service"       "Profiles, auth, follows"             "Postgres (sharded by user_id)"      "User data is read-heavy, needs strong consistency for auth")
-  (row "Post Service"       "Posts, media metadata"               "DynamoDB (PK=user_id, SK=timestamp)" "Write-heavy, auto-scales, TTL for stories")
-  (row "Feed Service"       "Feed computation + cache"            "Redis cluster"                       "Stateless compute + in-memory sorted sets")
-  (row "Media Service"      "Upload, process, serve"              "S3 + Lambda"                         "CPU-intensive transcoding, decoupled from API")
-  (row "Engagement Service" "Likes, comments, shares"             "DynamoDB (sharded counters)"         "Extreme write-heavy, needs atomic counters")
-  (row "Notification Svc"   "Push, in-app, email"                 "SQS + DynamoDB"                      "Async, can lag seconds without UX impact")
-  (row "Search/Explore"     "Hashtags, user search, trending"     "Elasticsearch"                       "Full-text + faceted search")
+  (row "Service"            "Owns"                                "Database"                           "Why This DB")
+  (row "User Service"       "Profiles, auth, follows"             "Postgres (sharded by user_id)"      "Auth needs ACID transactions (password update + session invalidate must be atomic). Follows need range queries (get all followers). Postgres B-tree indexes handle both.")
+  (row "Post Service"       "Posts, media metadata"               "DynamoDB (PK=user_id, SK=timestamp)" "Write-heavy (5K WPS), auto-scales without manual sharding. PK/SK pattern matches our access: get posts by user sorted by time. TTL for auto-deleting stories.")
+  (row "Feed Service"       "Feed computation + cache"            "Redis cluster (sorted sets)"         "Feed is a ranked list. Redis sorted set: O(log N) insert, O(log N + M) range query. In-memory = sub-ms latency. Evict LRU when memory full — stale feed is acceptable.")
+  (row "Media Service"      "Upload, process, serve"              "S3 + Lambda"                         "S3: 11 nines durability, unlimited storage, $0.023/GB. Lambda: event-driven image processing, no idle cost. No database needed — S3 is the storage.")
+  (row "Engagement Service" "Likes, comments, shares"             "DynamoDB (sharded counters)"         "Extreme write-heavy (100K+ WPS for viral posts). DynamoDB atomic ADD operation prevents lost writes. Conditional expressions prevent double-counting.")
+  (row "Notification Svc"   "Push, in-app, email"                 "SQS + DynamoDB"                      "Async by nature — 5s delay is fine. SQS decouples producers from consumers. DynamoDB stores notification history with TTL for auto-cleanup.")
+  (row "Search/Explore"     "Hashtags, user search, trending"     "Elasticsearch"                       "Full-text search with autocomplete (prefix queries), faceted filtering, and relevance scoring. Postgres full-text is too slow at this scale.")
 )}}
 
 {{diagram "Microservices Architecture" `
@@ -585,27 +691,120 @@ async def mark_viewed(story_id: str, user_id: int):
   (row "Content Moderation" "ML classifier + human review"  "Flag NSFW/spam before indexing in explore")
 )}}
 
-{{phase 10 "Bottlenecks & Trade-offs" "5 min"}}
+{{phase 10 "Bottlenecks & Deep Trade-offs" "8 min"}}
 
 {{table "Key Trade-offs" (rows
-  (row "Trade-off"                       "Choice"                          "Rationale")
-  (row "SQL vs NoSQL for posts"          "DynamoDB (NoSQL)"                "Write-heavy, no joins needed, auto-scale")
-  (row "Fan-out-on-write vs read"        "Hybrid"                          "Write for normal users, read for celebrities")
-  (row "Strong vs eventual consistency"  "Eventual for feed"               "Feed lag of 1-5s is invisible to users")
-  (row "Push vs pull for notifications"  "Push (FCM/APNs)"                 "Real-time engagement drives retention")
-  (row "Monolith vs microservices"       "Monolith -> microservices at 10M" "Ship fast first, split when scaling demands it")
-  (row "Single vs multi-region"          "Multi-region at 100M+"           "Latency + compliance (GDPR) require it")
+  (row "Trade-off"                       "Choice"                          "Rationale"                                      "What You Lose")
+  (row "SQL vs NoSQL for posts"          "Postgres at MVP &#8594; DynamoDB at scale" "MVP needs JOINs for feed. At 50M+ users, DynamoDB auto-scales writes without manual sharding." "Lose ad-hoc SQL queries, JOINs, transactions across tables")
+  (row "Fan-out-on-write vs read"        "Hybrid (threshold: 100K followers)" "Write for normal users (pre-compute feed), read for celebrities (avoid 200M Redis writes per post)." "Hybrid adds code complexity: two read paths, merge logic, celebrity detection")
+  (row "Strong vs eventual consistency"  "Eventual for feed, strong for likes" "Feed lag of 1-5s is invisible. But double-like is bad UX: use PK constraint (user_id, post_id)." "Eventual means a user might not see their own post in feed for 1-5s after posting")
+  (row "Push vs pull for notifications"  "Push (FCM/APNs) + SSE fallback"  "Real-time engagement drives retention. SSE for web where push tokens are not available." "Push requires device token management, FCM/APNs rate limits, and delivery is not guaranteed")
+  (row "Monolith &#8594; microservices" "Split at 10M users"               "Ship fast first. Split when team size > 15 engineers or deploy frequency needs exceed monolith." "Microservices add network latency (gRPC calls), distributed tracing, and operational complexity")
+  (row "Single &#8594; multi-region"    "Multi-region at 100M+"           "Latency for India/EU (250ms &#8594; 15ms) + GDPR compliance requires EU data residency." "Cross-region replication lag, conflict resolution (CRDTs), 3x infrastructure cost")
 )}}
 
 {{table "Potential Bottlenecks" (rows
-  (row "Bottleneck"                  "Symptom"                          "Fix")
-  (row "Feed computation"            "Feed load >500ms"                 "Pre-compute with fan-out-on-write + Redis")
-  (row "Hot partitions (celebrity)"  "DynamoDB throttling"              "Write sharding: PK = user_id#shard_N")
-  (row "Like counter contention"    "Counter drift, lost writes"       "Sharded counters in Redis (100 shards)")
-  (row "Image upload spike"          "S3 503 errors"                    "S3 prefix sharding + retry with jitter")
-  (row "DB connection exhaustion"    "Postgres max_connections"         "PgBouncer connection pooling + read replicas")
-  (row "CDN cache miss storm"        "Origin overload"                  "Origin Shield + stale-while-revalidate")
+  (row "Bottleneck"                  "Symptom"                          "Root Cause"                                    "Fix")
+  (row "Feed computation"            "Feed load >500ms"                 "Fan-out-on-read: N queries per followee"       "Pre-compute with fan-out-on-write + Redis sorted sets")
+  (row "Hot partitions (celebrity)"  "DynamoDB throttling on one PK"    "All reads/writes to same partition key"         "Write sharding: PK = user_id#shard_N, read scatter-gather across shards")
+  (row "Like counter contention"    "Counter drift, lost writes"       "Concurrent INCR on single Redis key"           "Sharded counters: 100 shards, random shard selection, lazy aggregation every 5s")
+  (row "Image upload spike"          "S3 503 errors"                    "S3 partitions by prefix, hot prefix = throttle" "Randomize S3 key prefix (hash-based), retry with exponential backoff + jitter")
+  (row "DB connection exhaustion"    "Postgres max_connections hit"     "Each ECS task holds a connection pool"          "PgBouncer connection pooling (transaction mode) + read replicas")
+  (row "CDN cache miss storm"        "Origin S3/ALB overloaded"        "TTL expiry causes all PoPs to refetch"          "Origin Shield (single regional cache) + stale-while-revalidate header")
 )}}
+
+{{say "Let me go deeper on two critical interview topics: distributed ID generation and counter collision prevention. These are follow-up questions that separate senior candidates."}}
+
+{{qa
+  "How does the database generate IDs and ensure no collisions at scale?"
+  "At MVP, Postgres BIGSERIAL (auto-increment) works fine on a single primary. But when we shard Postgres or move to DynamoDB, auto-increment breaks because each shard generates its own sequence. Three solutions: (1) Snowflake IDs: 64-bit IDs encoding timestamp + machine_id + sequence. Each worker generates unique IDs independently with no coordination. Instagram uses a similar approach. (2) UUID v7: time-ordered UUIDs that are sortable and unique across shards, 128-bit. (3) Pre-generated key service (KGS): batch-generate ID ranges, assign ranges to workers. We choose Snowflake-style IDs because they are 64-bit (half the storage of UUID), time-sortable (no random I/O on B-tree inserts), and require zero coordination between workers."
+  "What about counters? How do you prevent lost writes when 1M users like a post simultaneously?"
+  "A naive INCR on a single Redis key serializes all writes to one core — at best 100K ops/sec, but with network overhead more like 50K. For 1M likes/sec, you need sharded counters: split the counter into N shards (e.g., 100), each writer picks a random shard, INCRBY 1. To read: aggregate all shards (SUM). Trade-off: reads are slightly stale (aggregate every 5s and cache). The deeper problem is ensuring exactly-once counting — if a client retries after timeout, the like might be counted twice. Fix: the likes table PK (user_id, post_id) acts as an idempotency key. Before incrementing the counter, check if the like already exists. Use a Lua script in Redis to atomically check-and-increment. At DynamoDB scale: use atomic ADD with a conditional expression on a deduplification attribute."
+}}
+
+{{diagram "Distributed Counter Architecture" `
+<div class="d-flow-v">
+  <div class="d-box blue">1M concurrent like requests</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box purple">Deduplicate: check likes table PK (user_id, post_id)</div>
+  <div class="d-arrow-down">&#8595; new likes only</div>
+  <div class="d-branch">
+    <div class="d-branch-arm">
+      <div class="d-label">Shard 0</div>
+      <div class="d-box amber">INCRBY 1</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Shard 1</div>
+      <div class="d-box amber">INCRBY 1</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">...</div>
+      <div class="d-box gray">N shards</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Shard 99</div>
+      <div class="d-box amber">INCRBY 1</div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595; aggregate every 5s</div>
+  <div class="d-box green">Total = SUM(all shards) &#8594; cached in Redis (TTL 5s)</div>
+</div>
+`}}
+
+{{phase 11 "Distributed System Vision" "5 min"}}
+
+{{say "Let me paint the full distributed system picture. At 500M+ DAU, Instagram is not one system but a constellation of specialized systems communicating through event streams, each optimized for its specific access pattern."}}
+
+{{diagram "Complete Distributed System Vision" `
+<div class="d-flow-v">
+  <div class="d-box blue">Clients (iOS / Android / Web) &#8212; 500M DAU</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box purple">Route 53 (Latency-based DNS) &#8594; nearest region</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box purple">CloudFront (400+ edge PoPs) &#8212; static + API caching</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box indigo">API Gateway (ALB + WAF + rate limiter)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-row">
+    <div class="d-box green">User Svc</div>
+    <div class="d-box green">Post Svc</div>
+    <div class="d-box green">Feed Svc</div>
+    <div class="d-box green">Media Svc</div>
+    <div class="d-box green">Engagement Svc</div>
+    <div class="d-box green">Notification Svc</div>
+    <div class="d-box green">Search Svc</div>
+  </div>
+  <div class="d-arrow-down">&#8595; all services produce events &#8595;</div>
+  <div class="d-box red">Kafka (MSK) &#8212; Event Bus</div>
+  <div class="d-label">Events: post_created, user_followed, post_liked, comment_added, story_expired</div>
+  <div class="d-arrow-down">&#8595; consumed by downstream services &#8595;</div>
+  <div class="d-row">
+    <div class="d-box amber">DynamoDB Global Tables</div>
+    <div class="d-box indigo">Postgres (sharded)</div>
+    <div class="d-box red">Redis Cluster (feed cache)</div>
+    <div class="d-box amber">S3 (media)</div>
+    <div class="d-box purple">Elasticsearch</div>
+  </div>
+</div>
+`}}
+
+{{table "Distributed System Properties" (rows
+  (row "CAP Property"        "How We Handle It"                                          "Concrete Example")
+  (row "Partition Tolerance"  "Required. All services tolerate network partitions."       "If Kafka broker fails, producers buffer locally. Consumers catch up when partition heals.")
+  (row "Availability"        "Prioritized over consistency for feed/explore."             "Feed serves from Redis cache even if Post Svc is down. Degraded but available.")
+  (row "Consistency"         "Tunable per data type. Strong for auth/likes, eventual for feed." "Like uses PK constraint (strong). Feed uses fan-out + cache (eventual, 1-5s lag).")
+  (row "Idempotency"        "All write APIs are idempotent via natural keys or idempotency tokens." "Like: PK (user_id, post_id). Upload: client-generated upload_id prevents duplicate posts on retry.")
+  (row "Ordering"           "Kafka partitioned by user_id guarantees per-user ordering."  "Posts by same user appear in correct order in feed. Cross-user ordering is best-effort.")
+)}}
+
+{{qa
+  "How do services communicate? Sync or async?"
+  "Both, with a clear rule: reads are synchronous (gRPC, <10ms latency), writes are asynchronous (Kafka events). When Feed Svc needs to hydrate a post, it calls Post Svc via gRPC. When a new post is created, Post Svc publishes a post_created event to Kafka, and Feed Svc consumes it asynchronously for fan-out. This separation means write failures do not block reads."
+  "What happens if Kafka goes down?"
+  "Services have a local write-ahead buffer (in-memory + disk) that holds events until Kafka recovers. MSK has 99.95% SLA with multi-AZ replication. If a consumer falls behind, Kafka retains messages for 7 days. The feed might lag by minutes during an outage, but no data is lost. For likes/comments, we also write directly to DynamoDB (dual-write) so the source-of-truth database always has the data."
+}}
+
+{{key "The distributed system vision is: event-driven microservices where each service owns its data, communicates changes through Kafka, and is independently deployable and scalable. Reads are synchronous gRPC for low latency, writes are asynchronous events for reliability. Every write is idempotent, every read has a cache fallback."}}
 
 {{checklist
   "Start MVP: monolith + Postgres + S3 + CloudFront (~$500/mo)"
