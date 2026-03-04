@@ -1,4 +1,4 @@
-{{stageNav "Requirements & Problem Scope" 1 "Stage 1: MVP (0-1M users)" 2 "Stage 1: Upload Flow (Hop-by-Hop)" 3 "Stage 2: Growing (1M-50M users)" 4 "Stage 3: Scaling (50M-500M users)" 5 "Stage 4: Handling Peak Hours" 6 "Stage 5: Global Scale (500M+ users)" 7 "Stories Implementation" 8 "Explore & Search" 9 "Bottlenecks & Deep Trade-offs" 10 "Distributed System Vision" 11 "Interview Deep-Dive Q&A" 12}}
+{{stageNav "Requirements & Problem Scope" 1 "Stage 1: MVP (0-1M users)" 2 "Stage 1: Upload Flow (Hop-by-Hop)" 3 "Stage 2: Growing (1M-50M users)" 4 "Stage 3: Scaling (50M-500M users)" 5 "Stage 4: Handling Peak Hours" 6 "Stage 5: Global Scale (500M+ users)" 7 "Security & Content Moderation" 8 "Analytics & Monitoring" 9 "Bottlenecks & Deep Trade-offs" 10 "Distributed System Vision" 11 "Interview Deep-Dive Q&A" 12}}
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
@@ -444,9 +444,85 @@ class ShardedCounter:
   "DynamoDB Global Tables replicate in under 1 second. For that brief window, the feed may not include the latest post. This is acceptable because social media feeds are eventually consistent by design."
 }}
 
-{{phase 8 "Stories Implementation" "3 min"}}
+{{phase 8 "Security & Content Moderation" "8 min"}}
 
-{{say "Stories are interesting because they are ephemeral, they disappear after 24 hours. This changes our storage and caching strategy."}}
+{{say "Security at Instagram scale means content moderation, spam prevention, bot detection, and account safety. Each is a system design problem on its own."}}
+
+{{diagram "ig-security-layers"}}
+
+<h3>Content Moderation Pipeline</h3>
+
+{{diagram "ig-content-moderation"}}
+
+{{table "Content Moderation Layers" (rows
+  (row "Layer"               "When"              "Technology"                    "Latency"    "Accuracy")
+  (row "Pre-upload scan"     "During upload"     "PhotoDNA hash matching"        "<100ms"     "99.9% for known bad content")
+  (row "ML classification"   "Post-upload async" "CNN image classifier (NSFW/violence/spam)" "~200ms" "95% precision, 90% recall")
+  (row "Text analysis"       "On caption/comment" "NLP toxicity model + regex blocklist" "~50ms" "92% precision")
+  (row "User reporting"      "User-triggered"     "Human review queue (SQS + dashboard)" "4-24 hours" "99%+ with human review")
+  (row "Appeal process"      "After takedown"     "Second human reviewer"         "24-48 hours" "Context-dependent")
+)}}
+
+{{think "Content moderation is the hardest security problem at scale. At 100M posts/day, even a 0.1% false positive rate means 100K wrongly blocked posts — causing creator backlash. A 0.1% false negative means 100K policy-violating posts slip through. The solution is layered: ML catches 95% automatically, human review handles escalations and appeals."
+  (whyNot "only ML moderation" "ML models have blind spots: sarcasm, cultural context, new types of harmful content not in training data. A model trained on English misses harmful content in Hindi or Arabic. Human reviewers catch these edge cases. The combination of ML (fast, scalable) + human (accurate, contextual) is the only approach that works at scale.")
+  (how "handle CSAM detection" "Use PhotoDNA or Apple's NeuralHash to compute perceptual hashes of uploaded images. Compare against NCMEC's database of known CSAM hashes in <100ms. Match = immediate block + report to NCMEC (legally required in US). This runs synchronously before the image is stored — zero tolerance, zero delay.")
+}}
+
+{{hint "why PhotoDNA over raw hash matching?" "Raw SHA-256 hashes break on any modification — cropping, resizing, or adding a filter creates a completely different hash. PhotoDNA computes a perceptual hash based on visual features, so a slightly modified version of the same image still matches. This catches 99.9% of known bad content even after common transformations."}}
+
+<h3>Bot & Spam Prevention</h3>
+
+{{table "Bot Detection Signals" (rows
+  (row "Signal"                  "Detection Method"                              "Action")
+  (row "Follow/unfollow churn"   "Follow 100+ accounts/day, unfollow 80+ next day" "Shadowban: content hidden from explore/hashtags")
+  (row "Comment spam"            "Same comment text across 10+ posts in 1 hour"  "Rate limit comments, require CAPTCHA")
+  (row "Fake engagement"         "Likes from accounts created <24h ago, no avatar" "Exclude from engagement counts")
+  (row "Automation tools"        "API calls without proper OAuth flow"           "Block API access, require re-auth")
+  (row "Credential stuffing"     ">10 failed logins from same IP in 1 minute"   "CAPTCHA challenge, temporary IP block")
+)}}
+
+{{code "python" `# Behavioral bot scoring (runs per-action, <5ms)
+class BotScorer:
+    def score(self, user_id: str, action: str) -> float:
+        signals = {
+            "account_age_days": self.get_account_age(user_id),
+            "has_avatar": self.has_profile_photo(user_id),
+            "follow_velocity_1h": self.get_follow_count(user_id, hours=1),
+            "comment_diversity": self.get_unique_comment_ratio(user_id),
+            "login_device_count": self.get_device_count(user_id),
+        }
+        # Logistic regression model, trained on labeled bot/human data
+        score = self.model.predict(signals)  # 0.0 = human, 1.0 = bot
+
+        if score > 0.8:
+            self.apply_shadowban(user_id)    # Hide from explore
+        elif score > 0.5:
+            self.require_captcha(user_id)    # Challenge on next action
+        return score
+`}}
+
+{{hint "why shadowban over hard ban?" "Hard bans are easily detected — the bot operator creates a new account. Shadowbans are invisible: the account appears normal to its owner, but content is hidden from explore, hashtag pages, and non-follower feeds. The bot operator wastes resources on an account that has no reach. This is more effective at deterring bot farms than immediate bans."}}
+
+<h3>Account Security</h3>
+
+{{table "Account Safety Features" (rows
+  (row "Feature"              "Implementation"                                  "Impact")
+  (row "2FA (TOTP)"           "Time-based OTP via authenticator app"           "Blocks 99.9% of credential stuffing")
+  (row "Login anomaly"        "Device fingerprint + geo-location change detection" "Challenge new device/location with email verification")
+  (row "Session management"   "JWT with 15-min access token, 7-day refresh"   "Compromised token expires quickly")
+  (row "Rate limiting"        "Token bucket: 100 API calls/min per user"      "Prevents automated abuse")
+  (row "Data export (GDPR)"   "Async job: package all user data as ZIP"       "Compliance with EU data portability")
+  (row "Account deletion"     "Soft delete (30-day grace) → hard delete"      "GDPR right to erasure, with recovery window")
+)}}
+
+{{triggerQs "Security questions"
+  "How do you handle GDPR data deletion at scale?"
+  "Account deletion triggers an async pipeline: 1) Soft-delete the user record (30-day recovery window). 2) After 30 days, Lambda job deletes all user data across all services: Postgres (CASCADE), DynamoDB (batch delete), S3 media files, Redis cache entries, Elasticsearch index entries, Kafka tombstone events. 3) CDN cache invalidation for all user media URLs. Total deletion time: 48-72 hours across all services. Audit log confirms completion."
+  "How do you prevent fake engagement (bought likes/followers)?"
+  "Three signals: (1) Account quality scoring — accounts with no avatar, no posts, created <24h ago get low trust scores. Engagement from low-trust accounts is excluded from public counts. (2) Temporal analysis — 10K likes arriving in 10 seconds from accounts created on the same day is clearly inorganic. (3) Network analysis — bot farms often follow each other, creating detectable clusters via graph analysis on the follower graph."
+}}
+
+<h3>Stories Implementation</h3>
 
 {{diagram "ig-stories-lifecycle"}}
 
@@ -480,7 +556,11 @@ async def mark_viewed(story_id: str, user_id: int):
 
 {{diagram "ig-sub-problems"}}
 
-{{phase 9 "Explore & Search" "3 min"}}
+{{phase 9 "Analytics & Monitoring" "5 min"}}
+
+{{say "At Instagram scale, observability is not optional. Let me define SLOs, analytics pipelines, and the monitoring stack."}}
+
+<h3>Explore & Search</h3>
 
 {{table "Explore Page Architecture" (rows
   (row "Component"          "Technology"                     "How It Works")
@@ -494,6 +574,65 @@ async def mark_viewed(story_id: str, user_id: int):
 {{diagram "ig-explore-search"}}
 
 {{hint "why Elasticsearch over Postgres full-text?" "Postgres full-text search (tsvector/tsquery) works at small scale but lacks autocomplete, relevance tuning, and horizontal scaling. Elasticsearch provides prefix-based autocomplete for usernames, inverted indexes for hashtag search, and distributes across nodes. At 500M posts, a single Postgres instance cannot build and maintain a GIN index fast enough for real-time search."}}
+
+<h3>User Analytics Pipeline</h3>
+
+{{diagram "ig-analytics-pipeline"}}
+
+{{table "Analytics Event Schema (Kafka)" (rows
+  (row "Event Type"        "Key Fields"                                      "Consumers")
+  (row "post_viewed"       "post_id, viewer_id, source (feed/explore/profile), timestamp" "Analytics, ML ranking model")
+  (row "post_liked"        "post_id, user_id, timestamp"                     "Analytics, engagement counter")
+  (row "post_commented"    "post_id, user_id, comment_length, timestamp"     "Analytics, notification service")
+  (row "story_viewed"      "story_id, viewer_id, view_duration_ms"           "Analytics, story ranking")
+  (row "search_query"      "query_text, user_id, result_count, click_position" "Search ranking improvement")
+  (row "follow_action"     "follower_id, followee_id, source"                "Analytics, recommendation model")
+)}}
+
+{{think "Analytics events flow through Kafka to multiple consumers independently. The key insight is that the same event stream feeds both real-time dashboards (aggregated by Flink into Redis) and batch analytics (dumped to S3 by Firehose for Spark/Athena)."
+  (whyNot "direct database writes for analytics" "At 500M DAU with 20 events/session, that is 10B events/day. Direct DynamoDB writes at $1.25/M = $12,500/day just for analytics writes. Kafka + S3 Parquet + Athena costs ~$500/day for the same data volume. Plus, database writes in the hot path add latency to every user interaction.")
+  (how "compute engagement metrics in real-time" "Kafka Streams or Flink aggregates events per 1-minute windows: impressions, likes, comments per post. Output goes to Redis counters for real-time dashboards and feeds the explore ranking model. Latency: 1-2 minutes from event to dashboard update.")
+}}
+
+{{table "Analytics Query Examples" (rows
+  (row "Query"                          "Technology"                    "Latency"      "Cost")
+  (row "Real-time engagement rate"      "Flink → Redis counters"        "<2 min lag"   "~$200/day (Flink)")
+  (row "Daily active users"             "S3 Parquet → Athena"          "~30 seconds"  "$5/TB scanned")
+  (row "Top posts by engagement"        "Pre-computed → DynamoDB"      "<10ms"        "Negligible")
+  (row "User retention cohorts"         "S3 Parquet → Spark"           "~5 minutes"   "~$50/run (EMR)")
+  (row "Content moderation metrics"     "Flink → Grafana"              "Real-time"    "~$50/day")
+)}}
+
+<h3>Monitoring & SLOs</h3>
+
+{{diagram "ig-monitoring-slos"}}
+
+{{table "Service Level Objectives (SLOs)" (rows
+  (row "Metric"               "Target"                 "Measurement"                              "Error Budget")
+  (row "Feed Availability"    "99.99%"                 "Successful feed loads / total requests"    "52 min downtime/year")
+  (row "Feed Latency"         "p99 < 300ms"            "End-to-end feed load time"                "Alert if p99 > 500ms for 5 min")
+  (row "Upload Success"       "99.9%"                  "Successful uploads / total attempts"      "Alert if < 99.5% for 10 min")
+  (row "Image Load Time"      "p99 < 200ms"            "CDN image delivery latency"               "Alert if p99 > 500ms")
+  (row "Notification Delivery" "99.5% within 5 seconds" "Push notification delivery latency"       "Alert if lag > 30s for 5 min")
+)}}
+
+{{table "Key Metrics & Alerts" (rows
+  (row "Metric"                     "Source"               "Alert Threshold"                    "Action")
+  (row "Feed Load Errors"           "ALB 5xx rate"         "> 0.1% for 5 minutes"               "Page on-call, check Post Service health")
+  (row "Kafka Consumer Lag"         "MSK metrics"          "> 100K messages for 10 minutes"     "Scale consumers, check for stuck partitions")
+  (row "Redis Memory Usage"         "ElastiCache"          "> 80% maxmemory"                    "Scale cluster, check eviction rate")
+  (row "DynamoDB Throttles"         "CloudWatch"           "> 10 throttled requests/sec"         "Enable auto-scaling, check hot partitions")
+  (row "S3 Upload Errors"           "S3 metrics"           "> 0.5% error rate"                  "Check S3 rate limits, randomize key prefixes")
+  (row "CDN Cache Hit Ratio"        "CloudFront"           "< 80% for 30 minutes"               "Check origin health, TTL configuration")
+  (row "ML Moderation Queue"        "Custom metric"        "> 10K pending reviews"               "Scale moderation Lambda, alert content team")
+)}}
+
+{{think "The most important monitoring insight for Instagram: feed latency is the primary user experience metric. If feeds take >500ms, users perceive the app as slow and engagement drops. Cache hit ratio is the early warning — if it drops below 80%, something is wrong upstream."
+  (whyNot "just monitor HTTP error rates" "Error rates miss silent degradations. A feed that loads in 2 seconds instead of 200ms is technically successful but functionally broken. Latency percentile monitoring (especially p99) catches the long tail of slow requests that affect millions of users.")
+  (how "set up distributed tracing" "OpenTelemetry instrumentation on all services. Trace a feed request: ALB (1ms) → Feed Service (5ms) → Redis cache check (0.5ms) → Post Service gRPC (10ms) → User Service gRPC (5ms) → celebrity post merge (15ms) → response (36ms total). When p99 spikes, the trace shows exactly which service call degraded.")
+}}
+
+{{hint "why separate SLOs per feature?" "Feed availability matters more than explore availability — users tolerate explore being slow but not their feed. Upload success matters more than notification delivery — a lost photo is unrecoverable but a delayed notification is just annoying. Different SLOs let you prioritize engineering effort on what matters most to users."}}
 
 {{phase 10 "Bottlenecks & Deep Trade-offs" "8 min"}}
 
@@ -571,10 +710,14 @@ async def mark_viewed(story_id: str, user_id: int):
   "Sharded counters for viral posts (100 shards, aggregate lazily)"
   "Media pipeline: S3 -> Lambda -> 4 sizes -> CloudFront"
   "Stories: DynamoDB TTL for 24h auto-delete, Redis bitmap for view tracking"
+  "Content moderation: PhotoDNA (sync) + ML classifier (async) + human review"
+  "Bot prevention: behavioral scoring + shadowban + follow/unfollow churn detection"
+  "Account security: 2FA, login anomaly detection, JWT session management"
+  "Analytics: Kafka &#8594; Flink (real-time) + Firehose (batch S3) + ML training"
+  "Monitoring: per-feature SLOs, distributed tracing (OpenTelemetry), Grafana dashboards"
   "Peak handling: auto-scale + SQS write buffer + circuit breakers"
   "Multi-region at 500M+: DynamoDB Global Tables + S3 CRR + per-region Redis"
   "CRDTs for conflict-free multi-region counters"
-  "Never design for peak as baseline, scale dynamically"
 }}
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}

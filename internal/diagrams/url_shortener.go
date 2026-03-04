@@ -852,6 +852,334 @@ func registerURLShortener(r *Registry) {
 	})
 
 	r.Register(&Diagram{
+		Slug:        "url-security-layers",
+		Title:       "Enhanced Security Layers",
+		Description: "Five-layer defense: preview, bot detection, domain reputation, alias validation, rate limiting.",
+		ContentFile: "problems/url-shortener",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">Incoming Request: POST /api/v1/urls or GET /{code}</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Write Path Security (URL Creation)</div>
+        <div class="d-flow-v">
+          <div class="d-box red">Layer 1: Rate Limiting (100/min auth, 10/min anon)</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box red">Layer 2: CAPTCHA (anonymous after 5 creates)</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box amber">Layer 3: Custom Alias Validation (regex + reserved + profanity + homoglyph)</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box purple">Layer 4: Domain Reputation (Safe Browsing sync + URIBL/WHOIS async)</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green">Layer 5: DynamoDB Conditional Write</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Read Path Security (Redirect)</div>
+        <div class="d-flow-v">
+          <div class="d-box red">AWS WAF Bot Control at ALB</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box amber">TLS Fingerprint + UA Cross-check</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box purple">Risk Score Check (high risk &#8594; preview page)</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green">Normal redirect (301/302)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-flow-v">
+    <div class="d-box gray">Nightly Batch: Re-scan all URLs against updated threat feeds &#8594; disable flagged URLs (410 Gone)</div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "url-bot-detection",
+		Title:       "Bot Detection Pipeline",
+		Description: "Multi-signal bot detection from TLS fingerprinting to behavioral analysis.",
+		ContentFile: "problems/url-shortener",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">Incoming HTTP Request</div>
+  <div class="d-arrow-down">&#8595; extract signals</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Signal 1: TLS Fingerprint</div>
+        <div class="d-flow-v">
+          <div class="d-box purple">JA3/JA4 hash of TLS handshake</div>
+          <div class="d-box gray">Known bot fingerprints: Puppeteer, Selenium, curl, wget</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Signal 2: UA Consistency</div>
+        <div class="d-flow-v">
+          <div class="d-box purple">Cross-check UA string with TLS fingerprint</div>
+          <div class="d-box gray">Chrome UA + curl TLS = bot (mismatch)</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Signal 3: Behavioral</div>
+        <div class="d-flow-v">
+          <div class="d-box purple">Creation velocity + timing patterns</div>
+          <div class="d-box gray">&gt;10 URLs/min with identical patterns = bot</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595; compute</div>
+  <div class="d-box indigo">Bot Score: 0.0 (human) &#8594; 1.0 (bot)</div>
+  <div class="d-branch">
+    <div class="d-branch-arm">
+      <div class="d-label">Score &lt; 0.3</div>
+      <div class="d-box green">Allow (normal flow)</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Score 0.3 &#8212; 0.7</div>
+      <div class="d-box amber">Challenge (CAPTCHA)</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Score &gt; 0.7</div>
+      <div class="d-box red">Block (HTTP 429)</div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "url-alias-validation",
+		Title:       "Custom Alias Validation Flow",
+		Description: "Five-step validation pipeline for custom short URL aliases.",
+		ContentFile: "problems/url-shortener",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">Input: custom_alias = "my-link"</div>
+  <div class="d-arrow-down">&#8595; Step 1</div>
+  <div class="d-box green">Regex: ^[a-zA-Z0-9_-]{3,30}$ &#8594; PASS</div>
+  <div class="d-arrow-down">&#8595; Step 2</div>
+  <div class="d-box green">Reserved Words: admin, api, www, cdn... &#8594; PASS</div>
+  <div class="d-arrow-down">&#8595; Step 3</div>
+  <div class="d-box green">Profanity Filter (Aho-Corasick, ~5K terms) &#8594; PASS</div>
+  <div class="d-arrow-down">&#8595; Step 4</div>
+  <div class="d-box green">Homoglyph Check (paypa1 &#8776; paypal?) &#8594; PASS</div>
+  <div class="d-arrow-down">&#8595; Step 5</div>
+  <div class="d-box amber">DynamoDB: PutItem(condition: attribute_not_exists) &#8594; PASS or 409</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-branch">
+    <div class="d-branch-arm">
+      <div class="d-label">All pass</div>
+      <div class="d-box green">201 Created: short.ly/my-link</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Regex fails</div>
+      <div class="d-box red">400 Bad Request</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Reserved/profanity</div>
+      <div class="d-box red">422 Unprocessable</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Already taken</div>
+      <div class="d-box red">409 Conflict</div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "url-qr-code",
+		Title:       "QR Code Generation Architecture",
+		Description: "Lambda@Edge QR code generation with CloudFront caching.",
+		ContentFile: "problems/url-shortener",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">Client: GET /api/v1/urls/Ab3xK9/qr?size=300&format=png</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box purple">CloudFront Edge PoP</div>
+  <div class="d-branch">
+    <div class="d-branch-arm">
+      <div class="d-label">Cache HIT (24h TTL)</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Return cached QR image (&lt;5ms)</div>
+      </div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Cache MISS</div>
+      <div class="d-flow-v">
+        <div class="d-box amber">Lambda@Edge: generate QR code</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box gray">Encode: https://short.ly/Ab3xK9</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box green">Return PNG/SVG + cache at edge</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-row">
+    <div class="d-box indigo">150px: business cards</div>
+    <div class="d-box indigo">300px: posters, menus</div>
+    <div class="d-box indigo">600px: billboards</div>
+  </div>
+  <div class="d-label">Cost: $0.00006 per 10K requests (Lambda@Edge) + CloudFront transfer</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "url-analytics-schema",
+		Title:       "Enhanced Analytics Pipeline & Schema",
+		Description: "Click event enrichment and dimensional analytics storage in DynamoDB.",
+		ContentFile: "problems/url-shortener",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">Redirect: GET /Ab3xK9 &#8594; 301</div>
+  <div class="d-arrow-down">&#8595; fire-and-forget</div>
+  <div class="d-box green">Kinesis Data Streams (raw click event)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box purple">Lambda Enrichment (per batch, every 60s)</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-flow-v">
+        <div class="d-box gray">IP &#8594; Geo (MaxMind GeoIP2)</div>
+        <div class="d-box gray">UA &#8594; Device/Browser parsing</div>
+        <div class="d-box gray">Referrer &#8594; domain extraction</div>
+        <div class="d-box gray">Bot score computation</div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-flow-v">
+        <div class="d-box amber">Filter bots (score &gt; 0.7)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box amber">Aggregate by dimensions</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box amber">Batch write to DynamoDB</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-entity">
+    <div class="d-entity-header indigo">click_analytics table</div>
+    <div class="d-entity-body">
+      <div class="pk">PK: short_code#date (e.g., Ab3xK9#2024-03-05)</div>
+      <div class="pk">SK: dimension#value (e.g., country#IN, device#mobile)</div>
+      <div>click_count NUMBER (atomic ADD)</div>
+      <div>unique_ips NUMBER (HyperLogLog approximation)</div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "url-monitoring-slos",
+		Title:       "Monitoring & SLO Dashboard",
+		Description: "Service level objectives, key metrics, and alert thresholds.",
+		ContentFile: "problems/url-shortener",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">SLOs</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Availability: 99.99% (52 min/yr)</div>
+        <div class="d-box green">Redirect p99: &lt;10ms</div>
+        <div class="d-box green">Write Success: 99.9%</div>
+        <div class="d-box green">Cache Hit: &gt;60%</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Real-time Dashboard</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">RPS (requests per second)</div>
+        <div class="d-box blue">Latency percentiles (p50/p95/p99)</div>
+        <div class="d-box blue">Error rate (4xx, 5xx)</div>
+        <div class="d-box blue">Cache hit ratio</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Business Dashboard</div>
+      <div class="d-flow-v">
+        <div class="d-box purple">New URLs/day</div>
+        <div class="d-box purple">Top domains shortened</div>
+        <div class="d-box purple">Geo distribution</div>
+        <div class="d-box purple">Active users</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Cost Dashboard</div>
+      <div class="d-flow-v">
+        <div class="d-box amber">Daily spend by service</div>
+        <div class="d-box amber">DynamoDB RCU/WCU usage</div>
+        <div class="d-box amber">CloudFront transfer (GB)</div>
+        <div class="d-box amber">Month-over-month trend</div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="d-flow-v">
+  <div class="d-box red">Distributed Tracing: AWS X-Ray &#8212; ALB &#8594; ECS &#8594; Redis &#8594; DynamoDB (end-to-end latency breakdown)</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "url-db-access-patterns",
+		Title:       "DynamoDB Access Patterns & Hot Partition Handling",
+		Description: "Access patterns, GSI design, and hot partition mitigation for the URL table.",
+		ContentFile: "problems/url-shortener",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Primary Table: urls</div>
+      <div class="d-flow-v">
+        <div class="d-box green">GetItem(PK=short_code) &#8594; O(1), &lt;5ms</div>
+        <div class="d-box green">PutItem(condition: attribute_not_exists) &#8594; O(1)</div>
+        <div class="d-box blue">DeleteItem(PK=short_code) &#8594; O(1)</div>
+        <div class="d-box amber">TTL auto-deletes expired URLs &#8594; zero cost</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">GSI-1: user-urls-index</div>
+      <div class="d-flow-v">
+        <div class="d-box purple">PK: user_id | SK: created_at</div>
+        <div class="d-box purple">Projection: ALL (full item copy)</div>
+        <div class="d-box purple">Query: "List my URLs" &#8594; paginated</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Hot Partition Handling</div>
+      <div class="d-flow-v">
+        <div class="d-box red">Viral URL: 10M clicks/day</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box green">Cache hit rate 95%+ &#8594; only 500K DB reads/day</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box green">DynamoDB: 3,000 RCU per partition = 3M reads/sec</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box blue">Adaptive capacity redistributes within minutes</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Analytics: Separate Table</div>
+      <div class="d-flow-v">
+        <div class="d-box gray">PK: short_code#date &#8594; isolates analytics writes</div>
+        <div class="d-box gray">Prevents viral URL analytics from affecting redirects</div>
+      </div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
 		Slug:        "url-sub-problems",
 		Title:       "URL Shortener Sub-Problems & Building Blocks",
 		Description: "Key sub-problems and reusable building blocks referenced by the URL shortener.",

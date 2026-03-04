@@ -1,4 +1,4 @@
-{{stageNav "Requirements & Problem Scope" 1 "Data Model & Database Choice" 2 "Key Generation Deep Dive" 3 "High-Level Architecture" 4 "Caching Deep Dive" 5 "Scaling & Sharding" 6 "Availability & Reliability" 7 "Edge Cases & Security" 8 "Analytics Pipeline" 9 "Geo-Distribution & CAP Analysis" 10 "Cost Estimates" 11 "Interview Deep-Dive Q&A" 12}}
+{{stageNav "Requirements & Problem Scope" 1 "Data Model & Database Choice" 2 "Key Generation Deep Dive" 3 "High-Level Architecture" 4 "Caching Deep Dive" 5 "Scaling & Sharding" 6 "Availability & Reliability" 7 "Enhanced Security & Abuse Prevention" 8 "Analytics Deep Dive" 9 "Monitoring & Observability" 10 "Cost Estimates" 11 "Interview Deep-Dive Q&A" 12}}
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
@@ -18,6 +18,15 @@ Headers: Location: https://example.com/very/long/path
 
 GET /api/v1/urls/{short_code}/stats
 Response: { "short_code": "Ab3xK9", "long_url": "...", "clicks": 15420, "created_at": "...", "expires_at": "..." }
+Status: 200 OK
+
+GET /preview/{short_code}
+Response: HTML page showing destination URL before redirecting (anti-phishing)
+Status: 200 OK
+
+GET /api/v1/urls/{short_code}/qr?size=300&format=png
+Response: QR code image (PNG/SVG) encoding the short URL
+Sizes: 150px, 300px, 600px | Formats: PNG, SVG
 Status: 200 OK
 `}}
 
@@ -70,6 +79,23 @@ Status: 200 OK
 {{hint "why single-table design?" "DynamoDB charges per request, not per table. But each table has its own auto-scaling configuration, alarms, and backup policies. One table with a clean partition key (short_code) is simpler to operate than splitting URLs and metadata across multiple tables. Single-table design also enables DynamoDB transactions across URL creation and idempotency tracking."}}
 
 {{diagram "url-data-model"}}
+
+{{diagram "url-db-access-patterns"}}
+
+{{table "DynamoDB Access Patterns & Indexes" (rows
+  (row "Access Pattern"        "Table/Index"        "Key Condition"                        "Complexity"  "Expected Latency")
+  (row "Redirect lookup"       "urls (primary)"     "GetItem(PK=short_code)"               "O(1)"       "<5ms")
+  (row "Create URL"            "urls (primary)"     "PutItem(condition: attribute_not_exists)" "O(1)"    "<5ms")
+  (row "User's URLs (dashboard)" "GSI: user-urls-index" "Query(PK=user_id, SK=created_at DESC)" "O(n)"  "<10ms, paginated")
+  (row "Delete URL"            "urls (primary)"     "DeleteItem(PK=short_code)"            "O(1)"       "<5ms")
+  (row "Expired cleanup"       "N/A (automatic)"    "DynamoDB TTL auto-deletes"            "O(0)"       "Zero-cost, zero-code")
+  (row "Analytics increment"   "click_analytics"    "UpdateItem atomic ADD"                "O(1)"       "<5ms")
+)}}
+
+{{think "The GSI projection matters for cost. Using ALL projection (full item copy) means the user dashboard query returns all fields in a single read. KEYS_ONLY would require a follow-up GetItem per URL, turning O(1) into O(n) reads."
+  (whyNot "a separate analytics table query from the main table" "Analytics queries (clicks by country, device, etc.) have completely different access patterns than URL redirects. Mixing them in the same table creates hot partitions: a viral URL with 10M clicks/day would have 10M analytics writes competing with redirect reads on the same partition. Separate tables isolate the workloads.")
+  (how "handle a viral URL (hot partition)" "DynamoDB adaptive capacity kicks in within minutes, redistributing throughput to hot partitions. But the real defense is the cache: a viral URL has 95%+ cache hit rate, so only 5% of reads reach DynamoDB. For a URL getting 10M clicks/day, that is only 500K DB reads/day — well within a single partition's 3,000 RCU capacity (3M reads/sec max).")
+}}
 
 {{details "View Postgres Schema & Index Justifications (click to expand)" "sql" `-- If using Postgres (MVP or alternative approach):
 CREATE TABLE urls (
@@ -336,11 +362,105 @@ async def resolve_short_url(short_code: str) -> str:
   "Failover replaces a failed component with a standby (e.g., ElastiCache replica promotion). Graceful degradation reduces functionality while staying available (e.g., serve cached URLs but reject new URL creation when DynamoDB is throttled). Failover is for component-level failures; graceful degradation is for partial system-level outages where no single failover fixes the problem."
 }}
 
-{{phase 8 "Edge Cases & Security" "5 min"}}
+{{phase 8 "Enhanced Security & Abuse Prevention" "8 min"}}
 
-{{say "Edge cases and security are where interviews go deep. Let me cover the critical ones."}}
+{{say "Security is the existential risk for a URL shortener — your domain reputation is on the line. Let me cover five defense layers: link preview, bot detection, domain reputation, custom alias validation, and QR code generation."}}
 
 {{diagram "url-edge-cases"}}
+
+{{diagram "url-security-layers"}}
+
+<h3>Link Preview (Anti-Phishing)</h3>
+
+{{think "Link preview is industry standard — bit.ly, t.co, and goo.gl all show destination URL before redirecting. This reduces phishing click-through by 85% according to Google's research."
+  (whyNot "always redirect without preview" "Your domain becomes a phishing vector. ISPs and email providers will blocklist your domain, and Google Safe Browsing will flag all your short URLs. The preview page costs negligible compute — just an HTML template render.")
+  (whatIf "an attacker creates a short URL to a legitimate-looking phishing page" "The preview page shows the full destination URL, which often reveals the phishing domain. Combined with domain reputation checks, this catches 90%+ of phishing attempts before the user clicks through.")
+}}
+
+{{code "text" `GET /preview/{short_code}
+Response: HTML page showing:
+  - Full destination URL (highlighted domain)
+  - Domain age (via WHOIS)
+  - Safety rating (Safe Browsing API)
+  - "Continue to site" button
+  - "Report as suspicious" link
+
+Behavior:
+  - Anonymous/untrusted URLs → auto-redirect through preview
+  - Authenticated user URLs → direct redirect (trust established)
+  - Flagged URLs → preview mandatory, cannot bypass
+`}}
+
+{{hint "why preview is P0 not P2?" "Without preview, your URL shortener is an open redirect vulnerability. Attackers create short.ly/legit-looking pointing to credential-harvesting pages. Email providers like Gmail already flag unknown short URL domains. Preview pages with visible destination URLs reduce phishing success rates by 85% (Google Safe Browsing research). Cost: one HTML template, negligible compute."}}
+
+<h3>Bot Detection & CAPTCHA</h3>
+
+{{diagram "url-bot-detection"}}
+
+{{table "Bot Detection Layers" (rows
+  (row "Layer"               "Detection Method"                           "Action"                          "Cost")
+  (row "TLS Fingerprinting"  "JA3/JA4 fingerprint of TLS handshake"      "Flag headless browsers (Puppeteer, Selenium)" "Free (server-side)")
+  (row "User-Agent Analysis" "Cross-reference UA string with TLS fingerprint" "Block mismatched UA (e.g., Chrome UA with curl TLS)" "Free (server-side)")
+  (row "Behavioral Analysis" "Creation velocity, timing patterns, URL diversity" "Throttle accounts creating >10 URLs/min with identical patterns" "Free (server-side)")
+  (row "CAPTCHA on Anonymous" "hCaptcha/reCAPTCHA for unauthenticated creation" "Require CAPTCHA after 5 anonymous creations per IP" "$1/1000 verifications")
+  (row "AWS WAF Bot Control" "Managed bot detection rules at ALB"        "Block known bot IPs, challenge suspicious" "$10/mo + $1/1M requests")
+)}}
+
+{{hint "why CAPTCHA only for anonymous?" "Authenticated users have an account linked to email/phone — abuse is traceable and rate-limited per account. Anonymous users have no identity, so CAPTCHA is the only gating mechanism. Requiring CAPTCHA on every creation kills conversion. The sweet spot: first 5 anonymous creations per IP are free, then CAPTCHA gates further creation. This stops bot farms while keeping the API frictionless for legitimate one-off use."}}
+
+<h3>Domain Reputation Monitoring</h3>
+
+{{table "Domain Reputation Checks" (rows
+  (row "Check"                   "When"              "API/Source"                    "Latency"    "Action on Failure")
+  (row "Google Safe Browsing"    "On creation (sync)" "Safe Browsing Lookup API v4"   "~50ms"     "HTTP 422 Reject")
+  (row "URIBL/SURBL Blacklists" "On creation (async)" "DNS-based lookup"             "~10ms"     "Flag for review")
+  (row "Domain Age (WHOIS)"     "On creation (async)" "WHOIS API"                    "~200ms"    "New domain <30 days → auto-flag")
+  (row "Reverse DNS Check"      "On creation (async)" "DNS PTR record"               "~5ms"      "No rDNS → increase risk score")
+  (row "Periodic Re-scan"       "Nightly batch"       "All 4 sources above"          "Batch"     "Disable flagged URLs (410 Gone)")
+)}}
+
+{{think "Domain reputation is a layered defense. Sync check (Safe Browsing) blocks known bad URLs at creation. Async checks (URIBL, domain age, rDNS) run in parallel and flag suspicious URLs for review. Nightly re-scan catches URLs that became malicious after creation."
+  (whyNot "only check on creation" "URLs can point to clean pages at creation time and swap to phishing pages hours later. The nightly re-scan catches these 'bait-and-switch' attacks. Google Safe Browsing database updates every 30 minutes, so a nightly scan catches newly flagged domains within 24 hours.")
+  (how "implement risk scoring" "Assign each URL a risk score 0-100 based on: domain age (<30 days: +30), Safe Browsing flag (+50), URIBL match (+40), no rDNS (+10), high URL entropy (+10), IP address instead of domain (+20). Score >80: reject. Score 50-80: serve via 302 (not 301) so you can block later. Score <50: normal 301.")
+}}
+
+<h3>Custom Alias Validation</h3>
+
+{{diagram "url-alias-validation"}}
+
+{{code "text" `Custom Alias Validation Rules:
+
+1. Regex Pattern: ^[a-zA-Z0-9_-]{3,30}$
+   - Min 3 chars (prevent single-char squatting)
+   - Max 30 chars (keep URLs short)
+   - Alphanumeric + hyphen + underscore only
+
+2. Reserved Words Blocklist:
+   admin, api, www, cdn, static, assets, health, status,
+   preview, login, signup, dashboard, settings, billing,
+   help, support, docs, blog, about, terms, privacy
+
+3. Profanity Filter:
+   Community-maintained list (~5,000 terms, multiple languages)
+   Check using Aho-Corasick algorithm (O(n) for all patterns)
+
+4. Homoglyph Detection:
+   paypa1.com → flag similarity to paypal.com
+   g00gle → flag similarity to google
+   Use Unicode confusable detection (ICU library)
+
+5. DynamoDB Conditional Write:
+   PutItem with attribute_not_exists(short_code)
+
+Validation Flow: regex → reserved → profanity → homoglyph → DB write
+
+Error Responses:
+  400: Invalid format (regex fails)
+  409: Alias already taken (DB conflict)
+  422: Blocked (reserved word, profanity, or homoglyph)
+`}}
+
+{{hint "why Aho-Corasick for profanity?" "Checking 5,000 profanity patterns one by one takes O(n*m) where m is the number of patterns. Aho-Corasick builds a finite automaton that matches all patterns in a single O(n) pass through the input string. For a 30-char alias against 5,000 patterns, it completes in microseconds. The automaton is built once at startup and shared across requests."}}
 
 {{qa
   "How do you prevent hash collisions for custom aliases?"
@@ -349,35 +469,138 @@ async def resolve_short_url(short_code: str) -> str:
   "Rate limiting is the first defense: 100 creations/minute per authenticated user, 10/minute for anonymous. At 62^7 = 3.5 trillion total keys, even at 100M/day it takes 96 years to exhaust. The real risk is not key exhaustion but storage cost. We mitigate with mandatory TTL (max 5 years) and user quotas."
 }}
 
-{{qa
-  "How do you handle a URL shortener that serves as an open redirect vulnerability?"
-  "Attackers create short URLs pointing to phishing sites that look legitimate because the domain is yours. Mitigation: 1) Preview page for untrusted URLs (GET /{code}+ shows destination before redirecting). 2) Google Safe Browsing API check on creation. 3) Periodic re-scan of existing URLs. 4) User reporting + automated takedown."
-  "Should you support URL preview before redirect?"
-  "Yes, add a preview endpoint: GET /preview/{code} returns an HTML page showing the destination URL. Users click to proceed. This protects against phishing. Many shorteners (bit.ly, t.co) do this."
-}}
+<h3>QR Code Generation</h3>
 
-{{hint "why conditional PutItem for custom aliases?" "DynamoDB conditional writes (attribute_not_exists) are strongly consistent within a region and atomic — no race condition between two users trying to claim the same alias simultaneously. This eliminates the need for distributed locks or two-phase checks. The trade-off: conditional writes cost the same as regular writes but return a ConditionalCheckFailedException on conflict, which you map to HTTP 409."}}
+{{diagram "url-qr-code"}}
+
+{{table "QR Code Feature Spec" (rows
+  (row "Attribute"      "Detail")
+  (row "Endpoint"       "GET /api/v1/urls/{short_code}/qr?size=300&format=png")
+  (row "Sizes"          "150px (business card), 300px (poster), 600px (billboard)")
+  (row "Formats"        "PNG (default), SVG (scalable)")
+  (row "Implementation" "Lambda@Edge at CloudFront — generate on-the-fly")
+  (row "Caching"        "CloudFront cache 24h TTL — negligible origin hits")
+  (row "Cost"           "$0.00006 per 10K requests at Lambda@Edge")
+  (row "Use Cases"      "Print marketing, event posters, business cards, restaurant menus")
+)}}
+
+{{hint "why Lambda@Edge for QR codes?" "QR codes are static images determined entirely by the short URL. Generating them at the edge (Lambda@Edge) means the QR code is computed once and cached at 400+ CloudFront PoPs. Subsequent requests from any region get <10ms response. Generating on the origin would mean every QR request traverses the internet to your server. At $0.00006 per 10K requests, the cost is negligible."}}
 
 {{triggerQs "Questions about security"
   "How do you handle URL shortener abuse for SEO spam?"
   "Spammers create thousands of short URLs pointing to link farms to inflate PageRank. Defense: 1) Add rel='nofollow' to all redirect responses so search engines do not pass link equity. 2) Rate limit creation per IP and per account. 3) Flag accounts that create URLs pointing to domains on known spam lists (Spamhaus DBL). 4) Require email verification for accounts creating more than 50 URLs/day."
   "Should you validate that the destination URL actually exists before shortening?"
   "No for the default case. HEAD-requesting every destination URL adds 100-2000ms latency on creation and breaks URLs behind auth walls, VPNs, or firewalls your server cannot reach. Instead, validate URL format (valid scheme, hostname, no javascript: URIs) synchronously, and check Google Safe Browsing asynchronously. Only do existence checks as a premium feature for enterprise customers."
+  "How do you implement real-time URL reputation scoring?"
+  "On creation, extract features: domain age (WHOIS), URL entropy, path depth, IP vs domain, homoglyph detection. Feed into a pre-trained logistic regression model (~1ms inference). Score >80: reject. Score 50-80: serve via 302 (retain ability to block). Score <50: normal 301. Re-score all URLs weekly as threat intel updates. Catches ~85% of zero-day phishing at creation time."
 }}
 
-{{phase 9 "Analytics Pipeline" "3 min"}}
+{{phase 9 "Analytics Deep Dive" "5 min"}}
 
-{{say "Analytics is P2 but interviewers love it. Key insight: never increment a counter on every redirect in the hot path."}}
+{{say "Analytics is where we differentiate from a toy implementation. Key insight: never increment a counter on every redirect in the hot path. Instead, build a full analytics pipeline with geo-location, referrer tracking, device breakdown, and bot filtering."}}
 
 {{hint "why async over sync analytics?" "A synchronous DynamoDB counter increment on every redirect adds 5-10ms latency to the hot path and creates a write hotspot on popular URLs. Async streaming (Kinesis → Lambda → batch write) decouples analytics from redirect latency entirely. The trade-off: analytics lag by 1-2 minutes, which is acceptable for dashboards."}}
 
 {{diagram "url-analytics-pipeline"}}
 
-{{key "Async pipeline with Kinesis turns N DynamoDB writes into 1 batched write per aggregation window. Redirect latency stays under 10ms. Analytics lag 1-2 minutes, which is acceptable."}}
+{{diagram "url-analytics-schema"}}
 
-{{phase 10 "Geo-Distribution & CAP Analysis" "5 min"}}
+{{code "json" `// Kinesis Click Event Structure (enriched at ingestion)
+{
+  "short_code": "Ab3xK9",
+  "timestamp": 1710507600,
+  "ip": "203.0.113.42",
+  "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)...",
+  "referrer": "https://twitter.com/status/123456",
+  "geo": {
+    "country": "IN",
+    "region": "Karnataka",
+    "city": "Bengaluru",
+    "lat": 12.97,
+    "lon": 77.59
+  },
+  "device": {
+    "type": "mobile",
+    "os": "iOS",
+    "browser": "Safari"
+  },
+  "is_bot": false,
+  "bot_score": 0.02
+}
+`}}
 
-{{say "At global scale, we need multi-region deployment. Let me discuss the CAP trade-offs."}}
+{{table "Analytics DynamoDB Schema" (rows
+  (row "Table"            "PK"                              "SK"                              "Attributes"                    "Access Pattern")
+  (row "click_analytics"  "short_code#date (Ab3xK9#2024-03-05)" "total"                      "click_count, unique_ips"       "Total clicks per day")
+  (row "click_analytics"  "short_code#date"                 "country#IN"                      "click_count, unique_ips"       "Clicks by country")
+  (row "click_analytics"  "short_code#date"                 "device#mobile"                   "click_count, unique_ips"       "Clicks by device type")
+  (row "click_analytics"  "short_code#date"                 "referrer#twitter.com"            "click_count"                   "Clicks by referrer domain")
+  (row "click_analytics"  "short_code#date"                 "hour#14"                         "click_count"                   "Click heatmap by hour")
+)}}
+
+{{think "The analytics table uses a composite PK (short_code#date) so each day gets its own partition. The SK encodes the dimension and value. This gives us O(1) lookups for any dimension slice and avoids hot partitions because traffic spreads across dates."
+  (whyNot "a single counter per URL" "A single counter loses all dimensionality. You cannot answer 'which countries click?' or 'what time of day gets the most traffic?' without the raw event data. The dimensional schema costs ~3x more writes but enables 10x more useful analytics.")
+  (how "filter bot traffic from analytics" "The Lambda aggregator checks bot_score (computed from TLS fingerprint + UA analysis at ingestion). Clicks with bot_score > 0.7 are excluded from analytics counters but still logged in S3 for audit. This prevents SEO bots, scrapers, and monitoring tools from inflating click counts. Typically 15-25% of all clicks are bots.")
+}}
+
+{{table "Analytics Query Examples" (rows
+  (row "Query"                          "DynamoDB Operation"                                        "Latency")
+  (row "Total clicks today"             "GetItem(PK='Ab3xK9#2024-03-05', SK='total')"              "<5ms")
+  (row "Clicks by country"              "Query(PK='Ab3xK9#2024-03-05', SK begins_with 'country#')" "<10ms")
+  (row "Clicks by device"               "Query(PK='Ab3xK9#2024-03-05', SK begins_with 'device#')"  "<10ms")
+  (row "Click heatmap (by hour)"        "Query(PK='Ab3xK9#2024-03-05', SK begins_with 'hour#')"    "<10ms")
+  (row "Top referrers"                  "Query(PK='Ab3xK9#2024-03-05', SK begins_with 'referrer#')" "<10ms")
+  (row "30-day trend"                   "BatchGetItem across 30 date PKs, SK='total'"              "<50ms")
+)}}
+
+{{hint "why DynamoDB over a time-series DB for analytics?" "DynamoDB with composite keys gives us O(1) lookups for any dimension slice. A time-series DB (InfluxDB, TimescaleDB) would be better for arbitrary range queries but adds another database to operate. Since our queries are known upfront (by country, device, referrer, hour), DynamoDB's key-value model is sufficient and we avoid operational complexity."}}
+
+{{triggerQs "Questions about analytics"
+  "How do you handle geo-location from IP addresses?"
+  "Use MaxMind GeoIP2 database (updated weekly, ~$100/year). Load into Lambda memory at startup (~50MB). IP-to-geo lookup is O(1) via trie search, adds <1ms per event. Accuracy: ~95% at country level, ~75% at city level. For GDPR compliance, hash the IP after geo lookup — never store raw IPs in the analytics table."
+  "How do you distinguish bot clicks from human clicks?"
+  "Three signals: (1) TLS fingerprint — headless browsers (Puppeteer, Selenium) have distinctive JA3 hashes. (2) User-Agent consistency — a Chrome UA with a curl TLS fingerprint is a bot. (3) Click velocity — 100 clicks from the same IP in 10 seconds is not human. Assign a bot_score 0-1 and exclude >0.7 from analytics. Typically filters out 15-25% of all clicks."
+}}
+
+{{phase 10 "Monitoring & Observability" "5 min"}}
+
+{{say "A URL shortener needs concrete SLOs and monitoring. Let me define the key metrics, alert thresholds, and dashboard layout."}}
+
+{{diagram "url-monitoring-slos"}}
+
+{{table "Service Level Objectives (SLOs)" (rows
+  (row "Metric"            "Target"               "Measurement"                              "Error Budget")
+  (row "Availability"      "99.99%"               "Successful responses / total requests"    "52 min downtime/year")
+  (row "Redirect Latency"  "p99 < 10ms, p50 < 5ms" "CloudFront + origin combined"           "Alert if p99 > 50ms for 5 min")
+  (row "Write Success"     "99.9%"                "Successful creates / total create attempts" "Alert if < 99.5% for 5 min")
+  (row "Cache Hit Ratio"   "> 60%"                "CloudFront cache hits / total requests"   "Alert if < 50% (misconfiguration)")
+)}}
+
+{{table "Key CloudWatch Metrics & Alerts" (rows
+  (row "Metric"                     "Source"               "Alert Threshold"                    "Action")
+  (row "Redirect Success Rate"      "ALB 2xx+3xx / total"  "< 99.9% for 5 minutes"             "Page on-call engineer")
+  (row "Cache Hit Ratio"            "CloudFront"           "< 60% for 15 minutes"               "Check TTL config, cache invalidation bugs")
+  (row "DynamoDB Throttles"         "CloudWatch"           "ConsumedRCU > 80% of provisioned"   "Scale up capacity or enable auto-scaling")
+  (row "API Latency (p99)"          "ALB"                  "> 50ms for 5 minutes"               "Check Redis connection pool, DB latency")
+  (row "KGS Key Exhaustion"        "Custom metric"        "Remaining keys < 1 million"          "Trigger KGS batch generation")
+  (row "Error Rate (5xx)"          "ALB"                  "> 0.1% for 5 minutes"                "Check ECS task health, DB connectivity")
+)}}
+
+{{think "The most critical alert is redirect success rate. A URL shortener that returns 500 errors is a broken link — worse than no shortener at all. Cache hit ratio is the early warning: if it drops below 60%, something is wrong with TTL configuration or cache invalidation."
+  (whyNot "just monitor error rate" "Error rate catches failures but not degradations. A redirect that takes 500ms instead of 10ms is technically successful but functionally broken for users. Latency percentile monitoring catches these silent degradations.")
+  (how "set up dashboards" "Three dashboards: (1) Real-time: RPS, latency percentiles (p50/p95/p99), error rates, cache hit ratio. (2) Business: new URLs/day, top domains shortened, geographic distribution, active users. (3) Cost: daily spend by service — DynamoDB, CloudFront, ECS, Kinesis — with month-over-month trend.")
+}}
+
+{{table "Distributed Tracing (AWS X-Ray)" (rows
+  (row "Trace Point"        "What It Captures"                              "Expected Latency")
+  (row "ALB → ECS"          "Request routing, TLS termination"              "1-2ms")
+  (row "ECS → Redis"        "Cache lookup (GET url:short_code)"             "0.3-1ms")
+  (row "ECS → DynamoDB"     "DB read on cache miss"                         "3-5ms")
+  (row "ECS → Kinesis"      "Async analytics event publish"                 "2-5ms (fire-and-forget)")
+  (row "Total Redirect"     "End-to-end redirect latency"                   "5-10ms (cache hit), 10-15ms (miss)")
+)}}
+
+{{hint "why X-Ray over Jaeger?" "X-Ray is native to AWS — zero setup with ALB, ECS, DynamoDB, and Lambda. Auto-instruments SDK calls. Jaeger requires deploying and operating collectors, storage (Cassandra/Elasticsearch), and a query UI. For an all-AWS stack, X-Ray gives 80% of the value at 10% of the operational cost. Switch to Jaeger only if you need multi-cloud or fine-grained custom spans."}}
 
 {{diagram "url-multi-region"}}
 
@@ -438,18 +661,18 @@ async def resolve_short_url(short_code: str) -> str:
   "DynamoDB: PK = short_code, TTL for auto-expiration, GSI for user lookups"
   "Four caching layers: Browser 301 (30%) &#8594; CloudFront (60%) &#8594; Redis (95%) &#8594; DynamoDB"
   "Only ~5% of peak reads reach DynamoDB (2,900 RPS out of 57,850)"
-  "Bandwidth: 29 MB/s peak read, 500 GB/day egress"
-  "Cache sizing: 20M hot URLs &#215; 500B = 10 GB (fits 1 Redis node)"
-  "Analytics: async Kinesis &#8594; Lambda &#8594; batch DynamoDB writes (never in hot path)"
-  "Security: rate limiting + Safe Browsing API + HTTPS + WAF + preview page"
-  "Edge cases: 410 for expired, 404 for non-existent, 409 for alias conflict"
-  "Sharding: DynamoDB handles automatically. If SQL: consistent hashing."
+  "Security: 5 layers — rate limit, CAPTCHA, alias validation, domain reputation, bot detection"
+  "Link preview (anti-phishing): GET /preview/{code} shows destination before redirect"
+  "Custom alias validation: regex + reserved words + profanity + homoglyph + conditional write"
+  "QR code generation: Lambda@Edge, cached at CloudFront, 150/300/600px sizes"
+  "Analytics: dimensional schema — geo, device, referrer, hour — with bot filtering"
+  "Monitoring: SLOs (99.99% availability, p99 &lt;10ms), X-Ray distributed tracing"
   "Multi-region: DynamoDB Global Tables + per-region Redis + CloudFront edge"
   "CAP: AP system. Availability over consistency. Eventual consistency &lt;1 second."
   "Cost: $400/mo MVP &#8594; $12K/mo at 100K QPS"
 }}
 
-{{key "The URL shortener interview differentiator is not the redirect (trivially simple). It is: 1) deep understanding of four-layer caching and hit rates, 2) key generation trade-offs (counter coordination, collision, guessability), 3) CAP analysis (why AP over CP), 4) async analytics pipeline, and 5) cost awareness at scale."}}
+{{key "The URL shortener interview differentiator is not the redirect (trivially simple). It is: 1) four-layer caching with hit rate math, 2) key generation trade-offs (KGS vs counter vs hash), 3) five-layer security (preview, bot detection, domain reputation, alias validation, CAPTCHA), 4) dimensional analytics with bot filtering, 5) concrete SLOs and monitoring, and 6) CAP analysis with cost awareness."}}
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 

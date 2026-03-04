@@ -1142,4 +1142,179 @@ func registerInstagram(r *Registry) {
   </div>
 </div>`,
 	})
+
+	r.Register(&Diagram{
+		Slug:        "ig-security-layers",
+		Title:       "Security & Content Moderation Layers",
+		Description: "Multi-layer security architecture for Instagram at scale.",
+		ContentFile: "problems/instagram",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Upload Path Security</div>
+      <div class="d-flow-v">
+        <div class="d-box red">Rate Limiting (100 uploads/day per user)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box red">PhotoDNA Hash Check (CSAM, &lt;100ms)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box amber">ML Image Classifier (NSFW/violence, ~200ms async)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box amber">NLP Caption/Comment Toxicity (~50ms)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box green">Publish to Feed + Explore Index</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Account Security</div>
+      <div class="d-flow-v">
+        <div class="d-box purple">2FA (TOTP authenticator)</div>
+        <div class="d-box purple">Login anomaly detection (device + geo)</div>
+        <div class="d-box purple">Session: JWT 15-min access + 7-day refresh</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Bot Prevention</div>
+      <div class="d-flow-v">
+        <div class="d-box indigo">Follow/unfollow churn detection</div>
+        <div class="d-box indigo">Comment spam (duplicate text detection)</div>
+        <div class="d-box indigo">Behavioral bot scoring (ML model)</div>
+        <div class="d-box indigo">Shadowban for suspicious accounts</div>
+      </div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "ig-content-moderation",
+		Title:       "Content Moderation Pipeline",
+		Description: "Multi-stage content moderation from upload to human review.",
+		ContentFile: "problems/instagram",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">New Post / Comment Uploaded</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box red">Stage 1: PhotoDNA Hash Match (known bad content, &lt;100ms)</div>
+  <div class="d-branch">
+    <div class="d-branch-arm">
+      <div class="d-label">Match</div>
+      <div class="d-box red">Block + Report to NCMEC (legally required)</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">No match</div>
+      <div class="d-box green">Continue &#8595;</div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box amber">Stage 2: ML Classification (NSFW/violence/spam, ~200ms async)</div>
+  <div class="d-branch">
+    <div class="d-branch-arm">
+      <div class="d-label">Score &gt; 0.9</div>
+      <div class="d-box red">Auto-remove + notify creator</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Score 0.5 &#8212; 0.9</div>
+      <div class="d-box amber">Flag for human review (SQS queue)</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Score &lt; 0.5</div>
+      <div class="d-box green">Approved &#8594; publish to feed</div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box purple">Stage 3: User Reports &#8594; Human Review Queue (4-24h SLA)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box gray">Stage 4: Appeal Process &#8594; Second Reviewer (24-48h SLA)</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "ig-analytics-pipeline",
+		Title:       "Analytics & Engagement Pipeline",
+		Description: "Event-driven analytics from user actions to real-time dashboards and batch reports.",
+		ContentFile: "problems/instagram",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-row">
+    <div class="d-box blue">post_viewed</div>
+    <div class="d-box blue">post_liked</div>
+    <div class="d-box blue">post_commented</div>
+    <div class="d-box blue">story_viewed</div>
+    <div class="d-box blue">follow_action</div>
+  </div>
+  <div class="d-arrow-down">&#8595; Kafka (MSK)</div>
+  <div class="d-branch">
+    <div class="d-branch-arm">
+      <div class="d-label">Real-time (Flink)</div>
+      <div class="d-flow-v">
+        <div class="d-box purple">Apache Flink (sliding window aggregation)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box red">Redis counters (engagement rate, trending score)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box green">Grafana dashboards (&lt;2 min lag)</div>
+      </div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Batch (Firehose)</div>
+      <div class="d-flow-v">
+        <div class="d-box amber">Kinesis Firehose &#8594; S3 (Parquet)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box gray">Athena / Spark (ad-hoc analytics)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box gray">Retention cohorts, A/B test results</div>
+      </div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">ML Training</div>
+      <div class="d-flow-v">
+        <div class="d-box indigo">Feature store (engagement signals)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box indigo">Feed ranking model training (daily)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box indigo">Explore personalization model</div>
+      </div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "ig-monitoring-slos",
+		Title:       "Monitoring & SLO Dashboard",
+		Description: "Service level objectives and monitoring metrics for Instagram at scale.",
+		ContentFile: "problems/instagram",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">SLOs by Feature</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Feed: 99.99% available, p99 &lt;300ms</div>
+        <div class="d-box green">Upload: 99.9% success rate</div>
+        <div class="d-box green">Image Load: p99 &lt;200ms (CDN)</div>
+        <div class="d-box blue">Notifications: 99.5% within 5s</div>
+        <div class="d-box blue">Search: p99 &lt;100ms</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Key Alerts</div>
+      <div class="d-flow-v">
+        <div class="d-box red">Feed 5xx &gt; 0.1% &#8594; page on-call</div>
+        <div class="d-box red">Kafka lag &gt; 100K &#8594; scale consumers</div>
+        <div class="d-box amber">Redis &gt; 80% memory &#8594; scale cluster</div>
+        <div class="d-box amber">CDN hit ratio &lt; 80% &#8594; check TTL</div>
+        <div class="d-box amber">DynamoDB throttles &#8594; auto-scale</div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="d-flow-v">
+  <div class="d-box indigo">Distributed Tracing (OpenTelemetry): Feed request &#8594; Feed Svc (5ms) &#8594; Redis (0.5ms) &#8594; Post Svc gRPC (10ms) &#8594; User Svc gRPC (5ms) &#8594; Celebrity merge (15ms) = 36ms total</div>
+</div>`,
+	})
 }
