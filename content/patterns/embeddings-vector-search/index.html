@@ -1,6 +1,6 @@
-{{phase 1 "What Are Embeddings?" "3 min"}}
+{{phase 1 "What Are Embeddings?" "5 min"}}
 
-{{say "Embeddings are dense vector representations of text. Each piece of text is mapped to a point in high-dimensional space where similar texts are close together. This enables semantic search — finding documents by meaning, not just keywords."}}
+{{say "Embeddings are dense vector representations of text that capture semantic meaning. Each piece of text is mapped to a point in high-dimensional space where similar texts are close together. This enables semantic search, finding documents by meaning rather than just keyword matching."}}
 
 {{diagram "Embedding Space (Simplified to 2D)" `
   Meaning axis 2
@@ -18,195 +18,572 @@
        |  * "weather forecast"
        |    * "temperature today"
        |
-       |
 
-  Similar concepts cluster together.
-  Cosine similarity between "refund policy" and
-  "return process" is ~0.92 (very similar).
-  Between "refund policy" and "weather" is ~0.15 (unrelated).
+  Similar concepts cluster together in embedding space.
+  Cosine similarity("refund policy", "return process") = 0.92
+  Cosine similarity("refund policy", "weather forecast") = 0.15
 `}}
 
-{{table "Popular Embedding Models" (rows
-  (row "Model"                       "Dimensions"  "Max Tokens"  "Cost per 1M Tokens"  "Quality (MTEB)")
-  (row "OpenAI text-embedding-3-small" "1536"      "8191"        "$0.02"               "Good")
-  (row "OpenAI text-embedding-3-large" "3072"      "8191"        "$0.13"               "Best (commercial)")
-  (row "Cohere embed-v3"              "1024"        "512"         "$0.10"               "Very good")
-  (row "BGE-large (open source)"      "1024"        "512"         "Free (self-host)"    "Very good")
-  (row "E5-mistral (open source)"     "4096"        "32768"       "Free (self-host)"    "Excellent")
+{{thought "Why embeddings matter for LLM applications: they are the foundation of semantic search, RAG retrieval, recommendation systems, clustering, and anomaly detection. Every modern LLM app that retrieves relevant context uses embeddings under the hood. Understanding embeddings is foundational to understanding RAG, vector databases, and modern search."}}
+
+{{key "Embeddings convert text into vectors where semantic similarity maps to geometric proximity. Two sentences that mean the same thing will have vectors close together in embedding space, even if they use completely different words."}}
+
+{{phase 2 "Embedding Models Compared" "8 min"}}
+
+{{say "Choosing the right embedding model is critical. The three dimensions to evaluate are: quality (how well it captures semantic meaning), cost (per token), and constraints (max input length, dimensions)."}}
+
+{{table "Embedding Model Comparison" (rows
+  (row "Model"                          "Dimensions"  "Max Tokens"  "Cost/1M Tokens"  "MTEB Score"  "Notes")
+  (row "OpenAI text-embedding-3-small"  "1536"        "8191"        "$0.02"           "62.3"        "Best cost/quality ratio")
+  (row "OpenAI text-embedding-3-large"  "3072"        "8191"        "$0.13"           "64.6"        "Highest quality from OpenAI")
+  (row "Cohere embed-english-v3.0"      "1024"        "512"         "$0.10"           "64.5"        "Strong multilingual support")
+  (row "E5-large-v2 (open source)"      "1024"        "512"         "Free (GPU)"      "62.0"        "No API dependency")
+  (row "BGE-large-en-v1.5 (open)"       "1024"        "512"         "Free (GPU)"      "63.5"        "Best open-source option")
+  (row "E5-mistral-7b (open source)"    "4096"        "32768"       "Free (GPU)"      "66.6"        "Best quality, needs large GPU")
 )}}
 
-{{key "text-embedding-3-small is the best starting point: cheap ($0.02/1M tokens), good quality, 1536 dimensions. Switch to 3-large or open-source E5 only if retrieval quality is insufficient."}}
-
-{{phase 2 "Vector Similarity" "5 min"}}
-
-{{table "Distance Metrics" (rows
-  (row "Metric"          "Formula"                              "Range"           "When to Use")
-  (row "Cosine similarity" "dot(A,B) / (||A|| * ||B||)"        "[-1, 1]"         "Default for text. Ignores magnitude.")
-  (row "Dot product"      "sum(A[i] * B[i])"                   "(-inf, inf)"     "When vectors are normalized (same as cosine)")
-  (row "Euclidean (L2)"   "sqrt(sum((A[i]-B[i])^2))"           "[0, inf)"        "When magnitude matters")
+{{compare "Embedding Model Selection" (options
+  (best "OpenAI text-embedding-3-small" "Best starting point. $0.02 per million tokens is extremely cheap. 1536 dimensions with 8191 token input limit. Quality is good enough for 90 percent of applications. Switch only if retrieval quality is measurably insufficient.")
+  (alt "BGE-large-en-v1.5 (self-hosted)" "Best open-source option. No API dependency or per-call cost. Requires a GPU for inference (T4 is sufficient). Good for privacy-sensitive applications where data cannot leave your infrastructure.")
+  (alt "OpenAI text-embedding-3-large" "Use when you need maximum retrieval quality from a managed API. 6.5x more expensive than small but only 3-4 percent better on benchmarks. Worth it for high-stakes applications like legal or medical search.")
+  (nofit "Word2Vec / GloVe" "Legacy models from pre-transformer era. Produce poor-quality embeddings for sentences and paragraphs. Only useful as educational examples. Never use for production semantic search.")
 )}}
 
-{{code "python" `import numpy as np
+{{code "python" `from openai import OpenAI
+from typing import List
+import numpy as np
 
-def cosine_similarity(a, b):
-    a, b = np.array(a), np.array(b)
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-
-# Example: compare three sentences
-from openai import OpenAI
 client = OpenAI()
 
-def embed(text):
-    return client.embeddings.create(
-        model="text-embedding-3-small", input=text
-    ).data[0].embedding
+def embed_texts(
+    texts: List[str],
+    model: str = "text-embedding-3-small"
+) -> List[List[float]]:
+    """Embed a batch of texts using OpenAI API.
 
-e1 = embed("How do I return an item?")
-e2 = embed("What is the refund process?")
-e3 = embed("What is the weather today?")
+    The API accepts up to 2048 texts per batch.
+    Batch processing is 10-100x faster than one at a time.
+    """
+    response = client.embeddings.create(
+        input=texts,
+        model=model,
+    )
+    # Results are returned in the same order as input
+    return [item.embedding for item in response.data]
 
-print("return vs refund:", cosine_similarity(e1, e2))  # ~0.89
-print("return vs weather:", cosine_similarity(e1, e3))  # ~0.15
+
+def embed_single(
+    text: str,
+    model: str = "text-embedding-3-small"
+) -> List[float]:
+    """Embed a single text (e.g., a search query)."""
+    return embed_texts([text], model)[0]
+
+
+# --- Similarity Functions ---
+
+def cosine_similarity(a: List[float], b: List[float]) -> float:
+    """Cosine similarity between two vectors."""
+    a, b = np.array(a), np.array(b)
+    return float(
+        np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    )
+
+
+def dot_product(a: List[float], b: List[float]) -> float:
+    """Dot product similarity (use with normalized vectors)."""
+    return float(np.dot(a, b))
+
+
+def euclidean_distance(a: List[float], b: List[float]) -> float:
+    """Euclidean distance (lower = more similar)."""
+    return float(np.linalg.norm(np.array(a) - np.array(b)))
+
+
+# --- Demo: semantic similarity ---
+# e1 = embed_single("How do I return an item?")
+# e2 = embed_single("What is your refund policy?")
+# e3 = embed_single("What is the weather today?")
+#
+# print(cosine_similarity(e1, e2))  # ~0.89 (very similar)
+# print(cosine_similarity(e1, e3))  # ~0.15 (unrelated)
 `}}
 
-{{phase 3 "Vector Index Types" "5 min"}}
+{{phase 3 "Vector Similarity Metrics" "5 min"}}
 
-{{say "Searching by brute-force cosine similarity is O(n) per query — too slow for millions of vectors. Vector indexes provide approximate nearest neighbor (ANN) search in O(log n) time."}}
-
-{{table "Index Types" (rows
-  (row "Index"       "How It Works"                                  "Build Time"  "Query Time"       "Recall"    "Memory")
-  (row "Flat (brute)" "Compare against every vector"                 "O(1)"        "O(n)"            "100%"       "Minimal")
-  (row "IVF"         "Cluster vectors, search nearest clusters only" "O(n)"        "O(sqrt(n))"      "95-99%"     "Minimal")
-  (row "HNSW"        "Navigable small world graph, multi-layer"      "O(n log n)"  "O(log n)"        "98-99.5%"   "2-3x vectors")
-  (row "PQ"          "Compress vectors with product quantization"     "O(n)"        "O(n) but fast"   "90-95%"     "8-32x compression")
+{{table "Distance Metrics Comparison" (rows
+  (row "Metric"             "Formula"                           "Range"         "When to Use"                              "Default?")
+  (row "Cosine similarity"  "dot(A,B) / (||A|| * ||B||)"        "[-1, 1]"       "Text embeddings (ignores magnitude)"      "Yes")
+  (row "Dot product"        "sum(A[i] * B[i])"                  "(-inf, inf)"   "Normalized vectors (equivalent to cosine)" "Sometimes")
+  (row "Euclidean (L2)"     "sqrt(sum((A[i]-B[i])^2))"          "[0, inf)"      "When magnitude matters (rare for text)"    "No")
 )}}
 
-{{compare "Index Choice" (options
-  (best "HNSW" "Best query latency (O(log n)), highest recall (99%+). Default for most vector databases. Trade-off: 2-3x memory overhead for the graph structure. Use for anything under 100M vectors.")
-  (alt "IVF + PQ" "Lower memory than HNSW (product quantization compresses vectors). Good for 100M+ vectors where memory is constrained. Slightly lower recall (95-98%).")
-  (nofit "Flat/brute force" "Only viable for < 100K vectors. Query time is linear. Fine for prototypes but not production scale.")
+{{thought "For text embeddings, always use cosine similarity (or dot product on normalized vectors since they are equivalent). Cosine ignores the magnitude of vectors and only compares direction, which is what matters for semantic meaning. Euclidean distance is sensitive to magnitude and gives misleading results when vectors have different norms."}}
+
+{{avoid "Never compare embeddings from different models. Each model creates its own embedding space. A vector from text-embedding-3-small and one from Cohere embed-v3 cannot be meaningfully compared. If you switch models, you must re-embed your entire corpus. This is the most common and costly mistake in production vector search systems."}}
+
+{{phase 4 "Vector Index Types" "8 min"}}
+
+{{say "Brute-force cosine similarity is O(n) per query. With millions of vectors, this is too slow. Vector indexes provide approximate nearest neighbor (ANN) search in sublinear time by trading a small amount of accuracy for massive speed gains."}}
+
+{{table "Index Type Comparison" (rows
+  (row "Index"         "How It Works"                                   "Build Time"    "Query Time"     "Recall"      "Memory Overhead")
+  (row "Flat (brute)"  "Compare against every vector"                   "O(1)"          "O(n)"           "100%"        "None")
+  (row "IVFFlat"       "Cluster vectors, search nearest clusters only"  "O(n)"          "O(sqrt(n))"     "95-99%"      "Minimal")
+  (row "HNSW"          "Navigable small world graph, multi-layer"       "O(n log n)"    "O(log n)"       "98-99.5%"    "2-3x vectors")
+  (row "IVF+PQ"        "Cluster + product quantization compression"     "O(n)"          "O(n) but fast"  "90-95%"      "8-32x compression")
+  (row "ScaNN"         "Google's ANN library, anisotropic quantization"  "O(n)"         "O(sqrt(n))"     "95-99%"      "Moderate")
 )}}
 
-{{phase 4 "Vector Database Comparison" "5 min"}}
+{{diagram "HNSW Index Structure" `
+  Layer 2 (sparse):     A ---- B
+                        |
+  Layer 1 (medium):     A ---- B ---- C ---- D
+                        |      |      |
+  Layer 0 (dense):      A - E - B - F - C - G - D - H
 
-{{table "Vector Database Options" (rows
-  (row "Database"    "Type"              "Index"      "Max Vectors"   "Pricing"                      "Best For")
-  (row "pgvector"    "Postgres extension" "IVF, HNSW" "~10M"         "RDS cost ($0.10/GB)"          "Already on Postgres, < 10M vectors")
-  (row "Pinecone"    "Managed SaaS"       "Proprietary" "1B+"        "$0.33/GB + $8/M queries"      "Zero ops, serverless scaling")
-  (row "Qdrant"      "Self-hosted/cloud"  "HNSW"       "100M+"      "Open source or managed"        "High performance, filtering")
-  (row "Weaviate"    "Self-hosted/cloud"  "HNSW"       "100M+"      "Open source or managed"        "Multi-modal (text + images)")
-  (row "Milvus"      "Self-hosted/cloud"  "IVF, HNSW"  "1B+"        "Open source"                  "Largest scale deployments")
-  (row "ChromaDB"    "Embedded"           "HNSW"       "~1M"        "Free (in-process)"             "Prototyping, small projects")
+  Search starts at top layer (few nodes, long jumps).
+  Each layer adds more nodes with shorter connections.
+  Greedy traversal narrows the search region at each layer.
+  Final search happens in Layer 0 among nearby candidates.
+
+  Tuning parameters:
+  - M (connections per node): higher = better recall, more memory
+  - ef_construction: higher = better index quality, slower build
+  - ef_search: higher = better recall at query time, slower search
+`}}
+
+{{compare "Index Selection" (options
+  (best "HNSW" "Best query latency O(log n) with highest recall (98-99.5 percent). Default for most vector databases including pgvector, Qdrant, and Weaviate. Trade-off: uses 2-3x memory for graph structure. Use for anything under 100M vectors.")
+  (alt "IVF + PQ" "Lower memory than HNSW due to product quantization compressing vectors. Good for 100M+ vectors where memory is the bottleneck. Slightly lower recall (90-95 percent). Requires retraining the index when data distribution changes.")
+  (nofit "Flat / brute force" "Only viable for under 100K vectors. O(n) query time means every query scans every vector. Fine for prototypes and unit tests but not production scale.")
 )}}
 
-{{phase 5 "Full Implementation with pgvector" "5 min"}}
+{{phase 5 "Vector Database Comparison" "8 min"}}
+
+{{say "Vector databases are specialized systems for storing, indexing, and searching embedding vectors. The choice depends on your existing infrastructure, scale, and operational preferences."}}
+
+{{table "Vector Database Feature Comparison" (rows
+  (row "Database"    "Type"               "Index"        "Max Scale"    "Filtering"          "Best For")
+  (row "pgvector"    "Postgres extension"  "IVF, HNSW"   "~10M vectors" "Full SQL WHERE"    "Already on Postgres, simplicity")
+  (row "Pinecone"    "Managed SaaS"       "Proprietary"   "1B+ vectors" "Metadata filters"  "Zero ops, serverless scaling")
+  (row "Qdrant"      "Self-host or cloud" "HNSW"          "100M+"       "Rich filtering"    "High performance + filtering")
+  (row "Weaviate"    "Self-host or cloud" "HNSW"          "100M+"       "GraphQL filters"   "Multi-modal (text + images)")
+  (row "Milvus"      "Self-host or cloud" "IVF, HNSW"    "1B+"         "Attribute filters"  "Massive scale deployments")
+  (row "ChromaDB"    "Embedded (in-proc)" "HNSW"          "~1M"         "Metadata filters"  "Prototyping, small projects")
+)}}
+
+{{table "Vector Database Pricing (1M vectors, 1536 dims)" (rows
+  (row "Database"    "Storage Size"        "Monthly Cost"           "Query Latency"    "Ops Burden")
+  (row "pgvector"    "6GB + 12GB HNSW"     "$115 (RDS r6g.large)"  "5-15ms"           "Low (managed Postgres)")
+  (row "Pinecone"    "Managed"             "$70 (serverless)"       "10-30ms"          "Zero (fully managed)")
+  (row "Qdrant"      "6GB + 12GB HNSW"     "$50 (self-host EC2)"   "2-5ms"            "Medium (self-managed)")
+  (row "Weaviate"    "6GB + 12GB HNSW"     "$55 (self-host EC2)"   "3-8ms"            "Medium (self-managed)")
+  (row "Milvus"      "6GB + index"         "$80 (self-host)"       "3-10ms"           "High (complex setup)")
+  (row "ChromaDB"    "6GB in-memory"       "$0 (embedded)"         "1-3ms"            "Zero (embedded lib)")
+)}}
+
+{{compare "Vector Database Selection" (options
+  (best "pgvector" "If you already run PostgreSQL, add pgvector. Zero new infrastructure, full SQL filtering, HNSW indexes. Good up to 10M vectors. Best for startups and teams that value simplicity over specialized performance.")
+  (alt "Pinecone" "Fully managed, zero-ops serverless. Best if you want no infrastructure to manage. Higher cost but eliminates operational burden. Good for teams without dedicated infra engineers.")
+  (alt "Qdrant" "Open-source, Rust-based, excellent performance. Rich filtering with vector search. Self-host for cost control or use cloud. Best for teams that need advanced filtering and raw performance.")
+  (nofit "ChromaDB" "Embedded library, not a database. No persistence across restarts by default, no replication. Use for prototyping and local development only. Migrate to a real database before production.")
+)}}
+
+{{phase 6 "Complete Implementation with pgvector" "10 min"}}
+
+{{say "Here is a complete, production-ready implementation of embedding, storing, and searching with pgvector. This covers setup, ingestion, search, and metadata filtering."}}
 
 {{code "python" `import psycopg2
 import psycopg2.extras
 from openai import OpenAI
+from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass
 
-client = OpenAI()
-conn = psycopg2.connect("postgresql://localhost/mydb")
-cur = conn.cursor()
+@dataclass
+class SearchResult:
+    content: str
+    similarity: float
+    metadata: dict
 
-# --- Setup ---
-cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-cur.execute("""
-    CREATE TABLE IF NOT EXISTS documents (
-        id SERIAL PRIMARY KEY,
-        content TEXT NOT NULL,
-        metadata JSONB DEFAULT '{}',
-        embedding vector(1536)
-    )
-""")
-cur.execute("""
-    CREATE INDEX IF NOT EXISTS docs_hnsw_idx
-    ON documents USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64)
-""")
-conn.commit()
 
-# --- Ingest ---
-def ingest(texts: list[str], metadata: list[dict] = None):
-    """Embed and store a batch of texts."""
-    response = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=texts
-    )
-    for i, emb_data in enumerate(response.data):
-        meta = metadata[i] if metadata else {}
-        cur.execute(
-            "INSERT INTO documents (content, metadata, embedding) VALUES (%s, %s, %s)",
-            (texts[i], psycopg2.extras.Json(meta), emb_data.embedding)
+class VectorStore:
+    """Production vector store using pgvector."""
+
+    def __init__(
+        self,
+        connection_string: str,
+        table_name: str = "documents",
+        embedding_model: str = "text-embedding-3-small",
+        dimensions: int = 1536,
+    ):
+        self.conn = psycopg2.connect(connection_string)
+        self.table = table_name
+        self.model = embedding_model
+        self.dimensions = dimensions
+        self.client = OpenAI()
+        self._setup()
+
+    def _setup(self):
+        """Create extension, table, and HNSW index."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "CREATE EXTENSION IF NOT EXISTS vector;"
+            )
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS {table} (
+                    id SERIAL PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    metadata JSONB DEFAULT '{json_default}',
+                    embedding vector({dims}),
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """.format(
+                table=self.table,
+                dims=self.dimensions,
+                json_default="{}",
+            ))
+            # HNSW index: m=16 connections, ef_construction=64
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS {table}_hnsw_idx
+                ON {table}
+                USING hnsw (embedding vector_cosine_ops)
+                WITH (m = 16, ef_construction = 64)
+            """.format(table=self.table))
+        self.conn.commit()
+
+    def _embed_batch(self, texts: List[str]) -> List[List[float]]:
+        """Embed a batch of texts."""
+        response = self.client.embeddings.create(
+            input=texts, model=self.model
         )
-    conn.commit()
+        return [item.embedding for item in response.data]
 
-# --- Search ---
-def search(query: str, top_k: int = 5, filter_metadata: dict = None):
-    """Semantic search with optional metadata filtering."""
-    query_emb = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=query
-    ).data[0].embedding
+    def _embed_single(self, text: str) -> List[float]:
+        """Embed a single text."""
+        return self._embed_batch([text])[0]
 
-    sql = """
-        SELECT content, metadata,
-               1 - (embedding <=> %s::vector) AS similarity
-        FROM documents
-    """
-    params = [query_emb]
+    def ingest(
+        self,
+        texts: List[str],
+        metadata_list: Optional[List[dict]] = None,
+        batch_size: int = 100,
+    ):
+        """Embed and store texts in batches."""
+        if metadata_list is None:
+            metadata_list = [{}] * len(texts)
 
-    if filter_metadata:
-        sql += " WHERE metadata @> %s"
-        params.append(psycopg2.extras.Json(filter_metadata))
+        total_batches = (len(texts) + batch_size - 1) // batch_size
 
-    sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
-    params.extend([query_emb, top_k])
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i:i + batch_size]
+            batch_meta = metadata_list[i:i + batch_size]
 
-    cur.execute(sql, params)
-    return cur.fetchall()
+            embeddings = self._embed_batch(batch_texts)
+
+            with self.conn.cursor() as cur:
+                for text, meta, emb in zip(
+                    batch_texts, batch_meta, embeddings
+                ):
+                    cur.execute(
+                        "INSERT INTO {} "
+                        "(content, metadata, embedding) "
+                        "VALUES (%s, %s, %s::vector)".format(
+                            self.table
+                        ),
+                        (text, psycopg2.extras.Json(meta), emb),
+                    )
+            self.conn.commit()
+
+            batch_num = i // batch_size + 1
+            print("Ingested batch {}/{}".format(
+                batch_num, total_batches
+            ))
+
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        metadata_filter: Optional[dict] = None,
+        similarity_threshold: float = 0.0,
+    ) -> List[SearchResult]:
+        """Semantic search with optional metadata filtering."""
+        query_embedding = self._embed_single(query)
+
+        sql = """
+            SELECT content,
+                   1 - (embedding <=> %s::vector) AS similarity,
+                   metadata
+            FROM {}
+            WHERE 1 - (embedding <=> %s::vector) >= %s
+        """.format(self.table)
+        params = [query_embedding, query_embedding,
+                  similarity_threshold]
+
+        # Add metadata filter (Postgres JSONB containment)
+        if metadata_filter:
+            sql += " AND metadata @> %s"
+            params.append(psycopg2.extras.Json(metadata_filter))
+
+        sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
+        params.extend([query_embedding, top_k])
+
+        with self.conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        return [
+            SearchResult(
+                content=row[0],
+                similarity=float(row[1]),
+                metadata=row[2],
+            )
+            for row in rows
+        ]
+
+    def delete_by_metadata(self, metadata_filter: dict) -> int:
+        """Delete documents matching metadata filter."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM {} WHERE metadata @> %s".format(
+                    self.table
+                ),
+                (psycopg2.extras.Json(metadata_filter),),
+            )
+            deleted = cur.rowcount
+        self.conn.commit()
+        return deleted
+
+    def count(self) -> int:
+        """Return total number of documents."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM {}".format(self.table)
+            )
+            return cur.fetchone()[0]
 
 
 # --- Usage ---
-ingest(
-    ["Returns accepted within 30 days", "Free shipping over $50"],
-    [{"category": "policy"}, {"category": "shipping"}]
-)
-
-results = search("How do I return an item?", top_k=3)
-for content, meta, score in results:
-    print("{:.3f} | {} | {}".format(score, content, meta))
+# store = VectorStore("postgresql://localhost/mydb")
+#
+# # Ingest documents
+# store.ingest(
+#     texts=[
+#         "Returns accepted within 30 days of purchase.",
+#         "Free shipping on orders over $50.",
+#         "Premium members get 20% discount.",
+#     ],
+#     metadata_list=[
+#         {"category": "policy", "topic": "returns"},
+#         {"category": "shipping", "topic": "delivery"},
+#         {"category": "membership", "topic": "pricing"},
+#     ],
+# )
+#
+# # Search
+# results = store.search("How do I return an item?", top_k=3)
+# for r in results:
+#     print("{:.3f} | {} | {}".format(
+#         r.similarity, r.content, r.metadata
+#     ))
+#
+# # Search with filter
+# results = store.search(
+#     "What are the rules?",
+#     metadata_filter={"category": "policy"},
+# )
 `}}
 
-{{phase 6 "Cost Analysis" "3 min"}}
+{{phase 7 "Embedding Pipeline for Production" "5 min"}}
 
-{{table "Embedding + Vector Search Costs" (rows
-  (row "Component"          "Service"                         "Cost"                       "At 1M Documents")
-  (row "Embedding (ingest)" "text-embedding-3-small"          "$0.02/1M tokens"            "~$2 one-time")
-  (row "Embedding (query)"  "text-embedding-3-small"          "$0.02/1M tokens"            "$0.002/1K queries")
-  (row "Vector storage"     "pgvector on RDS (db.r6g.large)"  "$0.10/GB + $0.15/hr"        "~$115/month")
-  (row "Vector storage"     "Pinecone Serverless"             "$0.33/GB stored"            "~$2/month + queries")
-  (row "Vector storage"     "Qdrant Cloud"                    "$0.045/GB + compute"        "~$25/month")
+{{say "In production, you need a robust ingestion pipeline that handles document updates, incremental re-indexing, and embedding model versioning."}}
+
+{{diagram "Production Embedding Pipeline" `
+  Documents Source                     Query Path
+  (S3, API, DB)
+       |                               User Query
+       v                                    |
+  +------------+                            v
+  | Document   |                     +-----------+
+  | Processor  |                     | Embed     |
+  | (chunk,    |                     | Query     |
+  |  clean)    |                     | (same     |
+  +-----+------+                     |  model!)  |
+        |                            +-----+-----+
+        v                                  |
+  +------------+                           v
+  | Embedding  |                    +-----------+
+  | API (batch)|                    | pgvector  |
+  | OpenAI /   |                    | search    |
+  | self-host  |                    | (HNSW)    |
+  +-----+------+                    +-----+-----+
+        |                                 |
+        v                                 v
+  +------------+                    +-----------+
+  | pgvector   |                    | Results   |
+  | INSERT     |                    | + metadata|
+  | (upsert)   |                    +-----------+
+  +------------+
+
+  Key: Query embedding model MUST match
+  the document embedding model exactly.
+`}}
+
+{{code "python" `import hashlib
+from datetime import datetime
+
+class IncrementalIndexer:
+    """Track and incrementally update vector index."""
+
+    def __init__(self, store: VectorStore):
+        self.store = store
+        self._setup_tracking()
+
+    def _setup_tracking(self):
+        """Create table to track indexed documents."""
+        with self.store.conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS index_tracking (
+                    doc_id TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL,
+                    model_version TEXT NOT NULL,
+                    indexed_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+        self.store.conn.commit()
+
+    def _content_hash(self, text: str) -> str:
+        """Hash content to detect changes."""
+        return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+    def needs_reindex(
+        self, doc_id: str, content: str
+    ) -> bool:
+        """Check if document needs re-indexing."""
+        content_hash = self._content_hash(content)
+        with self.store.conn.cursor() as cur:
+            cur.execute(
+                "SELECT content_hash, model_version "
+                "FROM index_tracking WHERE doc_id = %s",
+                (doc_id,),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return True  # New document
+        if row[0] != content_hash:
+            return True  # Content changed
+        if row[1] != self.store.model:
+            return True  # Embedding model changed
+        return False
+
+    def index_document(
+        self,
+        doc_id: str,
+        content: str,
+        metadata: dict = None,
+    ):
+        """Index a document if it has changed."""
+        if not self.needs_reindex(doc_id, content):
+            return False  # Already up to date
+
+        # Delete old version if exists
+        self.store.delete_by_metadata({"doc_id": doc_id})
+
+        # Index new version
+        meta = metadata or {}
+        meta["doc_id"] = doc_id
+
+        self.store.ingest(
+            texts=[content], metadata_list=[meta]
+        )
+
+        # Update tracking
+        content_hash = self._content_hash(content)
+        with self.store.conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO index_tracking
+                    (doc_id, content_hash, model_version)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (doc_id)
+                DO UPDATE SET
+                    content_hash = EXCLUDED.content_hash,
+                    model_version = EXCLUDED.model_version,
+                    indexed_at = NOW()
+            """, (doc_id, content_hash, self.store.model))
+        self.store.conn.commit()
+
+        return True  # Re-indexed
+`}}
+
+{{phase 8 "Cost Analysis Deep Dive" "5 min"}}
+
+{{say "Understanding the full cost picture of embedding-based search is critical for capacity planning and architecture decisions."}}
+
+{{table "Embedding Cost Breakdown" (rows
+  (row "Operation"              "Model"                         "Volume"                "Cost")
+  (row "Initial embed (1M docs)" "text-embedding-3-small"      "1M x 500 tok avg"      "$10 one-time")
+  (row "Initial embed (1M docs)" "text-embedding-3-large"      "1M x 500 tok avg"      "$65 one-time")
+  (row "Query embedding"         "text-embedding-3-small"      "100K queries/mo x 50 tok" "$0.10/month")
+  (row "Re-embed on model change" "text-embedding-3-small"     "1M x 500 tok"          "$10 per change")
+  (row "Incremental updates"     "text-embedding-3-small"      "10K new docs/day"       "$3/month")
 )}}
 
-{{thought "pgvector is the cheapest option if you already run Postgres. For 1M documents with 1536-dim vectors, storage is about 6 GB (1M * 1536 * 4 bytes). HNSW index adds ~2x overhead = 18 GB total. Fits comfortably on a db.r6g.large RDS instance."}}
+{{table "Vector Storage Cost by Scale" (rows
+  (row "Scale"         "Storage (1536 dims)"   "pgvector (RDS)"     "Pinecone"          "Qdrant Cloud")
+  (row "100K vectors"  "0.6 GB + index"        "$50/mo (t3.medium)" "$8/mo"             "$15/mo")
+  (row "1M vectors"    "6 GB + index"          "$115/mo (r6g.large)" "$70/mo"           "$50/mo")
+  (row "10M vectors"   "60 GB + index"         "$350/mo (r6g.xlarge)" "$200/mo"         "$150/mo")
+  (row "100M vectors"  "600 GB + index"        "N/A (too large)"    "$1,500/mo"         "$800/mo")
+)}}
 
-{{phase 7 "Interview Q&A" "3 min"}}
+{{thought "Embedding API costs are negligible. At $0.02 per million tokens, embedding 1M documents costs $10. The real costs are: 1) Vector storage and compute for the database. 2) Query compute at scale. 3) Re-embedding costs when you change models. Budget for re-embedding when evaluating total cost of ownership."}}
+
+{{key "Embedding is cheap, storage is moderate, re-embedding is the hidden cost. Always version your embedding model in metadata. When you upgrade models, you must re-embed everything. Plan for this from day one by tracking which model version created each vector."}}
+
+{{phase 9 "When Embeddings Fail" "5 min"}}
+
+{{table "Embedding Limitations and Workarounds" (rows
+  (row "Limitation"                "Example"                                   "Why It Fails"                              "Workaround")
+  (row "Exact keyword matching"    "Search for error code ERR_4832"            "Embeddings capture meaning not exact text"  "Hybrid search: BM25 + embeddings")
+  (row "Negation understanding"    "'not good' vs 'good' have similar vectors" "Negation barely changes embedding direction" "Use reranking with cross-encoder")
+  (row "Domain-specific jargon"    "Medical terms, legal terminology"          "General models lack domain vocabulary"       "Fine-tune or use domain-specific model")
+  (row "Multi-language mixing"     "Query in English, docs in Japanese"        "Most models are English-centric"            "Use multilingual model (Cohere, E5)")
+  (row "Very short queries"        "Single-word search: 'pricing'"            "Too little context for good embedding"       "Query expansion before embedding")
+  (row "Stale embeddings"          "Document updated but vector is old"        "Vector represents outdated content"         "Incremental re-indexing pipeline")
+)}}
+
+{{avoid "Never assume embeddings handle exact keyword matching well. If a user searches for a specific product ID, error code, or person's name, BM25 keyword search will outperform embedding search. This is why hybrid search (dense + sparse) is the production standard. Use embeddings for semantic meaning and BM25 for exact matches."}}
+
+{{phase 10 "Interview Q&A" "5 min"}}
 
 {{qa
-  "How would you build a semantic search for an e-commerce site?"
-  "Embed product titles + descriptions with text-embedding-3-small. Store in pgvector with HNSW index. On search, embed the query, find top-50 by vector similarity, then rerank with a cross-encoder. Filter by category, price range, and availability using metadata. Hybrid search (embeddings + BM25 keyword) catches both semantic matches and exact product names."
-  "When do embeddings fail?"
-  "Embeddings struggle with: 1) Exact keyword matching — searching for error code ERR_1234 needs BM25, not embeddings. 2) Negation — not good and good have similar embeddings. 3) Very domain-specific jargon without fine-tuning. Always combine with keyword search for production systems."
+  "How would you build semantic search for an e-commerce site?"
+  "Embed product titles plus descriptions with text-embedding-3-small. Store in pgvector with HNSW index. On search, embed the query, find top-50 by vector similarity, then rerank with a cross-encoder for precision. Filter by category, price range, and availability using metadata. Use hybrid search combining embeddings plus BM25 to catch both semantic matches and exact product names or SKUs."
+  "How do you evaluate embedding quality for your use case?"
+  "Build an evaluation set: 200+ query and relevant document pairs from real user data. Measure recall at k (what percentage of relevant docs appear in top k results) and Mean Reciprocal Rank (how high does the first relevant result appear). Compare multiple models on your data because benchmark scores like MTEB may not reflect your specific domain. A model that scores lower on MTEB might perform better on your data if your domain is well-represented in its training."
 }}
+
+{{qa
+  "What happens when you run out of pgvector capacity?"
+  "pgvector struggles above 10M vectors on a single instance due to HNSW index memory requirements. Three options: 1) Upgrade to a larger RDS instance (r6g.2xlarge has 52 GB RAM). 2) Partition the table by a metadata field (like tenant_id) so each partition has its own smaller index. 3) Migrate to a dedicated vector database like Qdrant or Pinecone that handles horizontal scaling natively."
+  "How do you handle embedding model upgrades?"
+  "Version everything. Tag each vector with the model name and version in metadata. When upgrading: 1) Embed a test set with the new model and compare retrieval quality. 2) If better, re-embed the entire corpus in a new table or namespace. 3) Swap traffic to the new index atomically. 4) Keep the old index for rollback. Never try to mix embeddings from different models in the same index."
+}}
+
+{{followup "How would you implement real-time embedding updates?" "Use a Change Data Capture pipeline. When a document changes in your source database (Postgres, MongoDB), a CDC tool like Debezium captures the change event and publishes it to a Kafka topic. A consumer service reads the event, re-embeds the changed document, and upserts the new vector into pgvector. This keeps your vector index in sync with your source data with seconds of lag. For high-volume changes, batch the re-embedding calls to reduce API costs."}}
 
 {{checklist
   "Start with text-embedding-3-small (cheap, good quality)"
   "Cosine similarity is the default metric for text embeddings"
-  "HNSW index for <100M vectors, IVF+PQ for larger"
+  "HNSW index for under 100M vectors, IVF+PQ for larger scale"
   "pgvector if already on Postgres, Pinecone for zero-ops"
-  "Batch embed during ingest, single embed per query"
-  "Hybrid search: combine dense (embeddings) + sparse (BM25)"
-  "Rerank top-50 candidates with cross-encoder for best results"
-  "Monitor recall and latency as your index grows"
+  "Batch embed during ingest (up to 2048 texts per API call)"
+  "Always use the same model for documents and queries"
+  "Never mix embeddings from different models in one index"
+  "Use hybrid search: combine dense embeddings + sparse BM25"
+  "Add cross-encoder reranking for best retrieval precision"
+  "Version your embedding model in metadata for upgrades"
+  "Build incremental indexing pipeline for document updates"
+  "Monitor recall at k and query latency as index grows"
 }}
