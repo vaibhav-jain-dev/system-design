@@ -23,6 +23,8 @@ func FuncMap() template.FuncMap {
 		"info":      info,
 		"diagram":   diagram,
 		"details":   details,
+		"stageNav":  stageNav,
+		"anchor":    anchor,
 
 		// Helpers for building structured data in templates
 		"options": optionsList,
@@ -168,14 +170,21 @@ func details(summary, lang, content string) template.HTML {
 		summary, lang, template.HTMLEscapeString(content)))
 }
 
-// phase renders a phase/section header.
+// phase renders a phase/section header with an anchor ID for navigation.
 func phase(num int, title, time string) template.HTML {
+	slug := strings.ToLower(strings.ReplaceAll(title, " ", "-"))
+	slug = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		return -1
+	}, slug)
 	return template.HTML(fmt.Sprintf(
-		`<div class="phase-header">
+		`<div class="phase-header" id="phase-%d-%s">
 			<span class="phase-number">%d</span>
 			<span class="phase-title">%s</span>
 			<span class="phase-time">%s</span>
-		</div>`, num, title, time))
+		</div>`, num, slug, num, title, time))
 }
 
 // code renders a syntax-highlighted code block.
@@ -321,4 +330,50 @@ func diagram(title string, args ...string) template.HTML {
 			<div class="diagram-title">%s</div>
 			<pre class="diagram-art">%s</pre>
 		</div>`, title, art))
+}
+
+// StageItem represents a navigation item for the stage navigator.
+type StageItem struct {
+	Num   int
+	Title string
+	ID    string
+}
+
+// stageNav renders a sticky navigation bar for problem stages/phases.
+// Usage: {{stageNav "Requirements" 1 "MVP" 2 "Upload Flow" 3 ...}}
+func stageNav(args ...interface{}) template.HTML {
+	var items []StageItem
+	for i := 0; i+1 < len(args); i += 2 {
+		title := fmt.Sprintf("%v", args[i])
+		num := 0
+		switch v := args[i+1].(type) {
+		case int:
+			num = v
+		case float64:
+			num = int(v)
+		}
+		slug := strings.ToLower(strings.ReplaceAll(title, " ", "-"))
+		slug = strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+				return r
+			}
+			return -1
+		}, slug)
+		items = append(items, StageItem{num, title, fmt.Sprintf("phase-%d-%s", num, slug)})
+	}
+
+	var sb strings.Builder
+	sb.WriteString(`<nav class="stage-nav"><div class="stage-nav-inner">`)
+	for _, item := range items {
+		sb.WriteString(fmt.Sprintf(
+			`<a href="#%s" class="stage-nav-item" onclick="event.preventDefault(); document.getElementById('%s').scrollIntoView({behavior:'smooth', block:'start'})"><span class="stage-nav-num">%d</span><span class="stage-nav-label">%s</span></a>`,
+			item.ID, item.ID, item.Num, item.Title))
+	}
+	sb.WriteString(`</div></nav>`)
+	return template.HTML(sb.String())
+}
+
+// anchor creates a named anchor point for navigation.
+func anchor(id string) template.HTML {
+	return template.HTML(fmt.Sprintf(`<div id="%s" class="anchor-point"></div>`, id))
 }

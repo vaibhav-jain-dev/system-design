@@ -1,3 +1,5 @@
+{{stageNav "Requirements & Problem Scope" 1 "Stage 1: MVP (0-1M users)" 2 "Stage 1: Upload Flow (Hop-by-Hop)" 3 "Stage 2: Growing (1M-50M users)" 4 "Stage 3: Scaling (50M-500M users)" 5 "Stage 4: Handling Peak Hours" 6 "Stage 5: Global Scale (500M+ users)" 7 "Stories Implementation" 8 "Explore & Search" 9 "Bottlenecks & Deep Trade-offs" 10 "Distributed System Vision" 11}}
+
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
 {{say "Let me clarify the scope. Are we designing Instagram's full platform or focusing on specific features? I will assume we are building the core: photo/video sharing with a feed, stories, likes, comments, and explore."}}
@@ -129,8 +131,8 @@
       <div class="d-entity-header blue">users</div>
       <div class="d-entity-body">
         <div class="pk">id BIGSERIAL</div>
-        <div>username VARCHAR(30) UNIQUE</div>
-        <div>email VARCHAR(255) UNIQUE</div>
+        <div class="idx idx-unique">username VARCHAR(30)</div>
+        <div class="idx idx-unique">email VARCHAR(255)</div>
         <div>bio TEXT</div>
         <div>avatar_url TEXT</div>
         <div>created_at TIMESTAMP</div>
@@ -146,9 +148,10 @@
         <div>caption TEXT</div>
         <div>media_url TEXT NOT NULL</div>
         <div>media_type VARCHAR(10)</div>
-        <div>created_at TIMESTAMP</div>
+        <div class="idx idx-btree">created_at TIMESTAMP</div>
       </div>
     </div>
+    <div style="font-size:0.68rem; color:var(--text-muted); margin-top:4px; text-align:center;">idx: (user_id, created_at DESC)</div>
   </div>
   <div class="d-col">
     <div class="d-entity">
@@ -159,6 +162,7 @@
         <div>created_at TIMESTAMP</div>
       </div>
     </div>
+    <div style="font-size:0.68rem; color:var(--text-muted); margin-top:4px; text-align:center;">idx: followee_id (reverse lookup)</div>
     <div class="d-entity" style="margin-top: 0.75rem;">
       <div class="d-entity-header amber">likes</div>
       <div class="d-entity-body">
@@ -167,6 +171,7 @@
         <div>created_at TIMESTAMP</div>
       </div>
     </div>
+    <div style="font-size:0.68rem; color:var(--text-muted); margin-top:4px; text-align:center;">idx: post_id (count query)</div>
   </div>
   <div class="d-col">
     <div class="d-entity">
@@ -176,10 +181,17 @@
         <div class="fk">user_id BIGINT &#8594; users.id</div>
         <div class="fk">post_id BIGINT &#8594; posts.id</div>
         <div>text TEXT NOT NULL</div>
-        <div>created_at TIMESTAMP</div>
+        <div class="idx idx-btree">created_at TIMESTAMP</div>
       </div>
     </div>
+    <div style="font-size:0.68rem; color:var(--text-muted); margin-top:4px; text-align:center;">idx: (post_id, created_at DESC)</div>
   </div>
+</div>
+<div class="d-er-lines">
+  <div class="d-er-connector"><span class="d-er-from">users</span> <span class="d-er-type">1:N</span> <span class="d-er-to">posts</span></div>
+  <div class="d-er-connector"><span class="d-er-from">users</span> <span class="d-er-type">M:N</span> <span class="d-er-to">users</span> (via follows)</div>
+  <div class="d-er-connector"><span class="d-er-from">users</span> <span class="d-er-type">M:N</span> <span class="d-er-to">posts</span> (via likes)</div>
+  <div class="d-er-connector"><span class="d-er-from">posts</span> <span class="d-er-type">1:N</span> <span class="d-er-to">comments</span></div>
 </div>
 `}}
 
@@ -392,6 +404,45 @@ LIMIT 20 OFFSET :offset;
   (alt "Fan-out-on-write only" "Pre-compute all feeds. Works great except for celebrities. A Bieber post would trigger 200M Redis writes.")
   (nofit "Fan-out-on-read only" "Too slow at scale. Every feed load = N queries where N = number of followees. P99 exceeds 1 second.")
 )}}
+
+{{diagram "Feed Strategy: Hybrid Fan-out Architecture" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Fan-out-on-Write (Normal Users &lt; 100K followers)</div>
+      <div class="d-flow-v">
+        <div class="d-box green">User creates post</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box blue">Feed Service reads followers list</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box purple">Write post_id to each follower's Redis sorted set</div>
+        <div class="d-label">ZADD feed:{user_id} {timestamp} {post_id}</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box amber">Trim to latest 500: ZREMRANGEBYRANK feed:{uid} 0 -501</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box green">&#10003; Feed pre-computed. Read = O(1) Redis lookup</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Fan-out-on-Read (Celebrities &gt; 100K followers)</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Celebrity creates post</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box red">Skip fan-out (would be 200M writes)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box blue">Mark as celebrity_post in Redis set</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box purple">On feed read: merge pre-computed + celebrity posts</div>
+        <div class="d-label">DB query: SELECT FROM posts WHERE user_id IN (celeb_ids)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box amber">Sort by timestamp, return top N</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
 {{thought "Fan-out math: Average user follows 200 people. Fan-out-on-read = 200 queries per feed load. At 10M DAU x 10 loads/day = 100M feed loads = 20B DB queries/day = 230K QPS just for feed. Postgres cannot handle this. Fan-out-on-write pre-computes: each new post writes to ~200 follower feeds in Redis. At 50K posts/day = 10M Redis writes/day = 115 WPS. Much more manageable."}}
 
