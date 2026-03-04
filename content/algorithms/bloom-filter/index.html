@@ -19,32 +19,39 @@
 {{say "A Bloom filter is a bit array of m bits, initially all zeros. It uses k independent hash functions. To insert an element, hash it k times and set those k bit positions to 1. To query, hash and check all k positions."}}
 
 {{diagram "Bloom Filter: Insert and Query" `
-  Bit Array (m = 16 bits), k = 3 hash functions:
-
-  Initial state:
-  Index: 0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15
-  Bits:  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
-
-  INSERT "hello":
-    h1("hello") % 16 = 2   -> set bit[2]
-    h2("hello") % 16 = 7   -> set bit[7]
-    h3("hello") % 16 = 13  -> set bit[13]
-
-  After insert:
-  Bits:  0  0  1  0  0  0  0  1  0  0  0  0  0  1  0  0
-               ^              ^                 ^
-
-  INSERT "world":
-    h1("world") % 16 = 1   -> set bit[1]
-    h2("world") % 16 = 7   -> bit[7] already 1 (shared with "hello")
-    h3("world") % 16 = 11  -> set bit[11]
-
-  After both inserts:
-  Bits:  0  1  1  0  0  0  0  1  0  0  0  1  0  1  0  0
-
-  QUERY "hello":  bits 2,7,13 all = 1 -> POSSIBLY IN SET
-  QUERY "cat":    h1("cat")%16=5 -> bit[5]=0 -> DEFINITELY NOT IN SET
-  QUERY "fake":   h bits happen to be 1,7,11 -> all 1 -> FALSE POSITIVE!
+<div class="d-label" style="margin-bottom: 0.5rem;">Bit Array (m = 16 bits), k = 3 hash functions</div>
+<div class="d-group" style="margin-bottom: 1rem;">
+  <div class="d-group-title">Initial state: all zeros</div>
+  <div class="d-bit-array">
+    <div class="d-bit off">0</div><div class="d-bit off">1</div><div class="d-bit off">2</div><div class="d-bit off">3</div>
+    <div class="d-bit off">4</div><div class="d-bit off">5</div><div class="d-bit off">6</div><div class="d-bit off">7</div>
+    <div class="d-bit off">8</div><div class="d-bit off">9</div><div class="d-bit off">10</div><div class="d-bit off">11</div>
+    <div class="d-bit off">12</div><div class="d-bit off">13</div><div class="d-bit off">14</div><div class="d-bit off">15</div>
+  </div>
+</div>
+<div class="d-group" style="margin-bottom: 1rem;">
+  <div class="d-group-title">After INSERT "hello": h1=2, h2=7, h3=13</div>
+  <div class="d-bit-array">
+    <div class="d-bit off">0</div><div class="d-bit off">1</div><div class="d-bit on">2</div><div class="d-bit off">3</div>
+    <div class="d-bit off">4</div><div class="d-bit off">5</div><div class="d-bit off">6</div><div class="d-bit on">7</div>
+    <div class="d-bit off">8</div><div class="d-bit off">9</div><div class="d-bit off">10</div><div class="d-bit off">11</div>
+    <div class="d-bit off">12</div><div class="d-bit on">13</div><div class="d-bit off">14</div><div class="d-bit off">15</div>
+  </div>
+</div>
+<div class="d-group" style="margin-bottom: 1rem;">
+  <div class="d-group-title">After INSERT "world": h1=1, h2=7 (shared!), h3=11</div>
+  <div class="d-bit-array">
+    <div class="d-bit off">0</div><div class="d-bit on">1</div><div class="d-bit on">2</div><div class="d-bit off">3</div>
+    <div class="d-bit off">4</div><div class="d-bit off">5</div><div class="d-bit off">6</div><div class="d-bit on">7</div>
+    <div class="d-bit off">8</div><div class="d-bit off">9</div><div class="d-bit off">10</div><div class="d-bit on">11</div>
+    <div class="d-bit off">12</div><div class="d-bit on">13</div><div class="d-bit off">14</div><div class="d-bit off">15</div>
+  </div>
+</div>
+<div class="d-flow" style="flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem;">
+  <div class="d-box green">QUERY "hello": bits 2,7,13 all = 1 → POSSIBLY IN SET</div>
+  <div class="d-box blue">QUERY "cat": bit[5]=0 → DEFINITELY NOT IN SET</div>
+  <div class="d-box red">QUERY "fake": bits 1,7,11 all = 1 → FALSE POSITIVE!</div>
+</div>
 `}}
 
 {{thought "False positives occur because different elements share bit positions. As more elements are inserted, more bits become 1, and the chance of all k bits being 1 for a non-member increases. This is why sizing the bit array correctly is critical."}}
@@ -154,31 +161,33 @@ print("FP rate: {:.3f}% (expected: {:.3f}%)".format(
 )}}
 
 {{diagram "Bloom Filter as Cache Optimization Layer" `
-  Request: "Does key X exist?"
-       |
-       v
-  +-------------------+
-  | Bloom Filter      |    O(k) lookup, in-memory
-  | (1.2 GB for 1B    |
-  |  elements)        |
-  +--------+----------+
-           |
-      +----+----+
-      |         |
-  "Definitely  "Maybe
-   NOT here"    here"
-      |         |
-      v         v
-   SKIP DB    +-----------+
-   (99% of    | Database  |    Expensive disk/network I/O
-    cases)    | Lookup    |
-              +-----+-----+
-                    |
-               +----+----+
-               |         |
-            FOUND     NOT FOUND
-            (true     (false
-             pos.)     positive)
+<div class="d-flow-v" style="align-items: center;">
+  <div class="d-box blue">Request: "Does key X exist?"</div>
+  <div class="d-arrow-down">↓</div>
+  <div class="d-box purple">Bloom Filter (1.2 GB for 1B elements, O(k) in-memory)</div>
+  <div class="d-arrow-down">↓</div>
+  <div class="d-branch">
+    <div class="d-branch-arm">
+      <div class="d-box green">Definitely NOT here</div>
+      <div class="d-arrow-down">↓</div>
+      <div class="d-box green">SKIP DB (99% of cases)</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-box amber">Maybe here</div>
+      <div class="d-arrow-down">↓</div>
+      <div class="d-box gray">Database Lookup</div>
+      <div class="d-arrow-down">↓</div>
+      <div class="d-branch">
+        <div class="d-branch-arm">
+          <div class="d-box green">FOUND (true positive)</div>
+        </div>
+        <div class="d-branch-arm">
+          <div class="d-box red">NOT FOUND (false positive)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 `}}
 
 {{avoid "Never use a Bloom filter where false positives cause serious harm. Example: checking if a user is banned. A false positive would ban an innocent user. Use an exact data structure for safety-critical decisions."}}

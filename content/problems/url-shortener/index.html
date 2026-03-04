@@ -133,28 +133,49 @@ def base62_decode(s: str) -> int:
 {{say "Let me walk through the architecture hop by hop, starting with the write path for creating a short URL, then the read path for redirects."}}
 
 {{diagram "URL Shortener Architecture" `
-  WRITE PATH (Create Short URL)              READ PATH (Redirect)
-
-  Client                                     Client
-    |                                          |
-    | POST /api/shorten                        | GET /abc123
-    v                                          v
- +------------+                            +------------+
- | CloudFront |                            | CloudFront |---> Cache HIT? 301
- +-----+------+                            +-----+------+
-       |                                         | MISS
-       v                                         v
- +----------+    +--------------+          +----------+    +---------+
- |   ALB    |--->|  API Server  |          |   ALB    |--->|   API   |
- +----------+    +------+-------+          +----------+    +----+----+
-                        |                                       |
-               +--------+--------+                    +---------+---------+
-               |                 |                    |                   |
-               v                 v                    v                   v
-        +----------+      +-----------+         +----------+       +-----------+
-        | Postgres |      | ID Service|         |  Redis   |       | Postgres  |
-        | (store)  |      | (Base62)  |         | (cache)  |       | (fallback)|
-        +----------+      +-----------+         +----------+       +-----------+
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">WRITE PATH (Create Short URL)</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">Client</div>
+        <div class="d-arrow-down">↓</div>
+        <div class="d-label">POST /api/shorten</div>
+        <div class="d-box amber">CloudFront</div>
+        <div class="d-arrow-down">↓</div>
+        <div class="d-box green">ALB</div>
+        <div class="d-arrow-down">↓</div>
+        <div class="d-box indigo">API Server</div>
+        <div class="d-arrow-down">↓</div>
+        <div class="d-row">
+          <div class="d-box purple">DynamoDB (store)</div>
+          <div class="d-box red">KGS / ID Service (Base62)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">READ PATH (Redirect)</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">Client</div>
+        <div class="d-arrow-down">↓</div>
+        <div class="d-label">GET /abc123</div>
+        <div class="d-box amber">CloudFront</div>
+        <div class="d-label">Cache HIT? Return 301</div>
+        <div class="d-arrow-down">↓ MISS</div>
+        <div class="d-box green">ALB</div>
+        <div class="d-arrow-down">↓</div>
+        <div class="d-box indigo">API Server</div>
+        <div class="d-arrow-down">↓</div>
+        <div class="d-row">
+          <div class="d-box red">Redis (cache)</div>
+          <div class="d-box purple">DynamoDB (fallback)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 `}}
 
 {{table "Write Path: Creating a Short URL" (rows
