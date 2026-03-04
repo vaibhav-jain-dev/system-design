@@ -67,11 +67,38 @@ type Pattern struct {
 	Path        string `yaml:"path"`
 }
 
+// ConceptAppearance records where a concept appears (section-level granularity).
+type ConceptAppearance struct {
+	Type    string `yaml:"type"`    // "problem", "fundamental", "algorithm", "pattern"
+	Slug    string `yaml:"slug"`    // e.g. "url-shortener", "storage/redis"
+	Section string `yaml:"section"` // e.g. "Caching Deep Dive"
+	Phase   int    `yaml:"phase"`   // phase number (0 if not applicable)
+
+	// Resolved reference (populated after load)
+	Title string `yaml:"-"` // resolved title of the target
+	URL   string `yaml:"-"` // resolved URL path
+}
+
+// Concept is a cross-cutting topic that appears across multiple content types.
+type Concept struct {
+	Slug        string              `yaml:"slug"`
+	Title       string              `yaml:"title"`
+	Description string              `yaml:"description"`
+	AppearsIn   []ConceptAppearance `yaml:"appears_in"`
+}
+
+// ConceptCategory groups related concepts under a named category.
+type ConceptCategory struct {
+	Category string    `yaml:"category"`
+	Concepts []Concept `yaml:"concepts"`
+}
+
 type registryFile struct {
-	Problems     []Problem     `yaml:"problems"`
-	Fundamentals []Fundamental `yaml:"fundamentals"`
-	Algorithms   []Algorithm   `yaml:"algorithms"`
-	Patterns     []Pattern     `yaml:"patterns"`
+	Problems     []Problem         `yaml:"problems"`
+	Fundamentals []Fundamental     `yaml:"fundamentals"`
+	Algorithms   []Algorithm       `yaml:"algorithms"`
+	Patterns     []Pattern         `yaml:"patterns"`
+	Concepts     []ConceptCategory `yaml:"concepts"`
 }
 
 // Registry holds the loaded knowledge graph.
@@ -80,11 +107,13 @@ type Registry struct {
 	Fundamentals []*Fundamental
 	Algorithms   []*Algorithm
 	Patterns     []*Pattern
+	Concepts     []*ConceptCategory
 
 	problemsBySlug     map[string]*Problem
 	fundamentalsBySlug map[string]*Fundamental
 	algorithmsBySlug   map[string]*Algorithm
 	patternsBySlug     map[string]*Pattern
+	conceptsBySlug     map[string]*Concept
 }
 
 // Load parses _registry.yaml and builds the knowledge graph with reverse links.
@@ -104,6 +133,7 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 		fundamentalsBySlug: make(map[string]*Fundamental),
 		algorithmsBySlug:   make(map[string]*Algorithm),
 		patternsBySlug:     make(map[string]*Pattern),
+		conceptsBySlug:     make(map[string]*Concept),
 	}
 
 	// Index fundamentals (including children)
@@ -149,6 +179,41 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 		pt := &raw.Patterns[i]
 		reg.Patterns = append(reg.Patterns, pt)
 		reg.patternsBySlug[pt.Slug] = pt
+	}
+
+	// Index concepts and resolve references
+	for i := range raw.Concepts {
+		cat := &raw.Concepts[i]
+		reg.Concepts = append(reg.Concepts, cat)
+		for j := range cat.Concepts {
+			c := &cat.Concepts[j]
+			reg.conceptsBySlug[c.Slug] = c
+			for k := range c.AppearsIn {
+				a := &c.AppearsIn[k]
+				switch a.Type {
+				case "problem":
+					if p := reg.problemsBySlug[a.Slug]; p != nil {
+						a.Title = p.Title
+						a.URL = "/problem/" + a.Slug
+					}
+				case "fundamental":
+					if f := reg.fundamentalsBySlug[a.Slug]; f != nil {
+						a.Title = f.Title
+						a.URL = "/fund/" + a.Slug
+					}
+				case "algorithm":
+					if al := reg.algorithmsBySlug[a.Slug]; al != nil {
+						a.Title = al.Title
+						a.URL = "/algo/" + a.Slug
+					}
+				case "pattern":
+					if pt := reg.patternsBySlug[a.Slug]; pt != nil {
+						a.Title = pt.Title
+						a.URL = "/pattern/" + a.Slug
+					}
+				}
+			}
+		}
 	}
 
 	return reg, nil
@@ -214,6 +279,11 @@ func (r *Registry) GetAlgorithm(slug string) *Algorithm {
 // GetPattern returns a pattern by slug.
 func (r *Registry) GetPattern(slug string) *Pattern {
 	return r.patternsBySlug[slug]
+}
+
+// GetConcept returns a concept by slug.
+func (r *Registry) GetConcept(slug string) *Concept {
+	return r.conceptsBySlug[slug]
 }
 
 func categoryFromSlug(slug string) string {
