@@ -12,7 +12,19 @@
   (row "Delete"              "Not supported in standard Bloom filter"     "Use Counting Bloom Filter or Cuckoo Filter")
 )}}
 
-{{key "Bloom filters trade a small false positive rate for massive space savings. A HashSet storing 1 billion URLs takes ~64 GB. A Bloom filter with 1% false positive rate takes 1.2 GB. That is a 50x memory reduction."}}
+{{think "Why accept false positives at all? Because eliminating them entirely requires storing the actual elements, which costs 40+ bytes per element for string keys. 10 bits per element at 1% FP is a 30-50x memory reduction. In distributed systems, that difference is between fitting in RAM vs. spilling to disk."
+  (whyNot "a HashSet" "A HashSet gives exact membership at 40+ bytes per string key. For 1 billion URLs that is 40 GB — needs a dedicated memory node. A Bloom filter at 1% FP holds the same 1 billion elements in 1.2 GB, fitting on any app server.")
+  (whatIf "the false positive rate is 10% instead of 1%" "At 10% FP you save even more memory (~5 bits/element = 600 MB for 1B elements), but 1 in 10 negative lookups returns a false positive, causing unnecessary DB reads. 1% is the standard production trade-off.")
+}}
+
+{{key "Bloom filters trade a small false positive rate for massive space savings. A HashSet storing 1 billion URLs takes ~40 GB. A Bloom filter with 1% false positive rate takes 1.2 GB. That is a 33x memory reduction."}}
+
+{{triggerQs "Questions this overview triggers"
+  "Why are there no false negatives?"
+  "Once a bit is set to 1, it stays 1. When you insert an element, its k bit positions are set. A future lookup of that same element checks the same k positions — they are all still 1, so the filter always returns 'possibly present'. Bits are never cleared."
+  "Where would you use a Bloom filter in a URL shortener?"
+  "Before generating a new short code, check the Bloom filter. A 'not present' result means the code is definitely unused — skip the DB uniqueness check entirely. A 'possibly present' result means do a DB lookup to confirm. This eliminates roughly 99% of DB reads during code generation."
+}}
 
 {{phase 2 "How It Works" "5 min"}}
 
@@ -20,7 +32,12 @@
 
 {{diagram "algo-bloom-filter-insert-query"}}
 
-{{thought "False positives occur because different elements share bit positions. As more elements are inserted, more bits become 1, and the chance of all k bits being 1 for a non-member increases. This is why sizing the bit array correctly is critical."}}
+{{think "False positives occur because different elements share bit positions. As more elements are inserted, more bits become 1, and the chance of all k bits being 1 for a non-member increases. This is why sizing the bit array correctly upfront is critical — you cannot shrink it later."
+  (whatIf "the bit array fills up (nearly all bits = 1)" "False positive rate approaches 100%. Every query returns 'possibly present' regardless of whether the element was inserted. Always size m generously: at 10 bits/element, even 10 billion elements only needs 12.5 GB.")
+  (how "do k independent hash functions work in practice?" "You do not implement k separate hash functions. Double hashing: compute h1 = hash(item) and h2 = hash(item + salt), then derive k positions as h(i) = (h1 + i*h2) % m for i in 0..k-1. Two hash computations, k positions.")
+}}
+
+{{hint "bit array vs byte array" "The actual storage is a bytearray (bytes), not a Python list of booleans. A list of booleans uses 28 bytes per element in CPython. A bytearray packs 8 bits per byte, matching the theoretical 10 bits/element target."}}
 
 {{phase 3 "Optimal Parameters" "5 min"}}
 
@@ -33,6 +50,11 @@
   (row "Optimal hash count (k)" "k = (m/n) * ln(2)"                 "Minimizes FP rate for given m and n")
   (row "Bits per element"       "m/n = -1.44 * log2(p)"             "At 1% FP: ~9.6 bits per element")
 )}}
+
+{{think "The optimal k formula k = (m/n) * ln(2) ≈ 0.693 * (m/n) minimizes the false positive rate for a given bit array size. At 9.6 bits/element, k = 0.693 * 9.6 = 6.64, rounded to 7. This is why 7 hash functions appears in every Bloom filter implementation at 1% FP."
+  (whatIf "you use more hash functions than optimal (e.g., k=14 at 9.6 bits/element)" "More hash functions set more bits per insert, filling the array faster and increasing the false positive rate above 1%. Using exactly k = ceil((m/n) * ln(2)) minimizes FP for your chosen m.")
+  (whatIf "you use fewer hash functions than optimal (e.g., k=3)" "Fewer hash functions per insert means fewer bits set, but each lookup checks fewer positions. With k=3 and 9.6 bits/element, the FP rate rises from 1% to about 3.5%. A deliberate trade-off if hash computation is expensive.")
+}}
 
 {{table "Practical Sizing Guide" (rows
   (row "Elements (n)"   "FP Rate (p)"   "Bits (m)"        "Hash Functions (k)"  "Total Memory")
@@ -52,7 +74,14 @@
   (row "10 billion"     "12 GB"                 "400 GB"                  "33x")
 )}}
 
-{{key "At 1% false positive rate, a Bloom filter uses about 10 bits (1.25 bytes) per element. A HashSet uses 40+ bytes per element for typical string keys. Bloom filter wins by 30-50x on memory, which is why it is used wherever exact membership is not required."}}
+{{key "At 1% false positive rate, a Bloom filter uses about 10 bits (1.25 bytes) per element. A HashSet uses 40+ bytes per element for typical string keys. Bloom filter wins by 30-50x on memory."}}
+
+{{triggerQs "Questions this phase triggers"
+  "How do you size a Bloom filter for 1 billion URLs at 1% FP?"
+  "m = -(1B * ln(0.01)) / (ln(2))^2 = -(1B * -4.605) / 0.480 = 9.6 billion bits = 1.2 GB. k = (9.6B / 1B) * ln(2) = 9.6 * 0.693 = 6.65, round to 7 hash functions."
+  "What happens when you exceed the expected element count?"
+  "The false positive rate rises above the target. At 2x expected elements with no resizing, FP rate roughly quadruples. Mitigation: size m for 2-3x expected growth, or use a Scalable Bloom Filter that adds layers dynamically."
+}}
 
 {{phase 4 "Full Python Implementation" "8 min"}}
 
@@ -112,6 +141,12 @@ print("FP rate: {:.3f}% (expected: {:.3f}%)".format(
     100 * false_pos / 100_000, 100 * bf.estimated_fp_rate()))
 `}}
 
+{{hint "double hashing" "The _hashes method runs only 2 MD5 computations regardless of k. It derives all k positions from h1 and h2 using the formula (h1 + i*h2) % m. This is mathematically equivalent to k independent hash functions and is the standard production technique — not a shortcut."}}
+
+{{think "Using bytearray for the bit array is a deliberate choice. It packs 8 bits per byte, giving 9.6 bits/element theoretical efficiency at ~10 bits/element actual. A Python list of booleans would use 28 bytes per element — 22x worse. In production, use Redis BITSET or a native C extension (pybloom_live) for billion-element filters."
+  (whatIf "you need the filter to persist across process restarts" "Serialize self.bits with pickle or write the bytearray directly to disk. The filter is just a fixed-size byte array. Store self.m, self.k, and self.count alongside the bytes so you can reconstruct the BloomFilter object.")
+}}
+
 {{phase 5 "Use Cases in System Design" "5 min"}}
 
 {{say "Bloom filters appear in many system design problems as an optimization layer. They sit in front of expensive operations like database lookups or disk reads."}}
@@ -128,7 +163,19 @@ print("FP rate: {:.3f}% (expected: {:.3f}%)".format(
 
 {{diagram "algo-bloom-filter-cache-layer"}}
 
-{{avoid "Never use a Bloom filter where false positives cause serious harm. Example: checking if a user is banned. A false positive would ban an innocent user. Use an exact data structure for safety-critical decisions."}}
+{{think "Cassandra's SSTable Bloom filters are the canonical production example. Each SSTable file has its own Bloom filter. A read request for a key must check potentially dozens of SSTables — without Bloom filters, this means dozens of disk seeks. With Bloom filters, most SSTables are skipped in O(k) memory operations. Cassandra stores these filters in memory permanently for this reason."
+  (whatIf "the Bloom filter is too large to fit in memory" "For Cassandra SSTables, each file's filter is sized proportionally to its row count. A 1 GB SSTable with 10 million rows needs only 12 MB for its filter at 1% FP. Total filter memory across all SSTables is typically 1-5% of raw data size.")
+  (how "does the CDN one-hit-wonder filter work?" "Cache a URL only if it has been requested at least twice. On first request: check filter (not present), insert into filter, serve from origin. On second request: check filter (present), promote to cache. Only items with 2+ requests consume cache space. This prevents one-time viral content from evicting frequently accessed items.")
+}}
+
+{{avoid "Never use a Bloom filter where false positives cause serious harm. Checking if a user is banned: a false positive bans an innocent user. Checking if a payment is a duplicate: a false positive drops a legitimate transaction. Use an exact data structure for safety-critical decisions."}}
+
+{{triggerQs "Questions this phase triggers"
+  "How does Cassandra use Bloom filters to speed up reads?"
+  "Each SSTable has a Bloom filter loaded in memory. A read request checks the filter for each SSTable before touching disk. If the filter says 'not present', the SSTable disk read is skipped. With 10 SSTables and 1% FP, roughly 9 of 10 SSTable reads are eliminated for a key that does not exist in most of them."
+  "Why can a CDN use a Bloom filter but not a ban list?"
+  "CDN false positives cause a cache miss, which just adds 20-50ms latency — users do not notice. Ban list false positives cause an innocent user to be blocked from the service, which is a serious business and legal problem. Bloom filters are only appropriate when the cost of a false positive is low and reversible."
+}}
 
 {{phase 6 "Bloom Filter Variants" "3 min"}}
 
@@ -149,23 +196,28 @@ print("FP rate: {:.3f}% (expected: {:.3f}%)".format(
   (row "Scalable Bloom"          "No"              "~10 bits + overhead" "Approximate"     "Complex")
 )}}
 
+{{think "Cuckoo filters beat Counting Bloom Filters on almost every metric: same or lower FP rate, 3x less memory (12 vs 40 bits/element), and deletion support. The only reason to choose a Counting Bloom Filter today is existing code or library constraints."
+  (whyNot "Counting Bloom Filter over Cuckoo Filter" "4-bit counters use 40 bits/element vs 12 bits for Cuckoo. Cuckoo also has better cache performance due to denser packing. Unless your team already has a Counting Bloom Filter in production, Cuckoo is the right choice for deletable filters.")
+  (how "does deletion work in a Cuckoo filter?" "A Cuckoo filter stores fingerprints (short hashes of items) rather than setting bits. To delete, remove the fingerprint from one of its two candidate buckets. Unlike bits, a specific fingerprint can be removed without affecting other items that happened to set the same bits.")
+}}
+
 {{phase 7 "System Design Integration" "5 min"}}
 
 {{qa
   "How would you use a Bloom filter in a URL shortener?"
-  "Before generating a new short code, check the Bloom filter. If it says 'not present,' the code is definitely unique -- skip the DB check and write directly. If it says 'maybe present,' do a DB lookup to confirm. This eliminates 99% of DB uniqueness checks."
+  "Before generating a new short code, check the Bloom filter. If it says 'not present,' the code is definitely unique — skip the DB check and write directly. If it says 'maybe present,' do a DB lookup to confirm. This eliminates 99% of DB uniqueness checks."
   "What if the Bloom filter fills up and false positive rate spikes?"
-  "Three options: 1) Create a new, larger Bloom filter and rebuild from the database. 2) Use a Scalable Bloom Filter that adds layers as it grows. 3) Size the initial filter generously: at 10 bits per element, even 10 billion elements only needs 12.5 GB."
+  "Three options: 1) Create a new, larger Bloom filter and rebuild from the database. 2) Use a Scalable Bloom Filter that adds layers as it grows. 3) Size the initial filter for 2-3x expected growth — at 10 bits/element, 10 billion elements only needs 12.5 GB."
 }}
 
 {{qa
   "How does Cassandra use Bloom filters?"
-  "Each SSTable file has an associated Bloom filter. Before reading an SSTable from disk, Cassandra checks the Bloom filter. If the filter says the key is not in this SSTable, the disk read is skipped entirely. This avoids reading potentially dozens of SSTables per query."
+  "Each SSTable file has an associated Bloom filter. Before reading an SSTable from disk, Cassandra checks the Bloom filter. If the filter says the key is not in this SSTable, the disk read is skipped. This eliminates most disk seeks for keys spread across many SSTables."
   "Can you use a Bloom filter for counting, not just membership?"
-  "Not with a standard Bloom filter. Use a Count-Min Sketch instead, which is a related probabilistic structure designed for frequency estimation. It uses multiple hash functions with counters, returning the minimum count across all hash positions."
+  "No. A standard Bloom filter only tracks presence. Use a Count-Min Sketch for frequency estimation — it uses multiple hash functions with counters and returns the minimum count across all positions, which is an upper bound on the true count."
 }}
 
-{{followup "How would you implement a distributed Bloom filter?" "Two approaches: 1) Partitioned: split the bit array across Redis nodes using consistent hashing. Each query hashes k times and may hit multiple Redis nodes. 2) Replicated: each application server has a local copy of the full Bloom filter. Updates are broadcast asynchronously. Reads are local and instant. Approach 2 is simpler and faster for read-heavy workloads like URL deduplication."}}
+{{followup "How would you implement a distributed Bloom filter?" "Two approaches: 1) Partitioned — split the bit array across Redis nodes using consistent hashing. Each query may hit multiple nodes. 2) Replicated — each app server holds a full local copy, updates broadcast asynchronously. Replicated is simpler and faster for read-heavy workloads like URL deduplication. Use Redis BITSET commands (SETBIT, GETBIT) for the storage layer."}}
 
 {{phase 8 "Interview Checklist" "2 min"}}
 

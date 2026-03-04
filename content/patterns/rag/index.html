@@ -2,7 +2,10 @@
 
 {{say "RAG, Retrieval-Augmented Generation, is the most important design pattern for building production LLM applications. Instead of relying solely on the model's training data, we retrieve relevant documents at query time and inject them into the prompt. This grounds the model's response in real, up-to-date facts."}}
 
-{{thought "Why not just fine-tune? Fine-tuning bakes knowledge into model weights, which is expensive, slow to update, and hard to audit. RAG keeps knowledge in a searchable database: you can update it instantly, trace every answer back to its source, and control access per user. RAG is the default choice for enterprise LLM apps."}}
+{{think "Why not just fine-tune? Fine-tuning bakes knowledge into model weights — expensive, slow to update, and impossible to audit. RAG keeps knowledge in a searchable database: update it instantly, trace every answer to its source, control access per user."
+  (whyNot "Fine-tuning" "Re-training costs thousands of dollars and takes days. Knowledge baked into weights cannot be selectively updated or revoked. You cannot say 'forget this document' after fine-tuning.")
+  (whatIf "knowledge changes daily" "RAG handles this naturally — update the index, done. Fine-tuning would require daily re-training at massive cost. Long-context stuffing would blow your token budget and latency.")
+}}
 
 {{table "RAG vs Alternatives" (rows
   (row "Approach"              "Latency"    "Cost to Update"    "Traceability"    "Best For")
@@ -13,6 +16,13 @@
 )}}
 
 {{key "RAG is the right pattern when your application needs access to private, frequently updated, or domain-specific knowledge that the base model does not have. It gives you citations, access control, and instant updates without retraining."}}
+
+{{triggerQs "Questions this phase could trigger"
+  "When would you choose RAG over fine-tuning?"
+  "Choose RAG when knowledge changes frequently, needs citations, or requires access control. Fine-tuning is for adapting model behavior and style — things like tone, output format, or domain-specific reasoning patterns — not for injecting facts. The two are not mutually exclusive: fine-tune for style, RAG for knowledge."
+  "Can RAG and fine-tuning be combined?"
+  "Yes. Fine-tune the model on your domain's style and terminology so it understands the vocabulary, then use RAG to supply the actual facts. This is the best-of-both approach for specialized domains like legal or medical applications."
+}}
 
 {{phase 2 "RAG Architecture Overview" "5 min"}}
 
@@ -32,6 +42,15 @@
   (row "8. Generate"     "Augmented prompt"          "Answer with citations"     "Model selection, temperature")
 )}}
 
+{{hint "same model for embed and query" "You must embed queries with the exact same model used to embed documents. Every embedding model creates its own vector space. Query and document vectors from different models live in incompatible spaces and cannot be compared — cosine similarity will return meaningless numbers."}}
+
+{{triggerQs "Questions this phase could trigger"
+  "How does the offline indexing phase differ from the online query phase?"
+  "Offline indexing runs once (or incrementally) and is latency-insensitive — you have seconds to minutes. Online query runs on every user request and must complete in under 500ms. This is why you pre-compute embeddings offline: embedding at query time only covers the user's question, not the entire corpus."
+  "What is the role of metadata in RAG?"
+  "Metadata enables filtering. Every chunk gets tagged with source, author, date, department, access level, etc. At query time you apply metadata filters to restrict retrieval to authorized or relevant subsets. Without metadata, you cannot implement access control, date-range filtering, or per-tenant isolation."
+}}
+
 {{phase 3 "Chunking Strategies" "8 min"}}
 
 {{say "Chunking is the most underrated part of RAG. Bad chunking leads to bad retrieval, which leads to bad answers. There are three main strategies, each with different trade-offs."}}
@@ -44,6 +63,8 @@
   (row "Recursive"        "Split by headers, paragraphs, sentences"  "Respects doc structure" "Needs structured docs"  "Markdown, HTML docs")
   (row "Document-based"   "One chunk per logical document"            "Complete context"      "May exceed context limit" "Short docs like FAQs")
 )}}
+
+{{hint "chunk size 300-500 tokens" "Too small (under 100 tokens): chunks lack enough context for meaningful retrieval — the embedding captures almost no semantic signal. Too large (over 1000 tokens): chunks cover multiple topics, reducing precision because a chunk about both pricing AND returns will score well for both query types. 300-500 tokens is the empirically validated sweet spot."}}
 
 {{code "python" `from typing import List
 import tiktoken
@@ -145,6 +166,13 @@ def chunk_recursive(
 
 {{avoid "Never chunk without overlap. When you split at a fixed boundary, you often break a sentence or idea in half. The first half lands in chunk N, the second in chunk N+1. If a user asks about that idea, neither chunk has the full context. Use 10-15 percent overlap to ensure continuity."}}
 
+{{triggerQs "Questions this phase could trigger"
+  "How do you choose chunk size for a specific document type?"
+  "Match chunk size to your query granularity. FAQ documents: one chunk per question-answer pair (usually 100-200 tokens). Technical docs with long explanations: 400-600 tokens to capture a complete concept. Legal contracts: sentence-based chunking to preserve clause integrity. Then measure retrieval recall on a test set and adjust."
+  "What is the overlap and why does it matter?"
+  "Overlap is the number of tokens repeated between consecutive chunks. A 50-token overlap means the last 50 tokens of chunk N are also the first 50 tokens of chunk N+1. This ensures concepts that span a chunk boundary are fully captured in at least one chunk. Without overlap, queries about boundary-spanning ideas return incomplete chunks."
+}}
+
 {{phase 4 "Embedding Models & Vector Storage" "8 min"}}
 
 {{say "Embeddings convert text into dense vectors that capture semantic meaning. Two pieces of text that mean similar things will have vectors close together in the embedding space. Choosing the right model and vector database is critical for RAG quality."}}
@@ -157,6 +185,8 @@ def chunk_recursive(
   (row "E5-large-v2 (open source)"       "1024"        "62.0"        "Free (self-host)" "No API dependency")
   (row "BGE-large-en-v1.5 (open)"        "1024"        "63.5"        "Free (self-host)" "Best open-source option")
 )}}
+
+{{hint "text-embedding-3-small as default" "At $0.02 per million tokens, embedding a corpus of 1M documents costs roughly $10 total. The quality gap between small and large is only 2-3 points on MTEB — not worth 6.5x the cost unless you are in a high-stakes domain like legal or medical search where recall precision justifies the spend."}}
 
 {{compare "Vector Database Selection" (options
   (best "pgvector (PostgreSQL)" "If you already run Postgres, pgvector adds vector search with zero new infrastructure. Supports HNSW and IVFFlat indexes. Good up to 10M vectors. Best for startups and teams that want simplicity.")
@@ -283,6 +313,12 @@ def search_similar(
   (row "Hybrid"          "Combine dense + sparse with RRF" "Best of both worlds"                 "More complex, slower"          "Production systems")
 )}}
 
+{{think "Start with alpha=0.7 (70% dense, 30% sparse) for hybrid search. Dense handles most natural language queries. Sparse catches product codes, error messages, and names that embeddings misrepresent."
+  (whyNot "dense-only in production" "Dense search fails on exact queries like 'error ERR_4032' or 'SKU-78812'. Users searching for specific IDs expect exact matches. BM25 handles this perfectly while embeddings often return thematically-related but wrong results.")
+  (whatIf "queries are highly technical with acronyms" "Increase sparse weight (alpha=0.5 or lower). Technical domains like medical (ICD codes) or legal (statute citations) rely heavily on exact terminology that embeddings from general-purpose models may conflate with similar-sounding terms.")
+  (how "tune the alpha parameter" "Build a test set of 100-200 queries. Tag each as semantic (conceptual) or keyword (exact match). Run retrieval at several alpha values (0.3, 0.5, 0.7, 0.9). Measure recall@5 separately for each category. Pick the alpha that maximizes the harmonic mean of both.")
+}}
+
 {{code "python" `from rank_bm25 import BM25Okapi
 from typing import List, Tuple
 import numpy as np
@@ -407,7 +443,10 @@ def retrieve_and_rerank(
     return reranked
 `}}
 
-{{thought "Reranking is one of the highest-leverage improvements you can make to a RAG system. In benchmarks, adding a cross-encoder reranker to a bi-encoder retriever improves recall at k by 10-20 percent. The cost is about 100ms of latency for 50 candidates. Worth it for most production systems."}}
+{{think "Reranking is one of the highest-leverage improvements in RAG. Cross-encoders see both query and document together — they can judge relevance holistically rather than comparing independent vectors. The latency cost (~100ms for 50 candidates) is justified by 10-20% recall improvement."
+  (whyNot "reranking always" "Cross-encoders are O(n) with the number of candidates — each pair requires a separate inference pass. For 50 candidates and a 12-layer model, that is 50 forward passes. This adds 80-150ms latency. Skip reranking if your p99 latency target is under 300ms total and your retrieval precision is already high.")
+  (whatIf "reranker latency is too high" "Use a smaller cross-encoder model (MiniLM-L6 instead of L12) — roughly 2x faster with ~5% quality drop. Or reduce candidate count from 50 to 20. Or run the reranker asynchronously and stream the top bi-encoder results while reranking completes in the background.")
+}}
 
 {{phase 7 "Complete RAG Pipeline" "10 min"}}
 
@@ -560,6 +599,8 @@ class RAGPipeline:
 #     print("  Source:", src.source, "score:", src.score)
 `}}
 
+{{hint "temperature=0.1 for RAG" "Low temperature (0.0-0.2) keeps the model close to the retrieved facts and reduces hallucination. High temperature increases creativity but also increases the probability that the model deviates from the context and invents plausible-sounding but unsupported claims."}}
+
 {{phase 8 "Failure Modes & How to Fix Them" "5 min"}}
 
 {{say "RAG systems fail in predictable ways. Understanding these failure modes is essential for debugging and for interview discussions."}}
@@ -644,7 +685,10 @@ def defensive_query(rag: RAGPipeline, query: str) -> RAGResponse:
   (row "Total (GPT-4o-mini)"         "Full pipeline with GPT-4o-mini"                     "$10"             "~$230/mo")
 )}}
 
-{{thought "The LLM inference cost dominates RAG costs by 10x. Embeddings are cheap. Vector storage is cheap. The main lever for cost control is: use a cheaper model for simple questions, reduce context size with fewer or smaller chunks, and cache frequent queries. Caching identical queries can reduce LLM costs by 30-50 percent."}}
+{{think "LLM inference dominates RAG cost by 10x. Embeddings are a rounding error. The main levers: use a cheaper model for simple questions, reduce context size with fewer or smaller chunks, cache frequent queries. Caching identical queries can cut LLM costs by 30-50%."
+  (whyNot "always using GPT-4o-mini" "GPT-4o-mini produces noticeably worse answers for complex multi-hop questions that require synthesizing across multiple retrieved chunks. Run both models on your evaluation set and measure answer quality — then decide if the 5x cost difference is worth the quality gain for your use case.")
+  (how "implement semantic caching" "Embed each incoming query. Before calling the LLM, search the cache for queries with cosine similarity above 0.95. If found, return the cached answer. Use a short TTL (1-24 hours) for time-sensitive domains. Redis with a vector similarity module or a simple in-memory dict with exact-match hashing work for most traffic patterns.")
+}}
 
 {{key "Embedding costs are negligible. LLM inference is 80+ percent of RAG cost. Optimize by: caching repeated queries, using smaller models for simple questions, and limiting context window size. A semantic cache that matches similar queries can further reduce costs."}}
 
@@ -652,19 +696,19 @@ def defensive_query(rag: RAGPipeline, query: str) -> RAGResponse:
 
 {{qa
   "How would you evaluate RAG quality?"
-  "Three metrics: 1) Retrieval quality: measure recall at k and MRR (Mean Reciprocal Rank) on a labeled test set of query-to-relevant-chunk pairs. 2) Answer quality: use LLM-as-judge to score faithfulness (does the answer match the context?) and relevance (does it answer the question?). 3) End-to-end: human evaluation on a sample of 100-200 queries per week."
+  "Three metrics: 1) Retrieval quality: recall@k and MRR on a labeled test set of query-to-relevant-chunk pairs. 2) Answer quality: LLM-as-judge scoring faithfulness (does the answer match the context?) and relevance (does it answer the question?). 3) End-to-end: human evaluation on 100-200 queries per week. Faithfulness and recall@k are the two most actionable — fix retrieval first, then answer quality."
   "When would you NOT use RAG?"
-  "Skip RAG when: 1) The knowledge fits in the system prompt (under 10K tokens). 2) The task is creative generation, not factual Q and A. 3) Latency requirements are under 200ms since retrieval adds 100-300ms. 4) The corpus changes every few minutes making index freshness impractical."
+  "Skip RAG when: the knowledge fits in the system prompt (under 10K tokens), the task is creative generation not factual Q&A, latency must be under 200ms (retrieval adds 100-300ms), or the corpus changes every few minutes making index freshness impractical. A long-context model stuffed with a small document set is simpler and faster for ad-hoc queries."
 }}
 
 {{qa
   "How do you handle multi-turn conversations in RAG?"
-  "Two approaches: 1) Query rewriting: use the LLM to rewrite the latest message incorporating conversation history into a standalone query. For example, 'What about its pricing?' becomes 'What is the pricing for Pinecone vector database?'. 2) Include last 2-3 turns in the retrieval query for context."
+  "Query rewriting: use the LLM to rewrite the latest message incorporating conversation history into a standalone query. 'What about its pricing?' becomes 'What is the pricing for Pinecone vector database?' before hitting the retriever. Include the last 2-3 turns in the rewrite context. Without this, pronoun references and implicit context cause retrievals to miss the intent entirely."
   "How do you handle documents with tables and images?"
-  "For tables: convert to structured text or markdown before chunking. For images: use a multimodal embedding model or generate text descriptions with a vision model then embed those descriptions. Documents with mixed content need a preprocessing pipeline that handles each content type separately."
+  "Tables: convert to structured markdown before chunking — preserve the header row so each chunk is self-contained. Images: use a vision model to generate text descriptions, then embed those descriptions. Mixed-content documents need a preprocessing pipeline: extract text, describe images, linearize tables, then chunk the unified text. Never embed raw image bytes — no text embedding model understands them."
 }}
 
-{{followup "How would you implement access control in RAG?" "Metadata filtering. Every chunk gets tagged with access metadata like team, role, and classification level. At query time the user's permissions are checked and passed as a metadata filter to the vector search. The vector database only returns chunks the user is authorized to see. This is critical for enterprise RAG where different teams should only access their own documents."}}
+{{followup "How would you implement access control in RAG?" "Metadata filtering. Every chunk gets tagged with access metadata: team, role, classification level. At query time the user's permissions are checked and passed as a metadata filter to the vector search. The vector database only returns chunks the user is authorized to see. This is non-negotiable for enterprise RAG where different teams should only access their own documents. Never rely on the LLM to enforce access control — enforce it at the retrieval layer."}}
 
 {{checklist
   "Chunk size 300-500 tokens with 10-15 percent overlap"

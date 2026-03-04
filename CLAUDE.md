@@ -181,7 +181,10 @@ Content files are **Go template fragments** — no `<html>` or `<head>`, just bo
 | Macro | Purpose | Renders As |
 |-------|---------|------------|
 | `{{say "text"}}` | What to literally say in interview | Green-border italic quote box |
-| `{{thought "text"}}` | Side reasoning, math, failure scenarios | Gray cloud box |
+| `{{thought "text"}}` | Side reasoning, math, failure scenarios (legacy) | Gray cloud box |
+| `{{think "main" (whyNot "X" "reason") (whatIf "Y" "resp") (how "Q" "A")}}` | Enhanced thought with nested reasoning chains | Expandable thought block with red/amber/blue sub-chains |
+| `{{hint "short" "detail"}}` | Inline thought-process trigger (cloud icon) | Click to show popup explaining "why this decision" |
+| `{{triggerQs "Title" "Q1" "A1" "Q2" "A2" ...}}` | Potential interviewer questions per section | Collapsible bulb section with Q&A pairs |
 | `{{avoid "text"}}` | Common mistakes, "never say X" | Red-border warning box |
 | `{{key "text"}}` | Key takeaway, one-liner | Blue-border bold box |
 | `{{phase N "Title" "Time"}}` | Section header with number + time badge | Phase header with anchor ID `phase-N-slug` |
@@ -210,7 +213,12 @@ Content files are **Go template fragments** — no `<html>` or `<head>`, just bo
 
 {{diagram "rl-requirements"}}
 
-{{thought "Key decision: fail-open vs fail-closed..."}}
+{{think "Key decision: fail-open vs fail-closed. Fail-open is correct for most cases."
+  (whyNot "fail-closed" "A full outage is worse than a few seconds of unlimited traffic.")
+  (whatIf "Redis is down for 5 minutes" "Local in-memory counters take over with 80% accuracy.")
+}}
+
+{{hint "why sorted set?" "ZADD is O(log N) and ZRANGEBYSCORE counts in a window atomically."}}
 
 {{phase 2 "Architecture" "10 min"}}
 

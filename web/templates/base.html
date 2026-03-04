@@ -331,49 +331,39 @@
             var colW = Math.floor((vpW - gap) / 2);
             book.colW = colW;
 
-            // Step 1: Measure content height in single column at column width
-            inner.style.cssText = 'width:' + colW + 'px;height:auto;column-count:1;transform:none;';
-            var contentH = inner.scrollHeight;
+            // Step 1: Give the inner element a very wide width so CSS columns
+            // can flow ALL content without truncation. We use a large fixed
+            // number of columns (200) as an upper bound.
+            var maxCols = 200;
+            var hugeW = maxCols * colW + (maxCols - 1) * gap;
+            inner.style.cssText = 'width:' + hugeW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);';
 
-            // Step 2: Account for break-before:column on phase headers
-            // Each phase-header forces a new column, which can leave partial-height gaps
-            var phaseHeaders = inner.querySelectorAll('.phase-header');
-            // Add estimated wasted space from column breaks (avg half-column per break)
-            var breakPadding = 0;
-            if (phaseHeaders.length > 1) {
-                breakPadding = (phaseHeaders.length - 1) * (vpH * 0.35);
-            }
-            var effectiveH = contentH + breakPadding;
-
-            // Step 3: Calculate columns needed
-            var numCols = Math.max(2, Math.ceil(effectiveH / vpH));
-            if (numCols % 2 !== 0) numCols++;
-            book.total = Math.max(1, numCols / 2);
-
-            // Step 4: Apply multi-column layout with generous width
-            // Give 20% extra columns to prevent blank-page cutoff
-            var extraCols = Math.max(2, Math.ceil(numCols * 0.2));
-            if (extraCols % 2 !== 0) extraCols++;
-            var allocCols = numCols + extraCols;
-            var totalW = allocCols * colW + (allocCols - 1) * gap;
-            inner.style.cssText = 'width:' + totalW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);transition:transform 0.45s cubic-bezier(0.16,1,0.3,1);';
-
-            // Step 5: After layout, count actual used columns by finding rightmost content
+            // Step 2: After layout, measure how wide the content actually spread.
+            // Use a range to find the last character position — this is the most
+            // reliable way to get the true content extent in CSS multi-column.
             requestAnimationFrame(function() {
-                // Walk all direct children to find the actual rightmost edge
+                // Method: walk ALL leaf elements and find the rightmost bounding box
+                var innerRect = inner.getBoundingClientRect();
                 var maxRight = 0;
-                var children = inner.children;
-                for (var i = 0; i < children.length; i++) {
-                    var rect = children[i].getBoundingClientRect();
-                    var innerRect = inner.getBoundingClientRect();
-                    var right = rect.right - innerRect.left;
-                    if (right > maxRight) maxRight = right;
+                var allEls = inner.querySelectorAll('*');
+                for (var i = 0; i < allEls.length; i++) {
+                    var r = allEls[i].getBoundingClientRect();
+                    // Only consider elements with actual size (skip hidden/zero-size)
+                    if (r.width > 0 && r.height > 0) {
+                        var right = r.right - innerRect.left;
+                        if (right > maxRight) maxRight = right;
+                    }
                 }
-                // Actual columns used
+
+                // Actual columns used based on measured content width
                 var actualCols = Math.max(2, Math.ceil(maxRight / (colW + gap)));
                 if (actualCols % 2 !== 0) actualCols++;
-                book.total = Math.max(1, actualCols / 2);
 
+                // Now set the width to exactly fit the actual columns
+                var totalW = actualCols * colW + (actualCols - 1) * gap;
+                inner.style.cssText = 'width:' + totalW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);transition:transform 0.45s cubic-bezier(0.16,1,0.3,1);';
+
+                book.total = Math.max(1, actualCols / 2);
                 updateBookUI();
                 bookGo(Math.min(book.page, book.total - 1));
             });

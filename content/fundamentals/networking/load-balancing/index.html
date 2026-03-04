@@ -6,7 +6,7 @@
   "Why do we need a load balancer?"
   "Three reasons: 1) Distribute traffic evenly so no server is a bottleneck. 2) Health checks route away from unhealthy instances. 3) Single entry point: clients hit one DNS name, LB handles the rest."
   "Can DNS round-robin do the same thing?"
-  "Partially. DNS gives you basic distribution, but no health checks, no connection draining, no sticky sessions. DNS TTL means stale entries. A real LB reacts in seconds, DNS takes minutes."
+  "No. DNS gives basic distribution but no health checks, no connection draining, no sticky sessions. DNS TTL means stale entries linger for minutes. A real LB reacts in seconds."
 }}
 
 {{table "Load Balancer Layers" (rows
@@ -15,7 +15,13 @@
   (row "L7"      "Application" "HTTP headers, paths, cookies, gRPC" "AWS ALB, Nginx, Envoy")
 )}}
 
-{{thought "L4 vs L7 is the most common interview question on load balancing. L4 is faster (just forwards TCP packets), L7 is smarter (can route based on URL path, headers, cookies). Most web services use L7. Use L4 for non-HTTP protocols or when you need absolute lowest latency."}}
+{{think "L4 vs L7: which do I choose?"
+  (whyNot "L4 for web APIs" "You lose path-based routing, header inspection, WAF, and gRPC health checks. L4 just forwards TCP packets — it cannot distinguish /api from /static.")
+  (whatIf "I need both static IPs and L7 routing" "Chain NLB (static IP) in front of ALB (L7 routing). NLB passes TCP to ALB. You get both features at the cost of ~$16/mo extra and slightly more latency.")
+  (how "When does L4 beat L7?" "Non-HTTP protocols (MQTT, FIX, custom TCP), latency under 100 microseconds, or TLS passthrough where you cannot decrypt traffic at the LB.")
+}}
+
+{{hint "L7 is the default for web services" "90% of web workloads use L7. L4 is a deliberate choice for specific constraints, not the starting point."}}
 
 {{compare "Load Balancer Types" (options
   (best "ALB (Layer 7)" "HTTP-aware: path routing, host routing, WebSocket, gRPC, WAF integration. Best for web APIs and microservices.")
@@ -27,6 +33,12 @@
 
 {{say "The routing algorithm determines HOW traffic is distributed. The right choice depends on your workload pattern."}}
 
+{{triggerQs "Routing Algorithm Basics"
+  "Why is round-robin the default?" "It requires no state, handles uniform request sizes well, and distributes evenly across identical instances. Simple to reason about and debug."
+  "When does round-robin break down?" "When requests have wildly different processing times. A 30s video transcode on server A still receives the next request under round-robin even though server B is idle. Least-connections would correctly route to B."
+  "What makes consistent hashing special?" "Adding or removing a node only moves 1/N of the keys. Standard modulo hashing reshuffles all keys on any topology change, destroying cache locality."
+}}
+
 {{table "Routing Algorithms" (rows
   (row "Algorithm"            "How It Works"                                    "Best For"                              "Drawback")
   (row "Round Robin"          "Requests go to servers 1, 2, 3, 1, 2, 3..."     "Stateless APIs, uniform servers"       "Ignores server load differences")
@@ -37,7 +49,13 @@
   (row "Random"               "Randomly pick a server"                          "Simple load tests"                     "No guarantee of even distribution")
 )}}
 
-{{thought "Round-robin is the default for 90% of stateless web services. Only switch to least-connections if you have long-lived requests (WebSocket, file uploads) where connection count diverges from request count."}}
+{{think "Should I switch from round-robin?"
+  (whyNot "Least-connections for stateless short requests" "Connection count tracks active connections, not request complexity. For fast stateless requests, round-robin is simpler and equally effective.")
+  (whatIf "My requests have wildly varying durations" "Use least-connections. File uploads, video transcodes, and long-running reports will pile up on some servers under round-robin while others sit idle.")
+  (how "When do I need consistent hashing?" "When routing decisions must be sticky for non-cookie reasons: cache shards, user-partitioned data, or distributed systems where the same key must reach the same node.")
+}}
+
+{{hint "Least-connections for WebSocket" "WebSocket connections are long-lived. Round-robin ignores that server A has 500 persistent connections while server B has 10. Least-connections sees this."}}
 
 {{code "python" `# Consistent Hashing - used by Redis Cluster, DynamoDB, Cassandra
 import hashlib
@@ -80,11 +98,17 @@ class ConsistentHashRing:
 
 {{followup "When would you NOT use round-robin?" "When request processing time varies wildly. If Server A is processing a 30s video transcode while Server B is idle, round-robin still sends the next request to A. Least-connections would correctly pick B."}}
 
-{{key "Consistent hashing is essential knowledge for system design interviews. It minimizes redistribution when nodes are added or removed. Without it, adding a server reshuffles all keys. With it, only 1/N keys move."}}
+{{key "Consistent hashing minimizes redistribution when nodes are added or removed. Without it, adding a server reshuffles all keys. With it, only 1/N keys move."}}
 
 {{phase 3 "Health Checks" "3 min"}}
 
 {{say "Health checks are how the load balancer knows which backends are alive. Without them, you are blindly sending traffic to potentially dead servers."}}
+
+{{triggerQs "Health Check Design"
+  "What interval and threshold should I use?" "10s interval with 2 failures (20s detection) for critical services. 30s interval with 3 failures (90s) is the default and is fine for most apps."
+  "Why not use the deep health check for the load balancer?" "If /health/deep queries your database and that query is slow, the LB marks your instance unhealthy and removes it from rotation. Use shallow checks for the LB — only verify the process is alive and responding."
+  "What HTTP status code should /health return?" "200 for healthy, 503 for unhealthy. The LB checks against a matcher you configure. Non-200 causes the threshold counter to increment."
+}}
 
 {{table "Health Check Types" (rows
   (row "Type"          "Checks"                          "Detection Time"          "Use Case")
@@ -93,6 +117,14 @@ class ConsistentHashRing:
   (row "gRPC"          "gRPC health check protocol"       "~10s"                    "gRPC microservices")
   (row "Deep/Custom"   "/health/deep checks DB + cache"   "~30s (more comprehensive)" "Monitoring dashboards only")
 )}}
+
+{{think "Shallow vs deep health check — where does each belong?"
+  (whyNot "Deep check on load balancer" "One slow DB query cascades: LB removes instance, remaining instances handle more load, their DB queries slow, LB removes them too. Cascading removal kills your fleet.")
+  (whatIf "My app is up but DB is down" "Shallow LB check keeps the instance in rotation. It will return 500s. That is correct behavior — the outage surfaces at the DB layer, not as a mysterious capacity reduction.")
+  (how "How do I alert on DB failure without a deep LB check?" "Set up a separate monitoring health check (DataDog, CloudWatch Synthetics) that hits /health/deep and pages on failure.")
+}}
+
+{{hint "Match detection time to your SLA" "If your SLA requires 99.9% uptime, a 90-second detection window is too long for a complete instance failure. Set 10s interval, 2 threshold = 20s max detection."}}
 
 {{code "python" `# Health check endpoint examples
 
@@ -126,7 +158,13 @@ async def health_deep():
 
 {{phase 4 "AWS ALB vs NLB Comparison" "5 min"}}
 
-{{say "Let me compare ALB and NLB in detail. This is a common interview question and the answer depends on the workload."}}
+{{say "Let me compare ALB and NLB in detail. The answer depends on the workload."}}
+
+{{triggerQs "ALB vs NLB Decision"
+  "What is the single clearest signal to use NLB?" "You need a static IP address for firewall whitelisting. ALB has dynamic IPs; you must use DNS. NLB gives you Elastic IPs that never change."
+  "When does the NLB -> ALB chain make sense?" "You need NLB static IPs (or PrivateLink) and ALB L7 routing (path-based, WAF, auth). Adds ~$16/mo for the NLB and a small latency hop."
+  "Does ALB add meaningful latency?" "ALB adds ~1ms. For most web APIs that is negligible. NLB adds under 100 microseconds. Choose NLB for latency only when microseconds matter — HFT, gaming tick loops."
+}}
 
 {{table "ALB vs NLB Feature Comparison" (rows
   (row "Feature"              "ALB (Layer 7)"                        "NLB (Layer 4)")
@@ -145,6 +183,14 @@ async def health_deep():
   (row "Best For"             "Web APIs, microservices, SPA"         "Gaming, IoT, financial, PrivateLink")
 )}}
 
+{{think "ALB or NLB for my use case?"
+  (whyNot "NLB for a standard REST API" "You lose path-based routing, WAF, Cognito auth, and Lambda targets. NLB sees TCP bytes, not HTTP paths. Route all traffic to one port-based rule.")
+  (whatIf "My team insists on static IPs for partner whitelisting" "Use NLB -> ALB chain. NLB provides the static Elastic IPs. ALB behind it provides path routing and WAF. Costs ~$16/mo extra.")
+  (how "Can I add WAF to NLB?" "No. WAF only attaches to ALB, API Gateway, or CloudFront. If you need NLB and WAF, the chain is: NLB -> ALB -> WAF -> targets.")
+}}
+
+{{hint "ALB is the correct default" "Start with ALB unless a specific constraint forces NLB. Switching later is straightforward — NLB can target an ALB."}}
+
 {{compare "When to Use Which" (options
   (best "ALB" "Default choice for web services. Path-based routing lets you route /api/* to backend and /static/* to S3. WAF + auth built in. WebSocket and gRPC native.")
   (alt "NLB" "Choose when you need: static IPs (firewall rules), TLS passthrough, ultra-low latency, non-HTTP protocols, or AWS PrivateLink.")
@@ -157,10 +203,18 @@ async def health_deep():
 
 {{qa
   "How do you make the load balancer itself highly available?"
-  "ALB is managed by AWS. It is already multi-AZ. AWS runs multiple LB nodes across AZs. If one AZ goes down, traffic routes to healthy AZs automatically. You do not manage this."
+  "ALB is managed by AWS and is already multi-AZ. AWS runs multiple LB nodes across AZs. If one AZ goes down, traffic routes to healthy AZs automatically. You do not manage this."
   "What about cross-AZ data transfer costs?"
-  "Real concern. Cross-AZ is $0.01/GB each way. At 1TB/day = $20/day = $600/mo. Mitigation: use AZ-aware routing or internal ALBs within each AZ."
+  "Real concern. Cross-AZ is $0.01/GB each way. At 1TB/day that is $20/day = $600/mo. Mitigation: AZ-aware routing or internal ALBs within each AZ for intra-service calls."
 }}
+
+{{think "Is multi-AZ always worth the cross-AZ cost?"
+  (whyNot "Single-AZ to avoid cross-AZ fees" "One AZ is a single point of failure. AWS AZ outages happen. The $600/mo in cross-AZ fees is cheap compared to one hour of downtime.")
+  (whatIf "Cross-AZ costs are prohibitive at our scale" "Deploy an internal ALB per AZ for service-to-service calls. The public-facing ALB stays multi-AZ for external traffic. Services in the same AZ talk through the local internal ALB.")
+  (how "How do I minimize cross-AZ traffic?" "Deploy the same number of targets in each AZ. ALB balances per-AZ first when cross-zone load balancing is disabled. Imbalanced targets cause cross-AZ traffic.")
+}}
+
+{{hint "Cross-zone load balancing on ALB is on by default" "ALB distributes evenly across all registered targets regardless of AZ. NLB has cross-zone off by default. If your targets are uneven across AZs on NLB, enable it."}}
 
 {{table "High Availability Patterns" (rows
   (row "Pattern"                    "How It Works"                                  "Cost Impact")
@@ -207,7 +261,11 @@ async def health_deep():
   (row "Total"               "All charges"               "~$23/mo")
 )}}
 
-{{thought "Load balancers are cheap relative to the compute they front. A $27/mo ALB can distribute traffic to $5,000/mo worth of ECS tasks. The cost concern is cross-AZ data transfer, not the LB itself."}}
+{{think "Is the load balancer a significant cost?"
+  (whyNot "Skipping ALB to save money" "A $27/mo ALB distributes traffic to potentially thousands of dollars in compute. The LB cost is noise. The real cost to watch is cross-AZ data transfer.")
+  (whatIf "I have 10 microservices — do I need 10 ALBs?" "No. One ALB with path-based routing rules handles all 10. Each additional ALB costs $16.20/mo base. One ALB with 10 routing rules costs the same base fee.")
+  (how "What drives LCU cost up unexpectedly?" "Rule evaluations. Many listener rules multiplied by high RPS can dominate your LCU bill. At 10K RPS with 10 rules = 100K rule evaluations/s, which is 100 LCU worth.")
+}}
 
 {{phase 8 "Interview Q&A" "5 min"}}
 
@@ -215,17 +273,17 @@ async def health_deep():
   "How does a load balancer handle sticky sessions?"
   "ALB uses cookies. It sets an AWSALB cookie on the first response. Subsequent requests with that cookie go to the same target. Duration-based (LB controls) or application-based (app controls cookie). NLB uses source IP hash."
   "When would you use sticky sessions?"
-  "WebSocket connections, shopping carts stored in memory, or legacy apps with server-side sessions. Modern stateless apps should avoid sticky sessions entirely because they cause uneven load distribution."
+  "WebSocket connections, shopping carts stored in memory, or legacy apps with server-side sessions. Modern stateless apps should avoid sticky sessions — they cause uneven load distribution and break during deployments."
 }}
 
 {{qa
   "What is connection draining and why does it matter?"
   "When a target is deregistered (deploy, scale-in, unhealthy), the LB stops sending NEW requests but lets in-flight requests finish. Default timeout is 300 seconds. Without draining, active requests get terminated mid-response."
   "How do you handle a sudden traffic spike?"
-  "ALB auto-scales but needs time. For predictable spikes (product launch), pre-warm by contacting AWS support. For unpredictable spikes, use auto-scaling on the target group with aggressive scale-up policies and conservative scale-down."
+  "ALB auto-scales but needs time to ramp up. For predictable spikes, pre-warm by contacting AWS support. For unpredictable spikes, use auto-scaling on the target group with aggressive scale-up policies and conservative scale-down."
 }}
 
-{{followup "Can you put a load balancer behind another load balancer?" "Yes. Common pattern: NLB (static IP for firewall) -> ALB (L7 routing) -> ECS targets. Also used for AWS PrivateLink which requires NLB. The NLB passes TCP to ALB, ALB does content-based routing. Adds ~$25/mo but solves the static IP requirement."}}
+{{followup "Can you put a load balancer behind another load balancer?" "Yes. NLB (static IP for firewall) -> ALB (L7 routing) -> ECS targets. Also used for AWS PrivateLink which requires NLB. The NLB passes TCP to ALB, ALB does content-based routing. Adds ~$25/mo but solves the static IP requirement."}}
 
 {{checklist
   "ALB for HTTP/HTTPS workloads (Layer 7, path routing, WebSocket)"

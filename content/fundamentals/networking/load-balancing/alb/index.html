@@ -16,11 +16,23 @@
   (row "Slow start mode"      "Gradually increase traffic to new targets"     "Warm JVM, populate cache")
 )}}
 
-{{thought "ALB is the default choice for any HTTP/HTTPS workload. The only reasons to use NLB instead are: static IP requirement, non-HTTP protocol, ultra-low latency (<100us), or AWS PrivateLink."}}
+{{think "Is ALB the right choice for my HTTP workload?"
+  (whyNot "NLB for a standard REST API" "NLB sees raw TCP bytes, not HTTP paths. You lose path routing, WAF, Cognito auth, gRPC health checks, and Lambda targets. Only switch to NLB when a specific constraint forces it.")
+  (whatIf "I need ALB features but also a static IP" "Chain NLB -> ALB. NLB provides static Elastic IPs, ALB behind it provides L7 routing. Adds ~$16/mo.")
+  (how "What are the only legitimate reasons to skip ALB for HTTP?" "Static IP requirement, TLS passthrough where you cannot terminate at the LB, sub-100us latency requirement, or non-HTTP protocol.")
+}}
+
+{{hint "ALB is the correct default for HTTP" "Start every HTTP workload with ALB. The L7 features (path routing, WAF, auth) are too valuable to give up without a specific reason."}}
 
 {{phase 2 "Routing Rules Deep Dive" "5 min"}}
 
 {{say "ALB listener rules are evaluated in priority order. First match wins. This lets you build sophisticated routing topologies with a single ALB."}}
+
+{{triggerQs "Routing Rule Design"
+  "How many routing rules can one ALB have?" "Up to 100 rules per listener. One ALB can serve dozens of microservices behind path-based rules — no need for a separate ALB per service."
+  "What happens when no rule matches?" "The default rule fires. Always configure the default rule explicitly. Leaving it as a 404 fixed response is valid for APIs; routing to your SPA frontend is valid for SPAs."
+  "Does rule order matter?" "Yes. Rules are evaluated from lowest priority number to highest. Put specific rules first (priority 1-10) and general catch-alls last (priority 90-100)."
+}}
 
 {{table "ALB Routing Rule Examples" (rows
   (row "Priority" "Condition"                                    "Target Group"        "Use Case")
@@ -32,6 +44,14 @@
   (row "6"        "Path = /health"                               "Fixed 200 response"  "LB health check response")
   (row "99"       "Default"                                      "Web frontend"        "Catch-all for SPA")
 )}}
+
+{{think "Path vs host routing — which should I use?"
+  (whyNot "Host routing for all microservices" "Each subdomain requires a separate DNS entry and certificate SAN. Path routing on one domain is simpler operationally.")
+  (whatIf "I need both — some services on subdomains, some on paths" "Combine them. ALB supports AND/OR conditions. Rule: host = api.example.com AND path = /users/* routes to one target group.")
+  (how "How do I handle versioning in routing?" "Path prefix: /api/v2/* in a higher-priority rule catches v2 before the /api/* catch-all. Or use a header: X-API-Version: 2 to route without changing URLs.")
+}}
+
+{{hint "One ALB for all microservices saves money" "Each ALB costs $16.20/mo base. Ten microservices behind one ALB with path rules costs the same base fee as one service."}}
 
 {{diagram "fund-alb-path-routing"}}
 
@@ -109,6 +129,12 @@ resource "aws_lb_target_group" "api" {
 
 {{phase 3 "WebSocket and gRPC Support" "3 min"}}
 
+{{triggerQs "Protocol Support"
+  "Does WebSocket require special ALB configuration?" "No configuration needed. ALB automatically handles the HTTP upgrade handshake and maintains the connection. Just route to your WebSocket targets normally."
+  "What is the WebSocket idle timeout limit?" "4000 seconds maximum. For connections that must stay open longer, send periodic pings from the client to reset the idle timer."
+  "How is gRPC different from HTTP/2?" "gRPC uses HTTP/2 as transport but requires its own health check protocol. Set the target group protocol version to gRPC, not HTTP, to get proper gRPC health checks."
+}}
+
 {{table "Protocol Support" (rows
   (row "Protocol"    "How ALB Handles It"                              "Configuration Needed")
   (row "HTTP/1.1"    "Standard request-response"                       "Default, no config")
@@ -117,11 +143,21 @@ resource "aws_lb_target_group" "api" {
   (row "gRPC"        "HTTP/2 based, requires gRPC health check"       "Target group protocol version = gRPC")
 )}}
 
-{{followup "Can ALB terminate WebSocket connections?" "ALB handles the HTTP upgrade handshake and then maintains the WebSocket connection. It does not inspect WebSocket frames (that would be L7 on a non-HTTP protocol). The idle timeout is 4000 seconds max. For longer connections, send periodic pings from the client."}}
+{{think "Should I use HTTP/2 end-to-end or just at the listener?"
+  (whyNot "HTTP/2 all the way to backends" "Your backends may not support HTTP/2 server-side. ALB handles HTTP/2 from client and can translate to HTTP/1.1 to backends. Only enable HTTP/2 on backends if they explicitly support it.")
+  (whatIf "My gRPC service is behind ALB but health checks keep failing" "Check that the target group protocol version is set to gRPC, not HTTP. ALB must use the gRPC health check protocol, not a plain HTTP GET.")
+  (how "How does WebSocket sticky session work?" "WebSocket connections are inherently sticky once established — the TCP connection persists to one target. The issue is reconnections. Enable sticky sessions so reconnecting clients return to the same backend.")
+}}
 
 {{phase 4 "WAF and Authentication" "3 min"}}
 
-{{say "ALB integrates with AWS WAF for security and supports built-in authentication via Cognito or any OIDC provider. This means your backend never sees unauthenticated requests."}}
+{{say "ALB integrates with AWS WAF for security and supports built-in authentication via Cognito or any OIDC provider. Your backend never sees unauthenticated or malicious requests."}}
+
+{{triggerQs "Security Integration"
+  "Is WAF at the ALB enough, or do I need it at CloudFront too?" "Both is better. CloudFront WAF blocks at the edge before traffic reaches your origin region. ALB WAF is a second layer for traffic that reaches your VPC. For most apps, ALB WAF alone is sufficient."
+  "What does the built-in Cognito authentication actually do?" "ALB intercepts requests, redirects unauthenticated users to the Cognito hosted UI, validates the JWT on return, and only forwards authenticated requests to your backend. Your app code never handles auth redirects."
+  "How does rate-based WAF work?" "It counts requests per IP over a 5-minute window. When the threshold is exceeded, that IP is blocked for the remainder of the window. Set threshold based on your legitimate peak per-user RPS."
+}}
 
 {{table "WAF Rules for ALB" (rows
   (row "Rule Type"           "What It Blocks"                    "Cost")
@@ -131,6 +167,14 @@ resource "aws_lb_target_group" "api" {
   (row "Geo-match rule"      "Block traffic from specific countries" "$1/rule")
   (row "Bot Control"         "Block scrapers, automated bots"   "$10/month + $1/M requests")
 )}}
+
+{{think "Should I put WAF at ALB or CloudFront?"
+  (whyNot "ALB-only WAF for global traffic" "Traffic still hits your origin region before being blocked. CloudFront WAF blocks at the edge, saving origin bandwidth and compute for blocked requests.")
+  (whatIf "I have both CloudFront and ALB" "Add WAF at CloudFront for volumetric attacks and geographic blocks. Add WAF at ALB for application-layer rules (SQL injection, XSS) as a defense-in-depth layer.")
+  (how "What is the minimum WAF config for a public ALB?" "Enable AWS Managed Rules (AWSManagedRulesCommonRuleSet) and one rate-based rule. That covers the most common attack vectors for ~$2/mo.")
+}}
+
+{{hint "Auth at ALB = zero auth code in your app" "Cognito integration at ALB means your Lambda or ECS task receives only authenticated requests with the JWT claims in headers. No auth middleware to write or maintain."}}
 
 {{diagram "fund-alb-security-layers"}}
 
@@ -149,11 +193,21 @@ resource "aws_lb_target_group" "api" {
   (row "Typical total"             "Base + highest LCU"          "~$25-75/mo for most apps")
 )}}
 
-{{thought "ALB pricing is based on the highest dimension of LCU usage, not the sum. If you use 20 LCU for connections but only 0.5 LCU for bytes, you pay for 20 LCU. The rule evaluations dimension can surprise you: many routing rules with high RPS pushes up LCU."}}
+{{think "Why is my ALB bill higher than expected?"
+  (whyNot "Ignoring rule evaluations in LCU math" "LCU is priced on the highest single dimension. At 10K RPS with 10 rules, rule evaluations = 100K/s = 100 LCU, dominating all other dimensions.")
+  (whatIf "I consolidate from 10 ALBs to 1 ALB with routing rules" "Save 9 x $16.20 = $145.80/mo in base fees. Rule evaluation LCU cost is typically far less than the base savings.")
+  (how "How do I estimate LCU before deploying?" "Calculate each dimension: new connections/s / 25, active connections/min / 3000, GB/hr / 1, (rules x RPS) / 1000. The highest number is your LCU count. Multiply by $0.008/hr.")
+}}
 
 {{avoid "Do not create one ALB per microservice. Use path-based routing rules on a single ALB. Each additional ALB costs $16.20/mo base fee. With 10 microservices, that is $162/mo wasted. One ALB with 10 routing rules costs the same $16.20 base."}}
 
 {{phase 6 "Best Practices" "3 min"}}
+
+{{triggerQs "ALB Configuration Checklist"
+  "What deregistration delay should I set?" "Match your longest request duration. Default 300s is too long for APIs with 5s timeouts. Set 30-60s for APIs, longer for file upload or video processing."
+  "Which TLS security policy should I use?" "ELBSecurityPolicy-TLS13-1-2-2021-06 for public services. This enforces TLS 1.2 minimum and prefers TLS 1.3. Never use policies that allow TLS 1.0 or 1.1."
+  "When should I enable slow start mode?" "For JVM-based services (Java, Kotlin, Scala) that need JIT warmup, or services that pre-populate an in-process cache on startup. Start at 30-60s and tune from there."
+}}
 
 {{checklist
   "Use ALB for all HTTP/HTTPS workloads (default choice)"
@@ -170,7 +224,7 @@ resource "aws_lb_target_group" "api" {
 
 {{qa
   "When should I NOT use ALB?"
-  "Four scenarios: 1) You need a static IP (use NLB). 2) Non-HTTP protocol like raw TCP or UDP (use NLB). 3) You need TLS passthrough without termination (use NLB). 4) Ultra-low latency requirement under 100 microseconds (use NLB)."
+  "Four scenarios: 1) You need a static IP (use NLB). 2) Non-HTTP protocol like raw TCP or UDP (use NLB). 3) You need TLS passthrough without termination (use NLB). 4) Ultra-low latency under 100 microseconds (use NLB)."
   "Can ALB handle 1 million requests per second?"
-  "ALB auto-scales, but it needs time to ramp up. For sudden spikes, pre-warm by contacting AWS support. For predictable high traffic, the ALB learns your traffic pattern and pre-scales. Sustained 1M RPS is handled across multiple ALB nodes in multiple AZs."
+  "ALB auto-scales, but it needs time to ramp up. For sudden spikes, pre-warm by contacting AWS support. For predictable high traffic, the ALB learns your traffic pattern and pre-scales. Sustained 1M RPS is served across multiple ALB nodes in multiple AZs."
 }}

@@ -30,6 +30,11 @@ func FuncMap(diagramReg *diagrams.Registry) template.FuncMap {
 		"anchor":    anchor,
 		"deepQA":    deepQA,
 
+		// Thought process macros
+		"hint":       hint,
+		"think":      think,
+		"triggerQs":  triggerQs,
+
 		// Helpers for building structured data in templates
 		"options": optionsList,
 		"best":    optBest,
@@ -37,6 +42,9 @@ func FuncMap(diagramReg *diagrams.Registry) template.FuncMap {
 		"nofit":   optNofit,
 		"rows":    rowsList,
 		"row":     rowItem,
+		"whyNot":  whyNotItem,
+		"whatIf":  whatIfItem,
+		"how":     howItem,
 
 		// Utility functions for templates
 		"map":      makeMap,
@@ -423,4 +431,108 @@ func deepQA(title, content string) template.HTML {
 			</div>
 			%s
 		</div>`, title, content))
+}
+
+// ── Thought Process Macros ─────────────────────────────────────
+
+// hint renders an inline cloud icon that shows a popup with the thought process.
+// Short hint is visible on the icon, click opens a modal with the full explanation.
+// Usage: {{hint "short hint" "detailed explanation of why you thought this"}}
+func hint(short, detail string) template.HTML {
+	return template.HTML(fmt.Sprintf(
+		`<span class="hint-trigger" onclick="this.querySelector('.hint-popup').classList.toggle('show')">
+			<svg class="hint-cloud" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+			<span class="hint-label">%s</span>
+			<span class="hint-popup" onclick="event.stopPropagation()">
+				<span class="hint-popup-header">
+					<svg class="hint-popup-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+					Why this?
+					<button class="hint-close" onclick="event.stopPropagation(); this.closest('.hint-popup').classList.remove('show')">&times;</button>
+				</span>
+				<span class="hint-popup-body">%s</span>
+			</span>
+		</span>`, short, detail))
+}
+
+// ThinkChain represents a single step in a nested thought chain.
+type ThinkChain struct {
+	Kind    string // "whyNot", "whatIf", "how"
+	Title   string
+	Content string
+}
+
+func whyNotItem(title, content string) ThinkChain { return ThinkChain{"whyNot", title, content} }
+func whatIfItem(title, content string) ThinkChain { return ThinkChain{"whatIf", title, content} }
+func howItem(title, content string) ThinkChain    { return ThinkChain{"how", title, content} }
+
+// think renders an enhanced thought cloud with nested reasoning chains.
+// Usage: {{think "main reasoning" (whyNot "alternative" "reason") (whatIf "scenario" "response") ...}}
+func think(mainThought string, chains ...ThinkChain) template.HTML {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(`<div class="think-block"><div class="think-main">%s</div>`, mainThought))
+
+	if len(chains) > 0 {
+		sb.WriteString(`<div class="think-chains">`)
+		for _, c := range chains {
+			icon := ""
+			label := ""
+			cssClass := ""
+			switch c.Kind {
+			case "whyNot":
+				icon = `<svg class="think-chain-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`
+				label = "Why not"
+				cssClass = "think-why-not"
+			case "whatIf":
+				icon = `<svg class="think-chain-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`
+				label = "What if"
+				cssClass = "think-what-if"
+			case "how":
+				icon = `<svg class="think-chain-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`
+				label = "How"
+				cssClass = "think-how"
+			}
+			sb.WriteString(fmt.Sprintf(
+				`<details class="think-chain %s">
+					<summary class="think-chain-summary">%s <span class="think-chain-label">%s:</span> %s</summary>
+					<div class="think-chain-body">%s</div>
+				</details>`, cssClass, icon, label, c.Title, c.Content))
+		}
+		sb.WriteString(`</div>`)
+	}
+
+	sb.WriteString(`</div>`)
+	return template.HTML(sb.String())
+}
+
+// triggerQs renders a collapsible section with a bulb icon showing potential
+// interviewer questions that the current section could trigger.
+// Usage: {{triggerQs "What might they ask?" "Q1" "A1" "Q2" "A2" ...}}
+func triggerQs(title string, qaPairs ...string) template.HTML {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(
+		`<details class="trigger-qs">
+			<summary class="trigger-qs-summary">
+				<svg class="trigger-qs-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M9 18h6"/><path d="M10 22h4"/>
+					<path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/>
+				</svg>
+				<span>%s</span>
+				<span class="trigger-qs-count">%d</span>
+			</summary>
+			<div class="trigger-qs-body">`, title, len(qaPairs)/2))
+
+	for i := 0; i+1 < len(qaPairs); i += 2 {
+		q, a := qaPairs[i], qaPairs[i+1]
+		sb.WriteString(fmt.Sprintf(
+			`<div class="trigger-qa">
+				<div class="trigger-q">
+					<svg class="trigger-q-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+					%s
+				</div>
+				<div class="trigger-a">%s</div>
+			</div>`, q, a))
+	}
+
+	sb.WriteString(`</div></details>`)
+	return template.HTML(sb.String())
 }
