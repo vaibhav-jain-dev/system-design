@@ -49,6 +49,52 @@ Response: { "short_code": "Ab3xK9", "long_url": "...", "clicks": 15420, "created
 Status: 200 OK
 `}}
 
+{{diagram "301 vs 302 Redirect Comparison" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">301 Moved Permanently</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Browser caches redirect locally</div>
+        <div class="d-box green">CDN caches at edge PoPs</div>
+        <div class="d-box green">Repeat visits never hit origin</div>
+        <div class="d-box amber">Cannot change destination after caching</div>
+        <div class="d-box amber">Lose analytics on cached clicks</div>
+      </div>
+      <div class="d-flow-v">
+        <div class="d-label">Traffic flow (2nd click by same user):</div>
+        <div class="d-box blue">Browser</div>
+        <div class="d-arrow-down">&#8595; cached locally</div>
+        <div class="d-box green">&#10003; Direct to destination (0ms)</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">302 Found (Temporary)</div>
+      <div class="d-flow-v">
+        <div class="d-box red">Browser does NOT cache</div>
+        <div class="d-box red">Every click hits your servers</div>
+        <div class="d-box red">2&#8212;5&#215; more origin traffic</div>
+        <div class="d-box green">Full analytics on every click</div>
+        <div class="d-box green">Can change destination anytime</div>
+      </div>
+      <div class="d-flow-v">
+        <div class="d-label">Traffic flow (2nd click by same user):</div>
+        <div class="d-box blue">Browser</div>
+        <div class="d-arrow-down">&#8595; no cache</div>
+        <div class="d-box purple">Your server (5&#8212;50ms)</div>
+        <div class="d-arrow-down">&#8595; redirect</div>
+        <div class="d-box amber">Destination</div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="d-flow-v">
+  <div class="d-box indigo">Best practice: 301 by default for performance &#8212; switch to 302 only for links needing click tracking or mutable destinations</div>
+</div>
+`}}
+
 {{qa
   "Why 301 redirect instead of 302?"
   "301 is permanent redirect — browsers cache it, so repeat visits never hit our servers. This massively reduces read QPS. Use 302 (temporary) only if you need to track every single click for analytics, since browsers will not cache 302."
@@ -219,6 +265,152 @@ CREATE INDEX idx_urls_expires ON urls(expires_at) WHERE expires_at IS NOT NULL;
 
 {{thought "Base62 encoding: 7 characters gives us 62^7 = 3.52 trillion unique URLs. At 100M/day, that lasts 96 years. 6 characters = 56.8 billion, lasts 1.5 years. Go with 7 characters for safety."}}
 
+{{diagram "Base62 Encoding: How a Number Becomes a Short Code" `
+<div class="d-flow-v">
+  <div class="d-group">
+    <div class="d-group-title">Step 1: Counter Value (decimal 123,456,789)</div>
+    <div class="d-bitfield">
+      <div class="d-bitfield-segment" style="background: var(--blue-bg, #dbeafe); border-color: var(--blue-border, #93c5fd);">
+        <div class="d-bitfield-bits">1</div>
+        <div class="d-bitfield-name">10^8</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--blue-bg, #dbeafe); border-color: var(--blue-border, #93c5fd);">
+        <div class="d-bitfield-bits">2</div>
+        <div class="d-bitfield-name">10^7</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--blue-bg, #dbeafe); border-color: var(--blue-border, #93c5fd);">
+        <div class="d-bitfield-bits">3</div>
+        <div class="d-bitfield-name">10^6</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--blue-bg, #dbeafe); border-color: var(--blue-border, #93c5fd);">
+        <div class="d-bitfield-bits">4</div>
+        <div class="d-bitfield-name">10^5</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--blue-bg, #dbeafe); border-color: var(--blue-border, #93c5fd);">
+        <div class="d-bitfield-bits">5</div>
+        <div class="d-bitfield-name">10^4</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--blue-bg, #dbeafe); border-color: var(--blue-border, #93c5fd);">
+        <div class="d-bitfield-bits">6</div>
+        <div class="d-bitfield-name">10^3</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--blue-bg, #dbeafe); border-color: var(--blue-border, #93c5fd);">
+        <div class="d-bitfield-bits">7</div>
+        <div class="d-bitfield-name">10^2</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--blue-bg, #dbeafe); border-color: var(--blue-border, #93c5fd);">
+        <div class="d-bitfield-bits">8</div>
+        <div class="d-bitfield-name">10^1</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--blue-bg, #dbeafe); border-color: var(--blue-border, #93c5fd);">
+        <div class="d-bitfield-bits">9</div>
+        <div class="d-bitfield-name">10^0</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595; divide repeatedly by 62</div>
+  <div class="d-group">
+    <div class="d-group-title">Step 2: Convert to Base62 Digits (remainders)</div>
+    <div class="d-bitfield">
+      <div class="d-bitfield-segment" style="background: var(--green-bg, #dcfce7); border-color: var(--green-border, #86efac);">
+        <div class="d-bitfield-bits">8</div>
+        <div class="d-bitfield-name">62^4</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--green-bg, #dcfce7); border-color: var(--green-border, #86efac);">
+        <div class="d-bitfield-bits">M</div>
+        <div class="d-bitfield-name">62^3</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--green-bg, #dcfce7); border-color: var(--green-border, #86efac);">
+        <div class="d-bitfield-bits">0</div>
+        <div class="d-bitfield-name">62^2</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--green-bg, #dcfce7); border-color: var(--green-border, #86efac);">
+        <div class="d-bitfield-bits">k</div>
+        <div class="d-bitfield-name">62^1</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--green-bg, #dcfce7); border-color: var(--green-border, #86efac);">
+        <div class="d-bitfield-bits">X</div>
+        <div class="d-bitfield-name">62^0</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595; map to alphabet</div>
+  <div class="d-group">
+    <div class="d-group-title">Step 3: Base62 Alphabet (62 characters)</div>
+    <div class="d-bitfield">
+      <div class="d-bitfield-segment" style="background: var(--purple-bg, #f3e8ff); border-color: var(--purple-border, #d8b4fe);">
+        <div class="d-bitfield-bits">a&#8212;z</div>
+        <div class="d-bitfield-name">0&#8212;25</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--amber-bg, #fef3c7); border-color: var(--amber-border, #fcd34d);">
+        <div class="d-bitfield-bits">A&#8212;Z</div>
+        <div class="d-bitfield-name">26&#8212;51</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--indigo-bg, #e0e7ff); border-color: var(--indigo-border, #a5b4fc);">
+        <div class="d-bitfield-bits">0&#8212;9</div>
+        <div class="d-bitfield-name">52&#8212;61</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595; result</div>
+  <div class="d-group">
+    <div class="d-group-title">Output: Short Code</div>
+    <div class="d-row">
+      <div class="d-box green">123,456,789 &#8594; "8M0kX"</div>
+      <div class="d-box blue">7 chars = 62^7 = 3.52 trillion unique codes</div>
+      <div class="d-box amber">At 100M/day &#8594; lasts 96 years</div>
+    </div>
+  </div>
+</div>
+`}}
+
+{{diagram "URL ID Bit Layout (43 bits for 7-char Base62)" `
+<div class="d-flow-v">
+  <div class="d-group">
+    <div class="d-group-title">Option A: Simple Counter ID (43 bits)</div>
+    <div class="d-bitfield">
+      <div class="d-bitfield-segment" style="background: var(--green-bg, #dcfce7); border-color: var(--green-border, #86efac);">
+        <div class="d-bitfield-bits">bits 42&#8212;0</div>
+        <div class="d-bitfield-name">Counter value (43 bits = 8.8 trillion)</div>
+      </div>
+    </div>
+    <div class="d-label">Simple but sequential &#8212; guessable URLs</div>
+  </div>
+  <div class="d-group">
+    <div class="d-group-title">Option B: Snowflake-style ID (43 bits)</div>
+    <div class="d-bitfield">
+      <div class="d-bitfield-segment" style="background: var(--blue-bg, #dbeafe); border-color: var(--blue-border, #93c5fd);">
+        <div class="d-bitfield-bits">bits 42&#8212;27</div>
+        <div class="d-bitfield-name">Timestamp (16 bits &#8212; seconds mod 65536)</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--purple-bg, #f3e8ff); border-color: var(--purple-border, #d8b4fe);">
+        <div class="d-bitfield-bits">bits 26&#8212;17</div>
+        <div class="d-bitfield-name">Shard/Worker ID (10 bits &#8212; 1024 workers)</div>
+      </div>
+      <div class="d-bitfield-segment" style="background: var(--amber-bg, #fef3c7); border-color: var(--amber-border, #fcd34d);">
+        <div class="d-bitfield-bits">bits 16&#8212;0</div>
+        <div class="d-bitfield-name">Sequence (17 bits &#8212; 131K/sec/worker)</div>
+      </div>
+    </div>
+    <div class="d-label">Non-sequential, embeds metadata &#8212; but more complex</div>
+  </div>
+  <div class="d-group">
+    <div class="d-group-title">Option C: KGS Pre-generated (recommended)</div>
+    <div class="d-bitfield">
+      <div class="d-bitfield-segment" style="background: var(--indigo-bg, #e0e7ff); border-color: var(--indigo-border, #a5b4fc);">
+        <div class="d-bitfield-bits">bits 42&#8212;0</div>
+        <div class="d-bitfield-name">Random unique value (43 bits, pre-generated by KGS)</div>
+      </div>
+    </div>
+    <div class="d-label">Non-guessable, zero collisions, no coordination at runtime</div>
+  </div>
+  <div class="d-row">
+    <div class="d-box green">All options &#8594; Base62 encode &#8594; 7-character short code</div>
+    <div class="d-box purple">43 bits &#8776; 8.8 trillion values &#8811; 3.5T (62^7)</div>
+  </div>
+</div>
+`}}
+
 {{diagram "Key Generation Approaches Compared" `
 <div class="d-cols">
   <div class="d-col">
@@ -269,6 +461,40 @@ CREATE INDEX idx_urls_expires ON urls(expires_at) WHERE expires_at IS NOT NULL;
   (row "Failure mode"       "If counter service dies, all writes stop. No counter = no new URLs. Must have standby counter with failover." "If DB is down for collision check, writes fail. But at least each server can generate hashes independently." "If KGS dies, servers use local batch (~1000 keys). At 1,157 QPS, that is ~15 minutes of buffer. Plenty of time for recovery.")
   (row "Idempotency"        "Not idempotent: same long URL gets different short codes on retry." "Idempotent: same long URL always gets same hash. Good for deduplication." "Not idempotent by default. Can add dedup layer: check if long_url already exists before assigning new key.")
 )}}
+
+{{diagram "Collision Resolution: MD5/SHA Truncation Approach" `
+<div class="d-flow-v">
+  <div class="d-box blue">Input: long_url = "https://example.com/very/long/path"</div>
+  <div class="d-arrow-down">&#8595; MD5 hash</div>
+  <div class="d-box purple">MD5 &#8594; "e4d909c290d0fb1ca068ffaddf22cbd0" (128 bits)</div>
+  <div class="d-arrow-down">&#8595; take first 43 bits</div>
+  <div class="d-box green">Truncate &#8594; Base62 encode &#8594; "Ab3xK9p" (7 chars)</div>
+  <div class="d-arrow-down">&#8595; check DB</div>
+  <div class="d-branch">
+    <div class="d-branch-arm">
+      <div class="d-label">No collision</div>
+      <div class="d-flow-v">
+        <div class="d-box green">&#10003; Store mapping in DB</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box green">Return short URL to client</div>
+      </div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Collision detected</div>
+      <div class="d-flow-v">
+        <div class="d-box red">&#215; short_code already exists</div>
+        <div class="d-arrow-down">&#8595; retry strategy</div>
+        <div class="d-box amber">Append counter: hash(url + "1")</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box amber">Re-truncate &#8594; Base62 &#8594; new code</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box amber">Check DB again (max 5 retries)</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-label">Birthday paradox: at 100B URLs, collision probability &#8776; 0.14% per attempt</div>
+</div>
+`}}
 
 {{compare "Key Generation Strategy" (options
   (best "Key Generation Service (KGS)" "Pre-generates batches of unique keys in background. Each app server requests batch of 1000 keys. Zero collisions, non-guessable, decoupled from DB auto-increment. Best balance of simplicity, security, and performance.")
@@ -560,6 +786,46 @@ async def resolve_short_url(short_code: str) -> str:
 </div>
 `}}
 
+{{diagram "Reliability Patterns Overview" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Redundancy</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Multi-AZ: ECS across 3 AZs</div>
+        <div class="d-label">&lt; 1 min recovery</div>
+        <div class="d-box green">DB replication: DynamoDB 3 replicas</div>
+        <div class="d-label">&lt; 1 sec (transparent)</div>
+        <div class="d-box green">Cache failover: Redis Multi-AZ</div>
+        <div class="d-label">10&#8212;30 sec (promote replica)</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Resilience</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">Circuit breaker on DynamoDB calls</div>
+        <div class="d-label">Immediate fallback to cache</div>
+        <div class="d-box blue">Retry with exponential backoff + jitter</div>
+        <div class="d-label">Prevents thundering herd</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Protection</div>
+      <div class="d-flow-v">
+        <div class="d-box red">Rate limiting: 100 req/s per user</div>
+        <div class="d-label">Immediate (HTTP 429)</div>
+        <div class="d-box amber">Graceful degradation: cache-only mode</div>
+        <div class="d-label">95% reads still work during DB outage</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
+
 {{table "Reliability Patterns" (rows
   (row "Pattern"                "Implementation"                           "What It Handles"                       "Recovery Time")
   (row "Multi-AZ deployment"   "ECS tasks across 3 AZs"                   "Single AZ failure (33% capacity lost)" "< 1 minute (ALB auto-routes)")
@@ -724,6 +990,44 @@ async def resolve_short_url(short_code: str) -> str:
 }}
 
 {{phase 11 "Cost Estimates" "3 min"}}
+
+{{diagram "Cost Scaling Overview" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">MVP (1K QPS)</div>
+      <div class="d-flow-v">
+        <div class="d-box green">&#8776; $400/mo total</div>
+        <div class="d-box gray">2 ECS tasks + 1 Redis node</div>
+        <div class="d-box gray">DynamoDB on-demand</div>
+        <div class="d-box gray">CloudFront 1 TB</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Growth (10K QPS)</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">&#8776; $2,400/mo total</div>
+        <div class="d-box gray">8 ECS tasks + 3-node Redis</div>
+        <div class="d-box gray">DynamoDB provisioned</div>
+        <div class="d-box gray">CloudFront 10 TB</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Scale (100K QPS)</div>
+      <div class="d-flow-v">
+        <div class="d-box purple">&#8776; $12,100/mo total</div>
+        <div class="d-box gray">40 ECS tasks + Redis cluster</div>
+        <div class="d-box gray">DynamoDB reserved</div>
+        <div class="d-box amber">CloudFront 50 TB (35% of cost)</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
 {{table "Cost Breakdown by Scale" (rows
   (row "Component"        "MVP (1K QPS)"     "Growth (10K QPS)"    "Scale (100K QPS)")

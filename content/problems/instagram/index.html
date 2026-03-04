@@ -124,6 +124,39 @@
   (row "Total"         "All components"                 "~$500/mo")
 )}}
 
+{{diagram "MVP Tech Stack (Visual)" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Compute</div>
+      <div class="d-flow-v">
+        <div class="d-box green">ECS Fargate: 2&#215; t3.large &#8212; $120/mo</div>
+        <div class="d-box purple">ALB (Load Balancer) &#8212; $25/mo</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Storage</div>
+      <div class="d-flow-v">
+        <div class="d-box indigo">RDS Postgres db.r6g.large &#8212; $200/mo</div>
+        <div class="d-box red">ElastiCache Redis t4g.medium &#8212; $50/mo</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Media &amp; Delivery</div>
+      <div class="d-flow-v">
+        <div class="d-box amber">S3 Standard &#8212; $23/TB/mo</div>
+        <div class="d-box purple">CloudFront CDN &#8212; $85/10TB</div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="d-box blue">Total: &#8776;$500/mo for &lt;1M users</div>
+`}}
+
 {{diagram "Data Model (Entity Relationships)" `
 <div class="d-cols">
   <div class="d-col">
@@ -395,6 +428,66 @@ LIMIT 20 OFFSET :offset;
 </div>
 `}}
 
+{{diagram "CDN & Media Storage Pipeline" `
+<div class="d-flow-v">
+  <div class="d-box blue">Client (iOS / Android / Web)</div>
+  <div class="d-arrow-down">&#8595; pre-signed URL upload</div>
+  <div class="d-box amber">S3 Ingest Bucket (raw uploads)</div>
+  <div class="d-arrow-down">&#8595; S3 Event Notification</div>
+  <div class="d-box green">Lambda: Image Processing Pipeline</div>
+  <div class="d-branch">
+    <div class="d-branch-arm">
+      <div class="d-label">Thumbnail</div>
+      <div class="d-box purple">150&#215;150</div>
+      <div class="d-label">~15KB</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Small</div>
+      <div class="d-box purple">320&#215;320</div>
+      <div class="d-label">~40KB</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Medium</div>
+      <div class="d-box purple">640&#215;640</div>
+      <div class="d-label">~120KB</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-label">Full</div>
+      <div class="d-box purple">1080&#215;1080</div>
+      <div class="d-label">~300KB</div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595; all sizes saved</div>
+  <div class="d-box amber">S3 Media Bucket (processed images, WebP + JPEG)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">CDN Distribution</div>
+        <div class="d-flow-v">
+          <div class="d-box purple">CloudFront Origin Shield (regional cache)</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box purple">CloudFront Edge PoPs (400+ locations)</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box blue">User device (&lt;50ms globally)</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">CDN Config</div>
+        <div class="d-flow-v">
+          <div class="d-box green">Cache-Control: public, max-age=31536000</div>
+          <div class="d-box green">Accept header &#8594; WebP vs JPEG negotiation</div>
+          <div class="d-box green">Origin Shield &#8594; single origin fetch per region</div>
+          <div class="d-box amber">S3 CRR to eu-west-1, ap-south-1 for global reads</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
+
 {{phase 4 "Stage 2: Growing (1M-50M users)" "8 min"}}
 
 {{say "At 1M users things still work. At 10M, the feed query slows down because popular users follow 1000+ people, and the IN clause gets expensive. This is where we add the feed service and fan-out."}}
@@ -455,6 +548,55 @@ LIMIT 20 OFFSET :offset;
   (row "Async Likes/Comments"       "Like -> SQS -> batch write to DB"            "SQS + Lambda consumer")
   (row "ElastiCache Cluster"        "More memory for feed cache"                   "3-node r6g.large cluster")
 )}}
+
+{{diagram "Stage 2 Architecture (Visual)" `
+<div class="d-flow-v">
+  <div class="d-box blue">Client (iOS / Android / Web)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box purple">CloudFront + Origin Shield</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box purple">ALB</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Monolith (ECS &#215;8)</div>
+        <div class="d-flow-v">
+          <div class="d-box green">API Server (Django/FastAPI)</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-row">
+            <div class="d-box indigo">Postgres Primary</div>
+            <div class="d-box indigo">Read Replica &#215;2</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Feed Service (ECS &#215;4)</div>
+        <div class="d-flow-v">
+          <div class="d-box green">Fan-out Worker</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box red">Redis Cluster (3-node)</div>
+          <div class="d-label">Sorted sets per user</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Async Processing</div>
+        <div class="d-flow-v">
+          <div class="d-box amber">SQS (likes/comments queue)</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green">Lambda (batch writer)</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box amber">S3 &#8594; Lambda &#8594; 4 image sizes</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
 {{code "python" `# Fan-out-on-write: when user creates a post
 import redis
@@ -543,6 +685,74 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
   (row "Search/Explore"     "Hashtags, user search, trending"     "Elasticsearch"                       "Full-text search with autocomplete (prefix queries), faceted filtering, and relevance scoring. Postgres full-text is too slow at this scale.")
 )}}
 
+{{diagram "Microservices: Service &#8594; Database Ownership" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-flow-v">
+      <div class="d-box green">User Service</div>
+      <div class="d-label">Profiles, auth, follows</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box indigo">Postgres (sharded)</div>
+      <div class="d-label">ACID for auth, B-tree for follows</div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-flow-v">
+      <div class="d-box green">Post Service</div>
+      <div class="d-label">Posts, media metadata</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box amber">DynamoDB</div>
+      <div class="d-label">PK=user_id, SK=timestamp</div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-flow-v">
+      <div class="d-box green">Feed Service</div>
+      <div class="d-label">Feed computation + cache</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box red">Redis Cluster</div>
+      <div class="d-label">Sorted sets, sub-ms reads</div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-flow-v">
+      <div class="d-box green">Media Service</div>
+      <div class="d-label">Upload, process, serve</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box amber">S3 + Lambda</div>
+      <div class="d-label">11 nines durability</div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-flow-v">
+      <div class="d-box green">Engagement Service</div>
+      <div class="d-label">Likes, comments, shares</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box amber">DynamoDB</div>
+      <div class="d-label">Sharded counters, 100K+ WPS</div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-flow-v">
+      <div class="d-box green">Notification Svc</div>
+      <div class="d-label">Push, in-app, email</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box amber">SQS + DynamoDB</div>
+      <div class="d-label">Async, TTL auto-cleanup</div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-flow-v">
+      <div class="d-box green">Search/Explore</div>
+      <div class="d-label">Hashtags, user search</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box purple">Elasticsearch</div>
+      <div class="d-label">Full-text, autocomplete</div>
+    </div>
+  </div>
+</div>
+`}}
+
 {{diagram "Microservices Architecture" `
 <div class="d-flow-v">
   <div class="d-box blue">Client (iOS / Android / Web)</div>
@@ -607,6 +817,70 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
   (row "R7"  "Client loads images from CDN"                   "CDN"                 "CloudFront edge"               "Cache miss -> origin (200ms)"     "<50ms")
 )}}
 
+{{diagram "Notification System Flow" `
+<div class="d-flow-v">
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Event Producers</div>
+        <div class="d-flow-v">
+          <div class="d-box green">Post Svc: post_created</div>
+          <div class="d-box green">Engagement Svc: post_liked, comment_added</div>
+          <div class="d-box green">User Svc: user_followed</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-flow-v">
+        <div class="d-label">all events flow into</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box red">Kafka (MSK) &#8212; notification topic</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box indigo">Notification Service (ECS consumers)</div>
+  <div class="d-label">Dedup by (event_type, target_user, source_entity) &#8212; batch similar events</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-branch">
+    <div class="d-branch-arm">
+      <div class="d-group">
+        <div class="d-group-title">Mobile Push</div>
+        <div class="d-flow-v">
+          <div class="d-box amber">SNS Platform App</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-row">
+            <div class="d-box blue">APNs (iOS)</div>
+            <div class="d-box green">FCM (Android)</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-group">
+        <div class="d-group-title">Web Real-time</div>
+        <div class="d-flow-v">
+          <div class="d-box purple">SSE / WebSocket Gateway</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box blue">Browser client</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-group">
+        <div class="d-group-title">In-App Badge</div>
+        <div class="d-flow-v">
+          <div class="d-box red">Redis INCR badge:{user_id}</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box amber">DynamoDB (notification history, TTL 30d)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-label">Rate limit: max 50 push notifications/hr per user &#8212; batch likes: "alice and 12 others liked your post"</div>
+</div>
+`}}
+
 {{phase 6 "Stage 4: Handling Peak Hours" "5 min"}}
 
 {{say "Peak hours for Instagram: 6-9 PM local time, New Year midnight, Super Bowl, celebrity announcements. We need to handle 5-10x normal traffic without degradation."}}
@@ -623,6 +897,46 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
   (row "Circuit breakers"          "Downstream service failure"             "Hystrix pattern: fail fast, serve cached/degraded feed")
   (row "Read replicas + caching"   "Read amplification"                     "4x read replicas, 2x Redis cluster, increased TTL during peaks")
 )}}
+
+{{diagram "Peak Traffic Defense Layers" `
+<div class="d-flow-v">
+  <div class="d-box red">&#9889; Peak Traffic: 580K RPS (10&#215; normal)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Layer 1: Absorb</div>
+        <div class="d-flow-v">
+          <div class="d-box purple">CDN pre-warming (push to all PoPs)</div>
+          <div class="d-box purple">Rate limiter (100 req/min per user)</div>
+          <div class="d-box purple">Auto-scaling ECS (CPU/memory triggers)</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Layer 2: Buffer</div>
+        <div class="d-flow-v">
+          <div class="d-box amber">SQS write queue (likes/comments)</div>
+          <div class="d-box amber">Sharded counters (100 shards)</div>
+          <div class="d-box amber">Increased cache TTL during peaks</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Layer 3: Degrade</div>
+        <div class="d-flow-v">
+          <div class="d-box gray">Circuit breakers (fail fast)</div>
+          <div class="d-box gray">Serve cached/stale feed</div>
+          <div class="d-box gray">Fallback to trending (pre-computed)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-label">Normal: 58K RPS &#8594; Peak: 580K RPS &#8594; Super Bowl: 1M likes/sec on one post</div>
+</div>
+`}}
 
 {{code "python" `# Sharded counter for handling 1M likes/sec on viral posts
 import redis
@@ -656,6 +970,54 @@ class ShardedCounter:
 `}}
 
 {{followup "What if Redis goes down during peak?" "Three-layer defense: 1) Local in-memory cache (Caffeine) serves stale feed for 30s. 2) Circuit breaker trips, feed service returns cached-at-CDN feed. 3) If all caches cold, degrade to Trending feed from pre-computed batch (DynamoDB). Users see content, just not personalized."}}
+
+{{diagram "Multi-Layer Caching Strategy" `
+<div class="d-flow-v">
+  <div class="d-box blue">Incoming Request (GET /feed, GET /post, GET /profile)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">L1 &#8212; Local In-Memory Cache</div>
+        <div class="d-flow-v">
+          <div class="d-box green">Caffeine / Guava LRU (per ECS task)</div>
+          <div class="d-label">TTL: 30s | Size: 256MB per instance</div>
+          <div class="d-label">Latency: &lt;1ms | Hit rate: ~60%</div>
+          <div class="d-label">No network hop, fastest layer</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">L2 &#8212; Redis Cluster (Distributed)</div>
+        <div class="d-flow-v">
+          <div class="d-box red">ElastiCache Redis Cluster (50 nodes)</div>
+          <div class="d-label">TTL: 5min (feed), 1hr (profiles)</div>
+          <div class="d-label">Latency: 1-2ms | Hit rate: ~95%</div>
+          <div class="d-label">Shared across all app instances</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">L3 &#8212; Database (Source of Truth)</div>
+        <div class="d-flow-v">
+          <div class="d-box indigo">Postgres / DynamoDB</div>
+          <div class="d-label">Latency: 5-50ms</div>
+          <div class="d-label">Always consistent, highest cost</div>
+          <div class="d-label">Only hit on L1 + L2 miss (~5%)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595; Invalidation Strategy</div>
+  <div class="d-row">
+    <div class="d-box amber">Write-through: DB write &#8594; delete L2 key &#8594; L1 expires via TTL</div>
+    <div class="d-box amber">Kafka event &#8594; all instances invalidate L1 (pub/sub)</div>
+  </div>
+  <div class="d-label">Cache stampede protection: singleflight pattern + probabilistic early expiration (TTL &#215; random(0.8, 1.0))</div>
+</div>
+`}}
 
 {{avoid "Never design for peak as your baseline. You will burn money 95% of the time. Design for normal load, scale for peak. Auto-scaling + write buffering + circuit breakers handle the delta."}}
 
@@ -875,6 +1237,46 @@ async def mark_viewed(story_id: str, user_id: int):
   (row "Content Moderation" "ML classifier + human review"  "Flag NSFW/spam before indexing in explore")
 )}}
 
+{{diagram "Explore & Search Pipeline" `
+<div class="d-flow-v">
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Data Ingestion</div>
+        <div class="d-flow-v">
+          <div class="d-box green">Kafka events: post_created, post_liked, comment_added</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box purple">ML Content Classifier</div>
+          <div class="d-label">NSFW/spam filter &#8594; reject or flag for review</div>
+          <div class="d-arrow-down">&#8595; approved content</div>
+          <div class="d-box amber">Elasticsearch Index (posts, hashtags, users)</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Explore Feed Generation</div>
+        <div class="d-flow-v">
+          <div class="d-box indigo">Spark Batch Job (hourly)</div>
+          <div class="d-label">engagement_rate = (likes + comments) / impressions</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box blue">ML Ranking Model</div>
+          <div class="d-label">Collaborative filtering: users who liked X also liked Y</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box red">Redis (pre-computed explore feeds per interest cluster)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-row">
+    <div class="d-box blue">GET /explore &#8594; personalized trending grid</div>
+    <div class="d-box blue">GET /search?q=sunset &#8594; Elasticsearch autocomplete</div>
+    <div class="d-box blue">GET /tags/travel &#8594; hashtag feed (ES query)</div>
+  </div>
+</div>
+`}}
+
 {{phase 10 "Bottlenecks & Deep Trade-offs" "8 min"}}
 
 {{table "Key Trade-offs" (rows
@@ -932,6 +1334,75 @@ async def mark_viewed(story_id: str, user_id: int):
   </div>
   <div class="d-arrow-down">&#8595; aggregate every 5s</div>
   <div class="d-box green">Total = SUM(all shards) &#8594; cached in Redis (TTL 5s)</div>
+</div>
+`}}
+
+{{diagram "Scaling Timeline: Architecture Evolution" `
+<div class="d-flow-v">
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">MVP (0&#8212;1M users)</div>
+        <div class="d-flow-v">
+          <div class="d-box green">Monolith (Django/FastAPI)</div>
+          <div class="d-box indigo">Single Postgres (RDS)</div>
+          <div class="d-box red">Single Redis</div>
+          <div class="d-box amber">S3 + CloudFront</div>
+          <div class="d-label">~$500/mo | 1 team</div>
+          <div class="d-label">Pull-based feed (SQL query)</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Growth (1M&#8212;50M users)</div>
+        <div class="d-flow-v">
+          <div class="d-box green">Monolith + Feed Service</div>
+          <div class="d-box indigo">Postgres + 2 read replicas</div>
+          <div class="d-box red">Redis cluster (3 nodes)</div>
+          <div class="d-box amber">S3 &#8594; Lambda &#8594; 4 sizes</div>
+          <div class="d-label">~$12.5K/mo | 3 teams</div>
+          <div class="d-label">Hybrid fan-out + SQS buffering</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Scale (50M&#8212;500M users)</div>
+        <div class="d-flow-v">
+          <div class="d-box green">7 Microservices (ECS)</div>
+          <div class="d-box indigo">Sharded Postgres + DynamoDB</div>
+          <div class="d-box red">Redis cluster (50 nodes)</div>
+          <div class="d-box gray">Kafka (MSK) event bus</div>
+          <div class="d-label">~$150K/mo | 10 teams</div>
+          <div class="d-label">Event-driven, gRPC, sharded counters</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Global (500M+ users)</div>
+        <div class="d-flow-v">
+          <div class="d-box green">Multi-region microservices</div>
+          <div class="d-box indigo">DynamoDB Global Tables</div>
+          <div class="d-box red">Per-region Redis clusters</div>
+          <div class="d-box purple">Route 53 latency routing</div>
+          <div class="d-label">~$1M+/mo | 30+ teams</div>
+          <div class="d-label">CRDTs, S3 CRR, multi-region Kafka</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-flow">
+    <div class="d-box blue">0&#8212;1M</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box blue">1M&#8212;50M</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box blue">50M&#8212;500M</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box blue">500M+</div>
+  </div>
+  <div class="d-label">Key triggers: feed latency &gt; 200ms &#8594; add fan-out | write RPS &gt; 10K &#8594; shard DB | user latency &gt; 150ms &#8594; add region</div>
 </div>
 `}}
 
