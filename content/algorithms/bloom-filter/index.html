@@ -1,163 +1,277 @@
 {{phase 1 "What Is a Bloom Filter?" "3 min"}}
 
-{{say "A Bloom filter is a space-efficient probabilistic data structure that tests set membership. It can tell you definitely not in set or possibly in set. It never has false negatives, but it can have false positives."}}
+{{say "A Bloom filter is a space-efficient probabilistic data structure that tests set membership. It can tell you 'definitely not in the set' or 'possibly in the set.' It never produces false negatives, but it can produce false positives."}}
 
 {{table "Bloom Filter Properties" (rows
   (row "Property"            "Value"                                    "Implication")
-  (row "False positives"     "Possible (configurable rate)"              "May say yes when answer is no")
-  (row "False negatives"     "Impossible"                                "Never says no when answer is yes")
+  (row "False positives"     "Possible (configurable rate)"              "May say 'yes' when element is absent")
+  (row "False negatives"     "Impossible"                                "Never says 'no' when element is present")
   (row "Space"               "~10 bits per element at 1% FP rate"        "1 billion elements = 1.2 GB")
   (row "Lookup time"         "O(k) where k = number of hash functions"   "Typically k=7, so effectively O(1)")
   (row "Insert time"         "O(k)"                                      "Same as lookup")
-  (row "Delete"              "Not supported"                              "Use Counting Bloom Filter instead")
+  (row "Delete"              "Not supported in standard Bloom filter"     "Use Counting Bloom Filter or Cuckoo Filter")
 )}}
 
-{{key "Bloom filters trade a small false positive rate for massive space savings. A HashSet storing 1 billion URLs takes ~64 GB. A Bloom filter with 1% false positive rate takes 1.2 GB. 50x less memory."}}
+{{key "Bloom filters trade a small false positive rate for massive space savings. A HashSet storing 1 billion URLs takes ~64 GB. A Bloom filter with 1% false positive rate takes 1.2 GB. That is a 50x memory reduction."}}
 
 {{phase 2 "How It Works" "5 min"}}
 
-{{diagram "Bloom Filter: Insert and Query" `
-  Bit Array (m = 16 bits):
-  [0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0]
+{{say "A Bloom filter is a bit array of m bits, initially all zeros. It uses k independent hash functions. To insert an element, hash it k times and set those k bit positions to 1. To query, hash and check all k positions."}}
 
-  INSERT "hello" using k=3 hash functions:
-    h1("hello") % 16 = 2
-    h2("hello") % 16 = 7
-    h3("hello") % 16 = 13
+{{diagram "Bloom Filter: Insert and Query" `
+  Bit Array (m = 16 bits), k = 3 hash functions:
+
+  Initial state:
+  Index: 0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15
+  Bits:  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+
+  INSERT "hello":
+    h1("hello") % 16 = 2   -> set bit[2]
+    h2("hello") % 16 = 7   -> set bit[7]
+    h3("hello") % 16 = 13  -> set bit[13]
 
   After insert:
-  [0][0][1][0][0][0][0][1][0][0][0][0][0][1][0][0]
-         ^                 ^                 ^
+  Bits:  0  0  1  0  0  0  0  1  0  0  0  0  0  1  0  0
+               ^              ^                 ^
 
-  QUERY "world":
-    h1("world") % 16 = 5   -> bit[5] = 0 -> DEFINITELY NOT IN SET
-    (stop early, no need to check h2, h3)
+  INSERT "world":
+    h1("world") % 16 = 1   -> set bit[1]
+    h2("world") % 16 = 7   -> bit[7] already 1 (shared with "hello")
+    h3("world") % 16 = 11  -> set bit[11]
 
-  QUERY "hello":
-    h1("hello") % 16 = 2   -> bit[2] = 1
-    h2("hello") % 16 = 7   -> bit[7] = 1
-    h3("hello") % 16 = 13  -> bit[13] = 1
-    All bits are 1 -> POSSIBLY IN SET (might be false positive)
+  After both inserts:
+  Bits:  0  1  1  0  0  0  0  1  0  0  0  1  0  1  0  0
+
+  QUERY "hello":  bits 2,7,13 all = 1 -> POSSIBLY IN SET
+  QUERY "cat":    h1("cat")%16=5 -> bit[5]=0 -> DEFINITELY NOT IN SET
+  QUERY "fake":   h bits happen to be 1,7,11 -> all 1 -> FALSE POSITIVE!
 `}}
 
-{{say "The filter uses k independent hash functions. On insert, set k bits. On query, check k bits. If ANY bit is 0, the element is definitely not in the set. If ALL bits are 1, it might be in the set — those bits could have been set by other elements."}}
+{{thought "False positives occur because different elements share bit positions. As more elements are inserted, more bits become 1, and the chance of all k bits being 1 for a non-member increases. This is why sizing the bit array correctly is critical."}}
 
-{{phase 3 "Optimal Parameters" "3 min"}}
+{{phase 3 "Optimal Parameters" "5 min"}}
+
+{{say "Three parameters control a Bloom filter: m (bits in the array), k (number of hash functions), and n (expected number of elements). All three are related by the false positive rate formula."}}
 
 {{table "Parameter Formulas" (rows
-  (row "Parameter"                  "Formula"                            "What It Means")
-  (row "Optimal hash count (k)"     "k = (m/n) * ln(2)"                 "m=bits, n=expected elements")
-  (row "Required bits (m)"          "m = -n * ln(p) / (ln(2))^2"        "p=desired false positive rate")
-  (row "False positive rate"        "p = (1 - e^(-kn/m))^k"             "After n elements inserted")
-  (row "Bits per element"           "m/n = -1.44 * log2(p)"             "At 1% FP: 9.6 bits/element")
+  (row "Parameter"              "Formula"                            "What It Means")
+  (row "False positive rate"    "p = (1 - e^(-kn/m))^k"             "Probability of wrong 'yes' after n inserts")
+  (row "Required bits (m)"      "m = -(n * ln(p)) / (ln(2))^2"      "Bit array size for desired FP rate p")
+  (row "Optimal hash count (k)" "k = (m/n) * ln(2)"                 "Minimizes FP rate for given m and n")
+  (row "Bits per element"       "m/n = -1.44 * log2(p)"             "At 1% FP: ~9.6 bits per element")
 )}}
 
-{{table "Practical Sizing" (rows
-  (row "Elements (n)"   "FP Rate (p)"   "Bits (m)"        "Hash Fns (k)"  "Memory")
-  (row "1 million"       "1%"            "9.6M bits"       "7"             "1.2 MB")
-  (row "10 million"      "1%"            "96M bits"        "7"             "12 MB")
-  (row "100 million"     "1%"            "960M bits"       "7"             "120 MB")
-  (row "1 billion"       "1%"            "9.6B bits"       "7"             "1.2 GB")
-  (row "1 billion"       "0.1%"          "14.4B bits"      "10"            "1.8 GB")
+{{table "Practical Sizing Guide" (rows
+  (row "Elements (n)"   "FP Rate (p)"   "Bits (m)"        "Hash Functions (k)"  "Total Memory")
+  (row "1 million"       "1%"            "9.6M bits"       "7"                   "1.2 MB")
+  (row "10 million"      "1%"            "96M bits"        "7"                   "12 MB")
+  (row "100 million"     "1%"            "960M bits"       "7"                   "120 MB")
+  (row "1 billion"       "1%"            "9.6B bits"       "7"                   "1.2 GB")
+  (row "1 billion"       "0.1%"          "14.4B bits"      "10"                  "1.8 GB")
+  (row "1 billion"       "0.01%"         "19.2B bits"      "13"                  "2.4 GB")
 )}}
 
-{{thought "At 1% false positive rate, you need about 10 bits per element. A Bloom filter for 1 billion URLs costs 1.2 GB. The same URLs as a HashSet of 40-byte strings would cost 40 GB+. Bloom filter wins by 30x on memory."}}
+{{table "Space Comparison: Bloom Filter vs HashSet" (rows
+  (row "Elements"       "Bloom Filter (1% FP)"  "HashSet (40-byte keys)"  "Savings")
+  (row "1 million"      "1.2 MB"                "40 MB"                   "33x")
+  (row "100 million"    "120 MB"                "4 GB"                    "33x")
+  (row "1 billion"      "1.2 GB"                "40 GB"                   "33x")
+  (row "10 billion"     "12 GB"                 "400 GB"                  "33x")
+)}}
 
-{{phase 4 "Python Implementation" "5 min"}}
+{{key "At 1% false positive rate, a Bloom filter uses about 10 bits (1.25 bytes) per element. A HashSet uses 40+ bytes per element for typical string keys. Bloom filter wins by 30-50x on memory, which is why it is used wherever exact membership is not required."}}
+
+{{phase 4 "Full Python Implementation" "8 min"}}
 
 {{code "python" `import math
-import mmh3  # pip install mmh3 (MurmurHash3)
-from bitarray import bitarray  # pip install bitarray
+import hashlib
+from typing import List
+
 
 class BloomFilter:
+    """Bloom filter with configurable false positive rate.
+
+    Args:
+        expected_elements: Expected number of elements to insert.
+        fp_rate: Desired false positive rate (default 1%).
+    """
+
     def __init__(self, expected_elements: int, fp_rate: float = 0.01):
         self.n = expected_elements
         self.p = fp_rate
 
-        # Optimal bit array size
+        # Optimal bit array size: m = -(n * ln(p)) / (ln(2))^2
         self.m = int(-expected_elements * math.log(fp_rate) / (math.log(2) ** 2))
-        # Optimal number of hash functions
-        self.k = int((self.m / expected_elements) * math.log(2))
 
-        self.bit_array = bitarray(self.m)
-        self.bit_array.setall(0)
+        # Optimal hash function count: k = (m/n) * ln(2)
+        self.k = max(1, int((self.m / expected_elements) * math.log(2)))
+
+        # Bit array as bytearray (8 bits per byte)
+        self.bits = bytearray((self.m + 7) // 8)
         self.count = 0
 
-    def _hashes(self, item: str) -> list:
-        """Generate k hash positions using double hashing."""
-        h1 = mmh3.hash(item, 0) % self.m
-        h2 = mmh3.hash(item, 1) % self.m
+    def _get_bit(self, index: int) -> bool:
+        byte_idx = index // 8
+        bit_idx = index % 8
+        return bool(self.bits[byte_idx] & (1 << bit_idx))
+
+    def _set_bit(self, index: int):
+        byte_idx = index // 8
+        bit_idx = index % 8
+        self.bits[byte_idx] |= (1 << bit_idx)
+
+    def _hashes(self, item: str) -> List[int]:
+        """Generate k hash positions using double hashing.
+
+        Uses two MD5 hashes to simulate k independent hashes:
+            h(i) = (h1 + i * h2) % m
+        This is proven equivalent to k independent hashes.
+        """
+        h1_bytes = hashlib.md5(item.encode()).digest()
+        h2_bytes = hashlib.md5((item + ":salt").encode()).digest()
+
+        h1 = int.from_bytes(h1_bytes[:8], "big")
+        h2 = int.from_bytes(h2_bytes[:8], "big")
+
         return [(h1 + i * h2) % self.m for i in range(self.k)]
 
     def add(self, item: str):
-        """Insert an element into the filter."""
+        """Insert an element into the filter. O(k) time."""
         for pos in self._hashes(item):
-            self.bit_array[pos] = 1
+            self._set_bit(pos)
         self.count += 1
 
     def might_contain(self, item: str) -> bool:
-        """Check if element might be in the set.
-        False = definitely not in set.
-        True  = probably in set (could be false positive).
+        """Check if element might be in the set. O(k) time.
+
+        Returns:
+            False -> element is DEFINITELY NOT in the set.
+            True  -> element is PROBABLY in the set
+                     (with false positive probability p).
         """
-        return all(self.bit_array[pos] for pos in self._hashes(item))
+        return all(self._get_bit(pos) for pos in self._hashes(item))
+
+    def estimated_fp_rate(self) -> float:
+        """Current estimated false positive rate."""
+        return (1 - math.exp(-self.k * self.count / self.m)) ** self.k
 
 
-# --- Demo ---
+# --- Usage and verification ---
 bf = BloomFilter(expected_elements=1_000_000, fp_rate=0.01)
-print("Bits: {:,}, Hash functions: {}".format(bf.m, bf.k))
+print("Bit array: {:,} bits ({:.1f} MB)".format(bf.m, bf.m / 8 / 1e6))
+print("Hash functions: {}".format(bf.k))
 
-# Insert 100K URLs
+# Insert 100K items
 for i in range(100_000):
-    bf.add("https://example.com/page/{}".format(i))
+    bf.add("item:{}".format(i))
 
-# Test membership
-print(bf.might_contain("https://example.com/page/42"))     # True
-print(bf.might_contain("https://example.com/page/99999"))  # True
-print(bf.might_contain("https://never-inserted.com"))      # False (probably)
+# Test known members (should all return True)
+assert bf.might_contain("item:0") == True
+assert bf.might_contain("item:99999") == True
+
+# Test non-members: count false positives
+false_positives = 0
+test_count = 100_000
+for i in range(test_count):
+    if bf.might_contain("nonexistent:{}".format(i)):
+        false_positives += 1
+
+print("False positive rate: {:.3f}%".format(100 * false_positives / test_count))
+print("Expected FP rate: {:.3f}%".format(100 * bf.estimated_fp_rate()))
 `}}
 
 {{phase 5 "Use Cases in System Design" "5 min"}}
 
+{{say "Bloom filters appear in many system design problems as an optimization layer. They sit in front of expensive operations like database lookups or disk reads."}}
+
 {{table "Bloom Filter Use Cases" (rows
-  (row "System"             "Use Case"                                         "Why Bloom Filter"                              "What Happens on False Positive")
-  (row "URL Shortener"      "Check if short code already exists before insert" "Avoid DB lookup for 99% of new codes"          "Unnecessary DB check — harmless")
-  (row "Web Crawler"        "Track visited URLs to avoid re-crawling"          "Billions of URLs, cannot fit in memory"         "Re-crawl a page — wastes bandwidth")
-  (row "CDN / Cache"        "Check if item is cacheable before origin fetch"   "Avoid caching one-hit-wonder requests"          "Cache a rarely-accessed item — wastes space")
-  (row "Cassandra / HBase"  "Check if SSTable might contain a key"             "Skip disk reads for keys not in SSTable"        "Read SSTable and find nothing — wasted I/O")
-  (row "Spam Filter"        "Check if email address is known spammer"          "Millions of known spam addresses"               "Block legitimate email — false positive!")
-  (row "Instagram"          "Deduplicate story views"                          "Check if user already viewed this story"         "User sees view counted twice — minor")
+  (row "System"             "Use Case"                                         "Why Bloom Filter"                              "False Positive Cost")
+  (row "URL Shortener"      "Check if short code exists before DB insert"      "Avoids DB uniqueness check for 99% of codes"   "Extra DB query, harmless")
+  (row "Web Crawler"        "Track visited URLs to avoid re-crawling"          "Billions of URLs, cannot fit in memory"         "Re-crawl a page, wastes bandwidth")
+  (row "Cassandra/HBase"    "Check if SSTable might contain a key"             "Skip disk reads for absent keys"               "Read SSTable, find nothing")
+  (row "CDN Cache"          "One-hit-wonder filter before caching"             "Avoid caching items requested only once"        "Cache a cold item, wastes space")
+  (row "Spell Checker"      "Check if word exists in dictionary"               "Entire dictionary in ~1 MB"                    "Accept misspelled word")
+  (row "Instagram"          "Deduplicate feed recommendations"                 "Do not show same post twice"                   "Minor duplicate view count")
 )}}
 
-{{avoid "Never use a Bloom filter where false positives are catastrophic. Example: checking if a password exists in a breach database — a false positive would lock out a legitimate user. Use an exact data structure (HashSet, DB lookup) for safety-critical checks."}}
+{{diagram "Bloom Filter as Cache Optimization Layer" `
+  Request: "Does key X exist?"
+       |
+       v
+  +-------------------+
+  | Bloom Filter      |    O(k) lookup, in-memory
+  | (1.2 GB for 1B    |
+  |  elements)        |
+  +--------+----------+
+           |
+      +----+----+
+      |         |
+  "Definitely  "Maybe
+   NOT here"    here"
+      |         |
+      v         v
+   SKIP DB    +-----------+
+   (99% of    | Database  |    Expensive disk/network I/O
+    cases)    | Lookup    |
+              +-----+-----+
+                    |
+               +----+----+
+               |         |
+            FOUND     NOT FOUND
+            (true     (false
+             pos.)     positive)
+`}}
 
-{{phase 6 "Counting Bloom Filter" "3 min"}}
+{{avoid "Never use a Bloom filter where false positives cause serious harm. Example: checking if a user is banned. A false positive would ban an innocent user. Use an exact data structure for safety-critical decisions."}}
 
-{{say "Standard Bloom filters do not support deletes. Counting Bloom filters replace each bit with a counter (typically 4 bits). Increment on insert, decrement on delete. This allows removals but uses 4x more memory."}}
+{{phase 6 "Bloom Filter Variants" "3 min"}}
 
-{{table "Bloom Filter Variants" (rows
-  (row "Variant"                 "Delete Support"  "Space"                "Use Case")
-  (row "Standard Bloom Filter"   "No"              "~10 bits/element"     "Most use cases")
-  (row "Counting Bloom Filter"   "Yes"             "~40 bits/element"     "Need to remove elements")
-  (row "Cuckoo Filter"           "Yes"             "~12 bits/element"     "Better than counting BF — same space as standard BF with delete support")
-  (row "Scalable Bloom Filter"   "No"              "Grows dynamically"    "Unknown element count")
+{{say "Standard Bloom filters do not support deletion. Several variants address this and other limitations."}}
+
+{{compare "Bloom Filter Variant" (options
+  (best "Standard Bloom Filter" "Simplest, most space-efficient at ~10 bits/element. Use whenever you do not need deletion. Covers 90% of system design use cases.")
+  (alt "Cuckoo Filter" "Supports deletion with similar space to standard Bloom filter (~12 bits/element). Better than Counting Bloom Filter. Use when elements must be removable.")
+  (alt "Counting Bloom Filter" "Replaces each bit with a 4-bit counter to support deletion. Uses 4x more memory (~40 bits/element). Only use if Cuckoo filter is unavailable.")
+  (nofit "Scalable Bloom Filter" "Dynamically adds filter layers as elements grow. Useful when element count is unpredictable but adds complexity and slightly higher FP rates.")
 )}}
 
-{{phase 7 "Interview Q&A" "3 min"}}
+{{table "Variant Comparison" (rows
+  (row "Variant"                 "Delete Support"  "Space per Element"  "FP Rate Control"  "Complexity")
+  (row "Standard Bloom"          "No"              "~10 bits"           "Precise"          "Simplest")
+  (row "Counting Bloom"          "Yes"             "~40 bits"           "Precise"          "Simple")
+  (row "Cuckoo Filter"           "Yes"             "~12 bits"           "Good"             "Medium")
+  (row "Scalable Bloom"          "No"              "~10 bits + overhead" "Approximate"     "Complex")
+)}}
+
+{{phase 7 "System Design Integration" "5 min"}}
 
 {{qa
   "How would you use a Bloom filter in a URL shortener?"
-  "Before generating a new short code, check the Bloom filter. If it says not present, the code is definitely unique — skip the DB check and insert directly. If it says maybe present, do a DB check to confirm. This eliminates 99% of DB lookups for uniqueness checks."
-  "What if the Bloom filter gets full?"
-  "When the fill ratio exceeds the design capacity, false positive rate spikes. Options: 1) Create a new, larger Bloom filter and rebuild from the source of truth (DB). 2) Use a Scalable Bloom Filter that adds new filter layers as it grows. 3) Switch to a Cuckoo filter."
+  "Before generating a new short code, check the Bloom filter. If it says 'not present,' the code is definitely unique -- skip the DB check and write directly. If it says 'maybe present,' do a DB lookup to confirm. This eliminates 99% of DB uniqueness checks."
+  "What if the Bloom filter fills up and false positive rate spikes?"
+  "Three options: 1) Create a new, larger Bloom filter and rebuild from the database. 2) Use a Scalable Bloom Filter that adds layers as it grows. 3) Size the initial filter generously: at 10 bits per element, even 10 billion elements only needs 12.5 GB."
 }}
 
-{{checklist
-  "Bloom filter: definitely not or possibly yes (no false negatives)"
-  "Space: ~10 bits per element at 1% false positive rate"
-  "k = (m/n) * ln(2) for optimal hash function count"
-  "Use double hashing: h(i) = h1 + i*h2 for k hash positions"
-  "Cannot delete from standard Bloom filter (use Counting or Cuckoo)"
-  "Used in: URL shorteners, web crawlers, Cassandra, CDNs, spam filters"
-  "False positive is harmless (extra DB check), false negative is impossible"
+{{qa
+  "How does Cassandra use Bloom filters?"
+  "Each SSTable file has an associated Bloom filter. Before reading an SSTable from disk, Cassandra checks the Bloom filter. If the filter says the key is not in this SSTable, the disk read is skipped entirely. This avoids reading potentially dozens of SSTables per query."
+  "Can you use a Bloom filter for counting, not just membership?"
+  "Not with a standard Bloom filter. Use a Count-Min Sketch instead, which is a related probabilistic structure designed for frequency estimation. It uses multiple hash functions with counters, returning the minimum count across all hash positions."
 }}
+
+{{followup "How would you implement a distributed Bloom filter?" "Two approaches: 1) Partitioned: split the bit array across Redis nodes using consistent hashing. Each query hashes k times and may hit multiple Redis nodes. 2) Replicated: each application server has a local copy of the full Bloom filter. Updates are broadcast asynchronously. Reads are local and instant. Approach 2 is simpler and faster for read-heavy workloads like URL deduplication."}}
+
+{{phase 8 "Interview Checklist" "2 min"}}
+
+{{checklist
+  "Bloom filter: definitely-not-in-set or possibly-in-set (no false negatives)"
+  "Space: ~10 bits per element at 1% false positive rate (33x less than HashSet)"
+  "False positive formula: p = (1 - e^(-kn/m))^k"
+  "Optimal k = (m/n) * ln(2), typically 7 hash functions for 1% FP"
+  "Use double hashing: h(i) = h1 + i*h2 to generate k positions from 2 hashes"
+  "Cannot delete from standard Bloom filter; use Cuckoo Filter for deletions"
+  "Used in: URL shorteners, web crawlers, Cassandra SSTables, CDN caches, spell checkers"
+  "False positives must be harmless for the use case (extra DB check is OK, banning users is not)"
+}}
+
+{{key "The Bloom filter interview tests whether you understand the space-accuracy trade-off, can calculate optimal parameters, and know where false positives are acceptable. Always mention concrete numbers: 10 bits per element, 7 hash functions, 1% false positive rate for 1 billion elements in 1.2 GB."}}
