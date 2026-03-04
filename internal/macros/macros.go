@@ -355,21 +355,37 @@ func makeDiagramFunc(reg *diagrams.Registry) func(string, ...string) template.HT
 	}
 }
 
-// renderDiagram renders a Diagram from the registry.
+// renderDiagram renders a Diagram from the registry with interactive info icon.
 func renderDiagram(d *diagrams.Diagram) template.HTML {
+	// Build info icon with tooltip if description exists
+	infoHTML := ""
+	if d.Description != "" {
+		infoHTML = fmt.Sprintf(
+			`<span class="diagram-info" onclick="event.stopPropagation(); this.classList.toggle('active')">
+				<svg class="diagram-info-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+				<span class="diagram-tooltip">%s</span>
+			</span>`, template.HTMLEscapeString(d.Description))
+	}
+
 	switch d.Type {
 	case diagrams.TypeImage:
 		return template.HTML(fmt.Sprintf(
-			`<div class="diagram-container" data-slug="%s">
-				<div class="diagram-title">%s</div>
+			`<div class="diagram-container diagram-interactive" data-slug="%s">
+				<div class="diagram-header">
+					<div class="diagram-title">%s</div>
+					%s
+				</div>
 				<img src="/static/img/diagrams/%s" alt="%s" class="diagram-img" loading="lazy">
-			</div>`, d.Slug, d.Title, d.ImagePath, d.Title))
+			</div>`, d.Slug, d.Title, infoHTML, d.ImagePath, d.Title))
 	default: // TypeHTML
 		return template.HTML(fmt.Sprintf(
-			`<div class="diagram-container" data-slug="%s">
-				<div class="diagram-title">%s</div>
+			`<div class="diagram-container diagram-interactive" data-slug="%s">
+				<div class="diagram-header">
+					<div class="diagram-title">%s</div>
+					%s
+				</div>
 				%s
-			</div>`, d.Slug, d.Title, d.HTML))
+			</div>`, d.Slug, d.Title, infoHTML, d.HTML))
 	}
 }
 
