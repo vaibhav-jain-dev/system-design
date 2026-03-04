@@ -34,6 +34,51 @@
   (row "LSI Sort Key"       "No"       "Alternative sort within same partition"      "status = SHIPPED")
 )}}
 
+{{diagram "DynamoDB Key Structure" `
+<div class="d-flow-v">
+  <div class="d-box blue">Table: ECommerce</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box purple">Partition Key (PK) distributes items</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">PARTITION A</div>
+        <div class="d-flow-v">
+          <div class="d-box green">PK = USER#U123</div>
+          <div class="d-label">Sort Key orders items:</div>
+          <div class="d-box gray">SK = ORDER#2024-01</div>
+          <div class="d-box gray">SK = ORDER#2024-02</div>
+          <div class="d-box gray">SK = PROFILE</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">PARTITION B</div>
+        <div class="d-flow-v">
+          <div class="d-box green">PK = USER#U456</div>
+          <div class="d-label">Sort Key orders items:</div>
+          <div class="d-box gray">SK = ORDER#2024-03</div>
+          <div class="d-box gray">SK = PROFILE</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">PARTITION C</div>
+        <div class="d-flow-v">
+          <div class="d-box green">PK = PRODUCT#P789</div>
+          <div class="d-label">Sort Key orders items:</div>
+          <div class="d-box gray">SK = DETAILS</div>
+          <div class="d-box gray">SK = REVIEW#U123</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
+
 {{table "Single-Table Design Example: E-Commerce" (rows
   (row "Entity"     "PK"              "SK"                     "Attributes"                    "Access Pattern")
   (row "User"       "USER#U123"       "PROFILE"                "name, email, created_at"       "Get user profile")
@@ -42,6 +87,30 @@
   (row "Product"    "PRODUCT#P789"    "DETAILS"                "name, price, category"         "Get product details")
   (row "Review"     "PRODUCT#P789"    "REVIEW#U123"            "rating, text, date"            "Get product reviews")
 )}}
+
+{{diagram "Single-Table Design Layout" `
+<div class="d-group">
+  <div class="d-group-title">TABLE: ECommerce (Single Table)</div>
+  <div class="d-flow-v">
+    <div class="d-group">
+      <div class="d-group-title">PARTITION: USER#U123</div>
+      <div class="d-row">
+        <div class="d-box blue">SK = PROFILE<br>name, email</div>
+        <div class="d-box green">SK = ORDER#2024-01-15#O456<br>total, status</div>
+        <div class="d-box green">SK = ORDER#2024-02-20#O789<br>total, status</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">PARTITION: PRODUCT#P789</div>
+      <div class="d-row">
+        <div class="d-box purple">SK = DETAILS<br>name, price, category</div>
+        <div class="d-box amber">SK = REVIEW#U123<br>rating, text</div>
+        <div class="d-box amber">SK = REVIEW#U456<br>rating, text</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
 {{code "python" `import boto3
 
@@ -187,6 +256,41 @@ def lambda_handler(event, context):
   (row "Today's date as PK"            "All today's events on one partition"    "Add random suffix: 2024-01-15#A through 2024-01-15#Z")
   (row "Popular product page views"    "One product gets 90% of traffic"       "DAX cache in front to absorb reads")
 )}}
+
+{{diagram "Write Sharding Pattern" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">WITHOUT SHARDING</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">All Writes</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box amber">POST#123 (single PK)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box red">Single Partition<br>THROTTLED!</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">WITH SHARDING</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">All Writes</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box purple">Random Shard (0-9)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-row">
+          <div class="d-box green">POST#123#0</div>
+          <div class="d-box green">POST#123#1</div>
+          <div class="d-box green">...</div>
+          <div class="d-box green">POST#123#9</div>
+        </div>
+        <div class="d-label">Distributed across 10 partitions</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
 {{code "python" `import random
 

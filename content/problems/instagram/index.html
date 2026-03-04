@@ -33,6 +33,39 @@
 
 {{say "For MVP, I would build a monolith with Postgres, a single S3 bucket, and CloudFront. The goal is shipping fast with a clean data model we can shard later."}}
 
+{{diagram "MVP Architecture" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-flow-v">
+      <div class="d-box blue">Client (iOS / Android / Web)</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box purple">CloudFront (CDN)</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box purple">ALB (Load Balancer)</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box green">ECS (Django / FastAPI Monolith)</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-row">
+        <div class="d-box indigo">Postgres (RDS)</div>
+        <div class="d-box red">Redis (ElastiCache)</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">MEDIA STORAGE</div>
+      <div class="d-flow-v">
+        <div class="d-box amber">S3 Bucket (Photos)</div>
+        <div class="d-label">Pre-signed URL upload</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box purple">CloudFront (CDN)</div>
+        <div class="d-label">Edge-cached images</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
+
 {{table "MVP Tech Stack" (rows
   (row "Component"     "Technology"                     "Monthly Cost")
   (row "App Server"    "2x t3.large (ECS Fargate)"     "$120")
@@ -115,6 +148,55 @@ LIMIT 20 OFFSET :offset;
 {{phase 3 "Stage 1: Upload Flow (Hop-by-Hop)" "5 min"}}
 
 {{say "Let me walk through the upload flow hop by hop, showing each service, its purpose, failure modes, and cost."}}
+
+{{diagram "Upload & Read Flow" `
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">WRITE PATH (Photo Upload)</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">Client</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box amber">S3 (Pre-signed URL Upload)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box blue">POST /media (with S3 key)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box purple">ALB</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box green">ECS (App Server)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box indigo">Postgres (Write post record)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box red">Redis (Invalidate cache)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box gray">Response (post_id + CDN URL)</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">READ PATH (Feed Load)</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">Client</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box purple">ALB</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box green">ECS (App Server)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box red">Redis (Cache check)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box indigo">Postgres (Cache miss)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box red">Redis (Cache feed, TTL 5m)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box purple">CloudFront (Serve images)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box gray">Response (Feed JSON + CDN URLs)</div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
 
 {{table "Write Path: Photo Upload" (rows
   (row "Hop" "What Happens"                                   "AWS Service"        "Why"                                      "Failure Mode"                       "Cost")
@@ -243,6 +325,46 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
   (row "Search/Explore"     "Hashtags, user search, trending"     "Elasticsearch"                       "Full-text + faceted search")
 )}}
 
+{{diagram "Microservices Architecture" `
+<div class="d-flow-v">
+  <div class="d-box blue">Client (iOS / Android / Web)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box purple">CloudFront (CDN)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box purple">ALB (API Gateway)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-branch">
+    <div class="d-branch-arm">
+      <div class="d-box green">User Svc</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box indigo">Postgres</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-box green">Post Svc</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box amber">DynamoDB</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-box green">Feed Svc</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box red">Redis Cluster</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-box green">Media Svc</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box amber">S3</div>
+    </div>
+    <div class="d-branch-arm">
+      <div class="d-box green">Engagement Svc</div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box amber">DynamoDB</div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box gray">Kafka (MSK) &#8212; Event Bus: post_created, user_followed, post_liked</div>
+</div>
+`}}
+
 {{key "Each microservice owns its database. No shared DB. Services communicate via Kafka events (post_created, user_followed, post_liked) and synchronous gRPC for real-time reads."}}
 
 {{table "Write Path at Scale: Photo Upload" (rows
@@ -330,6 +452,70 @@ class ShardedCounter:
   (row "ap-south-1"    "India, South Asia"             "Primary for user data shard 75-99"     "250ms -> 15ms for India")
   (row "All regions"   "CDN edge (CloudFront)"         "S3 cross-region replication"           "Images <50ms everywhere")
 )}}
+
+{{diagram "Multi-Region Architecture" `
+<div class="d-flow-v">
+  <div class="d-box purple">Route 53 (Global DNS &#8212; Latency-based routing)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">us-east-1 (Americas)</div>
+        <div class="d-flow-v">
+          <div class="d-box purple">CloudFront</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box purple">ALB</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green">ECS Services</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-row">
+            <div class="d-box indigo">Postgres</div>
+            <div class="d-box amber">DynamoDB</div>
+            <div class="d-box red">Redis</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">eu-west-1 (Europe)</div>
+        <div class="d-flow-v">
+          <div class="d-box purple">CloudFront</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box purple">ALB</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green">ECS Services</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-row">
+            <div class="d-box indigo">Postgres</div>
+            <div class="d-box amber">DynamoDB</div>
+            <div class="d-box red">Redis</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">ap-south-1 (India)</div>
+        <div class="d-flow-v">
+          <div class="d-box purple">CloudFront</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box purple">ALB</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green">ECS Services</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-row">
+            <div class="d-box indigo">Postgres</div>
+            <div class="d-box amber">DynamoDB</div>
+            <div class="d-box red">Redis</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-label">DynamoDB Global Tables + S3 CRR replicate across all regions</div>
+</div>
+`}}
 
 {{table "Global Data Strategy" (rows
   (row "Data Type"           "Strategy"                                     "Consistency")
