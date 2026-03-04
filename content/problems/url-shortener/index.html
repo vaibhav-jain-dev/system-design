@@ -137,40 +137,48 @@ Status: 200 OK
 <div class="d-cols">
   <div class="d-col">
     <div class="d-group">
-      <div class="d-group-title">DynamoDB Table: urls</div>
-      <div class="d-flow-v">
-        <div class="d-box indigo">PK: short_code (String) &#8212; "Ab3xK9"</div>
-        <div class="d-box blue">original_url (String) &#8212; "https://example.com/..."</div>
-        <div class="d-box blue">user_id (String) &#8212; "user_12345"</div>
-        <div class="d-box blue">created_at (Number) &#8212; epoch timestamp</div>
-        <div class="d-box amber">expires_at (Number) &#8212; TTL attribute (auto-delete)</div>
-        <div class="d-box gray">click_count (Number) &#8212; atomic counter</div>
+      <div class="d-group-title">DynamoDB: urls table</div>
+      <div class="d-entity">
+        <div class="d-entity-header indigo">urls</div>
+        <div class="d-entity-body">
+          <div class="pk">short_code STRING</div>
+          <div>original_url STRING</div>
+          <div>user_id STRING</div>
+          <div>created_at NUMBER (epoch)</div>
+          <div>expires_at NUMBER (TTL)</div>
+          <div>click_count NUMBER (atomic)</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">GSI: user-urls-index</div>
+      <div class="d-entity">
+        <div class="d-entity-header purple">user-urls-index</div>
+        <div class="d-entity-body">
+          <div class="pk">user_id STRING</div>
+          <div class="pk">created_at NUMBER (SK)</div>
+          <div>short_code, original_url, click_count (projected)</div>
+        </div>
       </div>
     </div>
   </div>
   <div class="d-col">
     <div class="d-group">
-      <div class="d-group-title">GSI: user-urls-index</div>
-      <div class="d-flow-v">
-        <div class="d-box indigo">GSI PK: user_id (String)</div>
-        <div class="d-box indigo">GSI SK: created_at (Number, DESC)</div>
-        <div class="d-label">Query: "get all URLs by user, newest first"</div>
-        <div class="d-label">Projected: short_code, original_url, click_count</div>
-      </div>
-    </div>
-    <div class="d-group">
       <div class="d-group-title">Access Patterns</div>
       <div class="d-flow-v">
-        <div class="d-box green">Redirect: GetItem(PK=short_code) &#8594; O(1), &lt; 5ms</div>
-        <div class="d-box green">User URLs: Query(GSI, user_id) &#8594; paginated</div>
-        <div class="d-box green">Expiration: TTL auto-deletes, no cron jobs</div>
+        <div class="d-box green">Redirect: GetItem(PK=short_code) &#8594; O(1), &lt;5ms</div>
+        <div class="d-box green">Create: PutItem(condition: attribute_not_exists)</div>
+        <div class="d-box blue">User URLs: Query(GSI, user_id) &#8594; paginated</div>
+        <div class="d-box blue">Delete: DeleteItem(PK=short_code)</div>
+        <div class="d-box amber">Expiration: TTL auto-deletes expired URLs</div>
+        <div class="d-box amber">Analytics: atomic ADD on click_count</div>
       </div>
     </div>
   </div>
 </div>
 `}}
 
-{{code "sql" `-- If using Postgres (MVP or alternative approach):
+{{details "View Postgres Schema & Index Justifications (click to expand)" "sql" `-- If using Postgres (MVP or alternative approach):
 CREATE TABLE urls (
     short_code  VARCHAR(8) PRIMARY KEY,
     original_url TEXT NOT NULL,
@@ -266,7 +274,7 @@ CREATE INDEX idx_urls_expires ON urls(expires_at) WHERE expires_at IS NOT NULL;
   (nofit "Random generation + DB check" "Generate random 7-char string, check DB for collision. At 100B URLs, collision probability rises via Birthday paradox. Wasteful DB queries. Not suitable at scale.")
 )}}
 
-{{code "python" `import string
+{{details "View Base62 Encoding Implementation" "python" `import string
 
 ALPHABET = string.ascii_letters + string.digits  # a-zA-Z0-9, 62 chars
 
@@ -440,6 +448,18 @@ async def resolve_short_url(short_code: str) -> str:
     redis_client.setex(f"url:{short_code}", 3600, original_url)
 
     return original_url
+`}}
+
+{{diagram "Example: Redirect Lookup" `
+<div class="d-query-result">
+  <table>
+    <tr><th>Operation</th><th>Key</th><th>Result</th><th>Latency</th><th>Source</th></tr>
+    <tr><td>GET /Ab3xK9</td><td>url:Ab3xK9</td><td>https://example.com/very/long/path?utm=...</td><td>0.3ms</td><td>ElastiCache HIT</td></tr>
+    <tr><td>GET /Xz9mQ2</td><td>url:Xz9mQ2</td><td>https://docs.google.com/spreadsheets/d/...</td><td>4.8ms</td><td>DynamoDB (cache miss)</td></tr>
+    <tr><td>GET /expired1</td><td>url:expired1</td><td>HTTP 410 Gone</td><td>5.1ms</td><td>DynamoDB (TTL expired)</td></tr>
+    <tr><td>GET /notfound</td><td>url:notfound</td><td>HTTP 404 Not Found</td><td>4.2ms</td><td>DynamoDB (no item)</td></tr>
+  </table>
+</div>
 `}}
 
 {{qa
@@ -717,6 +737,51 @@ async def resolve_short_url(short_code: str) -> str:
 )}}
 
 {{thought "At scale, CloudFront is 35% of total cost. Optimization: use PriceClass_100 (US/EU/Asia only) to save 30%. Enable Gzip/Brotli compression on 301 response headers. Set longer Cache-Control on popular URLs. These three changes can cut CDN cost by 40%."}}
+
+{{diagram "URL Shortener Sub-Problems & Building Blocks" `
+<div class="d-flow-v">
+  <div class="d-subproblem">
+    <div class="d-subproblem-icon indigo">&#128273;</div>
+    <div class="d-subproblem-text">
+      <div class="d-subproblem-title">Key Generation (Base62 Encoding)</div>
+      <div class="d-subproblem-desc">62^7 = 3.5T unique codes. KGS pre-generates batches, zero collisions.</div>
+    </div>
+    <div class="d-subproblem-link">&#8594; Base62 Encoding</div>
+  </div>
+  <div class="d-subproblem">
+    <div class="d-subproblem-icon red">&#9889;</div>
+    <div class="d-subproblem-text">
+      <div class="d-subproblem-title">Rate Limiting API Abuse</div>
+      <div class="d-subproblem-desc">Token bucket at ALB: 100 req/s per user. Prevents URL spam and DDoS.</div>
+    </div>
+    <div class="d-subproblem-link">&#8594; Token Bucket / Rate Limiter</div>
+  </div>
+  <div class="d-subproblem">
+    <div class="d-subproblem-icon purple">&#127760;</div>
+    <div class="d-subproblem-text">
+      <div class="d-subproblem-title">CDN Caching (CloudFront)</div>
+      <div class="d-subproblem-desc">301 cached at 400+ edge PoPs. 60%+ reads never reach origin.</div>
+    </div>
+    <div class="d-subproblem-link">&#8594; CDN / CloudFront</div>
+  </div>
+  <div class="d-subproblem">
+    <div class="d-subproblem-icon green">&#128203;</div>
+    <div class="d-subproblem-text">
+      <div class="d-subproblem-title">Consistent Hashing (if SQL sharding)</div>
+      <div class="d-subproblem-desc">Hash ring with virtual nodes. Add/remove shards moves only K/N keys.</div>
+    </div>
+    <div class="d-subproblem-link">&#8594; Consistent Hashing</div>
+  </div>
+  <div class="d-subproblem">
+    <div class="d-subproblem-icon amber">&#128200;</div>
+    <div class="d-subproblem-text">
+      <div class="d-subproblem-title">Bloom Filter (Optional Collision Check)</div>
+      <div class="d-subproblem-desc">O(1) probabilistic check before DB write. Reduces unnecessary lookups.</div>
+    </div>
+    <div class="d-subproblem-link">&#8594; Bloom Filter</div>
+  </div>
+</div>
+`}}
 
 {{checklist
   "Base62 encoding: 7 chars = 3.5 trillion unique URLs (96 years at 100M/day)"

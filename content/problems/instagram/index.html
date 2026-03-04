@@ -123,37 +123,67 @@
 )}}
 
 {{diagram "Data Model (Entity Relationships)" `
-<div class="d-flow-v">
-  <div class="d-row">
-    <div class="d-box blue">users (id, username, email)</div>
-    <div class="d-arrow">&#8594; 1:N &#8594;</div>
-    <div class="d-box green">posts (id, user_id, media_url)</div>
+<div class="d-cols">
+  <div class="d-col">
+    <div class="d-entity">
+      <div class="d-entity-header blue">users</div>
+      <div class="d-entity-body">
+        <div class="pk">id BIGSERIAL</div>
+        <div>username VARCHAR(30) UNIQUE</div>
+        <div>email VARCHAR(255) UNIQUE</div>
+        <div>bio TEXT</div>
+        <div>avatar_url TEXT</div>
+        <div>created_at TIMESTAMP</div>
+      </div>
+    </div>
   </div>
-  <div class="d-row">
-    <div class="d-box blue">users</div>
-    <div class="d-arrow">&#8594; M:N &#8594;</div>
-    <div class="d-box purple">follows (follower_id, followee_id)</div>
-    <div class="d-arrow">&#8592; M:N &#8592;</div>
-    <div class="d-box blue">users</div>
+  <div class="d-col">
+    <div class="d-entity">
+      <div class="d-entity-header green">posts</div>
+      <div class="d-entity-body">
+        <div class="pk">id BIGSERIAL</div>
+        <div class="fk">user_id BIGINT &#8594; users.id</div>
+        <div>caption TEXT</div>
+        <div>media_url TEXT NOT NULL</div>
+        <div>media_type VARCHAR(10)</div>
+        <div>created_at TIMESTAMP</div>
+      </div>
+    </div>
   </div>
-  <div class="d-row">
-    <div class="d-box blue">users</div>
-    <div class="d-arrow">&#8594; M:N &#8594;</div>
-    <div class="d-box amber">likes (user_id, post_id)</div>
-    <div class="d-arrow">&#8592; N:1 &#8592;</div>
-    <div class="d-box green">posts</div>
+  <div class="d-col">
+    <div class="d-entity">
+      <div class="d-entity-header purple">follows</div>
+      <div class="d-entity-body">
+        <div class="pk fk">follower_id BIGINT &#8594; users.id</div>
+        <div class="pk fk">followee_id BIGINT &#8594; users.id</div>
+        <div>created_at TIMESTAMP</div>
+      </div>
+    </div>
+    <div class="d-entity" style="margin-top: 0.75rem;">
+      <div class="d-entity-header amber">likes</div>
+      <div class="d-entity-body">
+        <div class="pk fk">user_id BIGINT &#8594; users.id</div>
+        <div class="pk fk">post_id BIGINT &#8594; posts.id</div>
+        <div>created_at TIMESTAMP</div>
+      </div>
+    </div>
   </div>
-  <div class="d-row">
-    <div class="d-box blue">users</div>
-    <div class="d-arrow">&#8594; 1:N &#8594;</div>
-    <div class="d-box red">comments (id, user_id, post_id, text)</div>
-    <div class="d-arrow">&#8592; N:1 &#8592;</div>
-    <div class="d-box green">posts</div>
+  <div class="d-col">
+    <div class="d-entity">
+      <div class="d-entity-header red">comments</div>
+      <div class="d-entity-body">
+        <div class="pk">id BIGSERIAL</div>
+        <div class="fk">user_id BIGINT &#8594; users.id</div>
+        <div class="fk">post_id BIGINT &#8594; posts.id</div>
+        <div>text TEXT NOT NULL</div>
+        <div>created_at TIMESTAMP</div>
+      </div>
+    </div>
   </div>
 </div>
 `}}
 
-{{code "sql" `-- MVP Schema (Postgres)
+{{details "View SQL Schema (CREATE TABLE)" "sql" `-- MVP Schema (Postgres)
 CREATE TABLE users (
     id          BIGSERIAL PRIMARY KEY,
     username    VARCHAR(30) UNIQUE NOT NULL,
@@ -196,7 +226,7 @@ CREATE TABLE comments (
 );
 `}}
 
-{{code "sql" `-- Indexes with justification
+{{details "View Index Definitions & Justifications" "sql" `-- Indexes with justification
 -- All indexes are B-tree (Postgres default) unless noted.
 -- B-tree chosen over Hash because: supports range scans (ORDER BY, >,<),
 -- equality lookups, and prefix matching. Hash only supports equality.
@@ -247,6 +277,17 @@ WHERE p.user_id IN (
 GROUP BY p.id, u.id
 ORDER BY p.created_at DESC
 LIMIT 20 OFFSET :offset;
+`}}
+
+{{diagram "Example: Feed Query Result" `
+<div class="d-query-result">
+  <table>
+    <tr><th>post_id</th><th>username</th><th>caption</th><th>like_count</th><th>comment_count</th><th>created_at</th></tr>
+    <tr><td>4521</td><td>@foodie_jane</td><td>Best ramen in Tokyo...</td><td>342</td><td>28</td><td>2 min ago</td></tr>
+    <tr><td>4519</td><td>@travel_mike</td><td>Sunset in Santorini</td><td>1,205</td><td>89</td><td>15 min ago</td></tr>
+    <tr><td>4515</td><td>@dev_sarah</td><td>My setup for 2024</td><td>567</td><td>43</td><td>1 hr ago</td></tr>
+  </table>
+</div>
 `}}
 
 {{avoid "Do not over-engineer the MVP. No Kafka, no DynamoDB, no microservices. Postgres handles 5K QPS easily. Instagram ran on a single Django/Postgres stack until 10M users."}}
@@ -304,23 +345,43 @@ LIMIT 20 OFFSET :offset;
 </div>
 `}}
 
-{{table "Write Path: Photo Upload" (rows
-  (row "Hop" "What Happens"                                   "AWS Service"        "Why"                                      "Failure Mode"                       "Cost")
-  (row "W1"  "Client uploads photo to pre-signed S3 URL"      "S3"                 "Direct upload, no app server bottleneck"   "S3 returns 503, client retries"     "$0.005/1K PUT")
-  (row "W2"  "Client calls POST /api/v1/media with S3 key"    "ALB -> ECS"         "Metadata only, photo already in S3"       "App server down, ALB routes elsewhere" "$0.008/LCU-hr")
-  (row "W3"  "App server writes post record to Postgres"      "RDS Postgres"       "ACID for post creation"                   "DB failover to standby (30s)"       "$200/mo")
-  (row "W4"  "Invalidate user profile cache"                  "ElastiCache Redis"  "Profile shows latest post count"          "Cache miss, serve stale is fine"    "$50/mo")
-  (row "W5"  "Return post_id + CDN URL to client"             "Response"           "Client can immediately share the post"    "Timeout, client retries"            "Included")
-)}}
+{{diagram "Write Path: Photo Upload (Hop by Hop)" `
+<div class="d-flow-v">
+  <div class="d-box blue">W1: Client uploads photo to S3 via pre-signed URL</div>
+  <div class="d-label">S3 | Direct upload, no app server bottleneck | Failure: S3 503 &#8594; client retries</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box blue">W2: Client calls POST /media with S3 key</div>
+  <div class="d-label">ALB &#8594; ECS | Metadata only, photo already in S3</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box indigo">W3: App server writes post record to Postgres</div>
+  <div class="d-label">RDS Postgres | ACID for post creation | Failure: DB failover to standby (30s)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box red">W4: Invalidate user profile cache</div>
+  <div class="d-label">ElastiCache Redis | Profile shows latest post count | Failure: cache miss, serve stale</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box green">W5: Return post_id + CDN URL to client</div>
+  <div class="d-label">Response | Client can immediately share the post</div>
+</div>
+`}}
 
-{{table "Read Path: Feed Load" (rows
-  (row "Hop" "What Happens"                                   "AWS Service"        "Why"                                       "Failure Mode"                        "Cost")
-  (row "R1"  "Client requests GET /api/v1/feed"               "ALB -> ECS"         "App server handles feed assembly"          "ALB health check fails, drains node" "$0.008/LCU-hr")
-  (row "R2"  "Check Redis for cached feed"                    "ElastiCache Redis"  "90%+ cache hit for active users"           "Cache miss, fall through to R3"      "$50/mo")
-  (row "R3"  "Query Postgres: followees then recent posts"    "RDS Postgres"       "Fan-out-on-read: assemble feed at query time" "Slow query, timeout 5s"           "$200/mo")
-  (row "R4"  "Cache assembled feed in Redis (TTL 5 min)"      "ElastiCache Redis"  "Next request hits cache"                   "Redis full, evict LRU"              "Included")
-  (row "R5"  "Client loads images via CDN URLs"               "CloudFront -> S3"   "Edge-cached images, <50ms globally"        "Cache miss, origin fetch 200ms"     "$0.085/GB")
-)}}
+{{diagram "Read Path: Feed Load (Hop by Hop)" `
+<div class="d-flow-v">
+  <div class="d-box blue">R1: Client requests GET /api/v1/feed</div>
+  <div class="d-label">ALB &#8594; ECS | App server handles feed assembly | Failure: ALB drains unhealthy node</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box red">R2: Check Redis for cached feed</div>
+  <div class="d-label">ElastiCache Redis | 90%+ cache hit for active users | Failure: cache miss, fall through</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box indigo">R3: Query Postgres: followees then recent posts</div>
+  <div class="d-label">RDS Postgres | Fan-out-on-read: assemble feed at query time | Failure: slow query, timeout 5s</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box red">R4: Cache assembled feed in Redis (TTL 5 min)</div>
+  <div class="d-label">ElastiCache Redis | Next request hits cache | Failure: Redis full, evict LRU</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box purple">R5: Client loads images via CDN URLs</div>
+  <div class="d-label">CloudFront &#8594; S3 | Edge-cached images, &lt;50ms globally | Failure: cache miss, origin 200ms</div>
+</div>
+`}}
 
 {{phase 4 "Stage 2: Growing (1M-50M users)" "8 min"}}
 
@@ -645,14 +706,33 @@ class ShardedCounter:
 
 {{say "Stories are interesting because they are ephemeral, they disappear after 24 hours. This changes our storage and caching strategy."}}
 
-{{table "Stories Architecture" (rows
-  (row "Aspect"          "Design"                                           "Why")
-  (row "Storage"         "DynamoDB with TTL = 24 hours"                     "Auto-deletion, no cron jobs needed")
-  (row "Media"           "S3 with lifecycle policy (delete after 25h)"      "Buffer for timezone edge cases")
-  (row "Feed"            "Redis sorted set per user (separate from main)"   "Stories are time-ordered, not ranked")
-  (row "Viewed tracking" "Redis bitmap per story_id"                        "O(1) space-efficient, set bit per viewer")
-  (row "Ring UI"         "Client-side: unseen-first, then recency"          "No server-side ranking needed for MVP")
-)}}
+{{diagram "Stories Lifecycle" `
+<div class="d-flow-v">
+  <div class="d-row">
+    <div class="d-box blue">User uploads story</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box amber">S3 (media file)</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box green">DynamoDB (TTL = 24h)</div>
+  </div>
+  <div class="d-label">S3 lifecycle policy deletes media after 25h (timezone buffer)</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-row">
+    <div class="d-box red">Redis sorted set (per-user story feed)</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box purple">Redis bitmap (view tracking per story_id)</div>
+  </div>
+  <div class="d-label">Stories are time-ordered, not ranked &#8212; bitmap gives O(1) "has user seen this?" check</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-row">
+    <div class="d-box blue">Client renders story ring</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box gray">Unseen stories first, then by recency</div>
+  </div>
+  <div class="d-arrow-down">&#8595; after 24 hours</div>
+  <div class="d-box red">DynamoDB TTL auto-deletes &#8594; Redis keys expire &#8594; Story gone</div>
+</div>
+`}}
 
 {{code "python" `import time
 import redis
@@ -678,6 +758,59 @@ async def mark_viewed(story_id: str, user_id: int):
     await redis_client.setbit(f"story_views:{story_id}", user_id, 1)
     # Auto-expire the bitmap key after 25 hours
     await redis_client.expire(f"story_views:{story_id}", 90000)
+`}}
+
+{{diagram "Instagram Sub-Problems & Building Blocks" `
+<div class="d-flow-v">
+  <div class="d-subproblem">
+    <div class="d-subproblem-icon red">&#9829;</div>
+    <div class="d-subproblem-text">
+      <div class="d-subproblem-title">Like Counter at Scale</div>
+      <div class="d-subproblem-desc">Sharded counters + deduplication for 1M likes/sec on viral posts</div>
+    </div>
+    <div class="d-subproblem-link">&#8594; Consistent Hashing</div>
+  </div>
+  <div class="d-subproblem">
+    <div class="d-subproblem-icon blue">&#8635;</div>
+    <div class="d-subproblem-text">
+      <div class="d-subproblem-title">Feed Ranking & Fan-out</div>
+      <div class="d-subproblem-desc">Hybrid fan-out-on-write + fan-out-on-read with Redis sorted sets</div>
+    </div>
+    <div class="d-subproblem-link">&#8594; Redis Sorted Sets</div>
+  </div>
+  <div class="d-subproblem">
+    <div class="d-subproblem-icon purple">&#128247;</div>
+    <div class="d-subproblem-text">
+      <div class="d-subproblem-title">Media Processing Pipeline</div>
+      <div class="d-subproblem-desc">S3 event &#8594; Lambda &#8594; resize to 4 sizes &#8594; CDN distribution</div>
+    </div>
+    <div class="d-subproblem-link">&#8594; CDN / CloudFront</div>
+  </div>
+  <div class="d-subproblem">
+    <div class="d-subproblem-icon amber">&#9889;</div>
+    <div class="d-subproblem-text">
+      <div class="d-subproblem-title">Real-time Notifications</div>
+      <div class="d-subproblem-desc">Kafka events &#8594; push via FCM/APNs + SSE for web</div>
+    </div>
+    <div class="d-subproblem-link">&#8594; Rate Limiter</div>
+  </div>
+  <div class="d-subproblem">
+    <div class="d-subproblem-icon green">&#128336;</div>
+    <div class="d-subproblem-text">
+      <div class="d-subproblem-title">Ephemeral Stories (24h TTL)</div>
+      <div class="d-subproblem-desc">DynamoDB TTL auto-delete + Redis bitmap for view tracking</div>
+    </div>
+    <div class="d-subproblem-link">&#8594; DynamoDB TTL</div>
+  </div>
+  <div class="d-subproblem">
+    <div class="d-subproblem-icon indigo">&#128256;</div>
+    <div class="d-subproblem-text">
+      <div class="d-subproblem-title">Distributed ID Generation</div>
+      <div class="d-subproblem-desc">Snowflake IDs: 64-bit, time-sortable, zero coordination</div>
+    </div>
+    <div class="d-subproblem-link">&#8594; Snowflake ID</div>
+  </div>
+</div>
 `}}
 
 {{phase 9 "Explore & Search" "3 min"}}
