@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"html/template"
 	"strings"
+
+	"system-design/internal/diagrams"
 )
 
 // FuncMap returns the template function map for content macros.
-func FuncMap() template.FuncMap {
+// The diagram registry enables slug-based diagram lookup.
+func FuncMap(diagramReg *diagrams.Registry) template.FuncMap {
 	return template.FuncMap{
 		"say":       say,
 		"thought":   thought,
@@ -21,7 +24,7 @@ func FuncMap() template.FuncMap {
 		"compare":   compare,
 		"table":     tableMacro,
 		"info":      info,
-		"diagram":   diagram,
+		"diagram":   makeDiagramFunc(diagramReg),
 		"details":   details,
 		"stageNav":  stageNav,
 		"anchor":    anchor,
@@ -303,34 +306,63 @@ func tableMacro(title string, rows []TableRow) template.HTML {
 	return template.HTML(sb.String())
 }
 
-// diagram renders a diagram in a styled container.
-// Usage: {{diagram "Title" `<div>HTML diagram</div>`}}  — HTML mode (content starts with <)
-// Usage: {{diagram "Title" `ascii art here`}}             — legacy ASCII mode
-// If only title is given (no art), renders a placeholder.
-func diagram(title string, args ...string) template.HTML {
-	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
-		return template.HTML(fmt.Sprintf(
-			`<div class="diagram-container">
+// makeDiagramFunc creates a diagram rendering function with registry access.
+//
+// Three modes:
+//
+//	{{diagram "slug"}}                              — lookup from registry by slug
+//	{{diagram "Title" `<div>HTML diagram</div>`}}   — inline HTML mode (backward compat)
+//	{{diagram "Title" `ascii art here`}}            — legacy ASCII mode
+func makeDiagramFunc(reg *diagrams.Registry) func(string, ...string) template.HTML {
+	return func(titleOrSlug string, args ...string) template.HTML {
+		// Mode 1: Slug-based lookup (no second argument)
+		if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+			if d := reg.Get(titleOrSlug); d != nil {
+				return renderDiagram(d)
+			}
+			// No match — render placeholder
+			return template.HTML(fmt.Sprintf(
+				`<div class="diagram-container" data-slug="%s">
 				<div class="diagram-title">%s</div>
 				<div class="diagram-placeholder">Diagram: %s</div>
-			</div>`, title, title))
-	}
-	content := strings.TrimSpace(args[0])
-	// If content starts with <, treat as raw HTML diagram
-	if strings.HasPrefix(content, "<") {
+			</div>`, titleOrSlug, titleOrSlug, titleOrSlug))
+		}
+
+		// Mode 2/3: Inline content (backward compat)
+		content := strings.TrimSpace(args[0])
+		if strings.HasPrefix(content, "<") {
+			return template.HTML(fmt.Sprintf(
+				`<div class="diagram-container">
+				<div class="diagram-title">%s</div>
+				%s
+			</div>`, titleOrSlug, content))
+		}
+		// Legacy ASCII art mode
+		art := template.HTMLEscapeString(args[0])
 		return template.HTML(fmt.Sprintf(
 			`<div class="diagram-container">
 				<div class="diagram-title">%s</div>
-				%s
-			</div>`, title, content))
+				<pre class="diagram-art">%s</pre>
+			</div>`, titleOrSlug, art))
 	}
-	// Legacy ASCII art mode
-	art := template.HTMLEscapeString(args[0])
-	return template.HTML(fmt.Sprintf(
-		`<div class="diagram-container">
-			<div class="diagram-title">%s</div>
-			<pre class="diagram-art">%s</pre>
-		</div>`, title, art))
+}
+
+// renderDiagram renders a Diagram from the registry.
+func renderDiagram(d *diagrams.Diagram) template.HTML {
+	switch d.Type {
+	case diagrams.TypeImage:
+		return template.HTML(fmt.Sprintf(
+			`<div class="diagram-container" data-slug="%s">
+				<div class="diagram-title">%s</div>
+				<img src="/static/img/diagrams/%s" alt="%s" class="diagram-img" loading="lazy">
+			</div>`, d.Slug, d.Title, d.ImagePath, d.Title))
+	default: // TypeHTML
+		return template.HTML(fmt.Sprintf(
+			`<div class="diagram-container" data-slug="%s">
+				<div class="diagram-title">%s</div>
+				%s
+			</div>`, d.Slug, d.Title, d.HTML))
+	}
 }
 
 // StageItem represents a navigation item for the stage navigator.

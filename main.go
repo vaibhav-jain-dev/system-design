@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"system-design/internal/diagrams"
 	"system-design/internal/handlers"
 	"system-design/internal/macros"
 	"system-design/internal/registry"
@@ -33,8 +34,10 @@ func main() {
 	log.Printf("Loaded %d problems, %d fundamentals, %d algorithms, %d patterns",
 		len(reg.Problems), len(reg.AllFundamentals()), len(reg.Algorithms), len(reg.Patterns))
 
-	// Build template macros
-	funcMap := macros.FuncMap()
+	// Build diagram registry and template macros
+	diagramReg := diagrams.BuildDefault()
+	log.Printf("Loaded %d diagrams", diagramReg.Count())
+	funcMap := macros.FuncMap(diagramReg)
 
 	// Create handler with dependencies
 	h := handlers.New(reg, templateFS, contentFS, funcMap)
