@@ -176,8 +176,8 @@
         }
 
         // ── Book Mode (wide screen pagination) ───
-        var book = { page: 0, total: 1, active: false };
-        var BOOK_MIN_WIDTH = 1600;
+        var book = { page: 0, total: 1, active: false, colW: 0, gap: 56 };
+        var BOOK_MIN_WIDTH = 1200;
 
         function initBook() {
             var d = document.getElementById('detail');
@@ -187,7 +187,7 @@
             // Don't activate for welcome page or narrow screens
             if (window.innerWidth < BOOK_MIN_WIDTH || d.querySelector('.welcome')) return;
 
-            // Create viewport
+            // Create viewport wrapper
             var vp = document.createElement('div');
             vp.className = 'book-viewport';
             var inner = document.createElement('div');
@@ -223,7 +223,7 @@
             book.active = true;
             book.page = 0;
 
-            // Calculate after layout
+            // Calculate after layout settles
             requestAnimationFrame(function() {
                 requestAnimationFrame(calcBook);
             });
@@ -252,17 +252,33 @@
             if (!inner) return;
             var vp = inner.parentElement;
             var vpW = vp.clientWidth;
-            if (vpW <= 0) return;
+            var vpH = vp.clientHeight;
+            if (vpW <= 0 || vpH <= 0) return;
 
-            // Set column width = half viewport minus gap
-            var gap = 56;
+            var gap = book.gap;
             var colW = Math.floor((vpW - gap) / 2);
-            inner.style.columnWidth = colW + 'px';
+            book.colW = colW;
 
-            // Measure spread width (2 columns + gap = vpW)
-            var scrollW = inner.scrollWidth;
-            var spreadW = vpW;
-            book.total = Math.max(1, Math.round(scrollW / spreadW));
+            // Step 1: Measure content height as single column
+            inner.style.columnWidth = 'auto';
+            inner.style.columnCount = '1';
+            inner.style.width = colW + 'px';
+            inner.style.height = 'auto';
+            inner.style.transform = 'none';
+            var contentH = inner.scrollHeight;
+
+            // Step 2: Calculate columns needed
+            var numCols = Math.max(2, Math.ceil(contentH / vpH));
+            // Round up to even (each spread = 2 columns)
+            if (numCols % 2 !== 0) numCols++;
+            book.total = Math.max(1, numCols / 2);
+
+            // Step 3: Apply multi-column with enough width for all columns
+            var totalW = numCols * colW + (numCols - 1) * gap;
+            inner.style.width = totalW + 'px';
+            inner.style.height = vpH + 'px';
+            inner.style.columnWidth = colW + 'px';
+            inner.style.columnCount = '';
 
             // Update UI
             var totalEl = document.getElementById('book-total');
@@ -270,11 +286,11 @@
             if (totalEl) totalEl.textContent = book.total;
             if (inputEl) inputEl.max = book.total;
 
-            // Build dots (max 12 dots, then just numbers)
+            // Build dots (max 15)
             var dotsEl = document.getElementById('book-dots');
             if (dotsEl) {
                 dotsEl.innerHTML = '';
-                if (book.total <= 12) {
+                if (book.total <= 15) {
                     for (var i = 0; i < book.total; i++) {
                         var dot = document.createElement('span');
                         dot.className = 'book-dot' + (i === book.page ? ' active' : '');
@@ -286,7 +302,7 @@
                 }
             }
 
-            bookGo(book.page);
+            bookGo(Math.min(book.page, book.total - 1));
         }
 
         function bookGo(p) {
@@ -296,9 +312,13 @@
 
             var inner = document.querySelector('.book-inner');
             if (!inner) return;
-            var vp = inner.parentElement;
-            var spreadW = vp.clientWidth + 56; // vpWidth + gap
-            inner.style.transform = 'translateX(-' + (p * spreadW) + 'px)';
+
+            // Each spread = 2 columns. Offset = spreadIndex * (2*colW + 2*gap)
+            // But actually: spread N starts at column 2N
+            // Column position = colIndex * (colW + gap)
+            // Spread N starts at column 2N, position = 2N * (colW + gap)
+            var offset = p * 2 * (book.colW + book.gap);
+            inner.style.transform = 'translateX(-' + offset + 'px)';
 
             // Update input
             var inputEl = document.getElementById('book-input');
