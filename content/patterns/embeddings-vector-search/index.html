@@ -499,7 +499,16 @@ class IncrementalIndexer:
         return True  # Re-indexed
 `}}
 
+{{hint "content hashing for deduplication" "Hashing document content (SHA-256) before embedding lets you skip unchanged documents during re-indexing. For a 1M document corpus where 5% changes daily, this saves 950K unnecessary embedding API calls per day — $9.50/day or $285/month with text-embedding-3-small. The hash comparison itself is negligible (microseconds per document)."}}
+
 {{hint "version embedding model in metadata" "Store the model name and version in every vector's metadata row. When you upgrade models, you can identify which vectors were generated with the old model and re-embed them incrementally rather than doing a full corpus rebuild all at once. This turns a multi-day blocking operation into a background job."}}
+
+{{triggerQs "Questions about production pipelines"
+  "How do you handle embedding API rate limits during bulk ingestion?"
+  "OpenAI rate limits text-embedding-3-small at 5,000 RPM and 5M TPM. For 1M documents at 500 tokens each, you need 500M tokens — 100 minutes at max throughput. Use batch sizes of 2048 texts per request to minimize RPM usage. Add exponential backoff with jitter on 429 responses. For faster ingestion, request a rate limit increase or split across multiple API keys."
+  "What happens if embedding fails mid-ingestion?"
+  "The content hash tracking table acts as a checkpoint. Each document is individually tracked — if ingestion fails at document 500K of 1M, restart the job and the first 500K will be skipped (their hashes already match). This makes the pipeline idempotent. Wrap individual document ingestion in try/except and log failures to a dead-letter queue for retry."
+}}
 
 {{phase 8 "Cost Analysis Deep Dive" "5 min"}}
 
@@ -527,6 +536,13 @@ class IncrementalIndexer:
 {{think "Embedding API costs are negligible. At $0.02 per million tokens, embedding 1M documents costs $10 total. The real costs: vector storage and compute for the database, query compute at scale, and re-embedding when you change models. Budget for re-embedding as a recurring cost when evaluating total cost of ownership."
   (whyNot "the cheapest storage option always" "pgvector on a large RDS instance costs more than Qdrant self-hosted but eliminates the operational burden of managing a separate database. Factor in engineer time: a self-hosted Qdrant cluster requires monitoring, backups, upgrades, and incident response. At 40 hours of engineer time per month at $100/hr, the 'cheaper' option costs $4,000/month in labor alone.")
   (how "estimate total cost before choosing" "Calculate: initial embedding cost (one-time), monthly embedding cost for new/updated docs, monthly storage cost at your target scale, monthly compute cost for query volume, and engineer time for operational maintenance. The lowest monthly infrastructure cost is often not the lowest total cost.")
+}}
+
+{{triggerQs "Questions about cost optimization"
+  "How do you reduce vector storage costs at scale?"
+  "Three levers: (1) reduce dimensions — truncate from 1536 to 512 using Matryoshka representations for 3x storage reduction at ~2% quality loss. (2) Use product quantization (IVF+PQ) to compress vectors 8-32x at the index level. (3) Tiered storage — keep hot data (recent, frequently queried) in HNSW and archive cold data to a flat index on disk. Combining all three can reduce costs by 10-20x."
+  "When does self-hosting become cheaper than managed services?"
+  "At roughly 5M+ vectors, self-hosted Qdrant on EC2 costs less than Pinecone serverless. The break-even depends on your ops team size — self-hosting requires monitoring, backups, upgrades, and on-call. If one engineer spends 10 hours/month on vector DB ops at $100/hr, add $1,000/month to the self-hosted cost. Below 5M vectors, managed services almost always win on total cost."
 }}
 
 {{key "Embedding is cheap, storage is moderate, re-embedding is the hidden cost. Always version your embedding model in metadata. When you upgrade models, you must re-embed everything. Plan for this from day one by tracking which model version created each vector."}}
