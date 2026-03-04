@@ -3,30 +3,23 @@
 {{say "The token bucket algorithm controls request rate by modeling a bucket that fills with tokens at a steady rate. Each request consumes one token. If the bucket is empty, the request is rejected. The bucket has a maximum capacity, which allows short bursts."}}
 
 {{diagram "Token Bucket: Fill and Drain" `
-  Bucket Capacity: 10 tokens
-  Refill Rate: 2 tokens/second
+  Bucket Capacity: 10 tokens    Refill Rate: 2 tokens/second
 
-  Time 0s:  [**********]  10/10 tokens (full)
-             Request! -1 token
-  Time 0s:  [********* ]   9/10 tokens
+  Time 0s:  [**********]  10/10   (full)
+            Burst of 9 requests!
+  Time 0s:  [*         ]   1/10
+            Request!
+  Time 0s:  [          ]   0/10
+            Request! --> REJECTED (empty)
 
-             Burst of 8 requests! -8 tokens
-  Time 0s:  [*         ]   1/10 tokens
+            ...2 seconds pass, +4 tokens refilled...
 
-             No tokens added yet (same second)
-             Request!
-  Time 0s:  [          ]   0/10 tokens
+  Time 2s:  [****      ]   4/10   (refilled)
+            Request!
+  Time 2s:  [***       ]   3/10
 
-             Request! --> REJECTED (bucket empty)
-
-             ...2 seconds pass, +4 tokens refilled...
-
-  Time 2s:  [****      ]   4/10 tokens (refilled)
-             Request! -1 token
-  Time 2s:  [***       ]   3/10 tokens
-
-  Key insight: bucket allows bursts UP TO capacity,
-  but sustained rate cannot exceed refill_rate.
+  Allows bursts UP TO capacity.
+  Sustained rate cannot exceed refill_rate.
 `}}
 
 {{table "Token Bucket Parameters" (rows
@@ -63,55 +56,33 @@ import threading
 
 
 class TokenBucket:
-    """Thread-safe token bucket rate limiter.
-
-    Args:
-        capacity: Maximum tokens (burst size).
-        refill_rate: Tokens added per second (sustained rate).
-    """
+    """Thread-safe token bucket rate limiter."""
 
     def __init__(self, capacity: float, refill_rate: float):
         self.capacity = capacity
         self.refill_rate = refill_rate
-        self.tokens = capacity       # Start full
+        self.tokens = capacity
         self.last_refill = time.monotonic()
         self.lock = threading.Lock()
 
     def _refill(self):
-        """Add tokens based on elapsed time since last refill."""
         now = time.monotonic()
         elapsed = now - self.last_refill
         self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
         self.last_refill = now
 
     def allow(self, tokens_needed: int = 1) -> dict:
-        """Check if a request should be allowed.
-
-        Args:
-            tokens_needed: Tokens this request costs (default 1).
-
-        Returns:
-            dict with allowed, remaining, and retry_after keys.
-        """
         with self.lock:
             self._refill()
 
             if self.tokens >= tokens_needed:
                 self.tokens -= tokens_needed
-                return {
-                    "allowed": True,
-                    "remaining": int(self.tokens),
-                    "retry_after": 0,
-                }
+                return {"allowed": True, "remaining": int(self.tokens),
+                        "retry_after": 0}
 
-            # Calculate wait time until enough tokens refill
             deficit = tokens_needed - self.tokens
-            wait_seconds = deficit / self.refill_rate
-            return {
-                "allowed": False,
-                "remaining": 0,
-                "retry_after": round(wait_seconds, 2),
-            }
+            return {"allowed": False, "remaining": 0,
+                    "retry_after": round(deficit / self.refill_rate, 2)}
 
 
 class RateLimiter:
@@ -126,23 +97,17 @@ class RateLimiter:
     def is_allowed(self, key: str) -> dict:
         with self.lock:
             if key not in self.buckets:
-                self.buckets[key] = TokenBucket(
-                    self.capacity, self.refill_rate
-                )
+                self.buckets[key] = TokenBucket(self.capacity, self.refill_rate)
         return self.buckets[key].allow()
 
 
 # --- Usage ---
 limiter = RateLimiter(capacity=10, refill_rate=2.0)
-
 for i in range(15):
     result = limiter.is_allowed("user:123")
     status = "OK" if result["allowed"] else "REJECTED"
-    print("Request {}: {} (remaining: {})".format(
-        i + 1, status, result["remaining"]
-    ))
-# Output: first 10 requests ALLOW, then 5 REJECT
-# Wait 5 seconds -> 10 tokens refill -> all requests allowed again
+    print("Request {}: {} (remaining: {})".format(i + 1, status, result["remaining"]))
+# First 10 ALLOW, then 5 REJECT. Wait 5s -> 10 tokens refill.
 `}}
 
 {{phase 4 "Algorithm Comparison" "5 min"}}
@@ -166,23 +131,14 @@ for i in range(15):
 )}}
 
 {{diagram "Token Bucket vs Leaky Bucket" `
-  TOKEN BUCKET                        LEAKY BUCKET
-  (allows bursts)                     (smooths output)
+  TOKEN BUCKET (allows bursts)         LEAKY BUCKET (smooths output)
 
-  Incoming:  |||||| || |  | |||       Incoming:  |||||| || |  | |||
-               |                                    |
-               v                                    v
-          +----------+                         +----------+
-          | Tokens:5 |                         | Queue:5  |
-          | Cap: 10  |                         | Cap: 10  |
-          +----+-----+                         +----+-----+
-               |                                    |
-               v                                    v
-  Outgoing: |||||| || |  | |||       Outgoing:  | | | | | | | | | |
-            (bursty, mirrors input)             (constant rate output)
-
-  Token bucket: if tokens available, request passes immediately.
-  Leaky bucket: requests queue and drain at a fixed rate.
+  Incoming: |||||| || |  | |||         Incoming: |||||| || |  | |||
+            +----------+                         +----------+
+            | Tokens:5 |                         | Queue:5  |
+            +----+-----+                         +----+-----+
+  Outgoing: |||||| || |  | |||         Outgoing: | | | | | | | | | |
+            (bursty, passes instantly)            (constant drain rate)
 `}}
 
 {{phase 5 "Distributed Token Bucket with Redis" "8 min"}}
@@ -192,13 +148,8 @@ for i in range(15):
 {{code "python" `import time
 import redis
 
-
 class DistributedTokenBucket:
-    """Distributed token bucket using Redis + Lua script.
-
-    All state lives in Redis. The Lua script ensures atomicity.
-    No race conditions between multiple app servers.
-    """
+    """Distributed token bucket using Redis + Lua for atomicity."""
 
     LUA_SCRIPT = """
     local key = KEYS[1]
@@ -207,22 +158,14 @@ class DistributedTokenBucket:
     local now = tonumber(ARGV[3])
     local requested = tonumber(ARGV[4])
 
-    -- Get current bucket state
     local bucket = redis.call('HMGET', key, 'tokens', 'last_refill')
-    local tokens = tonumber(bucket[1])
-    local last_refill = tonumber(bucket[2])
+    local tokens = tonumber(bucket[1]) or capacity
+    local last_refill = tonumber(bucket[2]) or now
 
-    -- First request: initialize full bucket
-    if tokens == nil then
-        tokens = capacity
-        last_refill = now
-    end
-
-    -- Lazy refill based on elapsed time
+    -- Lazy refill
     local elapsed = math.max(0, now - last_refill)
     tokens = math.min(capacity, tokens + elapsed * refill_rate)
 
-    -- Check and consume tokens
     local allowed = 0
     local retry_after = 0
     if tokens >= requested then
@@ -232,10 +175,8 @@ class DistributedTokenBucket:
         retry_after = math.ceil((requested - tokens) / refill_rate)
     end
 
-    -- Save state with TTL for auto-cleanup of idle buckets
     redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now)
     redis.call('EXPIRE', key, math.ceil(capacity / refill_rate) * 2)
-
     return {allowed, math.floor(tokens), retry_after}
     """
 
@@ -243,36 +184,18 @@ class DistributedTokenBucket:
         self.redis = redis_client
         self.script = self.redis.register_script(self.LUA_SCRIPT)
 
-    def is_allowed(
-        self, key: str, capacity: int, refill_rate: float,
-        tokens_needed: int = 1,
-    ) -> dict:
-        """Check if request is allowed.
-
-        Args:
-            key: Rate limit key (e.g. "rl:user:123").
-            capacity: Max burst size.
-            refill_rate: Tokens per second (sustained rate).
-            tokens_needed: Cost of this request.
-        """
+    def is_allowed(self, key: str, capacity: int,
+                   refill_rate: float, tokens_needed: int = 1) -> dict:
         now = time.time()
         result = self.script(
-            keys=[key],
-            args=[capacity, refill_rate, now, tokens_needed],
-        )
-        return {
-            "allowed": bool(result[0]),
-            "remaining": int(result[1]),
-            "retry_after": int(result[2]),
-            "limit": capacity,
-        }
+            keys=[key], args=[capacity, refill_rate, now, tokens_needed])
+        return {"allowed": bool(result[0]), "remaining": int(result[1]),
+                "retry_after": int(result[2]), "limit": capacity}
 
 
 # --- Usage across multiple API servers ---
 r = redis.Redis(host="localhost", port=6379)
 limiter = DistributedTokenBucket(r)
-
-# Pro tier: 100 burst, 10/sec sustained
 result = limiter.is_allowed("rl:user:42", capacity=100, refill_rate=10)
 if result["allowed"]:
     print("Allowed, {} remaining".format(result["remaining"]))
@@ -287,33 +210,19 @@ else:
 {{say "Token bucket rate limiting appears in API rate limiter interviews. Here is how it fits as middleware in the request path."}}
 
 {{diagram "Token Bucket in API Architecture" `
-  Client Request
-       |
-       v
-  +---------+
-  |   ALB   |   Load Balancer
-  +---------+
-       |
-       v
-  +-------------------+
-  |   API Server      |
-  |  +--------------+ |
-  |  | Rate Limit   |-+--------> Redis (Lua script)
-  |  | Middleware    | |          HMGET + HMSET atomic
-  |  +------+-------+ |
-  |         |          |
-  |    +----+----+     |
-  |    |         |     |
-  |    v         v     |
-  |  ALLOW    REJECT   |
-  |  (app)    (429)    |
-  +-------------------+
+  Client --> ALB --> API Server
+                      |
+                 [Rate Limit Middleware]---> Redis (Lua script)
+                      |                     atomic HMGET+HMSET
+                 +----+----+
+                 |         |
+               ALLOW     REJECT
+              (continue)  (429 + Retry-After)
 
-  Rate limit headers on EVERY response:
+  Every response includes:
     X-RateLimit-Limit: 100
     X-RateLimit-Remaining: 73
-    X-RateLimit-Reset: 1704067260
-    Retry-After: 8  (only on 429 responses)
+    Retry-After: 8 (on 429 only)
 `}}
 
 {{table "Configuration by API Tier" (rows

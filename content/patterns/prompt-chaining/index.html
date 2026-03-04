@@ -1,182 +1,610 @@
-{{phase 1 "What Is Prompt Chaining?" "3 min"}}
+{{phase 1 "What Is Prompt Chaining?" "5 min"}}
 
-{{say "Prompt chaining breaks a complex task into a sequence of simpler LLM calls, where each step's output feeds into the next step's input. Each step has a focused prompt, producing higher quality than a single monolithic prompt."}}
+{{say "Prompt chaining breaks a complex task into a sequence of focused LLM calls, where each step's output feeds into the next step's input. Instead of asking one massive prompt to do everything, you decompose the task into smaller, well-defined steps that are easier to debug, validate, and optimize individually."}}
 
-{{diagram "Prompt Chain: Document Summarization" `
-  Input Document (5000 words)
-       |
-       v
-  +-------------+     +-------------+     +-----------+     +---------+
-  | Step 1:     |---->| Step 2:     |---->| Step 3:   |---->| Step 4: |
-  | Extract key |     | Categorize  |     | Generate  |     | Format  |
-  | facts       |     | by topic    |     | summary   |     | as JSON |
-  +-------------+     +-------------+     +-----------+     +---------+
-       |                    |                   |                |
-  "15 key facts"     "3 categories"       "250-word            "{title,
-                                           summary"             sections,
-                                                                bullets}"
-`}}
+{{thought "Why not a single prompt? A single prompt handling multiple subtasks often produces lower quality results because the model has to juggle too many instructions at once. Chaining gives each step a focused prompt with clear instructions. You can also validate intermediate outputs and retry individual steps without repeating the entire pipeline."}}
 
-{{key "Single prompt = one chance to get it right. Prompt chaining = multiple focused steps, each verifiable. Quality improves because each LLM call has a narrow, well-defined task."}}
-
-{{phase 2 "When to Chain vs Single Prompt" "3 min"}}
-
-{{table "Chain vs Single Prompt" (rows
-  (row "Factor"             "Single Prompt"                    "Prompt Chain")
-  (row "Task complexity"    "Simple, well-defined"              "Multi-step, requires reasoning")
-  (row "Output quality"     "Good for short tasks"              "Better for complex tasks")
-  (row "Latency"            "1 round trip"                      "N round trips (slower)")
-  (row "Cost"               "1 API call"                        "N API calls (more expensive)")
-  (row "Debuggability"      "Hard (one black box)"              "Easy (inspect each step)")
-  (row "Error handling"     "All or nothing"                    "Retry individual steps")
+{{table "Prompt Chaining vs Other Patterns" (rows
+  (row "Pattern"          "Steps"       "Control Flow"              "When to Use"                           "Cost")
+  (row "Single prompt"    "1"           "One shot"                  "Simple tasks, clear instructions"      "Lowest")
+  (row "Prompt chaining"  "2-6"         "Sequential, predefined"    "Multi-step with known structure"       "Medium")
+  (row "Parallel chains"  "2-6"         "Parallel then merge"       "Independent subtasks"                  "Medium")
+  (row "Agent loop"       "3-20+"       "Dynamic, LLM decides"      "Unpredictable steps, tool use"         "Highest")
 )}}
 
-{{compare "Execution Strategy" (options
-  (best "Sequential chain" "Steps run one after another. Output of step N is input to step N+1. Simple, easy to debug. Use for most cases.")
-  (alt "Parallel chain" "Independent steps run concurrently, results merged. Example: analyze sentiment AND extract entities in parallel, then combine. Faster but harder to implement.")
-  (nofit "Single monolithic prompt" "Asking the LLM to do everything in one shot. Works for simple tasks but quality degrades for complex multi-step reasoning.")
+{{diagram "Prompt Chain Pipeline" `
+  Input Document
+       |
+       v
+  +-------------+     +-------------+     +-------------+     +-------------+
+  |  Step 1:    |     |  Step 2:    |     |  Step 3:    |     |  Step 4:    |
+  |  EXTRACT    |---->|  CLASSIFY   |---->|  GENERATE   |---->|  VALIDATE   |
+  |  key facts  |     |  category   |     |  response   |     |  quality    |
+  +------+------+     +------+------+     +------+------+     +------+------+
+         |                   |                   |                   |
+         v                   v                   v                   v
+  "key: value ..."     "category: X"       "Dear user..."      "PASS / FAIL"
+                                                                     |
+                                                              +------+------+
+                                                              | FAIL        | PASS
+                                                              v             v
+                                                         Retry Step 3   Return to
+                                                         (max 2x)       User
+`}}
+
+{{key "Prompt chaining is the right pattern when the task has a predictable structure with 2-6 well-defined steps. Each step should have a single responsibility: extract, classify, generate, or validate. If you cannot predict the steps ahead of time, use an agent instead."}}
+
+{{phase 2 "Core Chaining Patterns" "8 min"}}
+
+{{say "There are four foundational chaining patterns. Most production LLM pipelines are combinations of these."}}
+
+{{table "Chaining Pattern Types" (rows
+  (row "Pattern"           "Structure"                     "Example"                                   "Key Benefit")
+  (row "Sequential"        "A -> B -> C -> D"              "Extract -> Classify -> Generate"            "Each step focused and debuggable")
+  (row "Parallel + Merge"  "(A, B, C) -> Merge"            "Summarize 3 docs in parallel, merge"       "Lower latency for independent tasks")
+  (row "Conditional"       "A -> if X then B else C"       "Classify -> route to handler"               "Different paths for different inputs")
+  (row "Gate (quality)"    "A -> Check -> retry or next"   "Generate -> Validate -> retry if bad"       "Quality control between steps")
 )}}
 
-{{phase 3 "Implementation" "5 min"}}
+{{phase 3 "Chaining Framework Implementation" "10 min"}}
 
-{{code "python" `from anthropic import Anthropic
+{{say "Here is a reusable chaining framework you can use in production. It handles sequential execution, output parsing, validation gates, retries, and per-step model selection."}}
 
-client = Anthropic()
+{{code "python" `from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass
+import openai
+import json
+import time
 
-def llm_call(prompt: str, system: str = "") -> str:
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=2048,
-        system=system,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response.content[0].text
+@dataclass
+class StepResult:
+    step_name: str
+    output: str
+    tokens_used: int
+    latency_ms: float
+    success: bool
+    error: Optional[str] = None
+
+@dataclass
+class ChainResult:
+    final_output: str
+    steps: List[StepResult]
+    total_tokens: int
+    total_latency_ms: float
 
 
-def chain_summarize(document: str) -> dict:
-    """4-step chain: extract -> categorize -> summarize -> format."""
+class LLMChain:
+    """Sequential prompt chaining framework."""
 
-    # Step 1: Extract key facts
-    facts = llm_call(
-        prompt="Extract the 10-15 most important facts from this document. "
-               "Return as a numbered list.\n\n" + document,
-        system="You are a fact extraction expert. Only extract stated facts."
-    )
-    print("Step 1 done: extracted facts")
+    def __init__(self, model: str = "gpt-4o"):
+        self.client = openai.OpenAI()
+        self.model = model
+        self.steps: List[dict] = []
 
-    # Step 2: Categorize by topic
-    categories = llm_call(
-        prompt="Group these facts into 3-5 topic categories. "
-               "Return as category headers with facts listed under each.\n\n" + facts,
-        system="You are an information organizer."
-    )
-    print("Step 2 done: categorized")
+    def add_step(
+        self,
+        name: str,
+        system_prompt: str,
+        user_prompt_template: str,
+        output_parser: Callable = None,
+        validator: Callable = None,
+        max_retries: int = 1,
+        model_override: str = None,
+    ):
+        """Add a step to the chain."""
+        self.steps.append({
+            "name": name,
+            "system_prompt": system_prompt,
+            "user_prompt_template": user_prompt_template,
+            "output_parser": output_parser or (lambda x: x),
+            "validator": validator,
+            "max_retries": max_retries,
+            "model": model_override or self.model,
+        })
+        return self  # Enable method chaining
 
-    # Step 3: Generate summary
-    summary = llm_call(
-        prompt="Write a 200-word executive summary based on these categorized facts. "
-               "Be concise and actionable.\n\n" + categories,
-        system="You are a business writer. Write clear, concise summaries."
-    )
-    print("Step 3 done: summary written")
+    def _call_llm(
+        self, system_prompt: str, user_prompt: str, model: str
+    ) -> dict:
+        """Make a single LLM call."""
+        start = time.time()
+        response = self.client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=2000,
+        )
+        latency_ms = (time.time() - start) * 1000
 
-    # Step 4: Format as structured JSON
-    structured = llm_call(
-        prompt="Convert this summary into JSON with fields: "
-               "title, executive_summary, key_points (array), "
-               "action_items (array).\n\n" + summary,
-        system="Return valid JSON only. No markdown, no explanation."
-    )
-    print("Step 4 done: formatted")
+        return {
+            "content": response.choices[0].message.content,
+            "tokens": response.usage.total_tokens,
+            "latency_ms": latency_ms,
+        }
 
-    import json
-    return json.loads(structured)
-`}}
+    def run(self, initial_input: str) -> ChainResult:
+        """Execute the chain sequentially."""
+        current_input = initial_input
+        all_steps = []
+        total_tokens = 0
+        total_latency = 0.0
 
-{{phase 4 "Gate Pattern: Quality Checks Between Steps" "5 min"}}
+        # Context dict holds all step outputs for templating
+        context = {"input": initial_input}
 
-{{say "The gate pattern adds a validation step between chain steps. If the output does not meet quality criteria, retry or abort. This prevents error propagation through the chain."}}
+        for step in self.steps:
+            step_result = self._run_step(
+                step, current_input, context
+            )
+            all_steps.append(step_result)
+            total_tokens += step_result.tokens_used
+            total_latency += step_result.latency_ms
 
-{{diagram "Chain with Gates" `
-  Step 1: Extract   --> Gate: Has 10+ facts? --NO--> Retry Step 1
-       |                        |
-      YES                      YES
-       |                        |
-       v                        v
-  Step 2: Classify  --> Gate: All facts categorized? --NO--> Retry Step 2
-       |                        |
-      YES                      YES
-       |                        v
-  Step 3: Summarize --> Gate: Under 300 words? --NO--> Retry with stricter prompt
-       |
-      YES
-       v
-  Final Output
-`}}
+            if not step_result.success:
+                return ChainResult(
+                    final_output=(
+                        "Chain failed at: {}. Error: {}".format(
+                            step["name"], step_result.error
+                        )
+                    ),
+                    steps=all_steps,
+                    total_tokens=total_tokens,
+                    total_latency_ms=total_latency,
+                )
 
-{{code "python" `def gated_chain_step(prompt, system, validator, max_retries=3):
-    """Run an LLM step with validation gate."""
-    for attempt in range(max_retries):
-        result = llm_call(prompt, system)
+            current_input = step_result.output
+            context[step["name"]] = current_input
 
-        is_valid, error = validator(result)
-        if is_valid:
-            return result
-
-        # Retry with feedback
-        prompt = (
-            "Your previous output had this issue: {}\n"
-            "Please fix it and try again.\n\n"
-            "Previous output:\n{}".format(error, result)
+        return ChainResult(
+            final_output=current_input,
+            steps=all_steps,
+            total_tokens=total_tokens,
+            total_latency_ms=total_latency,
         )
 
-    raise ValueError("Step failed after {} retries".format(max_retries))
+    def _run_step(
+        self, step: dict, current_input: str, context: dict
+    ) -> StepResult:
+        """Run a single step with retry logic."""
+        for attempt in range(step["max_retries"] + 1):
+            try:
+                user_prompt = step["user_prompt_template"].format(
+                    input=current_input, **context
+                )
+
+                result = self._call_llm(
+                    step["system_prompt"],
+                    user_prompt,
+                    step["model"],
+                )
+
+                parsed = step["output_parser"](result["content"])
+
+                if step["validator"]:
+                    is_valid, error = step["validator"](parsed)
+                    if not is_valid:
+                        if attempt < step["max_retries"]:
+                            continue
+                        return StepResult(
+                            step_name=step["name"],
+                            output=parsed,
+                            tokens_used=result["tokens"],
+                            latency_ms=result["latency_ms"],
+                            success=False,
+                            error="Validation: {}".format(error),
+                        )
+
+                return StepResult(
+                    step_name=step["name"],
+                    output=parsed,
+                    tokens_used=result["tokens"],
+                    latency_ms=result["latency_ms"],
+                    success=True,
+                )
+
+            except Exception as e:
+                if attempt < step["max_retries"]:
+                    continue
+                return StepResult(
+                    step_name=step["name"],
+                    output="",
+                    tokens_used=0,
+                    latency_ms=0,
+                    success=False,
+                    error=str(e),
+                )
+`}}
+
+{{phase 4 "Example: Customer Email Processing" "8 min"}}
+
+{{say "Here is a complete, practical example: processing incoming customer emails. The chain extracts key information, classifies urgency, generates a response, and validates quality before sending."}}
+
+{{code "python" `import json
+
+def parse_json_output(text: str) -> str:
+    """Extract JSON from LLM output, stripping markdown fences."""
+    fence = chr(96) * 3  # triple backtick
+    if fence in text:
+        text = text.split(fence)[1]
+        if text.startswith("json"):
+            text = text[4:]
+    return text.strip()
 
 
-# Example validator
-def validate_json(output):
-    import json
+def validate_response(text: str) -> tuple:
+    """Validate generated email response."""
+    if len(text) < 50:
+        return False, "Response too short"
+    if len(text) > 2000:
+        return False, "Response too long"
+    placeholders = ["[NAME]", "[PLACEHOLDER]", "TODO", "INSERT"]
+    for p in placeholders:
+        if p in text.upper():
+            return False, "Contains placeholder: {}".format(p)
+    return True, None
+
+
+# Build the chain
+chain = LLMChain(model="gpt-4o-mini")
+
+# Step 1: Extract (cheap model, simple task)
+chain.add_step(
+    name="extract",
+    system_prompt=(
+        "Extract key information from customer emails. "
+        "Return valid JSON with fields: customer_name, "
+        "issue_type, product, sentiment, "
+        "key_details (list of strings)."
+    ),
+    user_prompt_template="Email:\n{input}",
+    output_parser=parse_json_output,
+)
+
+# Step 2: Classify (cheap model, simple task)
+chain.add_step(
+    name="classify",
+    system_prompt=(
+        "Given extracted email info, classify: "
+        "urgency (low/medium/high/critical), "
+        "department (billing/technical/sales/general), "
+        "requires_human (true/false). Return valid JSON."
+    ),
+    user_prompt_template=(
+        "Extracted info:\n{extract}\n\n"
+        "Original email:\n{input}"
+    ),
+    output_parser=parse_json_output,
+)
+
+# Step 3: Generate (expensive model for quality)
+chain.add_step(
+    name="generate",
+    system_prompt=(
+        "Write a professional, empathetic customer support "
+        "email response. Address the customer by name. "
+        "Be specific about next steps. Under 200 words."
+    ),
+    user_prompt_template=(
+        "Customer info:\n{extract}\n\n"
+        "Classification:\n{classify}\n\n"
+        "Write a response email."
+    ),
+    model_override="gpt-4o",  # Better model for writing
+    max_retries=2,
+    validator=validate_response,
+)
+
+# Run the chain
+email = """
+Hi, I'm Sarah Chen. I purchased your Pro plan last week
+but I'm being charged for Enterprise pricing ($299/mo instead
+of $99/mo). This is the third time I've reached out about
+billing issues. Please fix this ASAP or I'll need to cancel.
+
+Order #ORD-2024-5567
+"""
+
+result = chain.run(email)
+
+print("Final Response:")
+print(result.final_output)
+print("\nPipeline Stats:")
+for step in result.steps:
+    print("  {} - tokens: {}, latency: {:.0f}ms, ok: {}".format(
+        step.step_name, step.tokens_used,
+        step.latency_ms, step.success
+    ))
+print("Total tokens:", result.total_tokens)
+print("Total latency: {:.0f}ms".format(result.total_latency_ms))
+`}}
+
+{{phase 5 "The Gate Pattern: Quality Control" "5 min"}}
+
+{{say "The gate pattern adds a validation step between chain stages. An LLM or rule-based checker evaluates the intermediate output. If it fails, the step retries with feedback about what went wrong. This is how you get reliable outputs from unreliable models."}}
+
+{{diagram "Gate Pattern Flow" `
+  Step N Output
+       |
+       v
+  +-----------+
+  |   GATE    |
+  | Validator |
+  +-----+-----+
+        |
+   +----+----+
+   |         |
+   v         v
+  PASS     FAIL
+   |         |
+   v         v
+  Step     Retry Step N
+  N+1      with error feedback
+           (max 2-3 retries)
+           |
+           v
+         FAIL -> abort chain
+         or use fallback
+`}}
+
+{{code "python" `def llm_judge_gate(
+    output: str,
+    criteria: str,
+    model: str = "gpt-4o-mini"
+) -> tuple:
+    """Use an LLM as a quality gate between chain steps."""
+    client = openai.OpenAI()
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a quality checker. Evaluate the "
+                    "output against the criteria. Respond with "
+                    "JSON only: "
+                    '{"pass": true/false, "reason": "..."}'
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Output to evaluate:\n{output}\n\n"
+                    "Criteria:\n{criteria}"
+                ).format(output=output, criteria=criteria),
+            },
+        ],
+        temperature=0,
+        max_tokens=200,
+    )
+
+    text = response.choices[0].message.content
     try:
-        json.loads(output)
-        return True, None
-    except json.JSONDecodeError as e:
-        return False, "Invalid JSON: {}".format(str(e))
+        result = json.loads(parse_json_output(text))
+        if result.get("pass"):
+            return True, None
+        return False, result.get("reason", "Quality check failed")
+    except json.JSONDecodeError:
+        return False, "Could not parse quality check response"
 
-# Usage
-result = gated_chain_step(
-    prompt="Convert to JSON: ...",
-    system="Return valid JSON only.",
-    validator=validate_json,
-    max_retries=3
+
+# Usage: add LLM-as-judge gate as validator
+chain.add_step(
+    name="generate_report",
+    system_prompt="Write an analysis report based on the data.",
+    user_prompt_template="Data:\n{input}",
+    validator=lambda output: llm_judge_gate(
+        output,
+        criteria=(
+            "1. Contains specific numbers from the data. "
+            "2. Has clear recommendations. "
+            "3. Professional tone. "
+            "4. No placeholder text."
+        )
+    ),
+    max_retries=2,
 )
 `}}
 
-{{phase 5 "Common Chain Patterns" "3 min"}}
+{{key "The gate pattern is the most important reliability technique for prompt chains. Without gates, errors compound: a bad extraction leads to a bad classification which leads to a bad response. Gates catch errors early and either retry or abort, preventing garbage from propagating through the chain."}}
 
-{{table "Chain Patterns" (rows
-  (row "Pattern"              "Steps"                                    "Use Case")
-  (row "Map-Reduce"           "Map: process each chunk. Reduce: combine." "Summarize long documents beyond context window")
-  (row "Extract-Transform"    "Extract structured data, then transform"  "Parse invoices, contracts, forms")
-  (row "Generate-Critique"    "Generate draft, critique it, improve"     "Writing, code generation")
-  (row "Classify-Route"       "Classify intent, route to specialized chain" "Customer support, multi-domain QA")
-  (row "Translate-Verify"     "Translate text, back-translate to verify" "High-quality translation")
+{{phase 6 "Parallel Chains" "5 min"}}
+
+{{say "When subtasks are independent, run them in parallel to reduce latency. Then merge the results in a final step."}}
+
+{{code "python" `import asyncio
+import openai
+from typing import List
+
+async def parallel_chain(
+    inputs: List[str],
+    system_prompt: str,
+    merge_prompt: str,
+    model: str = "gpt-4o-mini"
+) -> str:
+    """Run multiple prompts in parallel, then merge."""
+    client = openai.AsyncOpenAI()
+
+    async def run_one(input_text: str) -> str:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": input_text},
+            ],
+            temperature=0.1,
+            max_tokens=1000,
+        )
+        return response.choices[0].message.content
+
+    # Run all subtasks in parallel
+    results = await asyncio.gather(
+        *[run_one(inp) for inp in inputs]
+    )
+
+    # Merge step: combine parallel results
+    merge_input = "\n\n---\n\n".join(
+        "Section {}:\n{}".format(i + 1, r)
+        for i, r in enumerate(results)
+    )
+
+    merge_response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": merge_prompt},
+            {"role": "user", "content": merge_input},
+        ],
+        temperature=0.1,
+        max_tokens=2000,
+    )
+    return merge_response.choices[0].message.content
+
+
+# Example: summarize 3 documents in parallel, then merge
+# combined = asyncio.run(parallel_chain(
+#     inputs=[doc1, doc2, doc3],
+#     system_prompt="Summarize in 3 bullet points.",
+#     merge_prompt="Combine into a single coherent report.",
+# ))
+`}}
+
+{{table "Sequential vs Parallel Execution" (rows
+  (row "Approach"      "Latency (3 steps)"            "Total Tokens"    "When to Use")
+  (row "Sequential"    "Step1 + Step2 + Step3"         "Same"            "Steps depend on each other")
+  (row "Parallel"      "max(Step1, Step2, Step3)"      "Same"            "Steps are independent")
+  (row "Mixed"         "Parallel group + Sequential"   "Same"            "Some independent, some dependent")
 )}}
 
-{{phase 6 "Interview Q&A" "3 min"}}
+{{phase 7 "When to Chain vs Single Prompt vs Agent" "5 min"}}
+
+{{table "Decision Guide" (rows
+  (row "Criteria"                    "Single Prompt"             "Prompt Chain"               "Agent")
+  (row "Steps predictable?"          "Yes (1 step)"              "Yes (2-6 steps)"            "No")
+  (row "Needs tools/APIs?"           "No"                        "No"                         "Yes")
+  (row "Output format critical?"     "Medium"                    "High (validate each step)"  "Low")
+  (row "Latency budget"              "< 2 seconds"               "2-10 seconds"               "10-60 seconds")
+  (row "Debugging ease"              "Hard (one black box)"      "Easy (step by step)"        "Hardest")
+  (row "Cost per request"            "$0.01-0.05"                "$0.03-0.20"                 "$0.10-1.00")
+  (row "Quality for complex tasks"   "Lower"                     "Higher"                     "Highest")
+)}}
+
+{{compare "Pattern Selection" (options
+  (best "Prompt Chaining" "Best default for production LLM apps. Predictable cost, debuggable, each step testable independently. Use for any multi-step task with known structure: content generation, data processing, email handling.")
+  (alt "Single Prompt" "Use for simple tasks where one prompt gives good-enough results. Classification, summarization, simple Q&A. Lower cost and latency. Start here and add chaining only when quality is insufficient.")
+  (alt "Agent" "Use when you genuinely cannot predict the steps. Research tasks, open-ended tool use. Higher cost and latency but handles novel situations the chain cannot anticipate.")
+  (nofit "Fine-tuned Model" "Avoid if your task changes frequently or needs multiple steps. Fine-tuning is for static, high-volume, single-step tasks like classification at massive scale.")
+)}}
+
+{{phase 8 "Cost-Quality Tradeoff" "5 min"}}
+
+{{say "Every additional chain step adds cost and latency but improves quality. Here is how to think about the tradeoff and optimize."}}
+
+{{table "Cost-Quality Analysis (per request)" (rows
+  (row "Pipeline"                                  "Steps"  "Model"       "Tokens"   "Cost"     "Quality")
+  (row "Single prompt"                             "1"      "GPT-4o"      "~2K"      "$0.01"    "Good for simple tasks")
+  (row "Extract + Generate"                        "2"      "4o-mini"     "~3K"      "$0.005"   "Better structure")
+  (row "Extract + Classify + Generate"             "3"      "4o-mini"     "~4.5K"    "$0.007"   "Good quality")
+  (row "Extract + Classify + Generate + Validate"  "4"      "Mixed"       "~6K"      "$0.02"    "High quality")
+  (row "Full chain with retries"                   "4-8"    "Mixed"       "~10K"     "$0.04"    "Highest quality")
+)}}
+
+{{thought "The key optimization: use cheaper, faster models (GPT-4o-mini, Claude Haiku) for extraction and classification steps, then use the expensive model (GPT-4o, Claude Sonnet) only for the final generation step. Classification rarely needs the most powerful model, but writing a nuanced customer response does. This can cut costs by 50-70 percent while maintaining output quality."}}
+
+{{code "python" `# Cost-optimized chain: cheap models for simple steps,
+# expensive model only where quality matters most
+
+chain = LLMChain(model="gpt-4o-mini")  # Default: cheap
+
+chain.add_step(
+    name="extract",
+    system_prompt="Extract key facts as JSON.",
+    user_prompt_template="{input}",
+    # Uses default gpt-4o-mini (~$0.001 per call)
+)
+
+chain.add_step(
+    name="classify",
+    system_prompt="Classify urgency and category as JSON.",
+    user_prompt_template="Facts: {extract}",
+    # Uses default gpt-4o-mini (~$0.001 per call)
+)
+
+chain.add_step(
+    name="generate",
+    system_prompt="Write a professional response.",
+    user_prompt_template=(
+        "Facts: {extract}\nClassification: {classify}"
+    ),
+    model_override="gpt-4o",  # Expensive model for quality
+    # Uses gpt-4o (~$0.01 per call)
+)
+
+chain.add_step(
+    name="validate",
+    system_prompt=(
+        "Check response quality. Return JSON with "
+        "pass (boolean) and reason (string)."
+    ),
+    user_prompt_template="Response to check:\n{generate}",
+    # Uses default gpt-4o-mini (~$0.001 per call)
+)
+
+# Total: ~$0.013 per request vs $0.04 for all-GPT-4o
+`}}
+
+{{phase 9 "Error Handling & Common Patterns" "5 min"}}
+
+{{table "Chain Failure Modes" (rows
+  (row "Failure"                  "Cause"                                 "Impact"                             "Fix")
+  (row "Bad output format"        "LLM ignores format instructions"       "Next step cannot parse input"       "Output parser + retry with format reminder")
+  (row "Error propagation"        "Wrong extraction feeds wrong classify" "All downstream steps wrong"         "Gate validators between steps")
+  (row "Context overflow"         "Previous step output too large"        "Next step prompt exceeds limit"     "Summarize or truncate between steps")
+  (row "Inconsistency"           "Steps contradict each other"           "Final output contradicts itself"    "Pass all previous outputs as context")
+  (row "Timeout"                 "One step takes too long"                "User waits forever"                 "Per-step timeout, fail fast")
+  (row "Rate limit"              "Too many concurrent chains"             "API returns 429"                    "Retry with exponential backoff")
+)}}
+
+{{avoid "Do not pass raw LLM output from one step directly into the next without parsing. LLMs often add conversational fluff around structured output. Always use an output parser that extracts the structured data (JSON, key fields) before feeding it to the next step. This prevents prompt pollution where one step's chatty text confuses the next step."}}
+
+{{table "Common Chain Patterns" (rows
+  (row "Pattern"              "Steps"                                      "Use Case")
+  (row "Map-Reduce"           "Map: process each chunk. Reduce: combine."  "Summarize docs beyond context window")
+  (row "Extract-Transform"    "Extract structured data, then transform"    "Parse invoices, contracts, forms")
+  (row "Generate-Critique"    "Generate draft, critique it, improve"       "Writing, code generation")
+  (row "Classify-Route"       "Classify intent, route to specialized chain" "Customer support, multi-domain QA")
+  (row "Translate-Verify"     "Translate text, back-translate to verify"   "High-quality translation")
+)}}
+
+{{phase 10 "Interview Q&A" "5 min"}}
 
 {{qa
-  "When would you use prompt chaining vs a single long prompt?"
-  "Chain when: 1) task has distinct steps (extract then summarize), 2) you need to validate intermediate results, 3) different steps need different model parameters (temperature). Single prompt when: task is simple, latency matters, and the whole task fits naturally in one instruction."
-  "How do you handle errors in the middle of a chain?"
-  "Three strategies: 1) Retry the failed step with error feedback (gate pattern). 2) Fall back to a simpler approach for that step. 3) Return partial results with an error indicator so the user can decide. Never silently skip a failed step."
+  "How do you debug a failing prompt chain?"
+  "Log every step's input, output, tokens, and latency. When the chain produces a bad result, trace backwards from the final output to find which step first went wrong. Fix that step's prompt, parser, or validator. This is why chaining is easier to debug than a single large prompt: you can isolate the failure to one specific step."
+  "What is the latency impact of prompt chaining?"
+  "Each step adds 500ms-2s of LLM call latency. A 4-step chain takes 2-8 seconds end-to-end. Mitigate with: 1) Use streaming for the final step so users see partial results. 2) Parallelize independent steps. 3) Use faster models for extraction and classification. 4) Cache repeated inputs at the step level."
 }}
 
+{{qa
+  "How do you handle partial failures in a chain?"
+  "Three strategies: 1) Retry the failed step with a modified prompt that includes error feedback. 2) Use a fallback model if the primary model fails. 3) Return a partial result with a warning that some steps failed. Never silently return a bad result. Always surface which step failed and why."
+  "Can you chain prompts across different models?"
+  "Yes, and you should. Use cheap models like GPT-4o-mini or Claude Haiku for extraction and classification, then an expensive model like GPT-4o or Claude Sonnet for the final generation step. This cuts cost by 50-70 percent while maintaining quality where it matters most."
+}}
+
+{{followup "How would you implement prompt chaining with streaming?" "Stream only the final step. Steps 1 through N-1 run normally since you need their complete output before the next step can begin. For the last step, use the streaming API so the user sees tokens appear as they are generated. This gives the perception of lower latency even though total pipeline time is the same. In a web app, show a progress indicator during the earlier steps then switch to streaming text for the final generation."}}
+
 {{checklist
-  "Break complex tasks into focused single-purpose steps"
-  "Each step has its own system prompt optimized for that task"
-  "Gate pattern: validate output between steps, retry on failure"
-  "Pass only relevant output forward (not the entire conversation)"
-  "Use smaller/cheaper models for simple steps (classification, formatting)"
-  "Log each step's input/output for debugging"
-  "Set max retries per step (typically 2-3)"
+  "Decompose complex tasks into 2-6 focused steps"
+  "Each step has one responsibility: extract, classify, generate, or validate"
+  "Use output parsers between steps to extract structured data"
+  "Add gate validators to catch errors before they propagate"
+  "Use cheap models for extraction and classification steps"
+  "Reserve expensive models for the final generation step"
+  "Log every step input, output, tokens, and latency"
+  "Set per-step timeouts and max retries (2-3)"
+  "Parallelize independent steps to reduce latency"
+  "Stream the final step for better perceived performance"
 }}

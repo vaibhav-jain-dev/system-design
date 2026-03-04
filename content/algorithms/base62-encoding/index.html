@@ -27,29 +27,18 @@
 {{say "The encoding algorithm is identical to converting a decimal number to any other base. Repeatedly divide by 62 and map each remainder to a character."}}
 
 {{diagram "Base62 Encoding Process" `
-  Input: 123456789 (integer)
+  Input: 123456789
 
-  Step 1:  123456789 % 62 = 17  -> ALPHABET[17] = r
-           123456789 / 62 = 1991239
+  123456789 % 62 = 17 -> r     123456789 / 62 = 1991239
+  1991239   % 62 = 25 -> z     1991239   / 62 = 32116
+  32116     % 62 = 4  -> e     32116     / 62 = 517
+  517       % 62 = 21 -> v     517       / 62 = 8
+  8         % 62 = 8  -> i     8         / 62 = 0 (STOP)
 
-  Step 2:  1991239 % 62 = 25    -> ALPHABET[25] = z
-           1991239 / 62 = 32116
+  Read remainders bottom-to-top: "ivezr"
 
-  Step 3:  32116 % 62 = 4       -> ALPHABET[4]  = e
-           32116 / 62 = 517
-
-  Step 4:  517 % 62 = 21        -> ALPHABET[21] = v
-           517 / 62 = 8
-
-  Step 5:  8 % 62 = 8           -> ALPHABET[8]  = i
-           8 / 62 = 0           -> STOP
-
-  Reverse remainders: r z e v i  -->  "ivezr"
-  (read bottom-to-top to get most-significant digit first)
-
-  Decoding reverses the process:
-  "ivezr" -> 8*62^4 + 21*62^3 + 4*62^2 + 25*62 + 17
-           = 123456789
+  Decode: i=8, v=21, e=4, z=25, r=17
+  8*62^4 + 21*62^3 + 4*62^2 + 25*62 + 17 = 123456789
 `}}
 
 {{table "Time and Space Complexity" (rows
@@ -65,20 +54,11 @@
 
 {{code "python" `import string
 
-# Base62 alphabet: a-zA-Z0-9
 ALPHABET = string.ascii_lowercase + string.ascii_uppercase + string.digits
 BASE = len(ALPHABET)  # 62
 
 def base62_encode(num: int, min_length: int = 7) -> str:
-    """Encode a non-negative integer to a Base62 string.
-
-    Args:
-        num: Non-negative integer to encode.
-        min_length: Minimum output length (left-padded).
-
-    Returns:
-        Base62 string of at least min_length characters.
-    """
+    """Encode a non-negative integer to a Base62 string."""
     if num < 0:
         raise ValueError("Cannot encode negative numbers")
     if num == 0:
@@ -89,14 +69,11 @@ def base62_encode(num: int, min_length: int = 7) -> str:
         chars.append(ALPHABET[num % BASE])
         num //= BASE
 
-    # Reverse: we built it least-significant-first
     result = "".join(reversed(chars))
-
     # Left-pad with 'a' (index 0) to reach min_length
     if len(result) < min_length:
         result = ALPHABET[0] * (min_length - len(result)) + result
     return result
-
 
 def base62_decode(encoded: str) -> int:
     """Decode a Base62 string back to an integer."""
@@ -105,39 +82,29 @@ def base62_decode(encoded: str) -> int:
         num = num * BASE + ALPHABET.index(char)
     return num
 
-
 # --- Verification ---
 original_id = 123456789
 encoded = base62_encode(original_id)
 decoded = base62_decode(encoded)
 assert decoded == original_id
-
-max_7_char = BASE ** 7 - 1  # 3,521,614,606,207
-print(f"Max 7-char value: {max_7_char:,}")
+print(f"Max 7-char value: {BASE ** 7 - 1:,}")  # 3,521,614,606,207
 `}}
 
 {{phase 4 "Go Implementation" "5 min"}}
 
 {{code "go" `package base62
 
-import (
-    "errors"
-    "strings"
-)
+import ("errors"; "strings")
 
 const alphabet = "abcdefghijklmnopqrstuvwxyz" +
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ" +
-    "0123456789"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 const base = 62
 
-// Encode converts a non-negative integer to a Base62 string
-// with at least minLen characters (left-padded with 'a').
 func Encode(num uint64, minLen int) string {
     if num == 0 {
         return strings.Repeat(string(alphabet[0]), minLen)
     }
-
-    var buf [12]byte // 62^12 > uint64 max
+    var buf [12]byte
     i := len(buf)
     for num > 0 {
         i--
@@ -145,14 +112,12 @@ func Encode(num uint64, minLen int) string {
         num /= base
     }
     result := string(buf[i:])
-
     if pad := minLen - len(result); pad > 0 {
         result = strings.Repeat(string(alphabet[0]), pad) + result
     }
     return result
 }
 
-// Decode converts a Base62 string back to an integer.
 func Decode(encoded string) (uint64, error) {
     var num uint64
     for _, ch := range encoded {

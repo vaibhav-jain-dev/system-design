@@ -93,79 +93,53 @@
 
 {{code "python" `import hashlib
 import bisect
-from collections import defaultdict
-
 
 class ConsistentHashRing:
-    """Consistent hash ring with configurable virtual nodes.
-
-    Args:
-        nodes: Initial physical node names.
-        num_vnodes: Virtual nodes per physical node (default 150).
-    """
+    """Consistent hash ring with virtual nodes."""
 
     def __init__(self, nodes=None, num_vnodes=150):
         self.num_vnodes = num_vnodes
-        self.ring = {}           # hash_value -> physical node name
-        self.sorted_keys = []    # sorted hash positions for binary search
+        self.ring = {}           # hash_value -> node name
+        self.sorted_keys = []    # sorted positions for binary search
         self.nodes = set()
-
-        if nodes:
-            for node in nodes:
-                self.add_node(node)
+        for node in (nodes or []):
+            self.add_node(node)
 
     def _hash(self, key: str) -> int:
-        """Hash a string to a 32-bit integer on the ring."""
-        digest = hashlib.md5(key.encode()).hexdigest()
-        return int(digest[:8], 16)
+        return int(hashlib.md5(key.encode()).hexdigest()[:8], 16)
 
     def add_node(self, node: str):
-        """Add a physical node with all its virtual nodes."""
         self.nodes.add(node)
         for i in range(self.num_vnodes):
-            vnode_key = "{}:vn{}".format(node, i)
-            h = self._hash(vnode_key)
+            h = self._hash("{}:vn{}".format(node, i))
             self.ring[h] = node
             bisect.insort(self.sorted_keys, h)
 
     def remove_node(self, node: str):
-        """Remove a node and all its virtual nodes from the ring."""
         self.nodes.discard(node)
         for i in range(self.num_vnodes):
-            vnode_key = "{}:vn{}".format(node, i)
-            h = self._hash(vnode_key)
+            h = self._hash("{}:vn{}".format(node, i))
             if h in self.ring:
                 del self.ring[h]
                 self.sorted_keys.remove(h)
 
     def get_node(self, key: str) -> str:
-        """Find which node owns the given key.
-
-        Walks clockwise from the key's hash position.
-        Time: O(log(N * num_vnodes)) via binary search.
-        """
+        """Find owning node. O(log(N * vnodes)) via binary search."""
         if not self.ring:
             return None
-
         h = self._hash(key)
         idx = bisect.bisect_right(self.sorted_keys, h)
-
-        # Wrap around to start of ring
         if idx == len(self.sorted_keys):
-            idx = 0
-
+            idx = 0  # wrap around
         return self.ring[self.sorted_keys[idx]]
 
     def get_replicas(self, key: str, count: int = 3) -> list:
-        """Get multiple nodes for replication (walk clockwise)."""
+        """Walk clockwise collecting distinct physical nodes."""
         if not self.ring:
             return []
-
         h = self._hash(key)
         idx = bisect.bisect_right(self.sorted_keys, h)
-        replicas = []
-        seen = set()
-
+        replicas, seen = [], set()
         for _ in range(len(self.sorted_keys)):
             if idx == len(self.sorted_keys):
                 idx = 0
@@ -176,30 +150,16 @@ class ConsistentHashRing:
                 if len(replicas) == count:
                     break
             idx += 1
-
         return replicas
-
-    def get_distribution(self) -> dict:
-        """Show how many virtual slots each physical node owns."""
-        counts = defaultdict(int)
-        for node in self.ring.values():
-            counts[node] += 1
-        return dict(counts)
-
 
 # --- Usage ---
 ring = ConsistentHashRing(["cache-1", "cache-2", "cache-3"])
+for key in ["user:1001", "user:1002", "session:abc"]:
+    print("{} -> {}  replicas: {}".format(
+        key, ring.get_node(key), ring.get_replicas(key, 2)))
 
-for key in ["user:1001", "user:1002", "session:abc", "post:999"]:
-    node = ring.get_node(key)
-    replicas = ring.get_replicas(key, count=2)
-    print("{} -> primary: {}, replicas: {}".format(key, node, replicas))
-
-# Add a node: only ~1/4 of keys move
-ring.add_node("cache-4")
-
-# Remove a node: only its keys move to next clockwise node
-ring.remove_node("cache-2")
+ring.add_node("cache-4")     # only ~1/4 of keys move
+ring.remove_node("cache-2")  # only its keys move clockwise
 `}}
 
 {{phase 5 "Rebalancing Analysis" "5 min"}}

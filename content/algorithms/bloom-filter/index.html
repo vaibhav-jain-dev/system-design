@@ -85,99 +85,58 @@
 
 {{code "python" `import math
 import hashlib
-from typing import List
-
 
 class BloomFilter:
-    """Bloom filter with configurable false positive rate.
-
-    Args:
-        expected_elements: Expected number of elements to insert.
-        fp_rate: Desired false positive rate (default 1%).
-    """
+    """Bloom filter with configurable false positive rate."""
 
     def __init__(self, expected_elements: int, fp_rate: float = 0.01):
         self.n = expected_elements
         self.p = fp_rate
-
         # Optimal bit array size: m = -(n * ln(p)) / (ln(2))^2
         self.m = int(-expected_elements * math.log(fp_rate) / (math.log(2) ** 2))
-
-        # Optimal hash function count: k = (m/n) * ln(2)
+        # Optimal hash count: k = (m/n) * ln(2)
         self.k = max(1, int((self.m / expected_elements) * math.log(2)))
-
-        # Bit array as bytearray (8 bits per byte)
         self.bits = bytearray((self.m + 7) // 8)
         self.count = 0
 
     def _get_bit(self, index: int) -> bool:
-        byte_idx = index // 8
-        bit_idx = index % 8
-        return bool(self.bits[byte_idx] & (1 << bit_idx))
+        return bool(self.bits[index // 8] & (1 << (index % 8)))
 
     def _set_bit(self, index: int):
-        byte_idx = index // 8
-        bit_idx = index % 8
-        self.bits[byte_idx] |= (1 << bit_idx)
+        self.bits[index // 8] |= (1 << (index % 8))
 
-    def _hashes(self, item: str) -> List[int]:
-        """Generate k hash positions using double hashing.
-
-        Uses two MD5 hashes to simulate k independent hashes:
-            h(i) = (h1 + i * h2) % m
-        This is proven equivalent to k independent hashes.
-        """
-        h1_bytes = hashlib.md5(item.encode()).digest()
-        h2_bytes = hashlib.md5((item + ":salt").encode()).digest()
-
-        h1 = int.from_bytes(h1_bytes[:8], "big")
-        h2 = int.from_bytes(h2_bytes[:8], "big")
-
+    def _hashes(self, item: str) -> list:
+        """Double hashing: h(i) = (h1 + i*h2) % m for k positions."""
+        h1 = int.from_bytes(hashlib.md5(item.encode()).digest()[:8], "big")
+        h2 = int.from_bytes(hashlib.md5((item + ":salt").encode()).digest()[:8], "big")
         return [(h1 + i * h2) % self.m for i in range(self.k)]
 
     def add(self, item: str):
-        """Insert an element into the filter. O(k) time."""
+        """Insert element. O(k) time."""
         for pos in self._hashes(item):
             self._set_bit(pos)
         self.count += 1
 
     def might_contain(self, item: str) -> bool:
-        """Check if element might be in the set. O(k) time.
-
-        Returns:
-            False -> element is DEFINITELY NOT in the set.
-            True  -> element is PROBABLY in the set
-                     (with false positive probability p).
-        """
+        """False = definitely absent. True = probably present."""
         return all(self._get_bit(pos) for pos in self._hashes(item))
 
     def estimated_fp_rate(self) -> float:
-        """Current estimated false positive rate."""
         return (1 - math.exp(-self.k * self.count / self.m)) ** self.k
 
-
-# --- Usage and verification ---
+# --- Usage ---
 bf = BloomFilter(expected_elements=1_000_000, fp_rate=0.01)
-print("Bit array: {:,} bits ({:.1f} MB)".format(bf.m, bf.m / 8 / 1e6))
-print("Hash functions: {}".format(bf.k))
+print("Bits: {:,} ({:.1f} MB), Hash fns: {}".format(bf.m, bf.m/8/1e6, bf.k))
 
-# Insert 100K items
 for i in range(100_000):
     bf.add("item:{}".format(i))
 
-# Test known members (should all return True)
 assert bf.might_contain("item:0") == True
 assert bf.might_contain("item:99999") == True
 
-# Test non-members: count false positives
-false_positives = 0
-test_count = 100_000
-for i in range(test_count):
-    if bf.might_contain("nonexistent:{}".format(i)):
-        false_positives += 1
-
-print("False positive rate: {:.3f}%".format(100 * false_positives / test_count))
-print("Expected FP rate: {:.3f}%".format(100 * bf.estimated_fp_rate()))
+false_pos = sum(1 for i in range(100_000) if bf.might_contain("missing:{}".format(i)))
+print("FP rate: {:.3f}% (expected: {:.3f}%)".format(
+    100 * false_pos / 100_000, 100 * bf.estimated_fp_rate()))
 `}}
 
 {{phase 5 "Use Cases in System Design" "5 min"}}
