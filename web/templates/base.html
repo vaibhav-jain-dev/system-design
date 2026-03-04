@@ -4,12 +4,21 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>System Design Prep</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%236366F1'/><text x='50' y='72' font-size='60' font-weight='bold' text-anchor='middle' fill='white'>SD</text></svg>">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/style.css">
     <script src="/static/js/htmx.min.js"></script>
     <script defer src="/static/js/alpine.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/go.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/nginx.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/yaml.min.js"></script>
 </head>
 <body>
     <div class="app">
@@ -49,18 +58,18 @@
         </main>
     </div>
 
-    <!-- Reading Progress Cache: remembers where you were -->
+    <!-- Reading Progress, Syntax Highlighting, Sidebar Auto-Collapse -->
     <script>
     (function() {
         const STORAGE_KEY = 'sd-prep-progress';
+        const detail = document.getElementById('detail');
 
-        // Load saved progress
+        // ── Progress persistence ──────────────────
         function loadProgress() {
             try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
             catch { return {}; }
         }
 
-        // Save progress
         function saveProgress(data) {
             const current = loadProgress();
             Object.assign(current, data);
@@ -68,66 +77,92 @@
             localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
         }
 
-        // Track current page
         function trackPage() {
             const path = window.location.pathname + window.location.search;
             saveProgress({ lastPage: path });
         }
 
-        // Track scroll position
+        // ── Scroll position per topic ─────────────
         let scrollTimeout;
-        const detail = document.getElementById('detail');
         if (detail) {
             detail.addEventListener('scroll', function() {
                 clearTimeout(scrollTimeout);
                 scrollTimeout = setTimeout(function() {
                     const path = window.location.pathname;
+                    if (path === '/') return;
                     const scrollData = loadProgress().scrollPositions || {};
                     scrollData[path] = detail.scrollTop;
                     saveProgress({ scrollPositions: scrollData });
-                }, 300);
+                }, 200);
             });
         }
 
-        // Restore scroll position after HTMX swap
+        function restoreScroll() {
+            const path = window.location.pathname;
+            const positions = loadProgress().scrollPositions || {};
+            if (positions[path] && detail) {
+                requestAnimationFrame(function() {
+                    detail.scrollTop = positions[path];
+                });
+            } else if (detail) {
+                detail.scrollTop = 0;
+            }
+        }
+
+        // ── Syntax highlighting ───────────────────
+        function highlightCode() {
+            if (typeof hljs === 'undefined') return;
+            document.querySelectorAll('.code-block code').forEach(function(block) {
+                if (block.dataset.highlighted) return;
+                var lang = block.closest('.code-block')?.getAttribute('data-lang');
+                if (lang) {
+                    // Normalize lang names
+                    var langMap = { 'golang': 'go', 'py': 'python', 'javascript': 'js', 'sh': 'bash', 'shell': 'bash' };
+                    lang = langMap[lang] || lang;
+                    block.className = 'language-' + lang;
+                }
+                hljs.highlightElement(block);
+            });
+        }
+
+        // ── Sidebar auto-collapse ─────────────────
+        function collapseSidebarSections() {
+            var path = window.location.pathname;
+            var activeType = '';
+            if (path.startsWith('/problem/')) activeType = 'problem';
+            else if (path.startsWith('/fund/')) activeType = 'fundamental';
+            else if (path.startsWith('/algo/')) activeType = 'algorithm';
+            else if (path.startsWith('/pattern/')) activeType = 'pattern';
+
+            var sectionTypes = ['problem', 'fundamental', 'algorithm', 'pattern'];
+            document.querySelectorAll('.sidebar-section').forEach(function(section, i) {
+                if (i >= sectionTypes.length) return;
+                var type = sectionTypes[i];
+                if (activeType && type !== activeType) {
+                    section.classList.add('collapsed');
+                } else {
+                    section.classList.remove('collapsed');
+                }
+            });
+        }
+
+        // ── HTMX swap handler ─────────────────────
         document.addEventListener('htmx:afterSwap', function(e) {
             if (e.detail.target.id === 'detail') {
                 trackPage();
-                const path = window.location.pathname;
-                const positions = loadProgress().scrollPositions || {};
-                if (positions[path]) {
-                    setTimeout(function() {
-                        detail.scrollTop = positions[path];
-                    }, 50);
-                }
+                restoreScroll();
+                highlightCode();
+                collapseSidebarSections();
             }
         });
 
-        // Track sidebar expand state
-        document.addEventListener('click', function(e) {
-            const toggle = e.target.closest('.tree-toggle');
-            if (toggle) {
-                setTimeout(function() {
-                    const expanded = [];
-                    document.querySelectorAll('.sidebar-children').forEach(function(el) {
-                        if (el.style.display !== 'none' && !el.hidden) {
-                            const link = el.previousElementSibling?.querySelector('.sidebar-item');
-                            if (link) expanded.push(link.getAttribute('href'));
-                        }
-                    });
-                    saveProgress({ expandedSidebar: expanded });
-                }, 100);
-            }
-        });
-
-        // Redirect to last page on fresh visit to root
+        // ── Continue reading on home page ─────────
         if (window.location.pathname === '/') {
-            const progress = loadProgress();
+            var progress = loadProgress();
             if (progress.lastPage && progress.lastPage !== '/') {
-                // Show a subtle "Continue reading" button instead of auto-redirect
-                const welcome = document.querySelector('.welcome');
+                var welcome = document.querySelector('.welcome');
                 if (welcome) {
-                    const continueDiv = document.createElement('div');
+                    var continueDiv = document.createElement('div');
                     continueDiv.className = 'continue-reading';
                     continueDiv.innerHTML = '<a href="' + progress.lastPage + '" ' +
                         'hx-get="' + progress.lastPage + '" ' +
@@ -140,8 +175,16 @@
             }
         }
 
-        // Initial track
+        // ── Initial setup ─────────────────────────
         trackPage();
+        restoreScroll();
+        collapseSidebarSections();
+        // Delay highlight until hljs loads
+        if (typeof hljs !== 'undefined') {
+            highlightCode();
+        } else {
+            window.addEventListener('load', highlightCode);
+        }
     })();
     </script>
 </body>

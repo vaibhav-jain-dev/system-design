@@ -285,8 +285,9 @@ func tableMacro(title string, rows []TableRow) template.HTML {
 	return template.HTML(sb.String())
 }
 
-// diagram renders an ASCII art diagram in a styled container.
-// Usage: {{diagram "Title" `ascii art here`}}
+// diagram renders a diagram in a styled container.
+// Usage: {{diagram "Title" `<div>HTML diagram</div>`}}  — HTML mode (content starts with <)
+// Usage: {{diagram "Title" `ascii art here`}}             — legacy ASCII mode
 // If only title is given (no art), renders a placeholder.
 func diagram(title string, args ...string) template.HTML {
 	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
@@ -296,6 +297,16 @@ func diagram(title string, args ...string) template.HTML {
 				<div class="diagram-placeholder">Diagram: %s</div>
 			</div>`, title, title))
 	}
+	content := strings.TrimSpace(args[0])
+	// If content starts with <, treat as raw HTML diagram
+	if strings.HasPrefix(content, "<") {
+		return template.HTML(fmt.Sprintf(
+			`<div class="diagram-container">
+				<div class="diagram-title">%s</div>
+				%s
+			</div>`, title, content))
+	}
+	// Legacy ASCII art mode
 	art := template.HTMLEscapeString(args[0])
 	return template.HTML(fmt.Sprintf(
 		`<div class="diagram-container">

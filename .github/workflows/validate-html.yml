@@ -1,0 +1,98 @@
+name: Validate HTML Content
+
+on:
+  push:
+    paths:
+      - 'content/**/*.html'
+      - 'web/templates/**/*.html'
+  pull_request:
+    paths:
+      - 'content/**/*.html'
+      - 'web/templates/**/*.html'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build project (validates Go templates)
+        run: go build -o /tmp/sd-test .
+
+      - name: Start server and validate all pages
+        run: |
+          /tmp/sd-test &
+          SERVER_PID=$!
+          sleep 2
+
+          FAILED=0
+
+          # Test all content pages render without template errors
+          for page in \
+            "/" \
+            "/problem/url-shortener" \
+            "/problem/rate-limiter" \
+            "/problem/chat-system" \
+            "/fund/networking/load-balancing" \
+            "/fund/networking/cdn" \
+            "/fund/storage/redis" \
+            "/fund/storage/postgres" \
+            "/fund/storage/dynamodb" \
+            "/fund/compute" \
+            "/fund/messaging" \
+            "/algo/base62-encoding" \
+            "/algo/token-bucket" \
+            "/algo/consistent-hashing" \
+            "/algo/bloom-filter" \
+            "/algo/snowflake-id" \
+            "/pattern/rag" \
+            "/pattern/agent-tools" \
+            "/pattern/prompt-chaining" \
+            "/pattern/guardrails" \
+            "/pattern/embeddings-vector-search"; do
+
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:8080${page}")
+            if [ "$STATUS" != "200" ]; then
+              echo "FAIL: ${page} returned HTTP ${STATUS}"
+              FAILED=1
+            else
+              echo "OK: ${page}"
+            fi
+          done
+
+          kill $SERVER_PID 2>/dev/null || true
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo ""
+            echo "Some pages failed validation!"
+            exit 1
+          fi
+
+          echo ""
+          echo "All pages validated successfully."
+
+      - name: Check for ASCII art in content (diagrams must be HTML/CSS only)
+        run: |
+          # Check for box-drawing characters that indicate ASCII diagrams outside of code blocks
+          VIOLATIONS=$(grep -rn '┌\|┐\|└\|┘\|├\|┤\|┬\|┴\|┼\|═\|║' content/ --include="*.html" || true)
+          if [ -n "$VIOLATIONS" ]; then
+            echo "WARNING: Possible ASCII art box-drawing characters found in content files:"
+            echo "$VIOLATIONS"
+            echo ""
+            echo "Diagrams should use HTML/CSS instead of ASCII art."
+            # Warning only for now - set to exit 1 to enforce
+          fi
+
+      - name: Check for Mermaid usage
+        run: |
+          MERMAID=$(grep -rni 'mermaid\|```mermaid' content/ web/ --include="*.html" || true)
+          if [ -n "$MERMAID" ]; then
+            echo "FAIL: Mermaid syntax found - use HTML/CSS diagrams instead:"
+            echo "$MERMAID"
+            exit 1
+          fi
+          echo "No Mermaid usage found - good."
