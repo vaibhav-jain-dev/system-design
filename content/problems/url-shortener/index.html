@@ -1,8 +1,54 @@
-{{stageNav "Requirements & Problem Scope" 1 "Data Model & Database Choice" 2 "Key Generation Deep Dive" 3 "High-Level Architecture" 4 "Caching Deep Dive" 5 "Scaling & Sharding" 6 "Availability & Reliability" 7 "Enhanced Security & Abuse Prevention" 8 "Analytics Deep Dive" 9 "Monitoring & Observability" 10 "Cost Estimates" 11 "Interview Deep-Dive Q&A" 12}}
+{{stageNav "Requirements & Problem Scope" 1 "API Design" 2 "Data Model & Database Choice" 3 "Key Generation Deep Dive" 4 "High-Level Architecture" 5 "Caching Deep Dive" 6 "Scaling & Sharding" 7 "Availability & Reliability" 8 "Enhanced Security & Abuse Prevention" 9 "Analytics Deep Dive" 10 "Monitoring, Observability & Cost" 11 "Interview Deep-Dive Q&A" 12}}
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
-{{say "I'd start by clarifying the requirements. Are we designing just the shortening service, or also analytics, custom aliases, and expiration? Let me scope it out."}}
+{{say "I'd start by clarifying the scope. Are we designing just the shortening service, or also analytics, custom aliases, and expiration? Let me nail down the functional and non-functional requirements before jumping into design."}}
+
+{{hint "why scope first?" "Interviewers want to see you narrow the problem before solving it. A URL shortener could mean bit.ly (analytics-heavy, enterprise), TinyURL (simple redirect), or an internal tool (low scale, high reliability). Each leads to a fundamentally different architecture. Clarifying scope prevents over-engineering and shows product thinking."}}
+
+{{table "Functional Requirements" (rows
+  (row "Requirement"        "Description"                                       "Priority"  "Drives")
+  (row "Shorten URL"        "Given a long URL, generate a unique short code"    "P0"        "Key generation algorithm, collision handling")
+  (row "Redirect"           "GET /{code} → 301/302 to original URL"            "P0"        "Read-heavy design, caching strategy")
+  (row "Custom alias"       "User-provided short code instead of generated"    "P1"        "Uniqueness validation, reserved words")
+  (row "URL expiration"     "TTL-based auto-deletion of short URLs"            "P1"        "DynamoDB TTL vs cron cleanup")
+  (row "Analytics"          "Click count, referrer, geo, device breakdown"     "P2"        "Async event pipeline, not on hot path")
+  (row "Link preview"       "Safe preview page before redirect (anti-phishing)" "P2"       "Separate endpoint, not on redirect path")
+  (row "QR code"            "Generate QR code image for any short URL"         "P3"        "Stateless compute, cacheable at edge")
+)}}
+
+{{hint "why P0/P1/P2/P3 matters?" "Prioritization tells the interviewer which features you would build first and which you would defer. P0 features define the core loop (create + redirect). P1 features are needed for production readiness. P2/P3 are differentiators you discuss but don't deep-dive unless asked. Spending 10 minutes on QR codes when you haven't covered sharding is a red flag."}}
+
+{{think "Every functional requirement maps to a specific architectural decision. Shorten URL → key generation algorithm. Redirect → caching strategy. Analytics → async pipeline. This mapping is the bridge from requirements to architecture."
+  (whyNot "implement analytics on the redirect hot path" "Adding analytics to the redirect endpoint means every GET /{code} does a redirect + a write (click event). At 57K RPS, that doubles your write load and adds latency to the most critical path. Instead, fire-and-forget to Kinesis/SQS and process async. The redirect returns in <10ms; analytics can lag by seconds.")
+  (whatIf "the interviewer asks about URL editing after creation" "Editing breaks 301 caching — browsers that cached the old redirect keep going to the old destination. If editing is required (enterprise feature), use 302 redirects for editable URLs so every click passes through your servers. This is a product decision that directly impacts architecture.")
+  (how "custom aliases complicate key generation" "Generated codes use Base62 with collision retry. Custom aliases require uniqueness validation against the same keyspace, plus reserved word filtering (admin, api, health), profanity checks, and homoglyph detection (l vs 1, O vs 0). Two different code paths for the same table.")
+}}
+
+{{diagram "url-nfr-estimates"}}
+
+{{diagram "url-bandwidth-infra"}}
+
+{{think "With three caching layers (browser 301 cache, CloudFront edge, ElastiCache), actual DB hit rate is ~5%. 57,850 peak RPS × 5% = ~2,900 DynamoDB reads/s. Well within single-table capacity. The dominant cost is CDN egress, not compute or DB."
+  (whyNot "a single cache layer (just Redis)" "Redis alone gives ~95% hit rate, but every request still traverses your network to reach ElastiCache. CloudFront at the edge absorbs 60%+ before traffic even enters your VPC. Browser 301 caching absorbs another 30% of repeat visitors. Stacking layers turns 57,850 RPS into ~2,900 actual DB reads — a 20x reduction no single cache achieves.")
+  (whatIf "CloudFront has a global outage" "All 57,850 RPS hit your ALB directly. ElastiCache still absorbs 95%, so DynamoDB sees ~2,900 RPS — identical to normal. Your origin infrastructure is already sized for this. Latency increases from <10ms (edge) to ~50ms (origin), but the service stays up.")
+  (how "calculate the 5% DB hit rate" "Layer 1: browser 301 cache absorbs 30% of repeat visitors. 70% remain. Layer 2: CloudFront absorbs 60% of those. 28% remain. Layer 3: ElastiCache absorbs 95% of those. 1.4% remain. Round up to ~5% for cold starts, cache evictions, and new URLs. 57,850 × 5% = 2,893 DynamoDB reads/s.")
+}}
+
+{{hint "why estimate before designing?" "The capacity numbers directly drive architecture choices. At 100 RPS, a single Postgres instance works fine. At 57K RPS with 100:1 read-write ratio, you need a key-value store (DynamoDB), multi-layer caching, and a CDN. If you design first and estimate later, you might over-engineer (microservices for 100 RPS) or under-engineer (single Postgres for 57K RPS)."}}
+
+{{triggerQs "Questions about requirements"
+  "How do you estimate the read-to-write ratio?"
+  "URL shorteners are read-heavy by nature. Every URL is created once but clicked many times. Industry data: bit.ly sees 100:1 read-to-write ratio. Start with this as a baseline, then adjust based on your use case. If the shortener is for internal tools (fewer clicks per link), ratio drops to 10:1. For social sharing (viral links), it can exceed 1000:1."
+  "What assumptions are you making about the scale?"
+  "100M new URLs/day (roughly bit.ly scale). 100:1 read-to-write ratio = 10B redirects/day. Peak factor of 5x = 57,850 RPS peak reads. These numbers are aggressive — most companies are 10-100x smaller. But designing for this scale demonstrates you can handle the hard problems. Always state your assumptions explicitly so the interviewer can adjust."
+  "Should you support URL editing after creation?"
+  "No for the default case. Editing a URL after creation breaks 301 caching — browsers that cached the old redirect will keep going to the old destination until their cache expires. If editing is required (enterprise feature), issue 302 redirects for editable URLs so every click passes through your servers. Charge this as a premium feature."
+}}
+
+{{phase 2 "API Design" "5 min"}}
+
+{{say "Now that we have requirements scoped, let me define the API contract. The API design directly reflects our priority decisions — P0 endpoints first, then P1/P2."}}
 
 {{diagram "url-api-design"}}
 
@@ -10,11 +56,16 @@
 Request:  { "long_url": "https://example.com/very/long/path", "custom_alias": "my-link", "ttl_days": 365 }
 Response: { "short_url": "https://short.ly/Ab3xK9", "short_code": "Ab3xK9", "expires_at": "2027-01-01T00:00:00Z" }
 Status: 201 Created
+Headers: Location: https://short.ly/Ab3xK9
 
 GET /{short_code}
 Response: 301 Redirect with Location header
 Headers: Location: https://example.com/very/long/path
          Cache-Control: max-age=86400
+
+DELETE /api/v1/urls/{short_code}
+Response: 204 No Content
+Auth: API key required (owner only)
 
 GET /api/v1/urls/{short_code}/stats
 Response: { "short_code": "Ab3xK9", "long_url": "...", "clicks": 15420, "created_at": "...", "expires_at": "..." }
@@ -30,7 +81,15 @@ Sizes: 150px, 300px, 600px | Formats: PNG, SVG
 Status: 200 OK
 `}}
 
+{{hint "why versioned API paths (/api/v1/) but not on redirect?" "The redirect endpoint GET /{code} is the public-facing URL that gets shared everywhere — tweets, emails, printed QR codes. Adding /api/v1/ to it would make URLs longer and ugly. API endpoints are consumed by developers who can handle version changes. The redirect path is consumed by end users who cannot."}}
+
 {{diagram "url-redirects"}}
+
+{{think "301 vs 302 is not just a technical choice — it is a product decision that impacts analytics accuracy, caching behavior, and server load."
+  (whyNot "302 for everything" "302 Temporary Redirect means browsers never cache the redirect. Every repeat visit hits your servers. At 57K RPS, 30% of traffic is repeat visits — 302 adds 17K RPS of unnecessary load. That is roughly 2 extra ElastiCache nodes ($184/mo) and higher ALB costs, all for analytics data you can get from Kinesis event streaming instead.")
+  (whatIf "you need both caching and analytics" "Use 301 for the redirect (let browsers cache) and fire an async event to Kinesis on each redirect. For repeat visitors who hit browser cache, instrument the client-side redirect landing page with a 1x1 pixel beacon that fires on page load. This captures ~90% of analytics data without sacrificing caching.")
+  (how "Cache-Control header interacts with 301" "301 with Cache-Control: max-age=86400 tells browsers to cache the redirect for 24 hours. After 24h, they re-validate with your server. Without Cache-Control, 301 caching is indefinite in most browsers — you lose the ability to update the destination URL ever. Always set max-age explicitly.")
+}}
 
 {{qa
   "Why 301 redirect instead of 302?"
@@ -39,28 +98,18 @@ Status: 200 OK
   "REST. URL shortening maps perfectly to resources. POST to create, GET to read, DELETE to remove. No need for RPC complexity."
 }}
 
-{{diagram "url-nfr-estimates"}}
+{{hint "why return Location header on POST create?" "Returning the Location header with the short URL on creation follows HTTP 201 convention. Clients can follow the Location header to verify the redirect works immediately. It also enables HATEOAS — the response is self-describing without the client needing to construct URLs."}}
 
-{{diagram "url-bandwidth-infra"}}
-
-{{think "With three caching layers (browser 301 cache, CloudFront edge, ElastiCache), actual DB hit rate is ~5%. 57,850 peak RPS × 5% = ~2,900 DynamoDB reads/s. Well within single-table capacity. The dominant cost is CDN egress, not compute or DB."
-  (whyNot "a single cache layer (just Redis)" "Redis alone gives ~95% hit rate, but every request still traverses your network to reach ElastiCache. CloudFront at the edge absorbs 60%+ before traffic even enters your VPC. Browser 301 caching absorbs another 30% of repeat visitors. Stacking layers turns 57,850 RPS into ~2,900 actual DB reads — a 20x reduction no single cache achieves.")
-  (whatIf "CloudFront has a global outage" "All 57,850 RPS hit your ALB directly. ElastiCache still absorbs 95%, so DynamoDB sees ~2,900 RPS — identical to normal. Your origin infrastructure is already sized for this. Latency increases from <10ms (edge) to ~50ms (origin), but the service stays up.")
-  (how "calculate the 5% DB hit rate" "Layer 1: browser 301 cache absorbs 30% of repeat visitors. 70% remain. Layer 2: CloudFront absorbs 60% of those. 28% remain. Layer 3: ElastiCache absorbs 95% of those. 1.4% remain. Round up to ~5% for cold starts, cache evictions, and new URLs. 57,850 × 5% = 2,893 DynamoDB reads/s.")
+{{triggerQs "Questions about API design"
+  "How do you handle idempotency for URL creation?"
+  "Include an Idempotency-Key header (UUID generated by the client). Store the key in DynamoDB with a TTL of 24 hours. On duplicate requests with the same key, return the original response (201 + same short_code) without creating a new URL. This prevents duplicate URLs from network retries or client bugs. Stripe uses this exact pattern for payment API idempotency."
+  "Why not include rate limiting headers in the API design?"
+  "Rate limiting is infrastructure concern, not API contract. The rate limiter middleware adds X-RateLimit-Limit, X-RateLimit-Remaining, and Retry-After headers transparently. API documentation should mention rate limits, but the API contract should not change when rate limit policies change."
+  "How do you version the API when the redirect path has no version?"
+  "The redirect path (GET /{code}) is versionless and permanent — it should never change because URLs are shared everywhere. API paths (POST /api/v1/urls) are versioned. When v2 launches, v1 continues working. Deprecation timeline: 12 months minimum with X-API-Deprecation headers."
 }}
 
-{{hint "why 301 over 302?" "301 Moved Permanently lets browsers cache the redirect locally — repeat visitors never hit your servers. This alone eliminates 30% of traffic. Use 302 only if you need to track every click for analytics, since browsers bypass your servers on cached 301s."}}
-
-{{triggerQs "Questions about requirements"
-  "How do you estimate the read-to-write ratio?"
-  "URL shorteners are read-heavy by nature. Every URL is created once but clicked many times. Industry data: bit.ly sees 100:1 read-to-write ratio. Start with this as a baseline, then adjust based on your use case. If the shortener is for internal tools (fewer clicks per link), ratio drops to 10:1. For social sharing (viral links), it can exceed 1000:1."
-  "Should you support URL editing after creation?"
-  "No for the default case. Editing a URL after creation breaks 301 caching — browsers that cached the old redirect will keep going to the old destination until their cache expires. If editing is required (enterprise feature), issue 302 redirects for editable URLs so every click passes through your servers. Charge this as a premium feature."
-  "What is the difference between QPS and RPS in this context?"
-  "They are interchangeable here. QPS (queries per second) and RPS (requests per second) both measure throughput. In database contexts, QPS usually refers to database queries. In web contexts, RPS refers to HTTP requests. For capacity planning, track both: web RPS at the ALB and database QPS at DynamoDB, since caching makes them very different numbers."
-}}
-
-{{phase 2 "Data Model & Database Choice" "5 min"}}
+{{phase 3 "Data Model & Database Choice" "5 min"}}
 
 {{say "The core data model is simple: a mapping from short code to long URL. But the database choice matters. Let me justify why DynamoDB over SQL."}}
 
@@ -130,7 +179,7 @@ CREATE INDEX idx_urls_expires ON urls(expires_at) WHERE expires_at IS NOT NULL;
 -- don't support composite keys, and B-tree is just as fast for equality.
 `}}
 
-{{phase 3 "Key Generation Deep Dive" "8 min"}}
+{{phase 4 "Key Generation Deep Dive" "8 min"}}
 
 {{say "Short code generation is the most interesting design decision. I see three approaches, each with deep trade-offs that go beyond surface-level pros and cons."}}
 
@@ -208,7 +257,7 @@ def base62_decode(s: str) -> int:
   "UUID v4 is 128 bits of randomness, but truncating to 7 Base62 characters (41.8 bits) discards 86 bits of entropy. The truncated result has the same collision properties as any random 7-char string — birthday paradox gives 50% collision probability at ~280K URLs. You might as well generate random strings directly. UUID adds complexity without benefit for short codes."
 }}
 
-{{phase 4 "High-Level Architecture" "8 min"}}
+{{phase 5 "High-Level Architecture" "8 min"}}
 
 {{say "Let me walk through the architecture. The system has 7 core components, each with a specific purpose."}}
 
@@ -232,7 +281,7 @@ def base62_decode(s: str) -> int:
 
 {{key "The read path has four caching layers: Browser (301 cache, 24h), CloudFront edge (global, 24h), ElastiCache (regional, 1h), DynamoDB (origin). A popular URL never hits DynamoDB after the first read."}}
 
-{{phase 5 "Caching Deep Dive" "5 min"}}
+{{phase 6 "Caching Deep Dive" "5 min"}}
 
 {{say "Caching is the most critical optimization. The Pareto principle applies: 20% of URLs get 80% of traffic."}}
 
@@ -289,7 +338,7 @@ async def resolve_short_url(short_code: str) -> str:
   "ElastiCache Multi-AZ promotes the replica within 10-30 seconds. During failover, cache misses spike and DynamoDB absorbs the load. At 95% normal hit rate, a full cache loss means 20x more DynamoDB reads. DynamoDB auto-scales on-demand, so it handles the spike without throttling. Cache warms back up within minutes as popular URLs get re-cached."
 }}
 
-{{phase 6 "Scaling & Sharding" "5 min"}}
+{{phase 7 "Scaling & Sharding" "5 min"}}
 
 {{say "Let me address how the system scales at each layer, including database sharding strategies."}}
 
@@ -319,7 +368,7 @@ async def resolve_short_url(short_code: str) -> str:
 
 {{key "DynamoDB eliminates the sharding decision entirely. If you choose SQL (Postgres), consistent hashing with virtual nodes is the right approach, but you inherit the operational burden of rebalancing, split-brain prevention, and cross-shard queries."}}
 
-{{phase 7 "Availability & Reliability" "5 min"}}
+{{phase 8 "Availability & Reliability" "5 min"}}
 
 {{say "Let me cover the three pillars of reliability: replication, failover, and geo-distribution."}}
 
@@ -362,7 +411,33 @@ async def resolve_short_url(short_code: str) -> str:
   "Failover replaces a failed component with a standby (e.g., ElastiCache replica promotion). Graceful degradation reduces functionality while staying available (e.g., serve cached URLs but reject new URL creation when DynamoDB is throttled). Failover is for component-level failures; graceful degradation is for partial system-level outages where no single failover fixes the problem."
 }}
 
-{{phase 8 "Enhanced Security & Abuse Prevention" "8 min"}}
+{{diagram "url-multi-region"}}
+
+{{table "CAP Analysis" (rows
+  (row "CAP Property"        "Our Choice"                                       "Justification"                                     "Concrete Example")
+  (row "Partition Tolerance"  "Required (non-negotiable)"                       "Network partitions between regions will happen"     "us-east-1 cannot reach eu-west-1 for 30 seconds")
+  (row "Availability"        "Prioritized (AP system)"                          "A redirect that fails is worse than a stale redirect" "Serve from regional cache even during partition")
+  (row "Consistency"         "Eventual (acceptable)"                            "New URL created in us-east-1 visible in eu-west-1 within 1 second" "User creates URL in US, shares link. EU friend clicks 2 seconds later — DynamoDB Global Tables have already replicated.")
+  (row "Idempotency"        "All writes are idempotent"                        "DynamoDB PutItem with condition attribute_not_exists(short_code)" "Retry-safe: creating same URL twice either succeeds (idempotent) or returns conflict (alias taken)")
+)}}
+
+{{qa
+  "Is the URL shortener a CP or AP system?"
+  "AP — we prioritize availability over consistency. A redirect must always work, even if it serves a slightly stale mapping during a partition. In practice, DynamoDB Global Tables replicate in under 1 second, so inconsistency windows are tiny. The only CP operation is URL creation (conditional write ensures no duplicate short_codes), but this is a local operation within a single region."
+  "What happens if a URL is created in us-east-1 but a user in eu-west-1 tries to access it immediately?"
+  "DynamoDB Global Tables replicate within 1 second. If the user clicks within that 1-second window, they get a 404. This is extremely rare (sub-second race condition). Mitigation: CloudFront can be configured to retry the origin on 404 with a 1-second delay. Or accept the edge case — it self-heals in under 1 second."
+}}
+
+{{hint "why last-writer-wins is acceptable here?" "URL mappings are write-once, read-many. Once created, a short_code-to-URL mapping almost never changes. The only conflict scenario is two users in different regions creating the same custom alias during a network partition — astronomically rare. For KGS-generated keys, conflicts are impossible because each region gets non-overlapping key ranges."}}
+
+{{triggerQs "Questions about geo-distribution"
+  "How do you route users to the nearest region?"
+  "Route 53 latency-based routing measures RTT from the user's DNS resolver to each region and returns the IP of the lowest-latency region. CloudFront handles this at the edge layer automatically — users hit the nearest of 400+ PoPs regardless of which region the origin is in. For writes, Route 53 routes to the nearest region's ALB."
+  "What is the cost of running multi-region vs single-region?"
+  "DynamoDB Global Tables charges standard write pricing in each region plus $0.725 per million replicated write units. For 1,157 writes/sec across 3 regions, replication adds ~$2,500/month. ElastiCache needs a separate cluster per region (~$735/month each). Total multi-region premium: roughly 2.5x the single-region cost. Only justified when you need sub-50ms global latency or regulatory data residency."
+}}
+
+{{phase 9 "Enhanced Security & Abuse Prevention" "8 min"}}
 
 {{say "Security is the existential risk for a URL shortener — your domain reputation is on the line. Let me cover five defense layers: link preview, bot detection, domain reputation, custom alias validation, and QR code generation."}}
 
@@ -495,7 +570,7 @@ Error Responses:
   "On creation, extract features: domain age (WHOIS), URL entropy, path depth, IP vs domain, homoglyph detection. Feed into a pre-trained logistic regression model (~1ms inference). Score >80: reject. Score 50-80: serve via 302 (retain ability to block). Score <50: normal 301. Re-score all URLs weekly as threat intel updates. Catches ~85% of zero-day phishing at creation time."
 }}
 
-{{phase 9 "Analytics Deep Dive" "5 min"}}
+{{phase 10 "Analytics Deep Dive" "5 min"}}
 
 {{say "Analytics is where we differentiate from a toy implementation. Key insight: never increment a counter on every redirect in the hot path. Instead, build a full analytics pipeline with geo-location, referrer tracking, device breakdown, and bot filtering."}}
 
@@ -562,9 +637,9 @@ Error Responses:
   "Three signals: (1) TLS fingerprint — headless browsers (Puppeteer, Selenium) have distinctive JA3 hashes. (2) User-Agent consistency — a Chrome UA with a curl TLS fingerprint is a bot. (3) Click velocity — 100 clicks from the same IP in 10 seconds is not human. Assign a bot_score 0-1 and exclude >0.7 from analytics. Typically filters out 15-25% of all clicks."
 }}
 
-{{phase 10 "Monitoring & Observability" "5 min"}}
+{{phase 11 "Monitoring, Observability & Cost" "5 min"}}
 
-{{say "A URL shortener needs concrete SLOs and monitoring. Let me define the key metrics, alert thresholds, and dashboard layout."}}
+{{say "A URL shortener needs concrete SLOs, monitoring, and cost awareness. Let me define the key metrics, alert thresholds, and cost breakdown at different scales."}}
 
 {{diagram "url-monitoring-slos"}}
 
@@ -601,34 +676,6 @@ Error Responses:
 )}}
 
 {{hint "why X-Ray over Jaeger?" "X-Ray is native to AWS — zero setup with ALB, ECS, DynamoDB, and Lambda. Auto-instruments SDK calls. Jaeger requires deploying and operating collectors, storage (Cassandra/Elasticsearch), and a query UI. For an all-AWS stack, X-Ray gives 80% of the value at 10% of the operational cost. Switch to Jaeger only if you need multi-cloud or fine-grained custom spans."}}
-
-{{diagram "url-multi-region"}}
-
-{{table "CAP Analysis" (rows
-  (row "CAP Property"        "Our Choice"                                       "Justification"                                     "Concrete Example")
-  (row "Partition Tolerance"  "Required (non-negotiable)"                       "Network partitions between regions will happen"     "us-east-1 cannot reach eu-west-1 for 30 seconds")
-  (row "Availability"        "Prioritized (AP system)"                          "A redirect that fails is worse than a stale redirect" "Serve from regional cache even during partition")
-  (row "Consistency"         "Eventual (acceptable)"                            "New URL created in us-east-1 visible in eu-west-1 within 1 second" "User creates URL in US, shares link. EU friend clicks 2 seconds later — DynamoDB Global Tables have already replicated.")
-  (row "Idempotency"        "All writes are idempotent"                        "DynamoDB PutItem with condition attribute_not_exists(short_code)" "Retry-safe: creating same URL twice either succeeds (idempotent) or returns conflict (alias taken)")
-)}}
-
-{{qa
-  "Is the URL shortener a CP or AP system?"
-  "AP — we prioritize availability over consistency. A redirect must always work, even if it serves a slightly stale mapping during a partition. In practice, DynamoDB Global Tables replicate in under 1 second, so inconsistency windows are tiny. The only CP operation is URL creation (conditional write ensures no duplicate short_codes), but this is a local operation within a single region."
-  "What happens if a URL is created in us-east-1 but a user in eu-west-1 tries to access it immediately?"
-  "DynamoDB Global Tables replicate within 1 second. If the user clicks within that 1-second window, they get a 404. This is extremely rare (sub-second race condition). Mitigation: CloudFront can be configured to retry the origin on 404 with a 1-second delay. Or accept the edge case — it self-heals in under 1 second."
-}}
-
-{{hint "why last-writer-wins is acceptable here?" "URL mappings are write-once, read-many. Once created, a short_code-to-URL mapping almost never changes. The only conflict scenario is two users in different regions creating the same custom alias during a network partition — astronomically rare. For KGS-generated keys, conflicts are impossible because each region gets non-overlapping key ranges."}}
-
-{{triggerQs "Questions about geo-distribution"
-  "How do you route users to the nearest region?"
-  "Route 53 latency-based routing measures RTT from the user's DNS resolver to each region and returns the IP of the lowest-latency region. CloudFront handles this at the edge layer automatically — users hit the nearest of 400+ PoPs regardless of which region the origin is in. For writes, Route 53 routes to the nearest region's ALB."
-  "What is the cost of running multi-region vs single-region?"
-  "DynamoDB Global Tables charges standard write pricing in each region plus $0.725 per million replicated write units. For 1,157 writes/sec across 3 regions, replication adds ~$2,500/month. ElastiCache needs a separate cluster per region (~$735/month each). Total multi-region premium: roughly 2.5x the single-region cost. Only justified when you need sub-50ms global latency or regulatory data residency."
-}}
-
-{{phase 11 "Cost Estimates" "3 min"}}
 
 {{diagram "url-cost-scaling"}}
 

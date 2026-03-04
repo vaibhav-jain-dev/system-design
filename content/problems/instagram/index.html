@@ -1,10 +1,24 @@
-{{stageNav "Requirements & Problem Scope" 1 "Stage 1: MVP (0-1M users)" 2 "Stage 1: Upload Flow (Hop-by-Hop)" 3 "Stage 2: Growing (1M-50M users)" 4 "Stage 3: Scaling (50M-500M users)" 5 "Stage 4: Handling Peak Hours" 6 "Stage 5: Global Scale (500M+ users)" 7 "Security & Content Moderation" 8 "Analytics & Monitoring" 9 "Bottlenecks & Deep Trade-offs" 10 "Distributed System Vision" 11 "Interview Deep-Dive Q&A" 12}}
+{{stageNav "Requirements & Problem Scope" 1 "API Design" 2 "Stage 1: MVP (0-1M users)" 3 "Stage 1: Upload Flow (Hop-by-Hop)" 4 "Stage 2: Growing (1M-50M users)" 5 "Stage 3: Scaling (50M-500M users)" 6 "Stage 4: Handling Peak Hours" 7 "Stage 5: Global Scale (500M+ users)" 8 "Security & Content Moderation" 9 "Analytics & Monitoring" 10 "Bottlenecks & Trade-offs" 11 "Interview Deep-Dive Q&A" 12}}
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
-{{say "Let me clarify the scope. Are we designing Instagram's full platform or focusing on specific features? I will assume we are building the core: photo/video sharing with a feed, stories, likes, comments, and explore."}}
+{{say "Let me clarify the scope. Are we designing Instagram's full platform or focusing on specific features? I'll scope it to the core: photo/video sharing with a feed, stories, likes, comments, and explore. Let me nail down the functional and non-functional requirements."}}
 
-{{diagram "ig-api-design"}}
+{{hint "why scope matters for Instagram?" "Instagram has 20+ features: Reels, Shopping, DMs, Live, IGTV, AR filters, ads. A 45-minute interview cannot cover all of them. Scoping to core features (post, feed, stories, likes, comments, explore) lets you go deep on the hard problems: fan-out, media pipeline, feed ranking. Mention the others as future extensions to show awareness without derailing the design."}}
+
+{{table "Functional Requirements" (rows
+  (row "Requirement"        "Description"                                       "Priority"  "Drives")
+  (row "Upload photo/video" "Upload media with caption, filters, tags"          "P0"        "Media pipeline, S3, image processing")
+  (row "News Feed"          "See posts from followed users, ranked/chronological" "P0"      "Fan-out strategy, caching, feed ranking")
+  (row "Follow/Unfollow"    "Follow users to see their content in feed"         "P0"        "Social graph, follower count, fan-out lists")
+  (row "Like & Comment"     "Like posts, add comments with threading"           "P0"        "Counter design, notification pipeline")
+  (row "Stories"            "24-hour ephemeral content with view tracking"      "P1"        "TTL-based storage, separate feed, view dedup")
+  (row "Explore/Search"     "Discover trending content, search users/hashtags"  "P1"        "ML ranking, ElasticSearch, content indexing")
+  (row "Notifications"      "Push/in-app notifications for likes, comments, follows" "P1"   "Event-driven, fan-out, mobile push (APNs/FCM)")
+  (row "Direct Messages"    "Private messaging between users"                   "P2"        "WebSocket, message persistence, E2E encryption")
+)}}
+
+{{hint "why feed is the hardest P0?" "Upload is a straightforward pipeline (resize → S3 → CDN). Likes and comments are simple writes. But the feed requires reading posts from all followed users, ranking them, and serving within 200ms. For a user following 500 accounts who each post daily, that is 500 potential posts to rank per feed load. The fan-out strategy (write vs read) determines the entire system architecture."}}
 
 {{diagram "ig-nfr-estimates"}}
 
@@ -14,7 +28,41 @@
   (how "estimate storage growth" "200TB/day × 365 = 73PB/year of raw media. With 4 resize variants per image, that is ~290PB. S3 Standard at $0.023/GB = $6.7M/year. Move images older than 90 days to S3 Infrequent Access ($0.0125/GB) and older than 1 year to Glacier ($0.004/GB) using lifecycle policies to cut costs by 60%.")
 }}
 
-{{phase 2 "Stage 1: MVP (0-1M users)" "5 min"}}
+{{hint "why estimate storage before architecture?" "200TB/day of media uploads is the single number that drives the most architectural decisions. It tells you: S3 is mandatory (no filesystem scales to petabytes), you need a media processing pipeline (resize, transcode, thumbnails), CDN is non-negotiable (you cannot serve petabytes from origin), and lifecycle policies are required to control cost. Without this number, you might waste time debating whether to use local disk or EBS."}}
+
+{{triggerQs "Questions about requirements"
+  "How do you decide what goes into P0 vs P1?"
+  "P0 features define the core user loop: upload → feed → engage (like/comment). Without any P0 feature, the product doesn't work. P1 features (stories, explore, notifications) enhance engagement but users can still use the product without them. Instagram launched with just photo upload, feed, and likes — stories came 6 years later. Scope P0 to what gets you to product-market fit, then layer P1 features."
+  "Should you design for 500M users from the start?"
+  "No — start with MVP for 1M users, then evolve. The interview structure follows this: Phase 3 is MVP (monolith, Postgres), Phase 5 is scaling to 50M (microservices, DynamoDB), Phase 8 is global scale (multi-region). This shows the interviewer you can make pragmatic decisions at each stage rather than over-engineering from day one."
+  "How do you handle the tension between read-heavy and write-heavy patterns?"
+  "The surface-level read:write ratio is 10:1 (58K reads vs 6K writes). But fan-out-on-write amplifies each write: one post to 1K followers = 1K feed updates. This makes the effective write ratio much higher. The solution is hybrid fan-out: fan-out-on-write for normal users (<10K followers), fan-out-on-read for celebrities (>10K followers). This keeps write amplification bounded."
+}}
+
+{{phase 2 "API Design" "5 min"}}
+
+{{say "Now that requirements are scoped, let me define the core API contract. The API design reflects our priorities — P0 endpoints are the ones that handle the most traffic and need the most careful design."}}
+
+{{diagram "ig-api-design"}}
+
+{{hint "why separate media upload from post creation?" "Uploading a 5MB photo takes 2-10 seconds depending on network. Creating a post (caption, tags, metadata) takes <100ms. If you combine them in one API call, the entire request blocks for the upload duration. Separate them: POST /media/upload returns a media_id, then POST /posts references the media_id. This lets the client upload media in the background while the user types a caption."}}
+
+{{think "API design for Instagram is deceptively complex because it needs to handle very different access patterns within the same system."
+  (whyNot "a single GET /feed endpoint that returns everything" "A monolithic feed endpoint returns posts + user info + like counts + comment previews + story rings. That is 5 different data sources joined on the server. If any one source is slow (e.g., comment service degraded), the entire feed request fails. Instead, use a composition layer: GET /feed returns post IDs and lightweight metadata, client hydrates user info and engagement counts in parallel.")
+  (whatIf "you need to support both chronological and ranked feeds" "Use a feed_type query parameter: GET /feed?type=chronological vs GET /feed?type=ranked. The chronological feed is a simple time-sorted query. The ranked feed runs through an ML scoring pipeline. Both share the same post hydration logic but differ in ordering. Instagram initially shipped chronological and added ranking later — having the parameter from day one makes the transition seamless.")
+  (how "pagination works for infinite scroll" "Cursor-based pagination with opaque tokens: GET /feed?cursor=eyJ0cyI6MTY5...&limit=20. The cursor encodes the timestamp of the last item. Never use offset-based pagination — if new posts are inserted between pages, items shift and users see duplicates or miss posts. Cursor pagination is O(1) regardless of offset depth.")
+}}
+
+{{triggerQs "Questions about API design"
+  "Why cursor-based pagination over offset-based?"
+  "Offset pagination (page=5&limit=20) breaks when new content is inserted. If 3 new posts appear while the user is on page 5, page 6 will repeat 3 posts from page 5. Cursor pagination uses a timestamp or ID marker — 'give me 20 posts older than this cursor.' New insertions above the cursor don't affect results below it. Every major social API uses cursor pagination."
+  "How do you handle the presigned URL pattern for media upload?"
+  "Client calls POST /media/upload/init → server returns a presigned S3 PUT URL + upload_id. Client uploads directly to S3 using the presigned URL (never through your API server — saves bandwidth and latency). Client calls POST /media/upload/complete with upload_id → server validates the upload, triggers resize pipeline, returns media_id. This is how Instagram, Twitter, and Slack all handle media uploads."
+  "Should likes be POST /posts/{id}/like or PUT /posts/{id}/like?"
+  "POST. Like is creating a new resource (a like record), not updating the post. PUT implies idempotency — calling it twice should produce the same result. POST /like with a unique constraint (user_id, post_id) naturally handles double-like prevention at the database level. DELETE /posts/{id}/like for unlike."
+}}
+
+{{phase 3 "Stage 1: MVP (0-1M users)" "5 min"}}
 
 {{say "For MVP, I would build a monolith with Postgres, a single S3 bucket, and CloudFront. The goal is shipping fast with a clean data model we can shard later."}}
 
@@ -155,7 +203,7 @@ LIMIT 20 OFFSET :offset;
   "Add Redis when your Postgres CPU consistently exceeds 60% or P99 query latency exceeds 100ms. For a social app, this typically happens around 500K-1M DAU. Start by caching user profiles (most frequently read, rarely updated) and hot post metadata. The feed query is the last thing to cache because it changes on every followee post."
 }}
 
-{{phase 3 "Stage 1: Upload Flow (Hop-by-Hop)" "5 min"}}
+{{phase 4 "Stage 1: Upload Flow (Hop-by-Hop)" "5 min"}}
 
 {{say "Let me walk through the upload flow hop by hop, showing each service, its purpose, failure modes, and cost."}}
 
@@ -169,7 +217,7 @@ LIMIT 20 OFFSET :offset;
 
 {{hint "why pre-signed URLs for upload?" "Pre-signed URLs let clients upload directly to S3, bypassing your application servers entirely. This avoids the bottleneck of proxying multi-MB image files through your API tier, reduces server CPU and bandwidth costs, and lets S3 handle the heavy lifting of multipart uploads with built-in retry."}}
 
-{{phase 4 "Stage 2: Growing (1M-50M users)" "8 min"}}
+{{phase 5 "Stage 2: Growing (1M-50M users)" "8 min"}}
 
 {{say "At 1M users things still work. At 10M, the feed query slows down because popular users follow 1000+ people, and the IN clause gets expensive. This is where we add the feed service and fan-out."}}
 
@@ -284,7 +332,7 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
   "Add a ranking score to each post combining recency (exponential decay), engagement rate (likes + comments / impressions), and user affinity (how often the viewer interacts with the poster). Store the score as the ZSET score instead of raw timestamp. Recompute scores periodically via a batch job and update the sorted set."
 }}
 
-{{phase 5 "Stage 3: Scaling (50M-500M users)" "8 min"}}
+{{phase 6 "Stage 3: Scaling (50M-500M users)" "8 min"}}
 
 {{say "At 50M+ users, Postgres becomes the bottleneck. We need to shard the database, move to microservices, and add proper message queuing for async processing."}}
 
@@ -340,7 +388,7 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
   "Distributed tracing with a correlation ID (trace_id) propagated through every gRPC call and Kafka message header. Use OpenTelemetry to instrument all services, send traces to Jaeger or AWS X-Ray. When a feed load is slow, the trace shows exactly which service call took the most time — e.g., Post Service hydration at 45ms instead of the expected 10ms."
 }}
 
-{{phase 6 "Stage 4: Handling Peak Hours" "5 min"}}
+{{phase 7 "Stage 4: Handling Peak Hours" "5 min"}}
 
 {{say "Peak hours for Instagram: 6-9 PM local time, New Year midnight, Super Bowl, celebrity announcements. We need to handle 5-10x normal traffic without degradation."}}
 
@@ -408,7 +456,7 @@ class ShardedCounter:
 
 {{avoid "Never design for peak as your baseline. You will burn money 95% of the time. Design for normal load, scale for peak. Auto-scaling + write buffering + circuit breakers handle the delta."}}
 
-{{phase 7 "Stage 5: Global Scale (500M+ users)" "5 min"}}
+{{phase 8 "Stage 5: Global Scale (500M+ users)" "5 min"}}
 
 {{say "At 500M+ users, we need multi-region deployment for latency and compliance. Users in India should not hit US-East servers."}}
 
@@ -444,7 +492,7 @@ class ShardedCounter:
   "DynamoDB Global Tables replicate in under 1 second. For that brief window, the feed may not include the latest post. This is acceptable because social media feeds are eventually consistent by design."
 }}
 
-{{phase 8 "Security & Content Moderation" "8 min"}}
+{{phase 9 "Security & Content Moderation" "8 min"}}
 
 {{say "Security at Instagram scale means content moderation, spam prevention, bot detection, and account safety. Each is a system design problem on its own."}}
 
@@ -556,7 +604,7 @@ async def mark_viewed(story_id: str, user_id: int):
 
 {{diagram "ig-sub-problems"}}
 
-{{phase 9 "Analytics & Monitoring" "5 min"}}
+{{phase 10 "Analytics & Monitoring" "5 min"}}
 
 {{say "At Instagram scale, observability is not optional. Let me define SLOs, analytics pipelines, and the monitoring stack."}}
 
@@ -634,7 +682,7 @@ async def mark_viewed(story_id: str, user_id: int):
 
 {{hint "why separate SLOs per feature?" "Feed availability matters more than explore availability — users tolerate explore being slow but not their feed. Upload success matters more than notification delivery — a lost photo is unrecoverable but a delayed notification is just annoying. Different SLOs let you prioritize engineering effort on what matters most to users."}}
 
-{{phase 10 "Bottlenecks & Deep Trade-offs" "8 min"}}
+{{phase 11 "Bottlenecks & Trade-offs" "8 min"}}
 
 {{table "Key Trade-offs" (rows
   (row "Trade-off"                       "Choice"                          "Rationale"                                      "What You Lose")
@@ -675,8 +723,6 @@ async def mark_viewed(story_id: str, user_id: int):
 }}
 
 {{diagram "ig-scaling-timeline"}}
-
-{{phase 11 "Distributed System Vision" "5 min"}}
 
 {{say "Let me paint the full distributed system picture. At 500M+ DAU, Instagram is not one system but a constellation of specialized systems communicating through event streams, each optimized for its specific access pattern."}}
 

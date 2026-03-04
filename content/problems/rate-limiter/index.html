@@ -2,9 +2,22 @@
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
-{{say "Let me clarify the scope. Are we designing a rate limiter for a single service, or a distributed rate limiting platform? I will assume we are building a distributed rate limiter that can protect multiple services at scale."}}
+{{say "Let me clarify the scope. Are we designing a rate limiter for a single service, or a distributed rate limiting platform? I'll assume we're building a distributed rate limiter that can protect multiple services at scale. Let me define the functional and non-functional requirements."}}
 
 {{hint "why distributed?" "A single-service rate limiter is trivial — just an in-memory counter. The hard problems only emerge when you have multiple app servers that need to agree on a shared count, or multiple regions where you cannot afford a synchronous cross-region check on every request."}}
+
+{{table "Functional Requirements" (rows
+  (row "Requirement"              "Description"                                          "Priority"  "Drives")
+  (row "Per-key rate limiting"    "Enforce request limits per API key, user, or IP"       "P0"        "Redis data model, key schema, Lua atomicity")
+  (row "Multiple algorithms"     "Support token bucket, sliding window, fixed window"     "P0"        "Algorithm abstraction, configuration per endpoint")
+  (row "Rate limit headers"      "Return X-RateLimit-Limit, Remaining, Reset on every response" "P0" "Middleware design, response decoration")
+  (row "Configurable rules"      "Per-endpoint, per-tier limits without redeployment"    "P1"        "Config store, hot-reload, rule engine")
+  (row "Fail-open/closed toggle" "Per-endpoint policy when Redis is unavailable"          "P1"        "Circuit breaker, fallback strategy")
+  (row "Multi-region sync"       "Consistent counting across geographic regions"          "P2"        "Gossip protocol, async sync, accuracy trade-offs")
+  (row "Dashboard & analytics"   "Real-time visibility into rate limit hit rates"         "P2"        "Metrics pipeline, Grafana dashboards")
+)}}
+
+{{hint "why P0 includes rate headers?" "Rate headers are not optional. Without X-RateLimit-Remaining, well-behaved clients cannot proactively slow down before hitting the limit. This causes a thundering herd of 429 responses followed by aggressive retries. Stripe, GitHub, and every major API returns rate headers because it transforms clients from hammering-then-backing-off to smoothly self-throttling."}}
 
 {{diagram "rl-requirements"}}
 
