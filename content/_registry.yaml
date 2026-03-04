@@ -72,6 +72,156 @@ problems:
         risk: "Sticky session + node failure = temporary over-limit"
         caveats: "Sticky sessions via ALB cookie, not IP. Duration: 1 day."
 
+  - slug: ticket-booking
+    title: "BookMyShow Ticket Booking"
+    description: "Design movie/event ticket booking: seat locking, payment processing, QR codes, handling 100K users for 500 seats"
+    path: problems/ticket-booking
+    uses:
+      - fundamental: storage/redis
+        config: "Distributed lock for seat reservation with 10-min TTL"
+        why: "Sub-ms lock acquisition, automatic expiry on payment timeout"
+        not_this: "DynamoDB conditional writes — too slow for real-time seat map updates"
+        risk: "Redis failover during seat lock = potential double-booking"
+        caveats: "Redlock across 3 Redis nodes for safety. SET NX EX 600 for seat locks."
+      - fundamental: networking/load-balancing
+        config: "ALB with WebSocket support for real-time seat availability"
+        why: "Seat map updates need push to thousands of concurrent users"
+        not_this: "NLB — need L7 routing for /api vs /ws paths"
+        risk: "WebSocket connection storm on show opening"
+        caveats: "ALB WebSocket idle timeout: 4000s max. Keep-alive every 30s."
+
+  - slug: food-delivery
+    title: "Swiggy/Zomato Food Delivery"
+    description: "Design food delivery: order matching, real-time tracking, ETA prediction, surge pricing, 100K+ concurrent orders"
+    path: problems/food-delivery
+    uses:
+      - fundamental: storage/redis
+        config: "Geospatial index (GEOADD/GEORADIUS) for nearby delivery partners"
+        why: "O(log N) geo queries for partner matching within radius"
+        not_this: "Postgres PostGIS — too slow for real-time matching at 100K orders/min"
+        risk: "Stale location data if partner app loses connectivity"
+        caveats: "GEORADIUS returns unsorted. Sort by distance client-side. TTL partner locations 60s."
+      - fundamental: networking/load-balancing
+        config: "ALB with path routing: /api → order service, /ws → tracking service"
+        why: "Separate scaling for HTTP API vs persistent WebSocket connections"
+        not_this: "Single endpoint — tracking WebSocket connections would exhaust API server capacity"
+        risk: "ALB connection limits during dinner rush (100K concurrent WebSockets)"
+        caveats: "ALB supports 100K concurrent connections per target. Scale target groups independently."
+      - fundamental: networking/cdn/cloudfront
+        config: "Edge caching for restaurant menus, images, static assets"
+        why: "Menu images are read-heavy (10K views per update), highly cacheable"
+        not_this: "Serving images from origin — 100K users loading restaurant photos = origin overload"
+        risk: "Stale menu prices after restaurant update"
+        caveats: "TTL 5min for menus, 24h for images. Invalidate on menu update."
+
+  - slug: ride-hailing
+    title: "Ola/Uber Ride-Hailing"
+    description: "Design ride-hailing: geospatial matching, surge pricing, real-time tracking, ETA, 100K+ concurrent rides"
+    path: problems/ride-hailing
+    uses:
+      - fundamental: storage/redis
+        config: "GEOADD/GEORADIUS for driver location index, pub/sub for ride updates"
+        why: "Sub-ms geospatial queries for nearest driver matching"
+        not_this: "Postgres PostGIS — too slow for 1M driver location updates/min"
+        risk: "Stale driver locations lead to phantom drivers on map"
+        caveats: "Update driver location every 4s. TTL 30s to remove offline drivers."
+      - fundamental: networking/load-balancing
+        config: "NLB for driver location streaming, ALB for rider HTTP API"
+        why: "Driver app sends GPS updates every 4s — NLB handles high-throughput UDP/TCP"
+        not_this: "ALB for driver updates — L7 overhead unnecessary for location pings"
+        risk: "Connection draining during NLB health checks drops location updates"
+        caveats: "NLB cross-zone load balancing: $0.006/GB. Enable for even distribution."
+
+  - slug: chat-system
+    title: "WhatsApp/Slack Messaging"
+    description: "Design real-time messaging: 1-to-1 chat, group chat (256 members), E2E encryption, offline queue, 2B users"
+    path: problems/chat-system
+    uses:
+      - fundamental: storage/redis
+        config: "Pub/Sub for real-time message delivery, presence tracking"
+        why: "Sub-ms publish to connected WebSocket sessions"
+        not_this: "Polling — adds 1-5 second latency to message delivery"
+        risk: "Redis Pub/Sub is fire-and-forget — message loss on disconnect"
+        caveats: "Pub/Sub does not persist. Use Kafka for message durability. Redis for delivery only."
+      - fundamental: networking/load-balancing
+        config: "NLB for persistent WebSocket connections, ALB for REST API"
+        why: "WebSocket connections are long-lived — NLB handles millions of concurrent TCP connections"
+        not_this: "ALB — WebSocket idle timeout (4000s) and L7 overhead add latency"
+        risk: "NLB target deregistration drops active WebSocket sessions"
+        caveats: "NLB connection draining: 300s. Client must auto-reconnect on disconnect."
+      - fundamental: storage/dynamodb
+        config: "Messages table (PK=conversation_id, SK=message_id), TTL for ephemeral messages"
+        why: "Write-heavy (billions of messages/day), auto-scales, single-digit-ms reads"
+        not_this: "Postgres — write throughput limit at B+ scale, sharding complexity"
+        risk: "Hot partition on group chats with 256 members"
+        caveats: "On-demand pricing at 2B users = significant cost. Use reserved capacity."
+
+  - slug: search-autocomplete
+    title: "Search Autocomplete"
+    description: "Design typeahead: prefix matching, popularity ranking, fuzzy matching, <50ms response, trending updates"
+    path: problems/search-autocomplete
+    uses:
+      - fundamental: storage/redis
+        config: "Sorted sets for top-K suggestions per prefix, TTL for trending"
+        why: "ZRANGEBYSCORE returns top suggestions in O(log N + K), sub-ms latency"
+        not_this: "Elasticsearch — too slow for <50ms typeahead at every keystroke"
+        risk: "Memory explosion: all prefixes × top-K suggestions"
+        caveats: "Only store prefixes up to length 10. Longer prefixes fall through to ES."
+      - fundamental: networking/cdn/cloudfront
+        config: "Edge caching for popular prefix results (top 1000 prefixes)"
+        why: "80% of searches start with the same 1000 prefixes — cache at edge for <10ms"
+        not_this: "No CDN — every keystroke hits origin servers"
+        risk: "Stale suggestions for trending topics"
+        caveats: "TTL 60s for popular prefixes. Invalidate on trending spike."
+
+  - slug: twitter-feed
+    title: "Twitter/X Feed"
+    description: "Design Twitter: tweet posting, fan-out feed, timeline caching, trending, 500M users, celebrity accounts"
+    path: problems/twitter-feed
+    uses:
+      - fundamental: storage/redis
+        config: "Sorted sets for home timeline cache, pub/sub for real-time updates"
+        why: "Pre-computed timelines in sorted sets — O(log N) insert, O(1) range read"
+        not_this: "Memcached — no sorted set support, need ordering for timeline"
+        risk: "Celebrity tweet fan-out to 100M followers melts Redis cluster"
+        caveats: "Hybrid fan-out: write for <50K followers, read for celebrities. Cap timeline at 800 tweets."
+      - fundamental: networking/cdn/cloudfront
+        config: "Edge caching for media (images, videos), trending topics API"
+        why: "Viral tweet media gets millions of views — CDN absorbs 95% of reads"
+        not_this: "Serving media from origin — viral tweet = origin DDoS"
+        risk: "DMCA takedown requires instant CDN invalidation"
+        caveats: "CloudFront invalidation: 1000 free/mo. Use wildcard paths for bulk purge."
+      - fundamental: storage/dynamodb
+        config: "Tweets table (PK=user_id, SK=tweet_id), Timeline table (PK=user_id, SK=score)"
+        why: "Write-heavy (500K tweets/min), auto-scales without manual sharding"
+        not_this: "Postgres — connection exhaustion at Twitter scale"
+        risk: "Hot partition on celebrity user_id"
+        caveats: "Write sharding for celebrities: PK=user_id#shard. Scatter-gather on read."
+      - fundamental: networking/load-balancing
+        config: "ALB with path routing: /api → tweet service, /stream → streaming API"
+        why: "Streaming API (SSE/WebSocket) needs separate scaling from REST API"
+        not_this: "Single ALB target — streaming connections exhaust REST capacity"
+        risk: "Streaming connection storm during major events"
+        caveats: "Rate limit streaming connections: 1 per user. Reconnect backoff: exponential."
+
+  - slug: google-calendar
+    title: "Google Calendar"
+    description: "Design calendar: event CRUD, recurring events, invitations, conflict detection, reminders, timezone handling"
+    path: problems/google-calendar
+    uses:
+      - fundamental: storage/redis
+        config: "Cache for user calendar views, pub/sub for real-time event updates"
+        why: "Calendar day/week views are read-heavy — cache assembled view"
+        not_this: "No cache — every calendar open queries DB for recurring event expansion"
+        risk: "Cache invalidation on shared calendar event updates"
+        caveats: "TTL 5min for calendar views. Invalidate on event create/update/delete."
+      - fundamental: networking/load-balancing
+        config: "ALB with health checks for calendar API service"
+        why: "Stateless API, standard HTTP routing"
+        not_this: "NLB — need L7 for OAuth and path routing"
+        risk: "Morning login surge (9 AM across timezones) = predictable peak"
+        caveats: "Pre-warm ALB capacity before business hours. Target tracking scaling."
+
 # ─── Fundamentals (hierarchical) ───
 fundamentals:
   - slug: networking/load-balancing
@@ -120,25 +270,25 @@ algorithms:
     title: "Consistent Hashing"
     description: "Distribute data across nodes with minimal reshuffling on add/remove"
     path: algorithms/consistent-hashing
-    used_in: [url-shortener, instagram]
+    used_in: [url-shortener, instagram, ride-hailing, food-delivery]
 
   - slug: token-bucket
     title: "Token Bucket"
     description: "Rate limiting algorithm that allows bursts while enforcing average rate"
     path: algorithms/token-bucket
-    used_in: [rate-limiter]
+    used_in: [rate-limiter, ticket-booking, twitter-feed]
 
   - slug: bloom-filter
     title: "Bloom Filter"
     description: "Space-efficient probabilistic set membership test (no false negatives)"
     path: algorithms/bloom-filter
-    used_in: [url-shortener, instagram]
+    used_in: [url-shortener, instagram, chat-system, search-autocomplete]
 
   - slug: snowflake-id
     title: "Snowflake ID"
     description: "Distributed unique ID generation — time-sorted, no coordination"
     path: algorithms/snowflake-id
-    used_in: [url-shortener, instagram]
+    used_in: [url-shortener, instagram, ticket-booking, chat-system, twitter-feed]
 
 # ─── Design Patterns (for LLM) ───
 patterns:

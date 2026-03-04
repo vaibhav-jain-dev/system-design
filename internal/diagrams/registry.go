@@ -84,5 +84,12 @@ func BuildDefault() *Registry {
 	registerAlgorithms(r)
 	registerFundamentals(r)
 	registerPatterns(r)
+	registerFoodDelivery(r)
+	registerTicketBooking(r)
+	registerRideHailing(r)
+	registerChatSystem(r)
+	registerSearchAutocomplete(r)
+	registerTwitterFeed(r)
+	registerGoogleCalendar(r)
 	return r
 }
