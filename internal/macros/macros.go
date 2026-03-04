@@ -22,6 +22,7 @@ func FuncMap() template.FuncMap {
 		"table":     tableMacro,
 		"info":      info,
 		"diagram":   diagram,
+		"details":   details,
 
 		// Helpers for building structured data in templates
 		"options": optionsList,
@@ -136,10 +137,10 @@ func slugIcon(slug string) template.HTML {
 	return template.HTML(icons["icon-fundamental"])
 }
 
-// say renders an interview say-box.
+// say renders an interview say-box with speech icon.
 func say(text string) template.HTML {
 	return template.HTML(fmt.Sprintf(
-		`<div class="say-box"><span class="say-label">Say:</span> <em>"%s"</em></div>`, text))
+		`<div class="say-box"><span class="say-label"><svg class="box-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Say</span> <em>"%s"</em></div>`, text))
 }
 
 // thought renders a thought cloud for reasoning/math/failure scenarios.
@@ -151,13 +152,20 @@ func thought(text string) template.HTML {
 // avoid renders an avoid box for common mistakes.
 func avoid(text string) template.HTML {
 	return template.HTML(fmt.Sprintf(
-		`<div class="avoid-box"><span class="avoid-label">Avoid:</span> %s</div>`, text))
+		`<div class="avoid-box"><span class="avoid-label"><svg class="box-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> Avoid</span> %s</div>`, text))
 }
 
 // key renders a key takeaway box.
 func key(text string) template.HTML {
 	return template.HTML(fmt.Sprintf(
-		`<div class="key-takeaway"><strong>%s</strong></div>`, text))
+		`<div class="key-takeaway"><span class="key-label"><svg class="box-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg> Key Insight</span> %s</div>`, text))
+}
+
+// details renders a collapsible details/summary block (for SQL, code, etc.).
+func details(summary, lang, content string) template.HTML {
+	return template.HTML(fmt.Sprintf(
+		`<details class="collapsible-code"><summary>%s</summary><div class="code-block" data-lang="%s"><pre><code>%s</code></pre></div></details>`,
+		summary, lang, template.HTMLEscapeString(content)))
 }
 
 // phase renders a phase/section header.
