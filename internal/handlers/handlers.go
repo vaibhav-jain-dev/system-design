@@ -72,12 +72,13 @@ func countChildFundamentals(children []registry.Fundamental) int {
 // baseData returns common template data shared by all handlers.
 func (h *Handler) baseData() map[string]interface{} {
 	return map[string]interface{}{
-		"Problems":          h.reg.Problems,
-		"Fundamentals":      h.reg.Fundamentals,
-		"Algorithms":        h.reg.Algorithms,
-		"Patterns":          h.reg.Patterns,
-		"Concepts":          h.reg.Concepts,
-		"TotalFundamentals": countFundamentals(h.reg.Fundamentals),
+		"Problems":             h.reg.Problems,
+		"Fundamentals":         h.reg.Fundamentals,
+		"FundamentalGroups":    h.reg.GroupedFundamentals(),
+		"Algorithms":           h.reg.Algorithms,
+		"Patterns":             h.reg.Patterns,
+		"Concepts":             h.reg.Concepts,
+		"TotalFundamentals":    countFundamentals(h.reg.Fundamentals),
 	}
 }
 

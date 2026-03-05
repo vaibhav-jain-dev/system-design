@@ -23,6 +23,18 @@ problems:
         not_this: "Memcached — no persistence on node restart"
         risk: "Thundering herd on cache miss for viral URLs"
         caveats: "r6g.large = $0.126/hr = ~$92/mo. Monitor eviction rate."
+      - fundamental: storage/sharding
+        config: "Hash-based sharding on short_code; consistent hashing ring for DB nodes"
+        why: "Single MySQL at 100B URLs = ~20TB. Shard by short_code hash for even distribution"
+        not_this: "Range-based sharding — hot shards for popular URL prefixes"
+        risk: "Resharding requires migrating ~50% of keys when adding nodes"
+        caveats: "Use consistent hashing with 150 virtual nodes per DB. 6→12 shards is zero-downtime with CH."
+      - fundamental: distributed/consistent-hashing
+        config: "Virtual-node ring for URL DB shard assignment, 150 vnodes per physical node"
+        why: "Consistent hashing limits reshuffling to K/N keys on node add (vs full rehash)"
+        not_this: "Modulo hashing (key % N) — adding one node reshuffles (N-1)/N keys"
+        risk: "Uneven load if virtual node count is too low — monitor shard utilisation"
+        caveats: "Jump Consistent Hash or Rendezvous hashing also viable. CH most widely supported."
 
   - slug: instagram
     title: "Instagram"
@@ -53,6 +65,18 @@ problems:
         not_this: "Postgres — write amplification at scale, connection pool exhaustion"
         risk: "Hot partition on celebrity posts — use write sharding (user_id#shard)"
         caveats: "On-demand $1.25/M writes, $0.25/M reads. At 100K WPS = ~$10K/mo."
+      - fundamental: storage/sharding
+        config: "user_id-based sharding for posts/followers; write sharding for celebrity user_ids"
+        why: "Instagram at 1B users = 500TB+ media metadata. Shard by user_id for data co-location"
+        not_this: "Media ID sharding — loses user locality, forces cross-shard fan-out for feeds"
+        risk: "Celebrity user_id = hot shard — add shard suffix (user_id#0 … user_id#7)"
+        caveats: "Add shard index column to avoid cross-shard scatter-gather reads."
+      - fundamental: messaging/message-queues
+        config: "Kafka for async notification fan-out; SQS for image processing pipeline"
+        why: "Fan-out to 100M followers is async — push to Kafka, workers deliver to notification service"
+        not_this: "Synchronous fan-out in post request — post API would timeout at Instagram scale"
+        risk: "Kafka consumer lag during viral post = delayed notifications"
+        caveats: "Partition by user_id for ordered delivery. At-least-once with idempotent consumers."
 
   - slug: rate-limiter
     title: "Rate Limiter"
@@ -89,6 +113,18 @@ problems:
         not_this: "NLB — need L7 routing for /api vs /ws paths"
         risk: "WebSocket connection storm on show opening"
         caveats: "ALB WebSocket idle timeout: 4000s max. Keep-alive every 30s."
+      - fundamental: networking/websockets
+        config: "WebSocket push for real-time seat map updates to all concurrent viewers"
+        why: "100K users viewing same show's seat map need instant updates — polling adds 2-5s staleness"
+        not_this: "Long-polling — doubles server connections vs WebSocket, higher overhead"
+        risk: "WebSocket connection storm when popular show goes on sale"
+        caveats: "Throttle seat map broadcasts: batch updates every 500ms. Client debounces renders."
+      - fundamental: distributed/saga-pattern
+        config: "Choreography saga: seat-reserved → payment-processed → ticket-issued"
+        why: "Booking spans seat reservation + payment across microservices — saga coordinates rollback"
+        not_this: "Two-phase commit (2PC) — distributed lock held across services causes cascading timeouts"
+        risk: "Compensating transaction failure = inconsistent state (seat reserved but payment failed)"
+        caveats: "Idempotent compensating transactions required. Use outbox pattern for reliable event publishing."
 
   - slug: food-delivery
     title: "Swiggy/Zomato Food Delivery"
@@ -113,6 +149,18 @@ problems:
         not_this: "Serving images from origin — 100K users loading restaurant photos = origin overload"
         risk: "Stale menu prices after restaurant update"
         caveats: "TTL 5min for menus, 24h for images. Invalidate on menu update."
+      - fundamental: storage/geospatial
+        config: "Geohash for restaurant geo-indexing; Redis GEOADD/GEORADIUS for delivery-partner tracking"
+        why: "Finding restaurants within 5 km requires spatial index — Geohash reduces search space to 9 cells"
+        not_this: "Full table scan with Haversine formula — O(N) at 100K+ restaurants"
+        risk: "Restaurant at geohash boundary can be missed — query self + 8 neighbours"
+        caveats: "Geohash precision 6 = ~1.2 km × 0.6 km cells. Redis GEO uses WGS84 encoding internally."
+      - fundamental: networking/websockets
+        config: "WebSocket for real-time order status updates and delivery-partner location tracking"
+        why: "Order tracking needs server push — polling adds 3-5s staleness on driver position"
+        not_this: "SSE (Server-Sent Events) — unidirectional, can't receive driver pings from client"
+        risk: "WebSocket disconnect during delivery = stale map. Auto-reconnect in 2s."
+        caveats: "NLB for WebSocket connections. ALB idle timeout max 4000s — use NLB for long-lived rides."
 
   - slug: ride-hailing
     title: "Ola/Uber Ride-Hailing"
@@ -131,6 +179,18 @@ problems:
         not_this: "ALB for driver updates — L7 overhead unnecessary for location pings"
         risk: "Connection draining during NLB health checks drops location updates"
         caveats: "NLB cross-zone load balancing: $0.006/GB. Enable for even distribution."
+      - fundamental: storage/geospatial
+        config: "S2 cells for driver location index; GEORADIUS for nearest-driver matching within radius"
+        why: "Finding nearest N drivers requires O(log N) spatial query — geohash/S2 enables this vs O(N) scan"
+        not_this: "Lat/lon B-tree scan — O(N) full table scan across 1M active driver locations"
+        risk: "S2 cell boundary issue — drivers just outside query radius may be missed"
+        caveats: "Query cells at 2 ring levels around rider. Google S2 bindings for Java/C++; Redis GEO for simplicity."
+      - fundamental: networking/websockets
+        config: "WebSocket for real-time driver location push to rider app (every 4s)"
+        why: "Driver map must update in near-real-time — HTTP polling adds 4s+ staleness"
+        not_this: "HTTP polling from rider app — adds unnecessary load, stale positions on map"
+        risk: "WebSocket disconnect during ride = map freezes. Client must auto-reconnect within 1s."
+        caveats: "NLB for WebSocket connections (not ALB) to avoid L7 overhead on high-frequency location pings."
 
   - slug: chat-system
     title: "WhatsApp/Slack Messaging"
@@ -155,6 +215,24 @@ problems:
         not_this: "Postgres — write throughput limit at B+ scale, sharding complexity"
         risk: "Hot partition on group chats with 256 members"
         caveats: "On-demand pricing at 2B users = significant cost. Use reserved capacity."
+      - fundamental: messaging/message-queues
+        config: "Kafka for message persistence and replay; partitioned by conversation_id"
+        why: "Redis Pub/Sub is fire-and-forget. Kafka guarantees persistence + replay for offline users"
+        not_this: "Redis Streams — works but lacks Kafka's partition-level ordering guarantees"
+        risk: "Kafka consumer lag during message storm = delayed delivery notifications"
+        caveats: "Partition by conversation_id for ordered delivery. Replication factor 3 for durability."
+      - fundamental: networking/websockets
+        config: "Persistent WebSocket connections per chat server; sticky sessions via NLB"
+        why: "Real-time bidirectional chat — HTTP polling adds 1-5 second latency per message"
+        not_this: "SSE — unidirectional only, cannot send messages from client to server"
+        risk: "100K concurrent connections per chat server = ~1 GB RAM minimum"
+        caveats: "Auto-reconnect with exponential backoff (1s, 2s, 4s, 8s). Preserve message order on reconnect."
+      - fundamental: distributed/cap-theorem
+        config: "AP system: messages delivered at-least-once; read-your-own-writes via local cache"
+        why: "Availability over consistency — a delayed message is better than a failed send"
+        not_this: "CP system — a network partition that blocks message sends is unacceptable for chat"
+        risk: "Eventual consistency means brief duplicate delivery on reconnect — deduplicate client-side"
+        caveats: "Use idempotency keys (message_id) for at-least-once deduplication."
 
   - slug: search-autocomplete
     title: "Search Autocomplete"
@@ -173,6 +251,12 @@ problems:
         not_this: "No CDN — every keystroke hits origin servers"
         risk: "Stale suggestions for trending topics"
         caveats: "TTL 60s for popular prefixes. Invalidate on trending spike."
+      - fundamental: storage/sharding
+        config: "Shard trie by first character of prefix; Redis cluster for in-memory prefix storage"
+        why: "Trie for all English prefixes across 10 length levels doesn't fit on one node"
+        not_this: "Single Redis node — trie for 100K+ prefix-suggestion pairs hits memory ceiling"
+        risk: "Letter 't' shard receives 10× traffic vs 'x' shard — monitor hot shards"
+        caveats: "Only store prefixes up to length 10. Longer strings fall through to Elasticsearch."
 
   - slug: twitter-feed
     title: "Twitter/X Feed"
@@ -203,6 +287,18 @@ problems:
         not_this: "Single ALB target — streaming connections exhaust REST capacity"
         risk: "Streaming connection storm during major events"
         caveats: "Rate limit streaming connections: 1 per user. Reconnect backoff: exponential."
+      - fundamental: messaging/message-queues
+        config: "Kafka for async tweet fan-out to follower timelines; partitioned by tweeter user_id"
+        why: "Fan-out to 100M followers must be async — synchronous fan-out would timeout in seconds"
+        not_this: "SQS — no partition-based ordering, harder to replay missed timeline events"
+        risk: "Consumer lag during viral tweet = delayed timeline updates for followers"
+        caveats: "Hybrid fan-out: write for <50K followers, read for celebrities (fan-out-on-read)."
+      - fundamental: storage/sharding
+        config: "user_id-based sharding for tweets and timelines; write sharding for celebrity accounts"
+        why: "500M users × avg 50 tweets each = 25B tweet rows. Must shard across DB nodes"
+        not_this: "Single DB — connection exhaustion and write bottleneck at Twitter scale"
+        risk: "Celebrity user_id = hot shard — use PK=user_id#shard for write distribution"
+        caveats: "Scatter-gather on celebrity reads: query all shards, merge results."
 
   - slug: google-calendar
     title: "Google Calendar"
@@ -221,6 +317,12 @@ problems:
         not_this: "NLB — need L7 for OAuth and path routing"
         risk: "Morning login surge (9 AM across timezones) = predictable peak"
         caveats: "Pre-warm ALB capacity before business hours. Target tracking scaling."
+      - fundamental: distributed/cap-theorem
+        config: "CP system for event creation (strong consistency), AP for read replicas"
+        why: "Calendar conflicts require consistent reads — AP with stale data could double-book a meeting"
+        not_this: "AP system globally — eventual consistency allows double-booking until sync resolves"
+        risk: "Multi-region: conflict detection requires linearizable writes (quorum or Spanner)"
+        caveats: "DynamoDB conditional writes for single-region. Spanner for global consistent calendar."
 
 # ─── Fundamentals (hierarchical) ───
 fundamentals:
@@ -272,6 +374,7 @@ fundamentals:
     title: "Consistent Hashing"
     description: "Ring-based node distribution, virtual nodes, rebalancing cost, hotspot mitigation"
     path: fundamentals/distributed/consistent-hashing
+    related_algorithm: consistent-hashing
 
   - slug: distributed/cap-theorem
     title: "CAP Theorem & Consistency"
@@ -282,6 +385,7 @@ fundamentals:
     title: "Rate Limiting"
     description: "Token bucket, leaky bucket, fixed window, sliding window — distributed Redis Lua implementation"
     path: fundamentals/distributed/rate-limiting
+    related_algorithm: token-bucket
 
   - slug: distributed/saga-pattern
     title: "Saga Pattern"
@@ -316,12 +420,14 @@ algorithms:
     description: "Distribute data across nodes with minimal reshuffling on add/remove"
     path: algorithms/consistent-hashing
     used_in: [url-shortener, instagram, ride-hailing, food-delivery]
+    related_fundamental: distributed/consistent-hashing
 
   - slug: token-bucket
     title: "Token Bucket"
     description: "Rate limiting algorithm that allows bursts while enforcing average rate"
     path: algorithms/token-bucket
     used_in: [rate-limiter, ticket-booking, twitter-feed]
+    related_fundamental: distributed/rate-limiting
 
   - slug: bloom-filter
     title: "Bloom Filter"
