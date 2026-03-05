@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"log"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -40,6 +41,9 @@ type Problem struct {
 	Path        string      `yaml:"path"`
 	Docs        []DocMeta   `yaml:"docs"`
 	Uses        []UsageLink `yaml:"uses"`
+
+	// Algorithms used in this problem (auto-derived from Algorithm.UsedIn reverse)
+	Algorithms []*Algorithm `yaml:"-"`
 }
 
 type Fundamental struct {
@@ -49,6 +53,10 @@ type Fundamental struct {
 	Path        string        `yaml:"path"`
 	Children    []Fundamental `yaml:"children"`
 	UsedBy      []UsageLink   `yaml:"-"`
+
+	// Optional cross-reference to an algorithm that implements this concept
+	RelatedAlgorithm    string     `yaml:"related_algorithm"`
+	RelatedAlgorithmRef *Algorithm `yaml:"-"`
 }
 
 type Algorithm struct {
@@ -59,6 +67,10 @@ type Algorithm struct {
 	UsedIn      []string `yaml:"used_in"`
 	// Resolved references (populated after load)
 	UsedInProblems []*Problem `yaml:"-"`
+
+	// Optional cross-reference to a fundamental that covers this concept in depth
+	RelatedFundamental    string       `yaml:"related_fundamental"`
+	RelatedFundamentalRef *Fundamental `yaml:"-"`
 }
 
 type Pattern struct {
@@ -182,8 +194,28 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 		for _, problemSlug := range a.UsedIn {
 			if p, ok := reg.problemsBySlug[problemSlug]; ok {
 				a.UsedInProblems = append(a.UsedInProblems, p)
+				// Reverse link: problem knows which algorithms it uses
+				p.Algorithms = append(p.Algorithms, a)
 			} else {
 				log.Printf("WARNING: algorithm %q references non-existent problem %q", a.Slug, problemSlug)
+			}
+		}
+	}
+
+	// Resolve algorithm ↔ fundamental cross-references
+	for _, a := range reg.Algorithms {
+		if a.RelatedFundamental != "" {
+			a.RelatedFundamentalRef = reg.fundamentalsBySlug[a.RelatedFundamental]
+			if a.RelatedFundamentalRef == nil {
+				log.Printf("WARNING: algorithm %q references non-existent fundamental %q", a.Slug, a.RelatedFundamental)
+			}
+		}
+	}
+	for _, f := range reg.fundamentalsBySlug {
+		if f.RelatedAlgorithm != "" {
+			f.RelatedAlgorithmRef = reg.algorithmsBySlug[f.RelatedAlgorithm]
+			if f.RelatedAlgorithmRef == nil {
+				log.Printf("WARNING: fundamental %q references non-existent algorithm %q", f.Slug, f.RelatedAlgorithm)
 			}
 		}
 	}
@@ -290,4 +322,45 @@ func (r *Registry) GetPattern(slug string) *Pattern {
 // GetConcept returns a concept by slug.
 func (r *Registry) GetConcept(slug string) *Concept {
 	return r.conceptsBySlug[slug]
+}
+
+// FundamentalGroup groups top-level fundamentals under a category name
+// derived from the first path segment of their slug (e.g. "networking", "storage").
+type FundamentalGroup struct {
+	Category string
+	Items    []*Fundamental
+}
+
+// GroupedFundamentals returns fundamentals organised by their top-level category.
+// The order follows the order in which categories first appear in the registry.
+func (r *Registry) GroupedFundamentals() []FundamentalGroup {
+	seen := make(map[string]int) // category → index in groups slice
+	var groups []FundamentalGroup
+
+	for _, f := range r.Fundamentals {
+		cat := categoryOf(f.Slug)
+		idx, ok := seen[cat]
+		if !ok {
+			idx = len(groups)
+			seen[cat] = idx
+			groups = append(groups, FundamentalGroup{Category: cat})
+		}
+		groups[idx].Items = append(groups[idx].Items, f)
+	}
+	return groups
+}
+
+// categoryOf extracts the human-readable category from a fundamental slug.
+// E.g. "networking/load-balancing" → "Networking", "storage/redis" → "Storage".
+func categoryOf(slug string) string {
+	var prefix string
+	if idx := strings.Index(slug, "/"); idx >= 0 {
+		prefix = slug[:idx]
+	} else {
+		prefix = slug
+	}
+	if len(prefix) == 0 {
+		return "Other"
+	}
+	return strings.ToUpper(prefix[:1]) + prefix[1:]
 }
