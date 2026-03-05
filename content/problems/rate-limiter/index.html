@@ -2,7 +2,7 @@
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
-{{say "the scope. Are we designing a rate limiter for a single service, or a distributed rate limiting platform? I'll assume we're building a distributed rate limiter that can protect multiple services at scale. the functional and non-functional requirements."}}
+{{say "Let me clarify the scope. Are we designing a rate limiter for a single service, or a distributed rate limiting platform? I'll assume we're building a distributed rate limiter that can protect multiple services at scale. Here are the functional and non-functional requirements."}}
 
 {{hint "why distributed?" "A single-service rate limiter is trivial — just an in-memory counter. The hard problems only emerge when you have multiple app servers that need to agree on a shared count, or multiple regions where you cannot afford a synchronous cross-region check on every request."}}
 
@@ -48,7 +48,7 @@
 
 {{say "Redis handles 100K+ ops/sec per node easily. A 3-node ElastiCache cluster gives us 300K+ ops/sec with replication. For 500K peak, we might need 6 nodes or use Lua scripts to reduce round trips."}}
 
-{{hint "why Lua reduces round trips?" "A naive sliding window counter needs 3 Redis commands: ZREMRANGEBYSCORE, ZCARD, ZADD. Without Lua, those are 3 network round trips at ~0.1ms each = 0.3ms overhead. A Lua script runs all 3 atomically server-side in a single round trip. At 500K req/sec, that is saving 100ms of cumulative round-trip overhead per second."}}
+{{hint "why Lua reduces round trips?" "A naive sliding window counter needs 3 Redis commands: {{info \"ZREMRANGEBYSCORE\" \"Redis sorted set command that removes all members with scores in a range. Used to delete old entries outside the rate limit window.\"}} , {{info \"ZCARD\" \"Redis sorted set command that returns the count of members. Used to check if the rate limit is exceeded.\"}} , {{info \"ZADD\" \"Redis sorted set command that adds a member with a score. Each request timestamp gets added to the set.\"}} . Without Lua, those are 3 network round trips at ~0.1ms each = 0.3ms overhead. A {{info \"Lua script\" \"Lua is a programming language. Redis lets you upload a Lua script that runs entirely on the Redis server. All commands in the script execute atomically (no other command can interrupt). This is faster than sending multiple commands from the client.\"}} runs all 3 atomically server-side in a single round trip. At 500K req/sec, that is saving 100ms of cumulative round-trip overhead per second."}}
 
 {{phase 3 "API Design with Rate Headers" "3 min"}}
 
@@ -69,13 +69,13 @@
 
 {{phase 4 "Algorithm Deep Dive" "10 min"}}
 
-{{say "There are four main rate limiting algorithms. Each has different trade-offs for memory, accuracy, and burst handling. each one visually."}}
+{{say "There are four main rate limiting algorithms. Each has different trade-offs for memory, accuracy, and burst handling. Let me show each one visually."}}
 
 {{diagram "rl-algorithm-comparison"}}
 
 {{diagram "rl-token-bucket"}}
 
-{{hint "why Lua for token bucket?" "Token bucket requires read-modify-write: read current tokens, calculate refill, check if allowed, write new count. Without atomicity, two concurrent requests can both read the same token count, both see 'allowed', and both decrement — giving 2 requests through when only 1 token remained. Lua makes the entire operation atomic."}}
+{{hint "why Lua for token bucket?" "Token bucket requires {{info \"read-modify-write\" \"Read the current value, modify it, then write it back. This is not atomic in most systems. If two requests do this simultaneously, they both read the same old value, both make changes, and one change gets lost.\"}} : read current tokens, calculate refill, check if allowed, write new count. Without {{info \"atomicity\" \"Atomicity means an operation either fully completes or doesn't happen at all. No other operation can see a partial result. Lua scripts on Redis are atomic.\"}} , two concurrent requests can both read the same token count, both see 'allowed', and both decrement — giving 2 requests through when only 1 token remained. Lua makes the entire operation atomic."}}
 
 {{code "python" `import time
 import redis
@@ -219,9 +219,9 @@ class SlidingWindowCounter:
 
 {{phase 5 "Architecture (Hop-by-Hop)" "8 min"}}
 
-{{say "The rate limiter sits in the request path as middleware. where it fits and how the decision flows."}}
+{{say "The rate limiter sits in the request path as middleware. Here's where it fits and how the decision flows."}}
 
-{{hint "why middleware vs sidecar vs gateway?" "Middleware runs in-process — zero network hop, but couples rate limit logic to the service. Sidecar runs out-of-process on the same host — one local network hop, language-agnostic, but adds ~0.1ms. Gateway runs at the edge — catches abuse before it hits your fleet, but cannot enforce per-service business logic. Production systems use all three at different granularities."}}
+{{hint "why {{info \"middleware\" \"Middleware is code that runs before or after your main application logic. In a web framework, middleware checks rate limits, then passes the request to your handlers.\"}} vs {{info \"sidecar\" \"Sidecar is a separate process that runs on the same host as your application. It intercepts traffic, does rate limiting, then forwards to your app. Sidecars are common in service mesh architectures like Istio.\"}} vs {{info \"gateway\" \"API Gateway is a server that sits in front of your entire fleet. All user traffic goes through the gateway first. The gateway can reject requests before they reach your services.\"}}?" "Middleware runs in-process — zero network hop, but couples rate limit logic to the service. Sidecar runs out-of-process on the same host — one local network hop, language-agnostic, but adds ~0.1ms. Gateway runs at the edge — catches abuse before it hits your fleet, but cannot enforce per-service business logic. Production systems use all three at different granularities."}}
 
 {{diagram "rl-architecture"}}
 
@@ -276,7 +276,7 @@ async def rate_limit_middleware(request: Request, call_next):
   "Where exactly should the rate limiter sit — API gateway, load balancer, or application code?"
   "API gateway for coarse limits: stop DDoS, enforce tier caps before traffic hits your fleet. Application code for fine-grained limits: per-endpoint business logic, per-user feature limits that depend on account state. Load balancers should not do rate limiting — they lack the shared state needed for distributed counting and it couples infrastructure config to business rules."
   "How do you handle rate limiting for internal service-to-service calls?"
-  "Use the calling service's identity (service account or mTLS cert CN) as the rate limit key rather than a user ID. Internal services should have much higher limits than external users, but limits still matter to prevent one runaway service from overwhelming a downstream dependency. Circuit breakers handle the fail-fast behavior, but rate limits prevent the overload in the first place."
+  "Use the calling service's identity (service account or {{info \"mTLS\" \"mTLS (mutual TLS) is a way for two services to authenticate each other using certificates. Each service has a certificate that identifies it, like a digital ID card. You can extract the service name from the certificate.\"}} cert CN) as the rate limit key rather than a user ID. Internal services should have much higher limits than external users, but limits still matter to prevent one runaway service from overwhelming a downstream dependency. Circuit breakers handle the fail-fast behavior, but rate limits prevent the overload in the first place."
   "What happens if the rate limit key extraction fails — for example, a malformed JWT?"
   "Fail to a conservative default: treat the request as unauthenticated and apply the lowest-tier limit, keyed by IP. Do not reject outright on key extraction failure — that would let a malformed auth header bypass rate limiting entirely by triggering an error path. Log the extraction failure as a security signal; repeated failures from the same IP are worth alerting on."
 }}
@@ -330,7 +330,7 @@ return {1, limit - count - 1, 0}
 
 {{qa "How do you count accurately across multiple Redis nodes in a cluster?" "You don't count across nodes — you ensure all keys for the same rate limit subject land on the same node using Redis hash tags. A key like rl:{user:123}:endpoint1 hashes only the {user:123} portion, so all endpoints for user 123 go to the same shard. The Lua script then runs locally on that one shard with full atomicity. Without hash tags, keys scatter across shards, and Lua scripts that touch multiple keys will fail with a CROSSSLOT error." "What if one user's traffic is so high it overwhelms a single shard?" "That is a hot-key problem. Solutions: 1) local in-process rate limiting with a short TTL cache (accept slight over-counting), 2) shard the user's key across N slots by appending a modulo suffix (rl:{user:123:0}, rl:{user:123:1}) and summing counts, or 3) use request coalescing to batch multiple checks into one Redis call per event-loop tick."}}
 
-{{hint "why hash tags matter in Redis Cluster?" "In Redis Cluster, keys are distributed across 16,384 hash slots. A Lua script can only touch keys in the same slot. Without hash tags, rl:user:123:endpoint1 and rl:user:123:endpoint2 might land on different shards, making a unified Lua script impossible. Hash tags like rl:{user:123}:endpoint force both keys to the same slot by hashing only the bracketed portion."}}
+{{hint "why {{info \"hash tags\" \"Hash tags are curly braces {} in Redis keys. Only the text inside {} is hashed to determine which shard the key goes to. This lets you control which keys go to the same shard, so they can be accessed together by a Lua script.\"}} matter in Redis Cluster?" "In {{info \"Redis Cluster\" \"Redis Cluster splits your data across multiple Redis instances (shards). Instead of one Redis with 10GB memory, you have 3 Redises with 3-4GB each. More memory and more throughput, but more complex.\"}} , keys are distributed across 16,384 {{info \"hash slots\" \"Hash slots are numbered buckets (0-16383). Each key's hash determines which slot it goes to, which determines which shard stores it. There are 16,384 slots total split among the shards.\"}} . A Lua script can only touch keys in the same slot. Without hash tags, rl:user:123:endpoint1 and rl:user:123:endpoint2 might land on different shards, making a unified Lua script impossible. Hash tags like rl:{user:123}:endpoint force both keys to the same slot by hashing only the bracketed portion."}}
 
 {{triggerQs "Questions this section might trigger"
   "How does Cloudflare do distributed rate limiting at 100M+ req/sec?"
@@ -343,13 +343,13 @@ return {1, limit - count - 1, 0}
 
 {{phase 7 "Data Model & Redis Schema" "3 min"}}
 
-{{say "The Redis data model depends on which algorithm you pick. Sliding window counter uses simple string keys, token bucket uses a hash, and sliding window log uses sorted sets. the schema for each."}}
+{{say "The Redis data model depends on which algorithm you pick. Sliding window counter uses simple string keys, token bucket uses a hash, and sliding window log uses {{info \"sorted sets\" \"A Redis sorted set stores members with an associated score. All members are ordered by their score. We use the timestamp as the score, so we can query 'give me all members with scores between X and Y' (all requests in the time window).\"}} . Here's the schema for each."}}
 
 {{diagram "rl-data-model"}}
 
-{{hint "why sorted set for sliding window log?" "A sorted set stores members with a floating-point score. We use timestamp-in-milliseconds as the score and a unique request ID as the member. ZRANGEBYSCORE lets us count requests in [now-window, now] in O(log N + M) time. ZREMRANGEBYSCORE prunes old entries in O(log N + M). The score-as-timestamp design is what makes time-window queries natural."}}
+{{hint "why sorted set for sliding window log?" "A sorted set stores members with a floating-point score. We use timestamp-in-milliseconds as the score and a unique request ID as the member. {{info \"ZRANGEBYSCORE\" \"Redis sorted set command: returns all members with scores in a range. Let me count all requests between (now - window) and (now).\"}} lets us count requests in [now-window, now] efficiently. The score-as-timestamp design is what makes time-window queries natural."}}
 
-{{hint "why string counter for sliding window counter?" "The sliding window counter only needs two integers: current window count and previous window count. A Redis string with INCR is O(1) and uses ~50 bytes per key. Compare to sorted set: O(log N) per operation and O(N × 50 bytes) for N requests. For the high-throughput case (millions of keys), strings are the right choice."}}
+{{hint "why string counter for sliding window counter?" "The sliding window counter only needs two integers: current window count and previous window count. A Redis string with INCR is instant ({{info \"O(1)\" \"O(1) means the time is constant, no matter how much data you have. INCR always takes the same time whether you have 1 key or 1 billion keys.\"}} ) and uses ~50 bytes per key. Compare to sorted set: {{info \"O(log N)\" \"O(log N) means the time grows slowly with the amount of data. For 1 billion requests, log N is about 30. Still fast, but 30x slower than O(1).\"}} per operation and ~50 bytes per request. For the high-throughput case (millions of keys), strings are the right choice."}}
 
 {{diagram "rl-lua-execution"}}
 
@@ -364,7 +364,7 @@ return {1, limit - count - 1, 0}
 
 {{phase 8 "Redis Configuration" "3 min"}}
 
-{{say "the ElastiCache configuration optimized for rate limiting workloads."}}
+{{say "Here's the {{info \"ElastiCache\" \"ElastiCache is AWS's managed Redis service. AWS runs the Redis server for you, handles backups, replication, and failover. You just pay for the instance size.\"}} configuration optimized for rate limiting workloads."}}
 
 {{diagram "rl-elasticache-topology"}}
 
@@ -375,7 +375,7 @@ return {1, limit - count - 1, 0}
 # Mode: Cluster mode enabled (hash slot distribution)
 
 # Key configuration
-maxmemory-policy: volatile-lru    # Evict keys with TTL first
+maxmemory-policy: volatile-lru    # Evict keys with TTL first (delete oldest key when memory is full)
 timeout: 0                        # No idle timeout (keep connections)
 tcp-keepalive: 300                 # TCP keepalive for connection health
 lua-time-limit: 100               # Kill Lua scripts after 100ms
@@ -394,9 +394,9 @@ activedefrag: yes                 # Defragment memory proactively
 # 100K ops/sec per node x 3 shards = 300K ops/sec
 `}}
 
-{{avoid "Do not enable Redis persistence (RDB/AOF) for rate limiting. Rate limit counters are ephemeral. Persistence adds disk I/O latency and is pointless since counters reset on window expiry anyway. If Redis restarts, counters rebuild naturally from incoming requests."}}
+{{avoid "Do not enable Redis {{info \"persistence\" \"Persistence means saving data to disk so it survives a restart. Redis has two persistence modes: RDB and AOF.\"}} ({{info \"RDB\" \"RDB (Redis Database) takes a snapshot of all data at a point in time and saves it to disk. Fast to load on restart but can lose up to the last snapshot interval of data.\"}} /{{info \"AOF\" \"AOF (Append-Only File) writes every command to a log file on disk. Safer than RDB but slower and uses more disk space.\"}} ) for rate limiting. Rate limit counters are ephemeral. Persistence adds disk I/O latency and is pointless since counters reset on window expiry anyway. If Redis restarts, counters rebuild naturally from incoming requests."}}
 
-{{qa "Should you use Redis Cluster mode or a single shard with replicas for rate limiting?" "Redis Cluster mode for any production deployment beyond a single team's API. A single shard maxes out at ~100K ops/sec and 13 GB memory. With 50M active rate limit keys at 100 bytes each = 5 GB, a single shard works — but you have no horizontal scaling runway. Cluster mode with 3 shards gives 300K ops/sec and 39 GB, and you can add shards without downtime. The trade-off: Lua scripts must use hash tags to ensure all keys for a single rate check land on the same shard." "What about Redis Sentinel instead of Cluster?" "Sentinel provides high availability (automatic failover) but not horizontal scaling — it is still a single shard with replicas. Use Sentinel only if your rate limit key count fits in one node and your ops/sec is under 100K. Beyond that, Cluster mode is required. In ElastiCache, 'Cluster Mode Enabled' gives you both: automatic failover per shard plus horizontal scaling across shards."}}
+{{qa "Should you use {{info \"Cluster mode\" \"Cluster mode distributes data across multiple Redis shards. Each shard is independent and stores different keys. This gives you more memory and throughput, but Lua scripts can only touch keys that land on the same shard.\"}} or a single shard with replicas for rate limiting?" "Cluster mode for any production deployment beyond a single team's API. A single shard maxes out at ~100K ops/sec and 13 GB memory. With 50M active rate limit keys at 100 bytes each = 5 GB, a single shard works — but you have no horizontal scaling runway. Cluster mode with 3 shards gives 300K ops/sec and 39 GB, and you can add shards without downtime. The trade-off: Lua scripts must use hash tags to ensure all keys for a single rate check land on the same shard." "What about {{info \"Sentinel\" \"Sentinel is a tool that monitors Redis and automatically restarts it if it crashes. It doesn't split data across multiple machines. It's for high availability on a single shard, not for scaling.\"}} instead of Cluster?" "Sentinel provides high availability (automatic failover) but not horizontal scaling — it is still a single shard with replicas. Use Sentinel only if your rate limit key count fits in one node and your ops/sec is under 100K. Beyond that, Cluster mode is required. In ElastiCache, 'Cluster Mode Enabled' gives you both: automatic failover per shard plus horizontal scaling across shards."}}
 
 {{hint "why volatile-lru over allkeys-lru?" "volatile-lru only evicts keys that have a TTL set. Our rate limit keys all have TTLs (by design), so they are eligible for eviction. Keys without TTLs (like config or schema data you might share this Redis instance with) are protected. If you use allkeys-lru, Redis will evict anything including non-ephemeral data, which can cause subtle bugs."}}
 
