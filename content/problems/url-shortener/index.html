@@ -19,8 +19,8 @@
 
 {{hint "why P0/P1/P2/P3 matters?" "Prioritization tells the interviewer which features you would build first and which you would defer. P0 features define the core loop (create + redirect). P1 features are needed for production readiness. P2/P3 are differentiators you discuss but don't deep-dive unless asked. Spending 10 minutes on QR codes when you haven't covered sharding is a red flag."}}
 
-{{think "Every functional requirement maps to a specific architectural decision. Shorten URL → key generation algorithm. Redirect → caching strategy. Analytics → async pipeline. This mapping is the bridge from requirements to architecture."
-  (whyNot "implement analytics on the redirect hot path" "Adding analytics to the redirect endpoint means every GET /{code} does a redirect + a write (click event). At 57K RPS, that doubles your write load and adds latency to the most critical path. Instead, fire-and-forget to Kinesis/SQS and process async. The redirect returns in <10ms; analytics can lag by seconds.")
+{{think "Every functional requirement maps to a specific architectural decision. Shorten URL → key generation algorithm. Redirect → caching strategy. Analytics → {{info \"async\" \"Fire-and-forget processing that happens later\"}} pipeline. This mapping is the bridge from requirements to architecture."
+  (whyNot "implement analytics on the redirect hot path" "Adding analytics to the redirect endpoint means every GET /{code} does a redirect + a write (click event). At 57K {{info \"RPS\" \"Requests Per Second\"}}, that doubles your write load and adds {{info \"latency\" \"response time in milliseconds\"}} to the most critical path. Instead, fire-and-forget to Kinesis/SQS and process {{info \"async\" \"asynchronously later\"}}. The redirect returns in <10ms; analytics can lag by seconds.")
   (whatIf "the interviewer asks about URL editing after creation" "Editing breaks 301 caching — browsers that cached the old redirect keep going to the old destination. If editing is required (enterprise feature), use 302 redirects for editable URLs so every click passes through your servers. This is a product decision that directly impacts architecture.")
   (how "custom aliases complicate key generation" "Generated codes use Base62 with collision retry. Custom aliases require uniqueness validation against the same keyspace, plus reserved word filtering (admin, api, health), profanity checks, and homoglyph detection (l vs 1, O vs 0). Two different code paths for the same table.")
 }}
@@ -134,7 +134,7 @@ Status: 200 OK
 {{table "DynamoDB Access Patterns & Indexes" (rows
   (row "Access Pattern"        "Table/Index"        "Key Condition"                        "Complexity"  "Expected Latency")
   (row "Redirect lookup"       "urls (primary)"     "GetItem(PK=short_code)"               "O(1)"       "<5ms")
-  (row "Create URL"            "urls (primary)"     "PutItem(condition: attribute_not_exists)" "O(1)"    "<5ms")
+  (row "Create URL"            "urls (primary)"     "PutItem(condition: {{info \"idempotent\" \"safe to retry, no duplicates\"}}) attribute_not_exists)" "O(1)"    "<5ms")
   (row "User's URLs (dashboard)" "GSI: user-urls-index" "Query(PK=user_id, SK=created_at DESC)" "O(n)"  "<10ms, paginated")
   (row "Delete URL"            "urls (primary)"     "DeleteItem(PK=short_code)"            "O(1)"       "<5ms")
   (row "Expired cleanup"       "N/A (automatic)"    "DynamoDB TTL auto-deletes"            "O(0)"       "Zero-cost, zero-code")
