@@ -335,27 +335,29 @@
         }
 
         // ── HTMX swap handler ─────────────────────
-        // hx-swap="innerHTML" replaces #detail's children, so #detail's own
-        // class list (including book-active) survives the swap automatically.
         document.addEventListener('htmx:afterSwap', function(e) {
             if (e.detail.target.id === 'detail') {
+                // HTMX replaced #detail's innerHTML with new page content.
+                // The old book-reader / srcNodes are gone. Reset state completely
+                // then re-init book mode if the user's preference is book mode.
+                book.active       = false;
+                book.srcNodes     = [];
+                book.pages        = [];
+                book.spread       = 0;
+                book.totalSpreads = 0;
+
                 trackPage();
                 highlightCode();
                 collapseSidebarSections();
                 initSectionAnchors();
                 requestAnimationFrame(function() {
-                    // Re-sync book mode state with the new content.
-                    // Welcome page should never be in book mode.
-                    var d = document.getElementById('detail');
-                    if (d) {
-                        var isWelcome = !!d.querySelector('.welcome');
-                        if (book.active && !isWelcome) {
-                            d.classList.add('book-active');
-                        } else {
-                            d.classList.remove('book-active');
-                        }
+                    var pref = localStorage.getItem(BOOK_PREF_KEY);
+                    if (pref !== '0') {
+                        initBook();
+                    } else {
+                        syncViewBtn();
                     }
-                    initStageNav();
+                    if (!book.active) initStageNav();
                     restoreScroll();
                 });
             }
@@ -391,44 +393,233 @@
             }
         }
 
-        // ── Book Mode — simple 2-column scrollable reading view ──────────────
+        // ══════════════════════════════════════════════════════════════════════
+        // Book Mode — PDF-reader style 2-page spread
+        // ══════════════════════════════════════════════════════════════════════
         //
-        // Architecture (replaces the broken CSS multi-column pagination):
-        //   • No fixed-height columns, no JS measurement, no prev/next pages.
-        //   • initBook() / destroyBook() just add/remove .book-active on #detail.
-        //   • CSS applies column-count:2 + column-fill:balance to .detail-content
-        //     so the browser naturally splits content into two scrollable columns.
-        //   • The user scrolls #detail vertically — all content always visible.
-        //   • Preference is persisted in localStorage so "Normal View" survives refresh.
+        // How it works (no CSS multi-column, no measurement guesswork):
+        //   1. Collect all child elements of #detail into srcNodes (save for restore).
+        //   2. Measure each element's rendered height at the target PAGE WIDTH by
+        //      cloning into a hidden div inside #detail (inherits all CSS correctly).
+        //   3. Bin-pack elements into fixed-height pages — each page ≈ one viewport-tall
+        //      column. Oversized elements go alone (with in-page scroll).
+        //   4. Build the reader UI: two side-by-side .book-page divs + a controls bar.
+        //   5. For each spread, populate left/right pages by cloning the relevant
+        //      page's elements. Syntax highlighting is already baked into innerHTML.
+        //   6. Navigate with prev/next buttons, keyboard arrows, or mouse wheel.
         //
-        var book = { active: false };
+        // Preference persists across full-page reloads (localStorage: sd-book-mode).
+        // book.active + localStorage both survive HTMX innerHTML swaps on #detail
+        // (HTMX replaces children, not the element). HTMX handler re-inits the reader.
+        // ══════════════════════════════════════════════════════════════════════
+
+        var book = {
+            active:       false,
+            spread:       0,
+            totalSpreads: 0,
+            pages:        [],   // pages[i] = array of original elements for page i
+            srcNodes:     []    // saved childNodes for destroyBook restore
+        };
         var BOOK_MIN_WIDTH = 1024;
         var BOOK_PREF_KEY  = 'sd-book-mode';
 
+        // ── Layout constants ────────────────────────────────────────────────
+        var BOOK_V_PAD  = 48;   // total top+bottom padding inside the spread area
+        var BOOK_H_PAD  = 36;   // left+right padding inside each page
+        var BOOK_GAP    = 4;    // gap between left and right pages (spine gap)
+        var BOOK_CTRL_H = 52;   // controls bar height
+
+        // ── initBook ────────────────────────────────────────────────────────
         function initBook() {
             var d = document.getElementById('detail');
             if (!d) return;
-            // Skip welcome page and narrow screens
+
+            // Only one active session at a time
+            if (book.active) destroyBook();
             if (window.innerWidth < BOOK_MIN_WIDTH || d.querySelector('.welcome')) return;
+
+            // ── Compute page geometry ──────────────────────────────────────
+            var headerEl  = document.querySelector('.app-header');
+            var sidebarEl = document.querySelector('.sidebar');
+            var headerH   = headerEl  ? headerEl.offsetHeight  : 54;
+            var sidebarW  = sidebarEl ? sidebarEl.offsetWidth  : 280;
+            var vw = window.innerWidth;
+            var vh = window.innerHeight;
+
+            var pageH = vh - headerH - BOOK_CTRL_H - BOOK_V_PAD;
+            var pageW = Math.floor((vw - sidebarW - BOOK_GAP - BOOK_H_PAD * 4) / 2);
+            if (pageH < 150 || pageW < 150) return;
+
+            // ── Collect elements ───────────────────────────────────────────
+            book.srcNodes = Array.from(d.childNodes);
+            var elements  = Array.from(d.children);
+            if (!elements.length) return;
+
+            // ── Measure element heights at page width ──────────────────────
+            // Insert measurement container inside #detail so all CSS inherits
+            // (custom properties, font-size, etc. all resolve correctly).
+            var dPos = getComputedStyle(d).position;
+            if (dPos === 'static') d.style.position = 'relative';
+
+            var measDiv = document.createElement('div');
+            measDiv.setAttribute('aria-hidden', 'true');
+            measDiv.style.cssText =
+                'position:absolute;top:0;left:-9999px;' +
+                'width:' + pageW + 'px;' +
+                'overflow:hidden;visibility:hidden;pointer-events:none;' +
+                'padding:' + BOOK_H_PAD + 'px;box-sizing:border-box;';
+            d.appendChild(measDiv);
+
+            var heights = elements.map(function(el) {
+                var clone = el.cloneNode(true);
+                measDiv.appendChild(clone);
+                var h = clone.offsetHeight;
+                var cs = getComputedStyle(clone);
+                h += (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
+                measDiv.removeChild(clone);
+                return h;
+            });
+
+            d.removeChild(measDiv);
+            if (dPos === 'static') d.style.position = '';
+
+            // ── Bin-pack elements into pages ───────────────────────────────
+            var innerH = pageH - BOOK_H_PAD * 2; // content area height
+            book.pages = [];
+            var curPage = [], curH = 0;
+
+            elements.forEach(function(el, i) {
+                var h = heights[i];
+                // If adding this element overflows and there's content, start a new page.
+                // If the element alone is taller than a page, it goes alone (page scrolls).
+                if (curH + h > innerH && curPage.length > 0) {
+                    book.pages.push(curPage);
+                    curPage = [el];
+                    curH    = h;
+                } else {
+                    curPage.push(el);
+                    curH += h;
+                }
+            });
+            if (curPage.length > 0) book.pages.push(curPage);
+
+            book.totalSpreads = Math.ceil(book.pages.length / 2);
+            if (!book.totalSpreads) return;
+
+            // ── Build reader UI ────────────────────────────────────────────
+            while (d.firstChild) d.removeChild(d.firstChild);
+
+            var readerEl = document.createElement('div');
+            readerEl.className = 'book-reader';
+
+            var leftEl = document.createElement('div');
+            leftEl.className  = 'book-page book-page-left';
+            leftEl.id         = 'book-left';
+            leftEl.style.height = pageH + 'px';
+
+            var rightEl = document.createElement('div');
+            rightEl.className = 'book-page book-page-right';
+            rightEl.id        = 'book-right';
+            rightEl.style.height = pageH + 'px';
+
+            readerEl.appendChild(leftEl);
+            readerEl.appendChild(rightEl);
+            d.appendChild(readerEl);
+
+            var ctrlEl = document.createElement('div');
+            ctrlEl.className = 'book-controls';
+            ctrlEl.innerHTML =
+                '<button class="book-btn" id="book-prev" disabled title="Previous spread (← / PageUp)">' +
+                '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>' +
+                '</button>' +
+                '<span class="book-page-info" id="book-info">Page 1–2 of ' + book.pages.length + '</span>' +
+                '<button class="book-btn" id="book-next" title="Next spread (→ / PageDown)">' +
+                '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>' +
+                '</button>';
+            d.appendChild(ctrlEl);
+
+            document.getElementById('book-prev').onclick = function() { bookGoSpread(book.spread - 1); };
+            document.getElementById('book-next').onclick = function() { bookGoSpread(book.spread + 1); };
+
             d.classList.add('book-active');
             book.active = true;
+
+            bookGoSpread(0);
             syncViewBtn();
             localStorage.setItem(BOOK_PREF_KEY, '1');
         }
 
+        // ── bookGoSpread ─────────────────────────────────────────────────────
+        function bookGoSpread(idx) {
+            if (idx < 0) idx = 0;
+            if (idx >= book.totalSpreads) idx = book.totalSpreads - 1;
+            book.spread = idx;
+
+            var leftEl  = document.getElementById('book-left');
+            var rightEl = document.getElementById('book-right');
+            if (!leftEl || !rightEl) return;
+
+            // Populate pages with deep clones of the original elements.
+            // Syntax highlighting is already baked into the cloned innerHTML.
+            function fillPage(container, pageIdx) {
+                container.innerHTML = '';
+                if (!book.pages[pageIdx]) return;
+                book.pages[pageIdx].forEach(function(el) {
+                    container.appendChild(el.cloneNode(true));
+                });
+                // Re-run hljs on any code blocks that weren't highlighted (safety)
+                if (typeof hljs !== 'undefined') {
+                    container.querySelectorAll('pre code:not(.hljs)').forEach(function(b) {
+                        hljs.highlightElement(b);
+                    });
+                }
+            }
+
+            fillPage(leftEl,  idx * 2);
+            fillPage(rightEl, idx * 2 + 1);
+
+            // Update controls
+            var totalPages = book.pages.length;
+            var leftNum    = idx * 2 + 1;
+            var rightNum   = Math.min(idx * 2 + 2, totalPages);
+            var infoEl = document.getElementById('book-info');
+            if (infoEl) {
+                infoEl.textContent = rightNum < totalPages
+                    ? 'Pages ' + leftNum + '–' + rightNum + ' of ' + totalPages
+                    : (leftNum === totalPages ? 'Page ' + leftNum + ' of ' + totalPages
+                                              : 'Pages ' + leftNum + '–' + rightNum + ' of ' + totalPages);
+            }
+            var prevBtn = document.getElementById('book-prev');
+            var nextBtn = document.getElementById('book-next');
+            if (prevBtn) prevBtn.disabled = idx === 0;
+            if (nextBtn) nextBtn.disabled = idx >= book.totalSpreads - 1;
+        }
+
+        // ── destroyBook ──────────────────────────────────────────────────────
         function destroyBook() {
             var d = document.getElementById('detail');
             if (!d) return;
             d.classList.remove('book-active');
-            book.active = false;
+
+            if (book.srcNodes.length > 0) {
+                while (d.firstChild) d.removeChild(d.firstChild);
+                book.srcNodes.forEach(function(node) { d.appendChild(node); });
+            }
+
+            book.active       = false;
+            book.srcNodes     = [];
+            book.pages        = [];
+            book.spread       = 0;
+            book.totalSpreads = 0;
+
             syncViewBtn();
             localStorage.setItem(BOOK_PREF_KEY, '0');
         }
 
-        // Keep header book-toggle button + sidebar toggle in sync
+        // ── syncViewBtn ──────────────────────────────────────────────────────
         function syncViewBtn() {
-            var isBook = book.active;
-            var label  = document.getElementById('sidebar-view-label');
+            var isBook  = book.active;
+            var label   = document.getElementById('sidebar-view-label');
             var sideBtn = document.getElementById('sidebar-view-btn');
             var hdrBtn  = document.getElementById('book-toggle');
             if (label)   label.textContent = isBook ? 'Normal View' : 'Book View';
@@ -441,34 +632,68 @@
             else initBook();
         };
 
-        // Keyboard shortcut: B toggles book mode
+        // ── Keyboard navigation ──────────────────────────────────────────────
         document.addEventListener('keydown', function(e) {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-            if (e.key === 'b' || e.key === 'B') window.toggleBookMode();
+            if (e.key === 'b' || e.key === 'B') { window.toggleBookMode(); return; }
+            if (!book.active) return;
+            if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === 'PageDown') {
+                e.preventDefault(); bookGoSpread(book.spread + 1);
+            }
+            if (e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'PageUp') {
+                e.preventDefault(); bookGoSpread(book.spread - 1);
+            }
         });
 
-        // On resize: exit book mode if screen became too narrow
+        // ── Mouse wheel navigation ───────────────────────────────────────────
+        (function() {
+            var wheelLock = false;
+            document.addEventListener('wheel', function(e) {
+                if (!book.active) return;
+                // Allow scroll inside pages that overflow (very tall single elements)
+                var t = e.target;
+                while (t && !t.classList.contains('book-page')) {
+                    if (t.scrollHeight > t.clientHeight + 2) {
+                        var s = getComputedStyle(t);
+                        if (s.overflowY === 'auto' || s.overflowY === 'scroll') return;
+                    }
+                    t = t.parentElement;
+                }
+                e.preventDefault();
+                if (wheelLock) return;
+                wheelLock = true;
+                setTimeout(function() { wheelLock = false; }, 400);
+                if (e.deltaY > 0) bookGoSpread(book.spread + 1);
+                else if (e.deltaY < 0) bookGoSpread(book.spread - 1);
+            }, { passive: false });
+        })();
+
+        // ── Resize: re-build reader with new geometry ────────────────────────
         var resizeTimeout;
         window.addEventListener('resize', function() {
             clearTimeout(resizeTimeout);
             resizeTimeout = setTimeout(function() {
-                if (window.innerWidth < BOOK_MIN_WIDTH && book.active) destroyBook();
-            }, 200);
+                if (window.innerWidth < BOOK_MIN_WIDTH) {
+                    if (book.active) destroyBook();
+                    return;
+                }
+                if (book.active) {
+                    var savedSpread = book.spread;
+                    destroyBook();
+                    initBook();
+                    bookGoSpread(savedSpread);
+                }
+            }, 300);
         });
 
-        // On load: respect stored preference (default = book mode ON for wide screens)
+        // ── initBookFromPref ─────────────────────────────────────────────────
         function initBookFromPref() {
             var pref = localStorage.getItem(BOOK_PREF_KEY);
-            if (pref === '0') {
-                // User explicitly chose Normal View — keep it
-                syncViewBtn();
-                return;
-            }
-            // First visit or explicit book preference → activate on wide screens
+            if (pref === '0') { syncViewBtn(); return; }
             initBook();
         }
 
-        // ── Initial setup ─────────────────────────
+        // ── Initial setup ────────────────────────────────────────────────────
         trackPage();
         collapseSidebarSections();
         initSectionAnchors();
@@ -477,7 +702,14 @@
         } else {
             window.addEventListener('load', highlightCode);
         }
-        requestAnimationFrame(function() { initBookFromPref(); initStageNav(); restoreScroll(); });
+        // Highlight must complete before initBook measures element heights
+        requestAnimationFrame(function() {
+            requestAnimationFrame(function() {
+                initBookFromPref();
+                if (!book.active) initStageNav();
+                restoreScroll();
+            });
+        });
     })();
     </script>
 </body>
