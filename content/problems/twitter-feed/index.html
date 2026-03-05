@@ -469,6 +469,37 @@ def get_trending_hashtags(top_n: int = 50) -> list:
 
 {{avoid "Don't skip read-time fallback for cold cache. If Redis is down or cold, the Timeline Service must fall back to Cassandra — without this, a Redis restart would mean 300M users see empty feeds until all timelines are rehydrated."}}
 
+{{avoid "Timeline inconsistency during Kafka lag — don't ignore this. If fanout workers are 30s behind, some followers see a tweet and others don't. Mitigation: read repair — if a user requests a timeline and their Redis sorted set is > 60s stale (detected via a watermark key), force-refresh from Cassandra before returning. This trades latency for consistency during lag windows."}}
+
+{{avoid "Cache stampede on a viral tweet. When a tweet goes viral (10M likes in 1 hour), every timeline request fetches the tweet object from Redis. If the key expires at the same time, 10K requests simultaneously hit Cassandra — thundering herd. Mitigation: request collapsing (singleflight pattern) — first request fetches, all concurrent requestors wait for the same result. Also use probabilistic early expiration: refresh the key before it expires based on P = exp(-delta * beta / remaining_ttl)."}}
+
+{{table "Sharding Strategy" (rows
+  (row "Data" "Shard Key" "Method" "Notes")
+  (row "User timelines (Redis)" "user_id mod N" "Consistent hashing" "128 virtual nodes per Redis shard to distribute evenly")
+  (row "Tweets (Cassandra)" "tweet_id range" "Range sharding" "tweet_id is Snowflake — time-ordered. New tweets all go to the latest range shard (hot write). Spread with a random shard prefix byte.")
+  (row "Follow graph (Cassandra)" "follower_id" "Hash sharding" "Lookup: 'who does user X follow?' is on one shard. All 1000 follows colocated.")
+  (row "Trending counters (Redis)" "hashtag mod N" "Hash sharding" "Hot hashtags like #WorldCup can overload one shard — use replica reads for trending queries")
+  (row "Search index (Elasticsearch)" "tweet_id" "Range sharding" "Each ES shard holds 50GB of tweet data. Automatic via ES routing.")
+)}}
+
+{{table "Monthly AWS Cost Estimate (500M DAU)" (rows
+  (row "Component" "Spec" "Monthly Cost")
+  (row "Redis Cluster (timelines)" "40 × r6g.2xlarge (64GB), 3TB total" "~$57,600")
+  (row "Cassandra (tweets + follows)" "24 × i4i.4xlarge (2TB NVMe)" "~$67,200")
+  (row "Kafka (MSK)" "6 brokers, m5.4xlarge" "~$8,400")
+  (row "Fanout Workers (ECS)" "200 tasks avg, c6g.2xlarge" "~$14,400")
+  (row "Timeline Service (ECS)" "100 tasks avg, c6g.xlarge" "~$3,600")
+  (row "Elasticsearch" "12 nodes, r6g.2xlarge (64GB)" "~$17,280")
+  (row "Ranking GPU Fleet (ECS)" "50 × g4dn.xlarge (T4 GPU)" "~$52,800")
+  (row "CDN + Media Storage (S3+CF)" "Flat rate for media" "~$15,000")
+  (row "Total infra" "" "~$236,000/month")
+  (row "Per active user" "500M DAU" "~$0.00047/user/day")
+)}}
+
+{{think "At $236K/month for 500M DAU, infra is $0.014/user/month. Twitter's actual revenue per user is ~$20/year. Infra is < 1% of revenue. The GPU ranking fleet is the second biggest cost at $52.8K — but if it drives 15% better engagement, it pays for itself easily."
+  (whyNot "GCP as alternative" "GCP Bigtable is a Cassandra alternative at ~$0.17/GB/month (vs $0.10 for i4i.4xlarge self-managed). GCP TPUs are cheaper than NVIDIA T4 for ML inference. At this scale, cloud provider negotiation typically yields 40% discounts on compute. GCP vs AWS is a business decision more than a technical one.")
+}}
+
 {{checklist "Fan-out strategy accounts for celebrity threshold (50K followers)" "Timeline capped at 800 tweets to bound Redis memory" "Celebrity merge uses parallel Cassandra reads with 50-celebrity cap" "Trending uses sliding window buckets (ZUNIONSTORE), not a single counter" "Snowflake IDs enable time-sortable cursor pagination" "Redis pipeline for fanout writes (not individual ZADD per follower)" "Like counts in Redis with periodic sync to Cassandra (eventual consistency)" "SSE for real-time push + 30s polling fallback" "Cold-start fallback: seed timeline from Cassandra on Redis miss" "Elasticsearch for full-text search, synced via Kafka under 5s lag"}}
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
@@ -581,3 +612,12 @@ def get_trending_hashtags(top_n: int = 50) -> list:
 `}}
 
 {{key "Twitter feed design reduces to one core trade-off: fanout-on-write gives O(1) reads at the cost of O(followers) writes per tweet — use it for normal users, skip it for celebrities and merge at read time."}}
+
+{{triggerQs "Common interview follow-up directions"
+  "Add ephemeral stories (24-hour disappearing content)?"
+  "Stories use a separate storage layer: Redis Sorted Set per user with TTL-based expiry (ZADD with score = expiry_timestamp). A background sweeper deletes expired story IDs. Fan-out is not needed — stories are fetched at read time from a user's followers list (similar to celebrity merge). No Cassandra persistence — stories are ephemeral by design."
+  "How would you implement quote tweets?"
+  "A quote tweet is a new tweet with a reference_tweet_id field pointing to the original. Fan-out is the same as a normal tweet. At render time, the client fetches the referenced tweet by ID (Redis hash or Cassandra lookup). The original tweet's quoted_count is incremented via a Kafka event → async Cassandra update. No circular reference possible since you can't quote a quote tweet (Twitter's business rule)."
+  "How do you add monetization via promoted tweets?"
+  "Promoted tweets are injected into the candidate pool at read time by a separate Ads Service. The ranking model has a reserved slot (e.g., every 6th tweet) for an ad. The Ads Service accepts a (user_id, context_signals) request and returns a ranked list of eligible ads in < 5ms using a pre-computed user interest profile. Ads bypass the fanout system entirely — they're always fetched at read time and are never in the pre-computed timeline."
+}}
