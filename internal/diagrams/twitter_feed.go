@@ -3,41 +3,63 @@ package diagrams
 func registerTwitterFeed(r *Registry) {
 	r.Register(&Diagram{
 		Slug:        "tf-requirements",
-		Title:       "Scale Estimates & Requirements",
-		Description: "Functional and non-functional requirements with scale estimates for Twitter feed",
+		Title:       "Functional & Non-Functional Requirements",
+		Description: "Scale targets and feature requirements for a Twitter/X feed system",
 		ContentFile: "problems/twitter-feed",
 		Type:        TypeHTML,
 		HTML: `<div class="d-cols">
   <div class="d-col">
     <div class="d-group">
-      <div class="d-group-title">Scale Estimates</div>
+      <div class="d-group-title">P0 &#8212; Core (Must Have)</div>
       <div class="d-flow-v">
-        <div class="d-box blue">500M DAU &#8226; 200M tweets/day</div>
-        <div class="d-box blue">Avg user follows 200 accounts</div>
-        <div class="d-box blue">Timeline reads: 500M &#215; 10 refreshes = 5B/day</div>
-        <div class="d-box purple">Read QPS: 58K &#8226; Peak (3x) = 174K</div>
-        <div class="d-box purple">Write QPS: 2.3K &#8226; Peak (5x) = 11.5K</div>
-        <div class="d-box amber">Read:Write ratio = 25:1</div>
+        <div class="d-box green">Post tweets (text, images, links)</div>
+        <div class="d-box green">Home timeline &#8212; aggregated feed from followed users</div>
+        <div class="d-box green">Follow / unfollow users</div>
+        <div class="d-box green">User timeline &#8212; single user&#8217;s tweets</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">P1 &#8212; Important</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">Like, retweet, reply</div>
+        <div class="d-box blue">Hashtag search</div>
+        <div class="d-box blue">Trending topics</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">P2 &#8212; Nice to Have</div>
+      <div class="d-flow-v">
+        <div class="d-box gray">Notifications (mentions, likes)</div>
+        <div class="d-box gray">Media upload (video, GIF)</div>
       </div>
     </div>
   </div>
   <div class="d-col">
     <div class="d-group">
-      <div class="d-group-title">Functional Requirements</div>
+      <div class="d-group-title">Scale Targets</div>
       <div class="d-flow-v">
-        <div class="d-box green">Post tweets (text, images, links)</div>
-        <div class="d-box green">Home timeline: tweets from followed users</div>
-        <div class="d-box green">Timeline ranked by relevance + recency</div>
-        <div class="d-box blue">Follow/unfollow users</div>
-        <div class="d-box blue">Search tweets by keyword</div>
+        <div class="d-box purple">500M DAU</div>
+        <div class="d-box purple">500M tweets/day &#8776; 5,800 writes/sec</div>
+        <div class="d-box purple">300K timeline reads/sec (peak)</div>
+        <div class="d-box purple">Average user follows 200 accounts</div>
       </div>
     </div>
     <div class="d-group">
       <div class="d-group-title">Non-Functional Targets</div>
       <div class="d-flow-v">
-        <div class="d-box purple">Timeline load: &lt; 200ms p99</div>
-        <div class="d-box purple">Tweet delivery: &lt; 5s to followers</div>
+        <div class="d-box amber">Timeline latency: &lt; 200ms p99</div>
+        <div class="d-box amber">Tweet publish: &lt; 5s to appear in follower feeds</div>
         <div class="d-box amber">Availability: 99.99%</div>
+        <div class="d-box amber">Timeline freshness: &lt; 30s for non-celebrity tweets</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Key Decisions</div>
+      <div class="d-flow-v">
+        <div class="d-box red">Fan-out-on-write vs fan-out-on-read?</div>
+        <div class="d-label">Hybrid: write for normal users, read for celebrities</div>
+        <div class="d-box red">Chronological vs ranked feed?</div>
+        <div class="d-label">Ranked with recency bias &#8212; engagement + freshness score</div>
       </div>
     </div>
   </div>
@@ -46,8 +68,8 @@ func registerTwitterFeed(r *Registry) {
 
 	r.Register(&Diagram{
 		Slug:        "tf-api-design",
-		Title:       "API Endpoints",
-		Description: "REST API design for tweet operations, timeline retrieval, and follow management",
+		Title:       "API Design",
+		Description: "Core REST API endpoints for tweet creation, timelines, and social graph",
 		ContentFile: "problems/twitter-feed",
 		Type:        TypeHTML,
 		HTML: `<div class="d-cols">
@@ -55,37 +77,27 @@ func registerTwitterFeed(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">Tweet Operations</div>
       <div class="d-flow-v">
-        <div class="d-box green" style="font-family:var(--font-mono);font-size:0.78rem;text-align:left;white-space:pre">POST /v1/tweets
-{
-  "text": "Hello world",
-  "media_ids": ["m1", "m2"],
-  "reply_to": null
-}
-&#8594; 201 {"tweet_id": "1234567890"}</div>
-        <div class="d-box blue" style="font-family:var(--font-mono);font-size:0.78rem;text-align:left;white-space:pre">DELETE /v1/tweets/{tweet_id}
-&#8594; 204 No Content</div>
+        <div class="d-box green"><strong>POST /v1/tweets</strong><br/>Body: {text, media_ids[], reply_to?}<br/>Returns: {tweet_id, created_at}</div>
+        <div class="d-box green"><strong>DELETE /v1/tweets/{id}</strong><br/>Soft-delete &#8212; marks as deleted, removes from timelines</div>
+        <div class="d-box blue"><strong>POST /v1/tweets/{id}/like</strong><br/>Idempotent &#8212; returns 200 if already liked</div>
+        <div class="d-box blue"><strong>POST /v1/tweets/{id}/retweet</strong><br/>Creates retweet entry, fans out to followers</div>
       </div>
     </div>
   </div>
   <div class="d-col">
     <div class="d-group">
-      <div class="d-group-title">Timeline</div>
+      <div class="d-group-title">Timeline Endpoints</div>
       <div class="d-flow-v">
-        <div class="d-box amber" style="font-family:var(--font-mono);font-size:0.78rem;text-align:left;white-space:pre">GET /v1/timeline/home
-  ?cursor=eyJ0...&amp;limit=20
-&#8594; 200 {
-  "tweets": [...],
-  "next_cursor": "eyJ0..."
-}</div>
+        <div class="d-box purple"><strong>GET /v1/timeline/home</strong><br/>Params: cursor, limit (default 20)<br/>Returns: {tweets[], next_cursor}</div>
+        <div class="d-box purple"><strong>GET /v1/timeline/user/{id}</strong><br/>Params: cursor, limit<br/>Returns: user&#8217;s own tweets + retweets</div>
       </div>
     </div>
     <div class="d-group">
       <div class="d-group-title">Social Graph</div>
       <div class="d-flow-v">
-        <div class="d-box purple" style="font-family:var(--font-mono);font-size:0.78rem;text-align:left;white-space:pre">POST /v1/users/{id}/follow
-DELETE /v1/users/{id}/follow
-GET /v1/users/{id}/followers
-  ?cursor=...&amp;limit=50</div>
+        <div class="d-box amber"><strong>POST /v1/users/{id}/follow</strong><br/>Triggers async fan-out of recent tweets</div>
+        <div class="d-box amber"><strong>DELETE /v1/users/{id}/follow</strong><br/>Unfollow &#8212; removes tweets from timeline cache</div>
+        <div class="d-box gray"><strong>GET /v1/users/{id}/followers</strong><br/>Paginated &#8212; cursor-based, 100 per page</div>
       </div>
     </div>
   </div>
@@ -93,9 +105,9 @@ GET /v1/users/{id}/followers
 	})
 
 	r.Register(&Diagram{
-		Slug:        "tf-fanout-comparison",
-		Title:       "Fan-out Strategies: Write vs Read vs Hybrid",
-		Description: "Comparison of three fan-out approaches for delivering tweets to follower timelines",
+		Slug:        "tf-fanout-strategies",
+		Title:       "Fan-out Strategies Comparison",
+		Description: "Fan-out-on-write vs fan-out-on-read with hybrid approach for celebrities",
 		ContentFile: "problems/twitter-feed",
 		Type:        TypeHTML,
 		HTML: `<div class="d-cols">
@@ -103,12 +115,19 @@ GET /v1/users/{id}/followers
     <div class="d-group">
       <div class="d-group-title">Fan-out-on-Write (Push)</div>
       <div class="d-flow-v">
-        <div class="d-box green" style="text-align:center">User posts tweet</div>
-        <div class="d-arrow-down">&#8595; async</div>
-        <div class="d-box green" style="text-align:center">Write to all 200 follower timelines</div>
-        <div class="d-label">&#10003; Fast reads: O(1) timeline fetch</div>
-        <div class="d-label">&#10007; Celebrity: 10M followers = 10M writes</div>
-        <div class="d-box blue">Best for: users with &lt; 10K followers</div>
+        <div class="d-box green">User A posts tweet</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box blue">Fan-out service reads A&#8217;s follower list</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box blue">Write tweet_id to each follower&#8217;s timeline cache</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box purple">1,000 followers = 1,000 Redis ZADD ops</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box green">Timeline read = single Redis ZREVRANGE &#8212; O(1)</div>
+      </div>
+      <div class="d-flow-v" style="margin-top:8px">
+        <div class="d-box amber">&#10003; Fast reads (&lt; 5ms)</div>
+        <div class="d-box red">&#10007; Celebrity problem: 100M writes per tweet</div>
       </div>
     </div>
   </div>
@@ -116,24 +135,37 @@ GET /v1/users/{id}/followers
     <div class="d-group">
       <div class="d-group-title">Fan-out-on-Read (Pull)</div>
       <div class="d-flow-v">
-        <div class="d-box amber" style="text-align:center">User opens timeline</div>
+        <div class="d-box green">User B opens home timeline</div>
         <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box amber" style="text-align:center">Fetch tweets from all 200 followed users</div>
-        <div class="d-label">&#10003; No write amplification</div>
-        <div class="d-label">&#10007; Slow reads: 200 lookups + merge + sort</div>
-        <div class="d-box blue">Best for: celebrity timelines</div>
+        <div class="d-box blue">Fetch B&#8217;s follow list (200 accounts)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box blue">Query each followed user&#8217;s recent tweets</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box purple">Merge + rank 200 tweet lists</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box red">Slow reads: 200 scatter-gather queries &#8776; 100-300ms</div>
+      </div>
+      <div class="d-flow-v" style="margin-top:8px">
+        <div class="d-box amber">&#10003; No write amplification</div>
+        <div class="d-box red">&#10007; High read latency at scale</div>
       </div>
     </div>
   </div>
   <div class="d-col">
     <div class="d-group">
-      <div class="d-group-title">&#9733; Hybrid (Recommended)</div>
+      <div class="d-group-title">Hybrid (Best of Both)</div>
       <div class="d-flow-v">
-        <div class="d-box indigo" style="text-align:center">If followers &lt; 10K &#8594; Push</div>
-        <div class="d-box indigo" style="text-align:center">If followers &#8805; 10K &#8594; Pull at read</div>
-        <div class="d-label">&#10003; Best of both worlds</div>
-        <div class="d-label">&#10003; 99% users are push, 1% pull</div>
-        <div class="d-box green">Twitter/X uses this exact approach</div>
+        <div class="d-box green">Normal user (&lt; 10K followers)</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box blue">Fan-out-on-write &#8212; push to all followers</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box indigo"><strong>Celebrity (&gt; 10K followers)</strong></div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box purple">Skip fan-out &#8212; store in celebrity tweet cache</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box amber">On read: merge precomputed timeline + celebrity tweets</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box green">Result: fast reads + bounded write cost</div>
       </div>
     </div>
   </div>
@@ -143,347 +175,336 @@ GET /v1/users/{id}/followers
 	r.Register(&Diagram{
 		Slug:        "tf-architecture",
 		Title:       "High-Level Architecture",
-		Description: "End-to-end architecture from client through API gateway, tweet service, fan-out, and timeline service",
+		Description: "End-to-end architecture: CDN, load balancers, services, caches, and storage",
 		ContentFile: "problems/twitter-feed",
 		Type:        TypeHTML,
 		HTML: `<div class="d-flow-v">
   <div class="d-flow">
-    <div class="d-box blue" style="text-align:center"><strong>Mobile App</strong></div>
-    <div class="d-box blue" style="text-align:center"><strong>Web Client</strong></div>
+    <div class="d-box gray">Client (Mobile / Web)</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box blue">CDN (CloudFront)</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box blue">ALB</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box green">API Gateway</div>
   </div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box gray" style="text-align:center"><strong>API Gateway + Load Balancer</strong><br>Rate limiting &#8226; Auth &#8226; Routing</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-flow">
-    <div class="d-branch">
-      <div class="d-branch-arm">
-        <div class="d-box green" style="text-align:center"><strong>Tweet Service</strong><br>Create/Delete tweets<br>Store in TweetDB</div>
-        <div class="d-arrow-down">&#8595; event</div>
-        <div class="d-box amber" style="text-align:center"><strong>Kafka</strong><br>tweet-created topic</div>
-        <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box red" style="text-align:center"><strong>Fan-out Service</strong><br>Push to follower timelines<br>(if followers &lt; 10K)</div>
-      </div>
-      <div class="d-branch-arm">
-        <div class="d-box purple" style="text-align:center"><strong>Timeline Service</strong><br>Read pre-computed timeline<br>+ merge celebrity tweets</div>
-        <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box red" style="text-align:center"><strong>Redis Cluster</strong><br>Timeline cache<br>ZSET per user</div>
-      </div>
-      <div class="d-branch-arm">
-        <div class="d-box indigo" style="text-align:center"><strong>Social Graph Service</strong><br>Follow/Unfollow<br>Follower lists</div>
-        <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box gray" style="text-align:center"><strong>Graph DB / MySQL</strong><br>Adjacency lists<br>Follower counts</div>
-      </div>
-    </div>
-  </div>
-</div>`,
-	})
-
-	r.Register(&Diagram{
-		Slug:        "tf-tweet-flow",
-		Title:       "Tweet Creation &#8594; Fan-out &#8594; Timeline",
-		Description: "Step-by-step flow from tweet creation through fan-out workers to follower timeline delivery",
-		ContentFile: "problems/twitter-feed",
-		Type:        TypeHTML,
-		HTML: `<div class="d-flow-v">
-  <div class="d-box blue" style="text-align:center"><strong>1. User Posts Tweet</strong><br>POST /v1/tweets &#8594; Tweet Service</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box green" style="text-align:center"><strong>2. Persist to TweetDB (MySQL)</strong><br>tweets table: id, user_id, text, media, created_at<br>Return 201 to user immediately</div>
-  <div class="d-arrow-down">&#8595; async event</div>
-  <div class="d-box gray" style="text-align:center"><strong>3. Publish to Kafka</strong><br>Topic: tweet-created &#8226; Key: user_id &#8226; Value: tweet payload</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box amber" style="text-align:center"><strong>4. Fan-out Worker Consumes</strong><br>Fetch follower list from Social Graph (cached)<br>User has 5,000 followers &#8594; 5,000 Redis writes</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box red" style="text-align:center"><strong>5. Write to Redis Timelines</strong><br>For each follower: ZADD timeline:{follower_id} {timestamp} {tweet_id}<br>ZREMRANGEBYRANK to cap at 800 entries<br>Pipeline: 50 ZADD per batch &#8226; ~100ms for 5K followers</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box purple" style="text-align:center"><strong>6. Follower Opens Timeline</strong><br>ZREVRANGE timeline:{user_id} 0 19 &#8594; 20 tweet IDs<br>Multi-GET tweet details &#8594; hydrate &#8594; return</div>
-</div>`,
-	})
-
-	r.Register(&Diagram{
-		Slug:        "tf-celebrity-handling",
-		Title:       "Celebrity Handling &#8212; Hybrid Fan-out Threshold",
-		Description: "How the system handles celebrity accounts with millions of followers using pull-based merge",
-		ContentFile: "problems/twitter-feed",
-		Type:        TypeHTML,
-		HTML: `<div class="d-flow-v">
   <div class="d-cols">
     <div class="d-col">
       <div class="d-group">
-        <div class="d-group-title">Celebrity Posts (&#8805; 10K followers)</div>
+        <div class="d-group-title">Write Path</div>
         <div class="d-flow-v">
-          <div class="d-box red" style="text-align:center"><strong>@celebrity</strong><br>50M followers</div>
-          <div class="d-arrow-down">&#8595; tweet</div>
-          <div class="d-box amber" style="text-align:center"><strong>NO fan-out!</strong><br>Tweet stored only in TweetDB<br>+ celebrity_tweets Redis list</div>
+          <div class="d-box green">Tweet Service</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box purple">Kafka (tweet-events topic)</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-flow">
+            <div class="d-box amber">Fan-out Service</div>
+            <div class="d-arrow">&#8594;</div>
+            <div class="d-box red">Redis Timeline Cache</div>
+          </div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box indigo">Tweet Store (DynamoDB / Vitess)</div>
         </div>
       </div>
     </div>
     <div class="d-col">
       <div class="d-group">
-        <div class="d-group-title">Timeline Read (Merge at Read)</div>
+        <div class="d-group-title">Read Path</div>
         <div class="d-flow-v">
-          <div class="d-box blue" style="text-align:center"><strong>User opens timeline</strong></div>
+          <div class="d-box green">Timeline Service</div>
           <div class="d-arrow-down">&#8595;</div>
-          <div class="d-flow">
-            <div class="d-branch">
-              <div class="d-branch-arm">
-                <div class="d-box green" style="text-align:center"><strong>Pre-computed</strong><br>ZREVRANGE timeline<br>(non-celebrity tweets)</div>
-              </div>
-              <div class="d-branch-arm">
-                <div class="d-box purple" style="text-align:center"><strong>Pull celebrity</strong><br>User follows 5 celebrities<br>Fetch latest 20 from each</div>
-              </div>
-            </div>
-          </div>
-          <div class="d-arrow-down">&#8595; merge + sort</div>
-          <div class="d-box green" style="text-align:center"><strong>Merged timeline</strong><br>Top 20 by score &#8226; &lt; 50ms total</div>
+          <div class="d-box red">Redis Timeline Cache</div>
+          <div class="d-label">Precomputed sorted set per user (tweet_id:score)</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box purple">Celebrity Tweet Cache</div>
+          <div class="d-label">Merge on read for &gt; 10K follower accounts</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box amber">Ranking Service</div>
+          <div class="d-label">Score = engagement + recency + relevance</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box indigo">Tweet Store (hydrate tweet objects)</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Supporting Services</div>
+        <div class="d-flow-v">
+          <div class="d-box blue">User Service</div>
+          <div class="d-label">Profile, auth, follower counts</div>
+          <div class="d-box blue">Social Graph Service</div>
+          <div class="d-label">Follow/unfollow, adjacency lists</div>
+          <div class="d-box blue">Search Service</div>
+          <div class="d-label">Inverted index, hashtag lookup</div>
+          <div class="d-box blue">Notification Service</div>
+          <div class="d-label">Mentions, likes, retweets</div>
+          <div class="d-box blue">Media Service</div>
+          <div class="d-label">Image/video upload &#8594; S3 + CDN</div>
         </div>
       </div>
     </div>
   </div>
-  <div class="d-label">Threshold: 10K followers &#8226; ~0.1% of users are celebrities but cause 99% of fan-out cost if pushed</div>
 </div>`,
 	})
 
 	r.Register(&Diagram{
-		Slug:        "tf-timeline-cache",
-		Title:       "Redis Timeline Cache &#8212; Sorted Set Structure",
-		Description: "How each user's timeline is stored as a Redis sorted set with tweet IDs scored by timestamp",
+		Slug:        "tf-timeline-generation",
+		Title:       "Timeline Generation &#8212; Hybrid Approach",
+		Description: "Precomputed Redis timeline merged with on-read celebrity tweets and ranking",
 		ContentFile: "problems/twitter-feed",
 		Type:        TypeHTML,
-		HTML: `<div class="d-cols">
-  <div class="d-col">
-    <div class="d-group">
-      <div class="d-group-title">Redis Sorted Set per User</div>
-      <div class="d-flow-v">
-        <div class="d-box red" style="font-family:var(--font-mono);font-size:0.78rem;text-align:left;white-space:pre">KEY: timeline:{user_id}
-
-ZADD timeline:u123 1704067200 "t9876"
-ZADD timeline:u123 1704067190 "t9875"
-ZADD timeline:u123 1704067180 "t9874"
-...
-
-ZREVRANGE timeline:u123 0 19
-&#8594; ["t9876", "t9875", "t9874", ...]
-
-ZCARD timeline:u123
-&#8594; 800 (capped)</div>
-      </div>
+		HTML: `<div class="d-flow-v">
+  <div class="d-group">
+    <div class="d-group-title">Step 1: Precomputed Timeline (Fan-out-on-Write)</div>
+    <div class="d-flow">
+      <div class="d-box green">Normal user posts tweet</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box blue">Fan-out Service</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box red">Redis ZADD timeline:{user_id} {score} {tweet_id}</div>
     </div>
+    <div class="d-label">Score = tweet timestamp (epoch ms). Sorted set trimmed to 800 entries via ZREMRANGEBYRANK.</div>
   </div>
-  <div class="d-col">
-    <div class="d-group">
-      <div class="d-group-title">Memory Calculation</div>
-      <div class="d-flow-v">
-        <div class="d-box amber">Per entry: ~80 bytes (score + member)</div>
-        <div class="d-box amber">Per user: 800 entries &#215; 80B = 64 KB</div>
-        <div class="d-box amber">500M users &#215; 64KB = 32 TB total</div>
-        <div class="d-box purple">Active users (50M): 3.2 TB</div>
-        <div class="d-label">Only cache active users. Inactive: rebuild on demand from DB</div>
-      </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-group">
+    <div class="d-group-title">Step 2: Celebrity Merge (Fan-out-on-Read)</div>
+    <div class="d-flow">
+      <div class="d-box indigo">User follows 5 celebrities</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box purple">Fetch latest 20 tweets from each celebrity cache</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box amber">Merge 100 celebrity tweets with precomputed timeline</div>
     </div>
-    <div class="d-group">
-      <div class="d-group-title">Eviction Strategy</div>
-      <div class="d-flow-v">
-        <div class="d-box blue">LRU eviction for inactive timelines</div>
-        <div class="d-box blue">ZREMRANGEBYRANK cap at 800 per write</div>
-        <div class="d-box green">TTL: 7 days for inactive users</div>
-      </div>
+    <div class="d-label">Celebrity cache: separate Redis sorted set per celebrity. &#8776; 5 &#215; 20 = 100 tweets to merge.</div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-group">
+    <div class="d-group-title">Step 3: Rank &amp; Return</div>
+    <div class="d-flow">
+      <div class="d-box amber">Ranking model scores merged tweets</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box blue">Hydrate top 20 tweet objects from Tweet Store</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box green">Return {tweets[], next_cursor}</div>
     </div>
+    <div class="d-label">Total latency: Redis ZREVRANGE (2ms) + celebrity merge (10ms) + ranking (20ms) + hydration (50ms) &#8776; 80ms p50.</div>
   </div>
 </div>`,
 	})
 
 	r.Register(&Diagram{
 		Slug:        "tf-data-model",
-		Title:       "Data Model &#8212; Core Tables",
-		Description: "Database schema for tweets, users, follows, and timeline tables",
+		Title:       "Data Model",
+		Description: "Core tables: users, tweets, follows, timelines, likes, retweets, hashtags",
 		ContentFile: "problems/twitter-feed",
 		Type:        TypeHTML,
 		HTML: `<div class="d-cols">
   <div class="d-col">
     <div class="d-entity">
-      <div class="d-entity-header blue">tweets (MySQL &#8594; sharded)</div>
+      <div class="d-entity-header blue">users</div>
       <div class="d-entity-body">
-        <div class="pk">tweet_id BIGINT (Snowflake)</div>
-        <div class="fk">user_id BIGINT</div>
-        <div>text VARCHAR(280)</div>
-        <div>media_urls JSON</div>
-        <div>reply_to_id BIGINT NULL</div>
-        <div>retweet_of_id BIGINT NULL</div>
-        <div class="idx idx-btree">created_at TIMESTAMP</div>
-        <div>like_count INT DEFAULT 0</div>
-        <div>retweet_count INT DEFAULT 0</div>
+        <div><span class="pk">PK</span> user_id (snowflake)</div>
+        <div>username (unique)</div>
+        <div>display_name</div>
+        <div>bio</div>
+        <div>follower_count</div>
+        <div>following_count</div>
+        <div>is_celebrity (bool)</div>
+        <div>created_at</div>
+        <div><span class="idx idx-hash">IDX</span> username</div>
       </div>
     </div>
     <div class="d-entity">
-      <div class="d-entity-header green">users</div>
+      <div class="d-entity-header green">tweets</div>
       <div class="d-entity-body">
-        <div class="pk">user_id BIGINT</div>
-        <div class="idx idx-hash">username VARCHAR(50) UNIQUE</div>
-        <div>display_name VARCHAR(100)</div>
-        <div>follower_count INT</div>
-        <div>following_count INT</div>
-        <div>is_celebrity BOOLEAN</div>
+        <div><span class="pk">PK</span> tweet_id (snowflake)</div>
+        <div><span class="fk">FK</span> user_id</div>
+        <div>text (280 chars)</div>
+        <div>media_urls[]</div>
+        <div>reply_to_id (nullable)</div>
+        <div>retweet_of_id (nullable)</div>
+        <div>like_count</div>
+        <div>retweet_count</div>
+        <div>reply_count</div>
+        <div>created_at</div>
+        <div>is_deleted (bool)</div>
+        <div><span class="idx idx-btree">IDX</span> user_id + created_at</div>
+        <div><span class="idx idx-btree">IDX</span> reply_to_id</div>
       </div>
     </div>
   </div>
   <div class="d-col">
     <div class="d-entity">
-      <div class="d-entity-header purple">follows (Social Graph)</div>
+      <div class="d-entity-header purple">follows</div>
       <div class="d-entity-body">
-        <div class="pk">follower_id BIGINT</div>
-        <div class="pk">followee_id BIGINT</div>
-        <div class="idx idx-btree">created_at TIMESTAMP</div>
-        <div>INDEX (followee_id, follower_id)</div>
-        <div>INDEX (follower_id, created_at)</div>
+        <div><span class="pk">PK</span> follower_id + followee_id</div>
+        <div><span class="fk">FK</span> follower_id &#8594; users</div>
+        <div><span class="fk">FK</span> followee_id &#8594; users</div>
+        <div>created_at</div>
+        <div><span class="idx idx-btree">IDX</span> followee_id (reverse lookup)</div>
       </div>
     </div>
     <div class="d-entity">
-      <div class="d-entity-header red">timeline_cache (Redis)</div>
+      <div class="d-entity-header red">timelines (Redis)</div>
       <div class="d-entity-body">
-        <div class="pk">KEY: timeline:{user_id}</div>
-        <div>TYPE: Sorted Set (ZSET)</div>
-        <div>SCORE: tweet timestamp</div>
-        <div>MEMBER: tweet_id</div>
-        <div>MAX SIZE: 800 entries</div>
-        <div>TTL: 7 days (inactive users)</div>
+        <div><span class="pk">PK</span> timeline:{user_id}</div>
+        <div>Sorted set: member=tweet_id, score=timestamp</div>
+        <div>Max 800 entries per user</div>
+        <div>TTL: 7 days for inactive users</div>
+      </div>
+    </div>
+    <div class="d-entity">
+      <div class="d-entity-header amber">likes</div>
+      <div class="d-entity-body">
+        <div><span class="pk">PK</span> user_id + tweet_id</div>
+        <div>created_at</div>
+        <div><span class="idx idx-btree">IDX</span> tweet_id (count query)</div>
       </div>
     </div>
   </div>
-</div>
-<div class="d-er-lines">
-  <div class="d-er-connector">
-    <span class="d-er-from">users</span>
-    <span class="d-er-type">1:N</span>
-    <span class="d-er-to">tweets (user_id)</span>
-  </div>
-  <div class="d-er-connector">
-    <span class="d-er-from">users</span>
-    <span class="d-er-type">M:N</span>
-    <span class="d-er-to">follows (follower &#8596; followee)</span>
+  <div class="d-col">
+    <div class="d-entity">
+      <div class="d-entity-header indigo">retweets</div>
+      <div class="d-entity-body">
+        <div><span class="pk">PK</span> user_id + tweet_id</div>
+        <div>retweet_tweet_id (the new tweet entry)</div>
+        <div>created_at</div>
+        <div><span class="idx idx-btree">IDX</span> tweet_id</div>
+      </div>
+    </div>
+    <div class="d-entity">
+      <div class="d-entity-header gray">hashtags</div>
+      <div class="d-entity-body">
+        <div><span class="pk">PK</span> hashtag + tweet_id</div>
+        <div>hashtag (lowercase, normalized)</div>
+        <div><span class="fk">FK</span> tweet_id &#8594; tweets</div>
+        <div>created_at</div>
+        <div><span class="idx idx-hash">IDX</span> hashtag</div>
+        <div><span class="idx idx-btree">IDX</span> hashtag + created_at</div>
+      </div>
+    </div>
   </div>
 </div>`,
 	})
 
 	r.Register(&Diagram{
-		Slug:        "tf-trending-detection",
-		Title:       "Trending Topic Detection",
-		Description: "Sliding window count pipeline using Count-Min Sketch and z-score spike detection",
+		Slug:        "tf-celebrity-problem",
+		Title:       "The Celebrity Problem",
+		Description: "Why fan-out-on-write fails for celebrities and how the hybrid approach solves it",
 		ContentFile: "problems/twitter-feed",
 		Type:        TypeHTML,
 		HTML: `<div class="d-flow-v">
-  <div class="d-box blue" style="text-align:center"><strong>Tweet Stream</strong><br>200M tweets/day &#8594; extract hashtags + entities</div>
+  <div class="d-group">
+    <div class="d-group-title">The Problem</div>
+    <div class="d-flow">
+      <div class="d-box indigo"><strong>Celebrity</strong><br/>100M followers</div>
+      <div class="d-arrow">&#8594; posts 1 tweet &#8594;</div>
+      <div class="d-box red"><strong>Fan-out-on-Write</strong><br/>100M Redis ZADD operations</div>
+    </div>
+    <div class="d-flow-v" style="margin-top:8px">
+      <div class="d-box red">At 100K ZADD/sec per Redis node = 1,000 seconds to complete</div>
+      <div class="d-box red">10 shards &#8594; still 100 seconds latency</div>
+      <div class="d-box red">Celebrity tweets 5x/day = 500M unnecessary writes/day</div>
+    </div>
+  </div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box gray" style="text-align:center"><strong>Kafka (hashtag-counts topic)</strong><br>Partitioned by hashtag hash</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-cols">
-    <div class="d-col">
-      <div class="d-group">
-        <div class="d-group-title">Count-Min Sketch (per 5-min window)</div>
+  <div class="d-group">
+    <div class="d-group-title">The Solution: Hybrid Fan-out</div>
+    <div class="d-cols">
+      <div class="d-col">
         <div class="d-flow-v">
-          <div class="d-box amber" style="text-align:center">4 hash functions &#215; 10K counters<br>Memory: 40 KB per window<br>Error rate: &lt; 0.1%</div>
+          <div class="d-box green"><strong>Normal User</strong> (&lt; 10K followers)</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box blue">Fan-out-on-write as usual</div>
+          <div class="d-label">1,000 followers &#215; 1 ZADD = 1,000 ops &#8776; 10ms</div>
         </div>
       </div>
-    </div>
-    <div class="d-col">
-      <div class="d-group">
-        <div class="d-group-title">Spike Detection</div>
+      <div class="d-col">
         <div class="d-flow-v">
-          <div class="d-box purple" style="text-align:center">z-score = (current &#8722; mean) / stddev<br>Trending if z-score &gt; 3.0<br>Compare to same hour last week</div>
+          <div class="d-box indigo"><strong>Celebrity</strong> (&gt; 10K followers)</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box purple">Store in celebrity tweet cache only</div>
+          <div class="d-label">1 write regardless of follower count</div>
         </div>
       </div>
     </div>
   </div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box green" style="text-align:center"><strong>Trending Topics (Top 30)</strong><br>Ranked by velocity (rate of increase) not raw count<br>Cached in Redis &#8226; Refreshed every 5 min &#8226; Per-region variants</div>
-</div>`,
-	})
-
-	r.Register(&Diagram{
-		Slug:        "tf-scaling",
-		Title:       "Sharding Strategy",
-		Description: "Sharding approach for tweets, timelines, and social graph across distributed storage",
-		ContentFile: "problems/twitter-feed",
-		Type:        TypeHTML,
-		HTML: `<div class="d-cols">
-  <div class="d-col">
-    <div class="d-group">
-      <div class="d-group-title">Tweet Storage (MySQL Vitess)</div>
-      <div class="d-flow-v">
-        <div class="d-box blue" style="text-align:center"><strong>Shard by user_id</strong><br>All tweets from one user on same shard</div>
-        <div class="d-box green" style="text-align:center">16 shards &#215; 3 replicas<br>= 48 MySQL instances</div>
-        <div class="d-label">User profile reads: single shard lookup</div>
-      </div>
-    </div>
-    <div class="d-group">
-      <div class="d-group-title">Social Graph (MySQL)</div>
-      <div class="d-flow-v">
-        <div class="d-box purple" style="text-align:center"><strong>Shard by follower_id</strong><br>"Who do I follow?" = single shard</div>
-        <div class="d-box purple" style="text-align:center">Reverse index shard by followee_id<br>"Who follows me?" for fan-out</div>
-      </div>
-    </div>
-  </div>
-  <div class="d-col">
-    <div class="d-group">
-      <div class="d-group-title">Timeline Cache (Redis Cluster)</div>
-      <div class="d-flow-v">
-        <div class="d-box red" style="text-align:center"><strong>Shard by user_id hash</strong><br>Consistent hashing across slots</div>
-        <div class="d-flow">
-          <div class="d-group" style="flex:1">
-            <div class="d-group-title">Active tier</div>
-            <div class="d-box amber" style="text-align:center">50M users<br>3.2 TB<br>64 shards</div>
-          </div>
-          <div class="d-group" style="flex:1">
-            <div class="d-group-title">Warm tier</div>
-            <div class="d-box gray" style="text-align:center">Rebuild on<br>demand from<br>DB + fan-out</div>
-          </div>
-        </div>
-      </div>
+  <div class="d-group">
+    <div class="d-group-title">Read-Time Merge</div>
+    <div class="d-flow">
+      <div class="d-box red">User&#8217;s precomputed timeline</div>
+      <div class="d-box amber">+ merge celebrity tweets (&#8776; 5-10 celebrities followed)</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box green">Merged feed in &lt; 15ms extra latency</div>
     </div>
   </div>
 </div>`,
 	})
 
 	r.Register(&Diagram{
-		Slug:        "tf-real-time-updates",
-		Title:       "Real-Time Timeline Updates (SSE/WebSocket)",
-		Description: "How new tweets are pushed to connected clients via server-sent events or WebSocket",
+		Slug:        "tf-ranking-algorithm",
+		Title:       "Feed Ranking Algorithm",
+		Description: "Multi-signal ranking: engagement, recency, relevance, and social graph proximity",
 		ContentFile: "problems/twitter-feed",
 		Type:        TypeHTML,
 		HTML: `<div class="d-flow-v">
+  <div class="d-group">
+    <div class="d-group-title">Ranking Score Formula</div>
+    <div class="d-box purple"><strong>score = w1&#183;engagement + w2&#183;recency + w3&#183;relevance + w4&#183;social_proximity</strong></div>
+  </div>
   <div class="d-cols">
     <div class="d-col">
       <div class="d-group">
-        <div class="d-group-title">Push Flow</div>
+        <div class="d-group-title">Engagement Score (w1 = 0.3)</div>
         <div class="d-flow-v">
-          <div class="d-box green" style="text-align:center"><strong>Fan-out Service</strong><br>Writes to Redis timeline</div>
-          <div class="d-arrow-down">&#8595; publish</div>
-          <div class="d-box red" style="text-align:center"><strong>Redis Pub/Sub</strong><br>Channel: user:{user_id}:timeline<br>Lightweight notification (tweet_id only)</div>
-          <div class="d-arrow-down">&#8595;</div>
-          <div class="d-box indigo" style="text-align:center"><strong>WebSocket Gateway</strong><br>Maintains long-lived connections<br>~5M concurrent connections per node</div>
-          <div class="d-arrow-down">&#8595;</div>
-          <div class="d-box blue" style="text-align:center"><strong>Client</strong><br>Receives notification &#8594; fetch tweet detail<br>Prepend to timeline UI</div>
+          <div class="d-box green">likes &#215; 1.0</div>
+          <div class="d-box green">retweets &#215; 2.0</div>
+          <div class="d-box green">replies &#215; 3.0</div>
+          <div class="d-box green">click-through &#215; 1.5</div>
+          <div class="d-label">Normalized to [0, 1] by percentile rank</div>
+        </div>
+      </div>
+      <div class="d-group">
+        <div class="d-group-title">Recency Score (w2 = 0.35)</div>
+        <div class="d-flow-v">
+          <div class="d-box blue">decay = 1 / (1 + age_hours / 6)</div>
+          <div class="d-label">Half-life of 6 hours &#8212; tweets older than 24h score &lt; 0.2</div>
         </div>
       </div>
     </div>
     <div class="d-col">
       <div class="d-group">
-        <div class="d-group-title">Connection Management</div>
+        <div class="d-group-title">Relevance Score (w3 = 0.2)</div>
         <div class="d-flow-v">
-          <div class="d-box amber">Online users: track in Redis SET</div>
-          <div class="d-box amber">Only push to online users</div>
-          <div class="d-box amber">Offline: pull on next app open</div>
+          <div class="d-box amber">Topic interest from user history</div>
+          <div class="d-box amber">Hashtag affinity (past 30 days)</div>
+          <div class="d-box amber">Content type preference (images vs text)</div>
+          <div class="d-label">ML model: user embedding &#183; tweet embedding</div>
         </div>
       </div>
       <div class="d-group">
-        <div class="d-group-title">Fallback: SSE for Web</div>
+        <div class="d-group-title">Social Proximity (w4 = 0.15)</div>
         <div class="d-flow-v">
-          <div class="d-box purple" style="font-family:var(--font-mono);font-size:0.78rem;text-align:left;white-space:pre">GET /v1/timeline/stream
-Accept: text/event-stream
-
-data: {"tweet_id": "t9876"}
-data: {"tweet_id": "t9877"}</div>
+          <div class="d-box indigo">Mutual follows &#8594; 1.0</div>
+          <div class="d-box indigo">Frequent interactions &#8594; 0.8</div>
+          <div class="d-box indigo">One-way follow &#8594; 0.4</div>
+          <div class="d-box indigo">Friend of friend &#8594; 0.1</div>
         </div>
       </div>
+    </div>
+  </div>
+  <div class="d-group">
+    <div class="d-group-title">Ranking Pipeline</div>
+    <div class="d-flow">
+      <div class="d-box gray">Candidate tweets (&#8776; 500)</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box blue">Light ranker (score formula)</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box purple">Top 50 &#8594; heavy ML ranker</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box green">Top 20 returned to client</div>
     </div>
   </div>
 </div>`,
@@ -491,48 +512,248 @@ data: {"tweet_id": "t9877"}</div>
 
 	r.Register(&Diagram{
 		Slug:        "tf-search-indexing",
-		Title:       "Tweet Search with Elasticsearch",
-		Description: "How tweets are indexed and searched using Elasticsearch with relevance scoring",
+		Title:       "Search &amp; Indexing Pipeline",
+		Description: "Real-time inverted index for hashtags and keywords with Kafka-powered ingestion",
 		ContentFile: "problems/twitter-feed",
 		Type:        TypeHTML,
 		HTML: `<div class="d-flow-v">
-  <div class="d-flow">
-    <div class="d-branch">
-      <div class="d-branch-arm">
-        <div class="d-group">
-          <div class="d-group-title">Indexing Pipeline</div>
-          <div class="d-flow-v">
-            <div class="d-box green" style="text-align:center"><strong>New Tweet</strong></div>
-            <div class="d-arrow-down">&#8595;</div>
-            <div class="d-box gray" style="text-align:center"><strong>Kafka</strong><br>tweet-created topic</div>
-            <div class="d-arrow-down">&#8595;</div>
-            <div class="d-box amber" style="text-align:center"><strong>Index Worker</strong><br>Tokenize, stem, extract entities<br>Batch: 1000 docs per bulk request</div>
-            <div class="d-arrow-down">&#8595;</div>
-            <div class="d-box indigo" style="text-align:center"><strong>Elasticsearch Cluster</strong><br>20 shards &#8226; 2 replicas<br>~50 TB for 30-day window</div>
+  <div class="d-group">
+    <div class="d-group-title">Indexing Pipeline (Write Path)</div>
+    <div class="d-flow">
+      <div class="d-box green">New Tweet</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box purple">Kafka (tweet-events)</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box blue">Tokenizer / NLP Service</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box amber">Elasticsearch Cluster</div>
+    </div>
+    <div class="d-flow" style="margin-top:8px">
+      <div class="d-box blue">Tokenizer extracts:</div>
+      <div class="d-box gray">#hashtags</div>
+      <div class="d-box gray">@mentions</div>
+      <div class="d-box gray">keywords (stemmed)</div>
+      <div class="d-box gray">URLs (expanded)</div>
+      <div class="d-box gray">language</div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-group">
+    <div class="d-group-title">Inverted Index Structure (Elasticsearch)</div>
+    <div class="d-cols">
+      <div class="d-col">
+        <div class="d-entity">
+          <div class="d-entity-header amber">Hashtag Index</div>
+          <div class="d-entity-body">
+            <div><span class="pk">PK</span> hashtag (lowercase)</div>
+            <div>posting_list: [tweet_id, score, timestamp]</div>
+            <div>doc_count (for trending)</div>
+            <div><span class="idx idx-btree">IDX</span> timestamp (recent first)</div>
           </div>
         </div>
       </div>
-      <div class="d-branch-arm">
-        <div class="d-group">
-          <div class="d-group-title">Search Query Flow</div>
-          <div class="d-flow-v">
-            <div class="d-box blue" style="text-align:center"><strong>User searches "breaking news"</strong></div>
-            <div class="d-arrow-down">&#8595;</div>
-            <div class="d-box purple" style="text-align:center"><strong>Search Service</strong><br>Query Elasticsearch<br>BM25 + recency boost + engagement</div>
-            <div class="d-arrow-down">&#8595;</div>
-            <div class="d-box green" style="text-align:center"><strong>Results</strong><br>Ranked by relevance &#215; recency<br>Filter: safe search, blocked users<br>Paginated via search_after</div>
+      <div class="d-col">
+        <div class="d-entity">
+          <div class="d-entity-header blue">Full-Text Index</div>
+          <div class="d-entity-body">
+            <div><span class="pk">PK</span> token (stemmed word)</div>
+            <div>posting_list: [tweet_id, tf-idf, position]</div>
+            <div>Analyzers: english, cjk, emoji</div>
+            <div><span class="idx idx-btree">IDX</span> relevance + recency</div>
           </div>
         </div>
-        <div class="d-group">
-          <div class="d-group-title">Index Schema</div>
-          <div class="d-flow-v">
-            <div class="d-box gray" style="font-family:var(--font-mono);font-size:0.78rem;text-align:left;white-space:pre">tweet_id: keyword
-text: text (analyzed)
-user_id: keyword
-hashtags: keyword[]
-created_at: date
-engagement: float</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-group">
+    <div class="d-group-title">Search Query Path</div>
+    <div class="d-flow">
+      <div class="d-box green">GET /v1/search?q=#golang</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box amber">Elasticsearch query (filtered + scored)</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box blue">Hydrate tweet objects</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box green">Return ranked results</div>
+    </div>
+    <div class="d-label">Latency: &#8776; 20-50ms. Index lag: &#8776; 2-5 seconds from tweet post to searchable.</div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "tf-scaling",
+		Title:       "Scaling Strategy",
+		Description: "Sharding tweets by snowflake ID, timeline cache partitioning, and Kafka topic design",
+		ContentFile: "problems/twitter-feed",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Tweet Store Sharding</div>
+      <div class="d-flow-v">
+        <div class="d-box green"><strong>Shard key:</strong> tweet_id (snowflake)</div>
+        <div class="d-label">Snowflake embeds timestamp &#8594; range scans by time are shard-local</div>
+        <div class="d-box blue">16 shards &#215; 3 replicas = 48 nodes</div>
+        <div class="d-box blue">Each shard: &#8776; 30M tweets/day</div>
+        <div class="d-box purple">User timeline query: scatter to all shards by user_id index</div>
+        <div class="d-label">Mitigated by Redis timeline cache (no DB hit for home feed)</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Social Graph Sharding</div>
+      <div class="d-flow-v">
+        <div class="d-box amber"><strong>Shard key:</strong> user_id</div>
+        <div class="d-label">All followers/following for a user on same shard</div>
+        <div class="d-box amber">8 shards &#8212; follows table is smaller than tweets</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Timeline Cache (Redis Cluster)</div>
+      <div class="d-flow-v">
+        <div class="d-box red"><strong>Shard key:</strong> hash(user_id) mod 64</div>
+        <div class="d-box red">64 Redis masters &#215; 2 replicas = 192 nodes</div>
+        <div class="d-box red">Each node: &#8776; 8M user timelines</div>
+        <div class="d-label">Memory per node: 800 entries &#215; 16 bytes &#215; 8M = &#8776; 100GB</div>
+        <div class="d-box purple">Eviction: LRU for users inactive &gt; 7 days</div>
+        <div class="d-label">Cold user returns &#8594; rebuild from DB + fan-out backfill</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Kafka Partitioning</div>
+      <div class="d-flow-v">
+        <div class="d-box indigo"><strong>tweet-events:</strong> 128 partitions</div>
+        <div class="d-label">Partition key: user_id &#8212; all tweets from same user in order</div>
+        <div class="d-box indigo"><strong>fanout-tasks:</strong> 256 partitions</div>
+        <div class="d-label">Partition key: target_user_id &#8212; ordered delivery per timeline</div>
+      </div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "tf-failure-modes",
+		Title:       "Failure Modes &amp; Mitigations",
+		Description: "Timeline inconsistency, fan-out lag, and celebrity tweet thundering herd scenarios",
+		ContentFile: "problems/twitter-feed",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">1. Timeline Inconsistency</div>
+        <div class="d-flow-v">
+          <div class="d-box red"><strong>Failure:</strong> Fan-out partially completes &#8212; some followers see tweet, others don&#8217;t</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box amber"><strong>Cause:</strong> Fan-out worker crashes mid-batch</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green"><strong>Mitigation:</strong> Kafka consumer offsets &#8212; restart from last committed offset. Idempotent ZADD (re-adding same tweet_id is a no-op).</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">2. Fan-out Lag</div>
+        <div class="d-flow-v">
+          <div class="d-box red"><strong>Failure:</strong> Viral tweet causes fan-out queue to back up &#8212; 10K+ follower user floods Kafka</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box amber"><strong>Symptom:</strong> Timeline delivery delay exceeds 30s SLA</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green"><strong>Mitigation:</strong> Priority queue &#8212; celebrity fan-out is already skipped. For high-follower non-celebrities (10K-100K), batch ZADD in groups of 1,000. Auto-scale Kafka consumers on lag metric.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">3. Celebrity Tweet Thundering Herd</div>
+        <div class="d-flow-v">
+          <div class="d-box red"><strong>Failure:</strong> Celebrity tweets &#8594; millions of concurrent timeline reads all hit celebrity cache simultaneously</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box amber"><strong>Symptom:</strong> Redis celebrity cache hot key &#8594; single shard overloaded</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green"><strong>Mitigation:</strong> Replicate celebrity cache across multiple read replicas. Add jitter to client polling intervals. Use Redis Cluster with hash tags to spread celebrity keys across slots.</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">4. Redis Timeline Cache Failure</div>
+        <div class="d-flow-v">
+          <div class="d-box red"><strong>Failure:</strong> Redis node goes down &#8212; &#8776; 8M user timelines lost</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box amber"><strong>Symptom:</strong> Cache misses spike &#8594; DB scatter-gather queries surge</div>
+          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-box green"><strong>Mitigation:</strong> Redis replica auto-promotes. Circuit breaker on DB: return stale/partial timeline. Background job rebuilds timelines from follows table + tweet store. Rate-limit rebuild to 10K users/sec.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "tf-trending-topics",
+		Title:       "Trending Topics &#8212; Real-Time Detection",
+		Description: "Sliding window counting with Count-Min Sketch for approximate top-K trending topics",
+		ContentFile: "problems/twitter-feed",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-group">
+    <div class="d-group-title">Ingestion Pipeline</div>
+    <div class="d-flow">
+      <div class="d-box green">Tweet Stream</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box blue">Hashtag Extractor</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box purple">Kafka (hashtag-counts topic)</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box amber">Trending Service</div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Count-Min Sketch (Approximate Counting)</div>
+        <div class="d-flow-v">
+          <div class="d-box purple"><strong>Structure:</strong> d=5 hash functions &#215; w=10,000 counters</div>
+          <div class="d-box purple"><strong>Memory:</strong> 5 &#215; 10K &#215; 4 bytes = 200KB per window</div>
+          <div class="d-box blue"><strong>Insert:</strong> hash(hashtag) &#8594; increment d=5 counters</div>
+          <div class="d-box blue"><strong>Query:</strong> min of d=5 counters = approximate count</div>
+          <div class="d-box amber"><strong>Error:</strong> Over-counts by &#8804; &#949;N with probability 1-&#948;</div>
+          <div class="d-label">&#949; = e/w &#8776; 0.03%, &#948; = e^(-d) &#8776; 0.007. Sufficient for top-K ranking.</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Sliding Window (5-Minute Buckets)</div>
+        <div class="d-flow-v">
+          <div class="d-flow">
+            <div class="d-box gray">t-4</div>
+            <div class="d-box gray">t-3</div>
+            <div class="d-box gray">t-2</div>
+            <div class="d-box blue">t-1</div>
+            <div class="d-box green">t (current)</div>
           </div>
+          <div class="d-label">Window = sum of last 12 buckets (1 hour). Old buckets evicted.</div>
+          <div class="d-box amber"><strong>Acceleration detection:</strong><br/>trend_score = count_last_1h / count_prev_1h</div>
+          <div class="d-label">Score &gt; 3.0 = &#8220;trending&#8221;. Score &gt; 10.0 = &#8220;viral&#8221;.</div>
+        </div>
+      </div>
+      <div class="d-group">
+        <div class="d-group-title">Top-K Extraction</div>
+        <div class="d-flow-v">
+          <div class="d-box green">Min-heap of size K=50</div>
+          <div class="d-label">For each hashtag update: if count &gt; heap.min, replace and sift down</div>
+          <div class="d-box green">Publish top 50 trending every 30 seconds</div>
+          <div class="d-label">Regionalized: separate heaps per country/city</div>
         </div>
       </div>
     </div>

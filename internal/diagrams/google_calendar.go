@@ -3,42 +3,60 @@ package diagrams
 func registerGoogleCalendar(r *Registry) {
 	r.Register(&Diagram{
 		Slug:        "gc-requirements",
-		Title:       "Scale Estimates & Requirements",
-		Description: "Functional and non-functional requirements with scale estimates for Google Calendar",
+		Title:       "Scale & Requirements",
+		Description: "Scale targets, functional and non-functional requirements for Google Calendar",
 		ContentFile: "problems/google-calendar",
 		Type:        TypeHTML,
 		HTML: `<div class="d-cols">
   <div class="d-col">
     <div class="d-group">
-      <div class="d-group-title">Scale Estimates</div>
+      <div class="d-group-title">Scale</div>
       <div class="d-flow-v">
-        <div class="d-box blue">500M registered users &#8226; 100M DAU</div>
-        <div class="d-box blue">Avg 5 events/user/week = 70M events/day</div>
-        <div class="d-box blue">Calendar views: 100M &#215; 8 views/day = 800M/day</div>
-        <div class="d-box purple">Read QPS: 9.3K &#8226; Peak (3x) = 28K</div>
-        <div class="d-box purple">Write QPS: 810 &#8226; Peak (5x) = 4K</div>
-        <div class="d-box amber">Storage: 500M users &#215; 200 events avg &#215; 1KB = 100 TB</div>
+        <div class="d-box blue">1B registered users</div>
+        <div class="d-box blue">500M monthly active users</div>
+        <div class="d-box blue">50B total events stored</div>
+        <div class="d-box purple">100K event reads/sec (peak)</div>
+        <div class="d-box purple">10K event writes/sec (peak)</div>
+        <div class="d-box purple">&#8776; 50 events/user/week average</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">P0 &#8212; Core (Must Have)</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Create / update / delete events</div>
+        <div class="d-box green">Recurring events (RRULE)</div>
+        <div class="d-box green">Multi-timezone support (IANA)</div>
+        <div class="d-box green">Free/busy conflict detection</div>
+        <div class="d-box green">Invite attendees + RSVP</div>
       </div>
     </div>
   </div>
   <div class="d-col">
     <div class="d-group">
-      <div class="d-group-title">Functional Requirements</div>
+      <div class="d-group-title">P1 &#8212; Important</div>
       <div class="d-flow-v">
-        <div class="d-box green">Create/update/delete events</div>
-        <div class="d-box green">Recurring events (daily, weekly, custom RRULE)</div>
-        <div class="d-box green">Invite attendees + RSVP (accept/decline/tentative)</div>
-        <div class="d-box blue">Reminders (email, push, SMS)</div>
-        <div class="d-box blue">Shared calendars with permissions</div>
-        <div class="d-box blue">Conflict detection for overlapping events</div>
+        <div class="d-box blue">Calendar sharing &amp; permissions (ACL)</div>
+        <div class="d-box blue">Multi-channel notifications (email, push, in-app)</div>
+        <div class="d-box blue">Incremental sync (mobile/web clients)</div>
+        <div class="d-box blue">Day / week / month view rendering</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">P2 &#8212; Nice to Have</div>
+      <div class="d-flow-v">
+        <div class="d-box gray">Smart scheduling (find optimal slot)</div>
+        <div class="d-box gray">Room / resource booking</div>
+        <div class="d-box gray">CalDAV / iCal external sync</div>
       </div>
     </div>
     <div class="d-group">
       <div class="d-group-title">Non-Functional Targets</div>
       <div class="d-flow-v">
-        <div class="d-box purple">Calendar load: &lt; 300ms p99</div>
-        <div class="d-box purple">Sync latency: &lt; 2s cross-device</div>
-        <div class="d-box amber">Availability: 99.99%</div>
+        <div class="d-box purple">Read latency: &lt; 100ms (p99)</div>
+        <div class="d-box purple">Write latency: &lt; 200ms (p99)</div>
+        <div class="d-box purple">Availability: 99.99%</div>
+        <div class="d-box amber">Timezone correctness: zero DST bugs</div>
+        <div class="d-box amber">Sync consistency: eventual (&lt; 2s lag)</div>
       </div>
     </div>
   </div>
@@ -47,49 +65,61 @@ func registerGoogleCalendar(r *Registry) {
 
 	r.Register(&Diagram{
 		Slug:        "gc-api-design",
-		Title:       "API Endpoints",
-		Description: "REST API design for calendar and event CRUD, invitations, and sync",
+		Title:       "API Design",
+		Description: "Core REST API endpoints for calendar operations, recurring events, sharing, and notifications",
 		ContentFile: "problems/google-calendar",
 		Type:        TypeHTML,
 		HTML: `<div class="d-cols">
   <div class="d-col">
     <div class="d-group">
-      <div class="d-group-title">Event Operations</div>
+      <div class="d-group-title">Event CRUD</div>
       <div class="d-flow-v">
-        <div class="d-box green" style="font-family:var(--font-mono);font-size:0.78rem;text-align:left;white-space:pre">POST /v1/calendars/{cal_id}/events
-{
-  "title": "Team Standup",
-  "start": "2024-01-15T09:00:00Z",
-  "end": "2024-01-15T09:30:00Z",
-  "timezone": "America/New_York",
-  "recurrence": "RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR",
-  "attendees": ["alice@co.com", "bob@co.com"],
-  "reminders": [{"method": "push", "minutes": 10}]
-}
-&#8594; 201 {"event_id": "evt_abc123"}</div>
+        <div class="d-box green">POST /calendars/{calId}/events &#8212; Create event</div>
+        <div class="d-box green">GET /calendars/{calId}/events/{id} &#8212; Get event</div>
+        <div class="d-box green">PUT /calendars/{calId}/events/{id} &#8212; Update event</div>
+        <div class="d-box green">DELETE /calendars/{calId}/events/{id} &#8212; Delete event</div>
+        <div class="d-box blue">GET /calendars/{calId}/events?start=&amp;end= &#8212; List range</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Recurring Events</div>
+      <div class="d-flow-v">
+        <div class="d-box purple">POST .../events (body: rrule=FREQ=WEEKLY;BYDAY=MO,WE)</div>
+        <div class="d-box purple">PUT .../events/{id}/instances/{instanceDate} &#8212; Edit single</div>
+        <div class="d-box amber">DELETE .../events/{id}?scope=this|following|all</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Free/Busy</div>
+      <div class="d-flow-v">
+        <div class="d-box indigo">POST /freeBusy &#8212; Body: {users: [...], timeMin, timeMax}</div>
+        <div class="d-box indigo">Response: [{user, busy: [{start, end}, ...]}]</div>
       </div>
     </div>
   </div>
   <div class="d-col">
     <div class="d-group">
-      <div class="d-group-title">Calendar Views</div>
+      <div class="d-group-title">Calendar Sharing</div>
       <div class="d-flow-v">
-        <div class="d-box blue" style="font-family:var(--font-mono);font-size:0.78rem;text-align:left;white-space:pre">GET /v1/calendars/{cal_id}/events
-  ?start=2024-01-15T00:00:00Z
-  &amp;end=2024-01-22T00:00:00Z
-  &amp;expand_recurring=true
-&#8594; 200 {"events": [...], "sync_token": "s1"}</div>
+        <div class="d-box blue">POST /calendars/{calId}/acl &#8212; Add permission</div>
+        <div class="d-box blue">PUT /calendars/{calId}/acl/{ruleId} &#8212; Update role</div>
+        <div class="d-box blue">DELETE /calendars/{calId}/acl/{ruleId} &#8212; Revoke</div>
+        <div class="d-box gray">Roles: owner | writer | reader | freeBusyOnly</div>
       </div>
     </div>
     <div class="d-group">
-      <div class="d-group-title">Invitation Response</div>
+      <div class="d-group-title">Notifications</div>
       <div class="d-flow-v">
-        <div class="d-box amber" style="font-family:var(--font-mono);font-size:0.78rem;text-align:left;white-space:pre">PATCH /v1/events/{event_id}/rsvp
-{"status": "accepted"}
-
-GET /v1/calendars/sync
-  ?sync_token=s1
-&#8594; 200 {"changes": [...], "sync_token": "s2"}</div>
+        <div class="d-box amber">PUT /calendars/{calId}/events/{id}/reminders</div>
+        <div class="d-box amber">Body: [{method: email|push|popup, minutes: 15}]</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Sync</div>
+      <div class="d-flow-v">
+        <div class="d-box green">GET /calendars/{calId}/events?syncToken={token}</div>
+        <div class="d-box green">Response: {items: [...], nextSyncToken: "..."}</div>
+        <div class="d-box gray">410 Gone &#8594; full sync required (token expired)</div>
       </div>
     </div>
   </div>
@@ -99,46 +129,46 @@ GET /v1/calendars/sync
 	r.Register(&Diagram{
 		Slug:        "gc-recurring-events",
 		Title:       "Recurring Events &#8212; RRULE Expansion",
-		Description: "How RRULE recurrence rules are stored compactly and expanded at read time",
+		Description: "How recurring events are stored, expanded, and how exceptions override individual instances",
 		ContentFile: "problems/google-calendar",
 		Type:        TypeHTML,
 		HTML: `<div class="d-flow-v">
-  <div class="d-cols">
-    <div class="d-col">
-      <div class="d-group">
-        <div class="d-group-title">Storage: Single Row per Series</div>
-        <div class="d-flow-v">
-          <div class="d-box blue" style="font-family:var(--font-mono);font-size:0.78rem;text-align:left;white-space:pre">event_id: evt_standup
-title: "Team Standup"
-start: 2024-01-15T09:00:00Z
-duration: 30min
-rrule: FREQ=WEEKLY;BYDAY=MO,WE,FR
-until: 2024-12-31
-exceptions: [2024-03-25, 2024-07-04]</div>
-          <div class="d-label">One row &#8594; represents 156 occurrences/year</div>
-        </div>
-      </div>
-    </div>
-    <div class="d-col">
-      <div class="d-group">
-        <div class="d-group-title">Read-Time Expansion</div>
-        <div class="d-flow-v">
-          <div class="d-box amber" style="text-align:center"><strong>Query: Jan 15-22</strong></div>
-          <div class="d-arrow-down">&#8595; RRULE engine</div>
-          <div class="d-box green" style="text-align:center">Mon Jan 15, 9:00 AM</div>
-          <div class="d-box green" style="text-align:center">Wed Jan 17, 9:00 AM</div>
-          <div class="d-box green" style="text-align:center">Fri Jan 19, 9:00 AM</div>
-          <div class="d-label">Expand only within requested window</div>
-        </div>
+  <div class="d-flow">
+    <div class="d-box blue">Master Event<br/>rrule: FREQ=WEEKLY;BYDAY=MO,WE<br/>dtstart: 2024-01-01T09:00Z<br/>until: 2024-12-31</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box green">RRULE Engine<br/>Expand on read<br/>(virtual instances)</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-group">
+      <div class="d-group-title">Generated Instances</div>
+      <div class="d-flow-v">
+        <div class="d-box gray">Jan 1 (Mon) 9:00</div>
+        <div class="d-box gray">Jan 3 (Wed) 9:00</div>
+        <div class="d-box gray">Jan 8 (Mon) 9:00</div>
+        <div class="d-box gray">... &#8776; 104 instances/year</div>
       </div>
     </div>
   </div>
-  <div class="d-group">
-    <div class="d-group-title">Exception Handling</div>
-    <div class="d-flow">
-      <div class="d-box red" style="text-align:center"><strong>Delete one instance</strong><br>Add date to exceptions[]</div>
-      <div class="d-box purple" style="text-align:center"><strong>Modify one instance</strong><br>Create override row with<br>original_event_id + occurrence_date</div>
-      <div class="d-box amber" style="text-align:center"><strong>"This and following"</strong><br>Split: original UNTIL=date<br>New series starts at date</div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Exception Instances (materialized)</div>
+        <div class="d-flow-v">
+          <div class="d-box amber">Exception: Jan 8 moved to 10:00<br/>recurring_event_id = master.id<br/>original_start = Jan 8 09:00<br/>new_start = Jan 8 10:00</div>
+          <div class="d-box red">Exception: Jan 15 cancelled<br/>status = CANCELLED</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Expansion Strategy</div>
+        <div class="d-flow-v">
+          <div class="d-box purple">Virtual: expand on query &#8212; O(1) storage</div>
+          <div class="d-box purple">Materialized: pre-generate N days ahead</div>
+          <div class="d-box indigo">Hybrid: virtual + materialize on edit</div>
+          <div class="d-box green">Our choice: Hybrid<br/>&#8212; Virtual until user edits an instance<br/>&#8212; Exception row created on modification<br/>&#8212; Query merges master RRULE + exceptions</div>
+        </div>
+      </div>
     </div>
   </div>
 </div>`,
@@ -147,272 +177,370 @@ exceptions: [2024-03-25, 2024-07-04]</div>
 	r.Register(&Diagram{
 		Slug:        "gc-architecture",
 		Title:       "High-Level Architecture",
-		Description: "End-to-end architecture from client through API gateway, event service, and supporting services",
+		Description: "End-to-end architecture: CDN, ALB, microservices, data stores, and async processing",
 		ContentFile: "problems/google-calendar",
 		Type:        TypeHTML,
 		HTML: `<div class="d-flow-v">
   <div class="d-flow">
-    <div class="d-box blue" style="text-align:center"><strong>Web App</strong></div>
-    <div class="d-box blue" style="text-align:center"><strong>Mobile App</strong></div>
-    <div class="d-box blue" style="text-align:center"><strong>CalDAV Client</strong></div>
+    <div class="d-box gray">Web / Mobile Clients</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box blue">CDN (CloudFront)<br/>Static assets, calendar UI</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box blue">ALB<br/>TLS termination<br/>path-based routing</div>
   </div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box gray" style="text-align:center"><strong>API Gateway + Load Balancer</strong><br>Auth &#8226; Rate limiting &#8226; Protocol translation (CalDAV &#8594; REST)</div>
-  <div class="d-arrow-down">&#8595;</div>
   <div class="d-flow">
-    <div class="d-branch">
-      <div class="d-branch-arm">
-        <div class="d-box green" style="text-align:center"><strong>Event Service</strong><br>CRUD events<br>RRULE expansion<br>Conflict detection</div>
-        <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box red" style="text-align:center"><strong>MySQL (Vitess)</strong><br>Events, calendars<br>Sharded by user_id</div>
-      </div>
-      <div class="d-branch-arm">
-        <div class="d-box purple" style="text-align:center"><strong>Invitation Service</strong><br>Send/manage invites<br>RSVP tracking</div>
-        <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box gray" style="text-align:center"><strong>Kafka</strong><br>invitation-events<br>reminder-schedule</div>
-      </div>
-      <div class="d-branch-arm">
-        <div class="d-box amber" style="text-align:center"><strong>Reminder Service</strong><br>Scheduled delivery<br>Push/Email/SMS</div>
-        <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box indigo" style="text-align:center"><strong>Redis</strong><br>Reminder queue<br>Sync tokens</div>
+    <div class="d-group">
+      <div class="d-group-title">API Gateway</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Auth / Rate Limit</div>
+        <div class="d-box green">Request Routing</div>
       </div>
     </div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-flow">
+    <div class="d-box green">Event Service<br/>CRUD, RRULE expansion<br/>conflict detection</div>
+    <div class="d-box green">Notification Service<br/>Reminders, invites<br/>multi-channel delivery</div>
+    <div class="d-box green">Sync Service<br/>Delta sync tokens<br/>change tracking</div>
+    <div class="d-box green">Sharing Service<br/>ACL management<br/>permission checks</div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-flow">
+    <div class="d-box indigo">PostgreSQL<br/>Events, calendars,<br/>users, ACLs<br/>(sharded by user_id)</div>
+    <div class="d-box purple">Redis<br/>Session cache, free/busy<br/>cache, sync tokens<br/>(ElastiCache cluster)</div>
+    <div class="d-box amber">Kafka<br/>Event changes &#8594; notifications<br/>Event changes &#8594; sync fanout<br/>Event changes &#8594; analytics</div>
+    <div class="d-box gray">S3<br/>Attachments,<br/>ICS exports,<br/>backups</div>
   </div>
 </div>`,
 	})
 
 	r.Register(&Diagram{
 		Slug:        "gc-conflict-detection",
-		Title:       "Conflict Detection Algorithm",
-		Description: "How overlapping events are detected using interval overlap check on sorted event ranges",
+		Title:       "Free/Busy Conflict Detection",
+		Description: "Interval-based conflict detection with O(log n) queries using sorted intervals and batch availability",
 		ContentFile: "problems/google-calendar",
 		Type:        TypeHTML,
-		HTML: `<div class="d-flow-v">
-  <div class="d-cols">
-    <div class="d-col">
-      <div class="d-group">
-        <div class="d-group-title">Overlap Condition</div>
-        <div class="d-flow-v">
-          <div class="d-box indigo" style="text-align:center"><strong>Two events overlap when:</strong><br>event_A.start &lt; event_B.end AND event_B.start &lt; event_A.end</div>
-          <div class="d-box green" style="text-align:center"><strong>No conflict</strong><br>Meeting A: 9:00-10:00<br>Meeting B: 10:00-11:00<br>10:00 &lt; 11:00 &#10003; BUT 10:00 &lt; 10:00 &#10007;</div>
-          <div class="d-box red" style="text-align:center"><strong>Conflict!</strong><br>Meeting A: 9:00-10:30<br>Meeting B: 10:00-11:00<br>9:00 &lt; 11:00 &#10003; AND 10:00 &lt; 10:30 &#10003;</div>
-        </div>
-      </div>
-    </div>
-    <div class="d-col">
-      <div class="d-group">
-        <div class="d-group-title">Query Strategy</div>
-        <div class="d-flow-v">
-          <div class="d-box blue" style="text-align:center"><strong>1. New event request</strong><br>start=10:00, end=11:00</div>
-          <div class="d-arrow-down">&#8595;</div>
-          <div class="d-box amber" style="text-align:center"><strong>2. Query existing events</strong><br>WHERE user_id = ? AND end &gt; 10:00 AND start &lt; 11:00<br>Uses composite index (user_id, start, end)</div>
-          <div class="d-arrow-down">&#8595;</div>
-          <div class="d-box purple" style="text-align:center"><strong>3. Expand recurring events</strong><br>Check RRULE occurrences within window<br>Include overrides, exclude exceptions</div>
-          <div class="d-arrow-down">&#8595;</div>
-          <div class="d-box green" style="text-align:center"><strong>4. Return conflicts</strong><br>List overlapping events &#8226; Client shows warning<br>User can still create (soft conflict)</div>
+		HTML: `<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Conflict Detection Flow</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">New Event: 2pm&#8211;3pm</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box green">Query: SELECT * FROM events<br/>WHERE user_id = ? AND calendar_id = ?<br/>AND start_time &lt; '3pm'<br/>AND end_time &gt; '2pm'<br/>AND status != 'cancelled'</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box purple">B-tree index on (user_id, start_time)<br/>&#8594; O(log n) lookup</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-flow">
+          <div class="d-box green">No overlap &#8594; create event</div>
+          <div class="d-box amber">Overlap found &#8594; warn user</div>
         </div>
       </div>
     </div>
   </div>
-</div>`,
-	})
-
-	r.Register(&Diagram{
-		Slug:        "gc-invitation-flow",
-		Title:       "Invitation Flow &#8212; Invite &#8594; RSVP &#8594; Sync",
-		Description: "End-to-end invitation lifecycle from organizer creating event to attendee RSVP and calendar sync",
-		ContentFile: "problems/google-calendar",
-		Type:        TypeHTML,
-		HTML: `<div class="d-flow-v">
-  <div class="d-box blue" style="text-align:center"><strong>1. Organizer Creates Event</strong><br>POST /events with attendees: [alice, bob, carol]</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box green" style="text-align:center"><strong>2. Event Service</strong><br>Create event row &#8226; Create invitation rows (status=pending)<br>Publish to Kafka: invitation-events topic</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box amber" style="text-align:center"><strong>3. Invitation Service Consumes</strong><br>For each attendee:<br>&#8226; Internal user &#8594; create shadow event on their calendar<br>&#8226; External user &#8594; send ICS email attachment</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-flow">
-    <div class="d-branch">
-      <div class="d-branch-arm">
-        <div class="d-box purple" style="text-align:center"><strong>Push Notification</strong><br>"You're invited to<br>Team Standup"</div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Free/Busy Cache (Redis)</div>
+      <div class="d-flow-v">
+        <div class="d-box purple">Key: freebusy:{user_id}:{date}</div>
+        <div class="d-box purple">Value: sorted set of intervals<br/>ZADD score=start_epoch member="start|end"</div>
+        <div class="d-box indigo">Batch query: ZRANGEBYSCORE<br/>for all attendees in parallel<br/>&#8594; intersect busy slots</div>
+        <div class="d-box green">TTL: 1 hour, invalidate on event change</div>
       </div>
-      <div class="d-branch-arm">
-        <div class="d-box purple" style="text-align:center"><strong>Email</strong><br>ICS attachment<br>Accept/Decline buttons</div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Batch Availability (Find a Time)</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">Input: 5 attendees, next 7 days</div>
+        <div class="d-box blue">Merge all busy intervals &#8594; union</div>
+        <div class="d-box green">Find gaps &#8805; requested duration</div>
+        <div class="d-box green">Return ranked slots (fewest conflicts)</div>
       </div>
     </div>
   </div>
-  <div class="d-arrow-down">&#8595; attendee responds</div>
-  <div class="d-box indigo" style="text-align:center"><strong>4. RSVP Update</strong><br>PATCH /events/{id}/rsvp {status: "accepted"}<br>Update invitation row &#8594; notify organizer &#8594; sync all attendee views</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box green" style="text-align:center"><strong>5. Calendar Sync</strong><br>All attendees see updated RSVP status on next sync<br>Organizer sees: 2 accepted, 1 declined</div>
-</div>`,
-	})
-
-	r.Register(&Diagram{
-		Slug:        "gc-reminder-system",
-		Title:       "Scheduled Reminder Pipeline",
-		Description: "How reminders are scheduled, stored, and delivered via push, email, and SMS channels",
-		ContentFile: "problems/google-calendar",
-		Type:        TypeHTML,
-		HTML: `<div class="d-flow-v">
-  <div class="d-box blue" style="text-align:center"><strong>Event Created/Updated</strong><br>Reminders: [{push, 10min}, {email, 1hr}]</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box green" style="text-align:center"><strong>Reminder Scheduler</strong><br>Compute fire times: event_start &#8722; reminder_offset<br>e.g., 9:00 AM event, 10min reminder &#8594; fire at 8:50 AM</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box red" style="text-align:center"><strong>Redis Sorted Set (Reminder Queue)</strong><br>ZADD reminders {fire_timestamp} {reminder_id}<br>Score = UTC fire time &#8226; Member = reminder payload</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box amber" style="text-align:center"><strong>Reminder Worker (polls every 1s)</strong><br>ZRANGEBYSCORE reminders -inf {now} LIMIT 100<br>Process batch &#8594; ZREM after delivery</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-flow">
-    <div class="d-branch">
-      <div class="d-branch-arm">
-        <div class="d-box indigo" style="text-align:center"><strong>Push (FCM/APNs)</strong><br>Latency: &lt; 1s<br>90% of reminders</div>
-      </div>
-      <div class="d-branch-arm">
-        <div class="d-box purple" style="text-align:center"><strong>Email (SES)</strong><br>Latency: &lt; 30s<br>Calendar attachment</div>
-      </div>
-      <div class="d-branch-arm">
-        <div class="d-box gray" style="text-align:center"><strong>SMS (SNS)</strong><br>Latency: &lt; 5s<br>Premium feature</div>
-      </div>
-    </div>
-  </div>
-  <div class="d-label">At-least-once delivery: idempotency key per reminder &#8226; Dedup in last 5 min window</div>
 </div>`,
 	})
 
 	r.Register(&Diagram{
 		Slug:        "gc-data-model",
-		Title:       "Data Model &#8212; Core Tables",
-		Description: "Database schema for calendars, events, recurrence rules, invitations, and reminders",
+		Title:       "Data Model",
+		Description: "Core database tables: users, calendars, events, recurring rules, attendees, notifications, and sharing permissions",
 		ContentFile: "problems/google-calendar",
 		Type:        TypeHTML,
 		HTML: `<div class="d-cols">
   <div class="d-col">
     <div class="d-entity">
-      <div class="d-entity-header blue">calendars</div>
+      <div class="d-entity-header blue">users</div>
       <div class="d-entity-body">
-        <div class="pk">calendar_id BIGINT</div>
-        <div class="fk">owner_id BIGINT</div>
-        <div>name VARCHAR(200)</div>
-        <div>color VARCHAR(7)</div>
-        <div>timezone VARCHAR(50)</div>
-        <div class="idx idx-btree">is_primary BOOLEAN</div>
+        <div class="pk">user_id UUID (PK)</div>
+        <div>email VARCHAR(255)</div>
+        <div>display_name VARCHAR(100)</div>
+        <div>default_timezone VARCHAR(50)</div>
+        <div>notification_prefs JSONB</div>
+        <div class="idx idx-btree">idx_email UNIQUE</div>
       </div>
     </div>
     <div class="d-entity">
-      <div class="d-entity-header green">events</div>
+      <div class="d-entity-header green">calendars</div>
       <div class="d-entity-body">
-        <div class="pk">event_id BIGINT (Snowflake)</div>
-        <div class="fk">calendar_id BIGINT</div>
-        <div class="fk">organizer_id BIGINT</div>
+        <div class="pk">calendar_id UUID (PK)</div>
+        <div class="fk">owner_id UUID (FK &#8594; users)</div>
+        <div>title VARCHAR(200)</div>
+        <div>color VARCHAR(7)</div>
+        <div>timezone VARCHAR(50)</div>
+        <div>is_primary BOOLEAN</div>
+        <div class="idx idx-btree">idx_owner_id</div>
+      </div>
+    </div>
+    <div class="d-entity">
+      <div class="d-entity-header indigo">events</div>
+      <div class="d-entity-body">
+        <div class="pk">event_id UUID (PK)</div>
+        <div class="fk">calendar_id UUID (FK &#8594; calendars)</div>
+        <div class="fk">creator_id UUID (FK &#8594; users)</div>
         <div>title VARCHAR(500)</div>
         <div>description TEXT</div>
-        <div class="idx idx-btree">start_time TIMESTAMP</div>
-        <div class="idx idx-btree">end_time TIMESTAMP</div>
+        <div>start_time TIMESTAMPTZ</div>
+        <div>end_time TIMESTAMPTZ</div>
         <div>timezone VARCHAR(50)</div>
-        <div>location VARCHAR(500)</div>
-        <div>is_recurring BOOLEAN</div>
-        <div>status ENUM (confirmed|tentative|cancelled)</div>
-        <div class="idx idx-btree">updated_at TIMESTAMP</div>
+        <div>is_all_day BOOLEAN</div>
+        <div>status ENUM(confirmed, tentative, cancelled)</div>
+        <div class="fk">recurring_rule_id UUID (FK, nullable)</div>
+        <div>original_start TIMESTAMPTZ (for exceptions)</div>
+        <div>updated_at TIMESTAMPTZ</div>
+        <div>etag VARCHAR(64)</div>
+        <div class="idx idx-btree">idx_cal_start (calendar_id, start_time)</div>
+        <div class="idx idx-btree">idx_cal_end (calendar_id, end_time)</div>
+        <div class="idx idx-btree">idx_recurring_rule_id</div>
       </div>
     </div>
   </div>
   <div class="d-col">
     <div class="d-entity">
-      <div class="d-entity-header amber">recurrence_rules</div>
+      <div class="d-entity-header purple">recurring_rules</div>
       <div class="d-entity-body">
-        <div class="pk">rule_id BIGINT</div>
-        <div class="fk">event_id BIGINT</div>
-        <div>rrule VARCHAR(500)</div>
-        <div>until_date DATE NULL</div>
-        <div>count INT NULL</div>
-        <div>exceptions JSON</div>
+        <div class="pk">rule_id UUID (PK)</div>
+        <div>rrule VARCHAR(500) (RFC 5545)</div>
+        <div>dtstart TIMESTAMPTZ</div>
+        <div>dtend TIMESTAMPTZ (series end)</div>
+        <div>timezone VARCHAR(50)</div>
+        <div>exdates TIMESTAMPTZ[] (excluded dates)</div>
       </div>
     </div>
     <div class="d-entity">
-      <div class="d-entity-header purple">invitations</div>
+      <div class="d-entity-header amber">attendees</div>
       <div class="d-entity-body">
-        <div class="pk">invitation_id BIGINT</div>
-        <div class="fk">event_id BIGINT</div>
-        <div class="fk">attendee_id BIGINT</div>
-        <div>email VARCHAR(320)</div>
-        <div class="idx idx-hash">status ENUM (pending|accepted|declined|tentative)</div>
-        <div>responded_at TIMESTAMP NULL</div>
+        <div class="pk">attendee_id UUID (PK)</div>
+        <div class="fk">event_id UUID (FK &#8594; events)</div>
+        <div class="fk">user_id UUID (FK &#8594; users)</div>
+        <div>email VARCHAR(255)</div>
+        <div>response ENUM(accepted, declined, tentative, needsAction)</div>
+        <div>role ENUM(organizer, required, optional)</div>
+        <div class="idx idx-btree">idx_event_id</div>
+        <div class="idx idx-btree">idx_user_id_event_id UNIQUE</div>
       </div>
     </div>
     <div class="d-entity">
-      <div class="d-entity-header red">reminders</div>
+      <div class="d-entity-header red">notifications</div>
       <div class="d-entity-body">
-        <div class="pk">reminder_id BIGINT</div>
-        <div class="fk">event_id BIGINT</div>
-        <div class="fk">user_id BIGINT</div>
-        <div>method ENUM (push|email|sms)</div>
-        <div>offset_minutes INT</div>
-        <div class="idx idx-btree">fire_at TIMESTAMP</div>
-        <div>delivered BOOLEAN</div>
+        <div class="pk">notification_id UUID (PK)</div>
+        <div class="fk">event_id UUID (FK &#8594; events)</div>
+        <div class="fk">user_id UUID (FK &#8594; users)</div>
+        <div>method ENUM(email, push, popup)</div>
+        <div>trigger_minutes INT (before event)</div>
+        <div>scheduled_at TIMESTAMPTZ</div>
+        <div>sent BOOLEAN DEFAULT false</div>
+        <div class="idx idx-btree">idx_scheduled_unsent (scheduled_at) WHERE NOT sent</div>
+      </div>
+    </div>
+    <div class="d-entity">
+      <div class="d-entity-header gray">sharing_permissions</div>
+      <div class="d-entity-body">
+        <div class="pk">permission_id UUID (PK)</div>
+        <div class="fk">calendar_id UUID (FK &#8594; calendars)</div>
+        <div class="fk">grantee_id UUID (FK &#8594; users, nullable)</div>
+        <div>grantee_email VARCHAR(255)</div>
+        <div>role ENUM(owner, writer, reader, freeBusyOnly)</div>
+        <div>scope ENUM(user, group, domain, public)</div>
+        <div class="idx idx-btree">idx_calendar_grantee UNIQUE</div>
       </div>
     </div>
   </div>
-</div>
-<div class="d-er-lines">
-  <div class="d-er-connector">
-    <span class="d-er-from">calendars</span>
-    <span class="d-er-type">1:N</span>
-    <span class="d-er-to">events</span>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "gc-notification-system",
+		Title:       "Notification System",
+		Description: "Multi-channel notification delivery: email via SES, push via FCM/APNs, in-app, and reminder scheduling",
+		ContentFile: "problems/google-calendar",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-box blue">Event Created / Updated</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box green">Kafka: calendar-events topic</div>
+    <div class="d-arrow">&#8594;</div>
+    <div class="d-box green">Notification Service</div>
   </div>
-  <div class="d-er-connector">
-    <span class="d-er-from">events</span>
-    <span class="d-er-type">1:1</span>
-    <span class="d-er-to">recurrence_rules</span>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Reminder Scheduler</div>
+        <div class="d-flow-v">
+          <div class="d-box purple">Scan notifications table<br/>WHERE scheduled_at &lt;= NOW()<br/>AND sent = false</div>
+          <div class="d-box purple">Redis sorted set as delay queue<br/>ZADD reminders {fire_time} {notification_id}</div>
+          <div class="d-box purple">Worker: ZPOPMIN every 1s<br/>&#8594; dispatch to channel router</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Channel Router</div>
+        <div class="d-flow-v">
+          <div class="d-flow">
+            <div class="d-box amber">Email</div>
+            <div class="d-arrow">&#8594;</div>
+            <div class="d-box gray">AWS SES<br/>&#8776; $0.10 per 1K emails</div>
+          </div>
+          <div class="d-flow">
+            <div class="d-box amber">Push</div>
+            <div class="d-arrow">&#8594;</div>
+            <div class="d-box gray">FCM (Android)<br/>APNs (iOS)</div>
+          </div>
+          <div class="d-flow">
+            <div class="d-box amber">In-App</div>
+            <div class="d-arrow">&#8594;</div>
+            <div class="d-box gray">WebSocket / SSE<br/>to connected clients</div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
-  <div class="d-er-connector">
-    <span class="d-er-from">events</span>
-    <span class="d-er-type">1:N</span>
-    <span class="d-er-to">invitations</span>
-  </div>
-  <div class="d-er-connector">
-    <span class="d-er-from">events</span>
-    <span class="d-er-type">1:N</span>
-    <span class="d-er-to">reminders</span>
+  <div class="d-group">
+    <div class="d-group-title">Notification Types</div>
+    <div class="d-flow">
+      <div class="d-box green">Event invite</div>
+      <div class="d-box green">RSVP update</div>
+      <div class="d-box blue">Event modified</div>
+      <div class="d-box blue">Event cancelled</div>
+      <div class="d-box purple">Reminder (15m, 1h, 1d before)</div>
+      <div class="d-box gray">Daily agenda summary</div>
+    </div>
   </div>
 </div>`,
 	})
 
 	r.Register(&Diagram{
 		Slug:        "gc-timezone-handling",
-		Title:       "Timezone Handling &#8212; UTC Storage + Display",
-		Description: "How events are stored in UTC and converted to user's local timezone at display time",
+		Title:       "Timezone Handling",
+		Description: "UTC storage, IANA timezone database, DST edge cases, and floating time events",
 		ContentFile: "problems/google-calendar",
 		Type:        TypeHTML,
-		HTML: `<div class="d-flow-v">
-  <div class="d-cols">
-    <div class="d-col">
-      <div class="d-group">
-        <div class="d-group-title">Storage: Always UTC</div>
-        <div class="d-flow-v">
-          <div class="d-box blue" style="text-align:center"><strong>User creates event</strong><br>"Meeting at 3 PM EST"</div>
-          <div class="d-arrow-down">&#8595; convert</div>
-          <div class="d-box green" style="text-align:center"><strong>Stored as UTC</strong><br>start: 2024-01-15T20:00:00Z<br>end: 2024-01-15T21:00:00Z<br>timezone: America/New_York</div>
-          <div class="d-label">IANA timezone ID stored alongside for display</div>
-        </div>
+		HTML: `<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Storage Strategy</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">Store all times as TIMESTAMPTZ (UTC)</div>
+        <div class="d-box blue">Store original IANA timezone alongside<br/>e.g., "America/New_York"</div>
+        <div class="d-box green">Convert to user&#8217;s local TZ on read</div>
+        <div class="d-box green">Never store offsets (UTC-5) &#8212; they change with DST</div>
       </div>
     </div>
-    <div class="d-col">
-      <div class="d-group">
-        <div class="d-group-title">Display: Convert to Viewer's TZ</div>
-        <div class="d-flow-v">
-          <div class="d-box amber" style="text-align:center"><strong>Alice (NYC, UTC-5)</strong><br>Sees: 3:00 PM &#8211; 4:00 PM EST</div>
-          <div class="d-box purple" style="text-align:center"><strong>Bob (London, UTC+0)</strong><br>Sees: 8:00 PM &#8211; 9:00 PM GMT</div>
-          <div class="d-box indigo" style="text-align:center"><strong>Carol (Tokyo, UTC+9)</strong><br>Sees: 5:00 AM &#8211; 6:00 AM JST (+1 day)</div>
-        </div>
+    <div class="d-group">
+      <div class="d-group-title">DST Edge Cases</div>
+      <div class="d-flow-v">
+        <div class="d-box amber">Spring forward: 2:30 AM doesn&#8217;t exist<br/>&#8594; Snap to 3:00 AM (next valid time)</div>
+        <div class="d-box amber">Fall back: 1:30 AM occurs twice<br/>&#8594; Use wall clock + timezone = unambiguous</div>
+        <div class="d-box red">Recurring at 2:30 AM across DST boundary<br/>&#8594; Expand using wall-clock time in IANA TZ<br/>&#8594; Library handles non-existent times</div>
       </div>
     </div>
   </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">IANA Timezone Database</div>
+      <div class="d-flow-v">
+        <div class="d-box indigo">&#8776; 600 timezone identifiers</div>
+        <div class="d-box indigo">Updated 3&#8211;4 times/year (governments change rules)</div>
+        <div class="d-box indigo">Ship TZDB with application, not OS-level</div>
+        <div class="d-box purple">Use: Go time.LoadLocation() / Java ZoneId.of()</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Floating Time Events</div>
+      <div class="d-flow-v">
+        <div class="d-box green">All-day events: DATE only, no timezone<br/>e.g., "Birthday on March 15"</div>
+        <div class="d-box green">Stored as DATE type, rendered in viewer&#8217;s TZ</div>
+        <div class="d-box gray">Traveling user: "Lunch at noon" = local time<br/>&#8594; Store as floating (no TZ conversion)</div>
+        <div class="d-box gray">Flag: is_floating BOOLEAN on event</div>
+      </div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "gc-sync-protocol",
+		Title:       "Incremental Sync Protocol",
+		Description: "Sync tokens, delta changes, and conflict resolution for mobile and web clients",
+		ContentFile: "problems/google-calendar",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
   <div class="d-group">
-    <div class="d-group-title">Edge Cases</div>
+    <div class="d-group-title">Sync Flow</div>
     <div class="d-flow">
-      <div class="d-box red" style="text-align:center"><strong>DST Transition</strong><br>Store wall-clock time + IANA TZ<br>"9 AM America/New_York" shifts<br>UTC offset automatically</div>
-      <div class="d-box red" style="text-align:center"><strong>All-Day Events</strong><br>Store as DATE not TIMESTAMP<br>No timezone conversion<br>"Jan 15" everywhere</div>
-      <div class="d-box red" style="text-align:center"><strong>Floating Time</strong><br>Reminders like "9 AM local"<br>Convert per-user at fire time<br>Not UTC-fixed</div>
+      <div class="d-box blue">Client<br/>syncToken: "abc123"</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box green">GET /events?syncToken=abc123</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box green">Sync Service</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box purple">Query changes since token<br/>SELECT * FROM events<br/>WHERE updated_at &gt; token_timestamp<br/>AND calendar_id IN (accessible)</div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Sync Token Implementation</div>
+        <div class="d-flow-v">
+          <div class="d-box indigo">Token = Base64(user_id + timestamp + page_cursor)</div>
+          <div class="d-box indigo">Stored in Redis: sync:{user}:{calendar} &#8594; last_sync_ts</div>
+          <div class="d-box amber">Token expiry: 30 days<br/>Expired &#8594; HTTP 410 Gone &#8594; full sync</div>
+          <div class="d-box green">Response includes nextSyncToken for next call</div>
+        </div>
+      </div>
+      <div class="d-group">
+        <div class="d-group-title">Delta Response</div>
+        <div class="d-flow-v">
+          <div class="d-box green">Created events: full event object</div>
+          <div class="d-box blue">Updated events: full event object (with new etag)</div>
+          <div class="d-box red">Deleted events: {id, status: "cancelled"}</div>
+          <div class="d-box gray">Page size: max 250 events per response</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Conflict Resolution</div>
+        <div class="d-flow-v">
+          <div class="d-box purple">Optimistic concurrency: etag on every event</div>
+          <div class="d-box purple">PUT with If-Match: {etag}<br/>&#8594; 412 Precondition Failed if stale</div>
+          <div class="d-box amber">Server-side: last-writer-wins (by updated_at)</div>
+          <div class="d-box amber">Client-side: show conflict UI for concurrent edits</div>
+        </div>
+      </div>
+      <div class="d-group">
+        <div class="d-group-title">Push Notifications for Sync</div>
+        <div class="d-flow-v">
+          <div class="d-box green">Kafka event &#8594; WebSocket push to connected clients</div>
+          <div class="d-box green">Mobile: silent push &#8594; triggers background sync</div>
+          <div class="d-box gray">Fallback: client polls every 5 minutes</div>
+        </div>
+      </div>
     </div>
   </div>
 </div>`,
@@ -420,134 +548,173 @@ exceptions: [2024-03-25, 2024-07-04]</div>
 
 	r.Register(&Diagram{
 		Slug:        "gc-scaling",
-		Title:       "Sharding Strategy &#8212; By User",
-		Description: "Database sharding by user_id for events, calendars, and invitations",
-		ContentFile: "problems/google-calendar",
-		Type:        TypeHTML,
-		HTML: `<div class="d-flow-v">
-  <div class="d-box indigo" style="text-align:center"><strong>Shard Key: user_id (calendar owner)</strong><br>All calendars + events for one user on same shard</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-flow">
-    <div class="d-group" style="flex:1">
-      <div class="d-group-title">Shard 1 (users 0-125M)</div>
-      <div class="d-flow-v">
-        <div class="d-box green" style="text-align:center"><strong>Primary</strong><br>MySQL 8.0<br>~25 TB</div>
-        <div class="d-box gray" style="text-align:center">Read Replica 1</div>
-        <div class="d-box gray" style="text-align:center">Read Replica 2</div>
-      </div>
-    </div>
-    <div class="d-group" style="flex:1">
-      <div class="d-group-title">Shard 2 (users 125-250M)</div>
-      <div class="d-flow-v">
-        <div class="d-box green" style="text-align:center"><strong>Primary</strong><br>MySQL 8.0<br>~25 TB</div>
-        <div class="d-box gray" style="text-align:center">Read Replica 1</div>
-        <div class="d-box gray" style="text-align:center">Read Replica 2</div>
-      </div>
-    </div>
-    <div class="d-group" style="flex:1">
-      <div class="d-group-title">Shard 3 (users 250-375M)</div>
-      <div class="d-flow-v">
-        <div class="d-box green" style="text-align:center"><strong>Primary</strong><br>MySQL 8.0<br>~25 TB</div>
-        <div class="d-box gray" style="text-align:center">Read Replica 1</div>
-        <div class="d-box gray" style="text-align:center">Read Replica 2</div>
-      </div>
-    </div>
-    <div class="d-group" style="flex:1">
-      <div class="d-group-title">Shard 4 (users 375-500M)</div>
-      <div class="d-flow-v">
-        <div class="d-box green" style="text-align:center"><strong>Primary</strong><br>MySQL 8.0<br>~25 TB</div>
-        <div class="d-box gray" style="text-align:center">Read Replica 1</div>
-        <div class="d-box gray" style="text-align:center">Read Replica 2</div>
-      </div>
-    </div>
-  </div>
-  <div class="d-label">Cross-shard query: shared calendar events &#8594; scatter-gather across attendee shards. Mitigated by caching shared calendar in Redis.</div>
-</div>`,
-	})
-
-	r.Register(&Diagram{
-		Slug:        "gc-sync-protocol",
-		Title:       "Sync Protocol &#8212; Incremental Sync",
-		Description: "CalDAV-compatible incremental sync using sync tokens for efficient cross-device synchronization",
-		ContentFile: "problems/google-calendar",
-		Type:        TypeHTML,
-		HTML: `<div class="d-flow-v">
-  <div class="d-cols">
-    <div class="d-col">
-      <div class="d-group">
-        <div class="d-group-title">Initial Sync (Full)</div>
-        <div class="d-flow-v">
-          <div class="d-box blue" style="text-align:center"><strong>Client &#8594; Server</strong><br>GET /sync (no token)</div>
-          <div class="d-arrow-down">&#8595;</div>
-          <div class="d-box green" style="text-align:center"><strong>Server returns</strong><br>All events + sync_token = "v1_ts1704067200"</div>
-          <div class="d-arrow-down">&#8595;</div>
-          <div class="d-box gray" style="text-align:center"><strong>Client stores</strong><br>Full event cache + sync_token</div>
-        </div>
-      </div>
-    </div>
-    <div class="d-col">
-      <div class="d-group">
-        <div class="d-group-title">Incremental Sync (Delta)</div>
-        <div class="d-flow-v">
-          <div class="d-box blue" style="text-align:center"><strong>Client &#8594; Server</strong><br>GET /sync?token=v1_ts1704067200</div>
-          <div class="d-arrow-down">&#8595;</div>
-          <div class="d-box amber" style="text-align:center"><strong>Server queries</strong><br>WHERE updated_at &gt; token_timestamp<br>Returns only changed/deleted events</div>
-          <div class="d-arrow-down">&#8595;</div>
-          <div class="d-box green" style="text-align:center"><strong>Response</strong><br>3 created, 1 updated, 1 deleted<br>New sync_token = "v1_ts1704070800"</div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div class="d-group">
-    <div class="d-group-title">Push Notification for Instant Sync</div>
-    <div class="d-flow">
-      <div class="d-box purple" style="text-align:center"><strong>Event changed</strong><br>on server</div>
-      <div class="d-arrow">&#8594;</div>
-      <div class="d-box indigo" style="text-align:center"><strong>Push via WebSocket</strong><br>"calendar_changed" signal</div>
-      <div class="d-arrow">&#8594;</div>
-      <div class="d-box blue" style="text-align:center"><strong>Client triggers</strong><br>incremental sync</div>
-    </div>
-  </div>
-</div>`,
-	})
-
-	r.Register(&Diagram{
-		Slug:        "gc-shared-calendars",
-		Title:       "Shared Calendars &#8212; ACL & Permissions",
-		Description: "Access control model for shared calendars with role-based permissions and sharing flows",
+		Title:       "Scaling Strategy",
+		Description: "Sharding by user_id, read replicas for calendar views, and denormalized day-view cache",
 		ContentFile: "problems/google-calendar",
 		Type:        TypeHTML,
 		HTML: `<div class="d-cols">
   <div class="d-col">
     <div class="d-group">
-      <div class="d-group-title">Permission Levels</div>
+      <div class="d-group-title">Database Sharding</div>
       <div class="d-flow-v">
-        <div class="d-box green" style="text-align:center"><strong>Owner</strong><br>Full control &#8226; Delete calendar &#8226; Manage sharing</div>
-        <div class="d-box blue" style="text-align:center"><strong>Editor</strong><br>Create/edit/delete events &#8226; Invite others</div>
-        <div class="d-box amber" style="text-align:center"><strong>Viewer</strong><br>Read-only &#8226; See event details</div>
-        <div class="d-box gray" style="text-align:center"><strong>Free/Busy Only</strong><br>See time slots &#8226; No event details</div>
+        <div class="d-box blue">Shard key: user_id (hash-based)</div>
+        <div class="d-box blue">All user data co-located on same shard<br/>&#8212; calendars, events, attendees, notifications</div>
+        <div class="d-box amber">Cross-user queries (shared calendars)<br/>&#8594; scatter-gather across shards</div>
+        <div class="d-box green">&#8776; 16 shards initial, split at 500GB/shard</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Read Replicas</div>
+      <div class="d-flow-v">
+        <div class="d-box purple">2 read replicas per shard</div>
+        <div class="d-box purple">Calendar view reads &#8594; replicas (100K QPS)</div>
+        <div class="d-box purple">Writes &#8594; primary only (10K QPS)</div>
+        <div class="d-box gray">Replication lag: &lt; 100ms (acceptable for views)</div>
       </div>
     </div>
   </div>
   <div class="d-col">
     <div class="d-group">
-      <div class="d-group-title">ACL Table</div>
-      <div class="d-entity">
-        <div class="d-entity-header purple">calendar_acl</div>
-        <div class="d-entity-body">
-          <div class="pk">acl_id BIGINT</div>
-          <div class="fk">calendar_id BIGINT</div>
-          <div>grantee_type ENUM (user|group|domain|public)</div>
-          <div>grantee_id VARCHAR(320)</div>
-          <div>role ENUM (owner|editor|viewer|freebusy)</div>
-          <div>created_at TIMESTAMP</div>
-        </div>
+      <div class="d-group-title">Day-View Cache (Redis)</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Key: dayview:{user_id}:{date}</div>
+        <div class="d-box green">Value: pre-rendered event list for that day</div>
+        <div class="d-box green">TTL: 6 hours, invalidate on event change</div>
+        <div class="d-box indigo">Cache hit rate: &#8776; 85%<br/>Most users view same day repeatedly</div>
       </div>
     </div>
     <div class="d-group">
-      <div class="d-group-title">Authorization Check</div>
+      <div class="d-group-title">Hot User Mitigation</div>
       <div class="d-flow-v">
-        <div class="d-box red" style="text-align:center">On every event read/write:<br>1. Check calendar_acl for user<br>2. Check group memberships<br>3. Check domain-wide sharing<br>Cache ACL in Redis &#8226; TTL 5 min</div>
+        <div class="d-box amber">CEO calendar: 500+ attendees per event<br/>&#8594; Fan-out writes to attendee shards</div>
+        <div class="d-box amber">Rate limit: max 2500 attendees/event</div>
+        <div class="d-box red">Organization-wide events (10K+ people)<br/>&#8594; Async notification, no inline fan-out</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Capacity Estimates</div>
+      <div class="d-flow-v">
+        <div class="d-box gray">50B events &#215; 1KB avg = 50TB raw storage</div>
+        <div class="d-box gray">With indexes + replicas &#8776; 200TB total</div>
+        <div class="d-box gray">Redis cache: &#8776; 500GB (hot data + free/busy)</div>
+      </div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "gc-sharing-permissions",
+		Title:       "Sharing &amp; Permissions (ACL Model)",
+		Description: "Access control list model: owner, editor, viewer roles, organization-wide sharing, and delegation",
+		ContentFile: "problems/google-calendar",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Permission Hierarchy</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Owner<br/>Full control: CRUD events, manage sharing, delete calendar</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box blue">Writer (Editor)<br/>Create, edit, delete events. Cannot manage sharing.</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box purple">Reader (Viewer)<br/>See event details. Cannot modify.</div>
+        <div class="d-arrow-down">&#8595;</div>
+        <div class="d-box gray">FreeBusy Only<br/>See busy/free slots. No event details.</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Permission Check Flow</div>
+      <div class="d-flow-v">
+        <div class="d-box indigo">1. Check user &#8594; calendar direct ACL</div>
+        <div class="d-box indigo">2. Check user&#8217;s groups &#8594; calendar group ACL</div>
+        <div class="d-box indigo">3. Check domain-wide default (org setting)</div>
+        <div class="d-box indigo">4. Check public access flag</div>
+        <div class="d-box green">First match wins (most specific scope)</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Sharing Scopes</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">User: share with specific email</div>
+        <div class="d-box blue">Group: share with Google Group / team</div>
+        <div class="d-box amber">Domain: everyone@company.com &#8594; freeBusy by default</div>
+        <div class="d-box red">Public: anyone with link (opt-in, rare)</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Delegation</div>
+      <div class="d-flow-v">
+        <div class="d-box purple">Executive delegation: assistant manages calendar</div>
+        <div class="d-box purple">Delegate can: create events, respond to invites, view private events</div>
+        <div class="d-box purple">Audit log: all actions tagged with delegate&#8217;s identity</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Caching ACLs</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Redis: acl:{calendar_id} &#8594; SET of user_id:role</div>
+        <div class="d-box green">TTL: 10 minutes, invalidate on ACL change</div>
+        <div class="d-box gray">Avoid DB lookup on every event read</div>
+      </div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "gc-calendar-view",
+		Title:       "Calendar View Rendering",
+		Description: "Day, week, and month view query optimization with pre-aggregated time slots",
+		ContentFile: "problems/google-calendar",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">View Queries</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Day View<br/>SELECT * FROM events<br/>WHERE calendar_id IN (...)<br/>AND start_time &lt; day_end<br/>AND end_time &gt; day_start<br/>ORDER BY start_time<br/>&#8594; &#8776; 10&#8211;20 events, &lt; 5ms</div>
+        <div class="d-box blue">Week View<br/>Same query, 7-day range<br/>&#8594; &#8776; 50&#8211;100 events, &lt; 15ms</div>
+        <div class="d-box purple">Month View<br/>Same query, 30-day range<br/>+ aggregate into day counts<br/>&#8594; &#8776; 200&#8211;400 events, &lt; 50ms</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Recurring Event Expansion</div>
+      <div class="d-flow-v">
+        <div class="d-box amber">Fetch master events with RRULE</div>
+        <div class="d-box amber">Expand RRULE within view window only</div>
+        <div class="d-box amber">Merge with exception instances</div>
+        <div class="d-box amber">Sort combined list by start_time</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Pre-Aggregated Slots (Month View)</div>
+      <div class="d-flow-v">
+        <div class="d-box indigo">Key: month:{user_id}:{calendar_id}:{YYYY-MM}</div>
+        <div class="d-box indigo">Value: {day1: 3, day2: 0, day3: 5, ...}</div>
+        <div class="d-box indigo">Updated async via Kafka consumer</div>
+        <div class="d-box green">Month grid renders instantly from cache<br/>Detail loaded on day click</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Multi-Calendar Overlay</div>
+      <div class="d-flow-v">
+        <div class="d-box blue">User views 5 calendars simultaneously</div>
+        <div class="d-box blue">Parallel queries: 1 per calendar</div>
+        <div class="d-box blue">Client merges + color-codes by calendar</div>
+        <div class="d-box gray">Server-side merge option for mobile (save bandwidth)</div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Index Strategy</div>
+      <div class="d-flow-v">
+        <div class="d-box green">Covering index: (calendar_id, start_time) INCLUDE (title, end_time, status)</div>
+        <div class="d-box green">Avoids heap lookup for view rendering</div>
+        <div class="d-box gray">Partial index: WHERE status != 'cancelled'</div>
       </div>
     </div>
   </div>
