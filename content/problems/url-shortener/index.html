@@ -2,7 +2,7 @@
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
-{{say "I'd start by clarifying the scope. Are we designing just the shortening service, or also analytics, custom aliases, and expiration? Let me nail down the functional and non-functional requirements before jumping into design."}}
+{{say "Clarify the scope: are we designing just shortening, or also analytics, custom aliases, and expiration? Define the functional and non-functional requirements first."}}
 
 {{hint "why scope first?" "Interviewers want to see you narrow the problem before solving it. A URL shortener could mean bit.ly (analytics-heavy, enterprise), TinyURL (simple redirect), or an internal tool (low scale, high reliability). Each leads to a fundamentally different architecture. Clarifying scope prevents over-engineering and shows product thinking."}}
 
@@ -19,8 +19,8 @@
 
 {{hint "why P0/P1/P2/P3 matters?" "Prioritization tells the interviewer which features you would build first and which you would defer. P0 features define the core loop (create + redirect). P1 features are needed for production readiness. P2/P3 are differentiators you discuss but don't deep-dive unless asked. Spending 10 minutes on QR codes when you haven't covered sharding is a red flag."}}
 
-{{think "Every functional requirement maps to a specific architectural decision. Shorten URL → key generation algorithm. Redirect → caching strategy. Analytics → async pipeline. This mapping is the bridge from requirements to architecture."
-  (whyNot "implement analytics on the redirect hot path" "Adding analytics to the redirect endpoint means every GET /{code} does a redirect + a write (click event). At 57K RPS, that doubles your write load and adds latency to the most critical path. Instead, fire-and-forget to Kinesis/SQS and process async. The redirect returns in <10ms; analytics can lag by seconds.")
+{{think "Every functional requirement maps to a specific architectural decision. Shorten URL → key generation algorithm. Redirect → caching strategy. Analytics → {{info \"async\" \"Fire-and-forget processing that happens later\"}} pipeline. This mapping is the bridge from requirements to architecture."
+  (whyNot "implement analytics on the redirect hot path" "Adding analytics to the redirect endpoint means every GET /{code} does a redirect + a write (click event). At 57K {{info \"RPS\" \"Requests Per Second\"}}, that doubles your write load and adds {{info \"latency\" \"response time in milliseconds\"}} to the most critical path. Instead, fire-and-forget to Kinesis/SQS and process {{info \"async\" \"asynchronously later\"}}. The redirect returns in <10ms; analytics can lag by seconds.")
   (whatIf "the interviewer asks about URL editing after creation" "Editing breaks 301 caching — browsers that cached the old redirect keep going to the old destination. If editing is required (enterprise feature), use 302 redirects for editable URLs so every click passes through your servers. This is a product decision that directly impacts architecture.")
   (how "custom aliases complicate key generation" "Generated codes use Base62 with collision retry. Custom aliases require uniqueness validation against the same keyspace, plus reserved word filtering (admin, api, health), profanity checks, and homoglyph detection (l vs 1, O vs 0). Two different code paths for the same table.")
 }}
@@ -48,7 +48,7 @@
 
 {{phase 2 "API Design" "5 min"}}
 
-{{say "Now that we have requirements scoped, let me define the API contract. The API design directly reflects our priority decisions — P0 endpoints first, then P1/P2."}}
+{{say "Define the API contract based on priority decisions: P0 endpoints first (shortening + redirect), then P1/P2 (analytics, custom aliases)."}}
 
 {{diagram "url-api-design"}}
 
@@ -111,11 +111,11 @@ Status: 200 OK
 
 {{phase 3 "Data Model & Database Choice" "5 min"}}
 
-{{say "The core data model is simple: a mapping from short code to long URL. But the database choice matters. Let me justify why DynamoDB over SQL."}}
+{{say "The core data model is simple: short code maps to long URL. Database choice matters. DynamoDB is better than SQL for this workload."}}
 
 {{compare "Database Choice" (options
-  (best "DynamoDB" "Every read is a single-key lookup — DynamoDB's sweet spot. Auto-scales from 0 to millions of QPS with no manual sharding. Built-in TTL for URL expiration (zero-cost cleanup). On-demand pricing at low scale, provisioned with auto-scaling at high scale. Global Tables for multi-region. $0.25/M reads, $1.25/M writes.")
-  (alt "Postgres" "Works well at MVP (< 10K QPS). ACID transactions for analytics consistency. But at 50K+ QPS, you need manual sharding by short_code hash. Connection pooling (PgBouncer) required. Read replicas help reads but writes bottleneck on primary. More operational burden as you scale.")
+  (best "DynamoDB" "Every read is a single-key lookup — DynamoDB's strong point. Auto-scales from 0 to millions of {{info \"QPS\" \"Queries Per Second\"}} with no manual {{info \"sharding\" \"splitting data across multiple databases\"}}. Built-in {{info \"TTL\" \"Time-To-Live: auto-delete expired data\"}} for URL expiration. On-demand pricing at low scale, provisioned with auto-scaling at high scale. Global Tables for multi-region. $0.25/M reads, $1.25/M writes.")
+  (alt "Postgres" "Works at MVP (< 10K {{info \"QPS\" \"Queries Per Second\"}}). {{info \"ACID transactions\" \"Atomic, Consistent, Isolated, Durable guarantees\"}} help analytics. But at 50K+ QPS, manual {{info \"sharding\" \"splitting data across databases\"}} needed. {{info \"Connection pooling\" \"reusing database connections\"}} (PgBouncer) required. Read replicas help reads but writes bottleneck on primary.")
   (nofit "Cassandra" "Handles writes well but operational complexity is high: compaction tuning, repair cycles, JVM garbage collection pauses. DynamoDB gives the same key-value performance without the ops burden.")
   (nofit "MongoDB" "Replica set management, config servers, mongos routing. No advantage over DynamoDB for simple key-value lookups. WiredTiger storage engine adds unnecessary complexity.")
 )}}
@@ -134,15 +134,15 @@ Status: 200 OK
 {{table "DynamoDB Access Patterns & Indexes" (rows
   (row "Access Pattern"        "Table/Index"        "Key Condition"                        "Complexity"  "Expected Latency")
   (row "Redirect lookup"       "urls (primary)"     "GetItem(PK=short_code)"               "O(1)"       "<5ms")
-  (row "Create URL"            "urls (primary)"     "PutItem(condition: attribute_not_exists)" "O(1)"    "<5ms")
-  (row "User's URLs (dashboard)" "GSI: user-urls-index" "Query(PK=user_id, SK=created_at DESC)" "O(n)"  "<10ms, paginated")
+  (row "Create URL"            "urls (primary)"     "PutItem({{info \"idempotent\" \"safe to retry without creating duplicates\"}})" "O(1)"    "<5ms")
+  (row "User's URLs (dashboard)" "{{info \"GSI\" \"Secondary Index: extra way to look up data\"}}: user-urls-index" "Query(PK=user_id, SK=created_at DESC)" "O(n)"  "<10ms, paginated")
   (row "Delete URL"            "urls (primary)"     "DeleteItem(PK=short_code)"            "O(1)"       "<5ms")
   (row "Expired cleanup"       "N/A (automatic)"    "DynamoDB TTL auto-deletes"            "O(0)"       "Zero-cost, zero-code")
   (row "Analytics increment"   "click_analytics"    "UpdateItem atomic ADD"                "O(1)"       "<5ms")
 )}}
 
-{{think "The GSI projection matters for cost. Using ALL projection (full item copy) means the user dashboard query returns all fields in a single read. KEYS_ONLY would require a follow-up GetItem per URL, turning O(1) into O(n) reads."
-  (whyNot "a separate analytics table query from the main table" "Analytics queries (clicks by country, device, etc.) have completely different access patterns than URL redirects. Mixing them in the same table creates hot partitions: a viral URL with 10M clicks/day would have 10M analytics writes competing with redirect reads on the same partition. Separate tables isolate the workloads.")
+{{think "The index projection matters for cost. Using ALL projection (full item copy) means the user dashboard query returns all fields in a single read. KEYS_ONLY would require a follow-up lookup per URL, turning one read into many reads."
+  (whyNot "a separate analytics table query from the main table" "Analytics queries (clicks by country, device) have completely different access patterns than URL redirects. Mixing them in the same table creates {{info \"hot partitions\" \"one part of the database gets hammered with too many requests\"}}: a viral URL with 10M clicks/day would have 10M writes competing with redirect reads on the same partition. Separate tables isolate the workloads.")
   (how "handle a viral URL (hot partition)" "DynamoDB adaptive capacity kicks in within minutes, redistributing throughput to hot partitions. But the real defense is the cache: a viral URL has 95%+ cache hit rate, so only 5% of reads reach DynamoDB. For a URL getting 10M clicks/day, that is only 500K DB reads/day — well within a single partition's 3,000 RCU capacity (3,000 reads/sec max for ≤4KB items).")
 }}
 
@@ -252,16 +252,16 @@ def base62_decode(s: str) -> int:
 
 {{triggerQs "Questions about key generation"
   "How do you handle hash collisions for custom aliases?"
-  "Custom aliases bypass key generation entirely — the user provides the short code. Use DynamoDB conditional PutItem with attribute_not_exists(short_code). If the alias exists, DynamoDB rejects the write atomically and you return HTTP 409 Conflict. No race condition possible because conditional writes are strongly consistent within a region."
+  "Custom aliases bypass key generation entirely — the user provides the short code. Use DynamoDB conditional write: only save if the code doesn't already exist. If the alias exists, DynamoDB rejects the write and you return HTTP 409 (Conflict). No race condition possible because the database ensures strong consistency within a region."
   "Why not use UUID and truncate to 7 characters?"
-  "UUID v4 is 128 bits of randomness, but truncating to 7 Base62 characters (41.8 bits) discards 86 bits of entropy. The truncated result has the same collision properties as any random 7-char string — birthday paradox gives 50% collision probability at ~280K URLs. You might as well generate random strings directly. UUID adds complexity without benefit for short codes."
+  "A {{info \"UUID\" \"Universally Unique Identifier: a 128-bit random number\"}} is too long. When you chop it down to 7 characters, you throw away most of the randomness. Just generate random 7-character strings instead. UUID adds unnecessary complexity for short codes."
 }}
 
 {{phase 5 "High-Level Architecture" "8 min"}}
 
-{{say "Let me walk through the architecture. The system has 7 core components, each with a specific purpose."}}
+{{say "Now let me explain the architecture. The system has 7 core components, each with a specific purpose."}}
 
-{{hint "why ECS over Lambda?" "URL redirects need consistent sub-10ms latency. Lambda cold starts add 100-500ms on first invocation. ECS Fargate tasks are always warm — no cold start penalty. Lambda is better for the analytics pipeline (sporadic, tolerant of latency) but not for the redirect hot path."}}
+{{hint "why ECS over Lambda?" "URL redirects need consistent sub-10ms speed. {{info \"Lambda cold starts\" \"delay when AWS starts a new function for the first time: 100-500ms\"}} hurt latency. ECS Fargate tasks are always running — no startup delay. Lambda works for analytics (which doesn't need to be fast) but not for the redirect hot path."}}
 
 {{diagram "url-architecture"}}
 
@@ -285,7 +285,7 @@ def base62_decode(s: str) -> int:
 
 {{say "Caching is the most critical optimization. The Pareto principle applies: 20% of URLs get 80% of traffic."}}
 
-{{hint "why read-through not write-through?" "Write-through cache (populate on create) wastes memory on URLs that may never be clicked. Read-through (populate on first read) only caches URLs that are actually accessed. Since 80% of traffic hits 20% of URLs, read-through naturally caches the hot set without wasting memory on the cold tail."}}
+{{hint "why read-through not write-through?" "{{info \"Write-through\" \"save to cache when data is first created\"}} wastes memory on URLs never clicked. {{info \"Read-through\" \"save to cache only when someone requests it\"}} only caches popular URLs. Since 80% of traffic hits 20% of URLs, read-through naturally caches popular ones without wasting memory."}}}
 
 {{diagram "url-caching-layers"}}
 
@@ -370,7 +370,7 @@ async def resolve_short_url(short_code: str) -> str:
 
 {{phase 8 "Availability & Reliability" "5 min"}}
 
-{{say "Let me cover the three pillars of reliability: replication, failover, and geo-distribution."}}
+{{say "the three pillars of reliability: replication, failover, and geo-distribution."}}
 
 {{hint "why multi-AZ before multi-region?" "Multi-AZ within a single region gives you 99.99% availability with minimal complexity. Multi-region adds cross-region replication, conflict resolution, and DNS routing complexity. Start multi-AZ, only add multi-region when you need global latency reduction or regulatory compliance (data residency)."}}
 
@@ -423,7 +423,7 @@ async def resolve_short_url(short_code: str) -> str:
 
 {{qa
   "Is the URL shortener a CP or AP system?"
-  "AP — we prioritize availability over consistency. A redirect must always work, even if it serves a slightly stale mapping during a partition. In practice, DynamoDB Global Tables replicate in under 1 second, so inconsistency windows are tiny. The only CP operation is URL creation (conditional write ensures no duplicate short_codes), but this is a local operation within a single region."
+  "{{info \"AP system\" \"Availability + Partition tolerance: chosen if you want the service to stay up even during network problems\"}} — we prioritize availability over consistency. A redirect must always work, even if it serves a slightly stale mapping. In practice, DynamoDB replicates in under 1 second, so stale data is rare. URL creation (within a single region) is {{info \"CP\" \"Consistent + Partition tolerant: ensuring data is correct and handling network issues\"}}, but that's acceptable for a single region."}}
   "What happens if a URL is created in us-east-1 but a user in eu-west-1 tries to access it immediately?"
   "DynamoDB Global Tables replicate within 1 second. If the user clicks within that 1-second window, they get a 404. This is extremely rare (sub-second race condition). Mitigation: CloudFront can be configured to retry the origin on 404 with a 1-second delay. Or accept the edge case — it self-heals in under 1 second."
 }}
@@ -439,7 +439,7 @@ async def resolve_short_url(short_code: str) -> str:
 
 {{phase 9 "Enhanced Security & Abuse Prevention" "8 min"}}
 
-{{say "Security is the existential risk for a URL shortener — your domain reputation is on the line. Let me cover five defense layers: link preview, bot detection, domain reputation, custom alias validation, and QR code generation."}}
+{{say "Security is critical for a URL shortener — your domain reputation is at stake. We use five defense layers: link preview, bot detection, domain reputation checks, custom alias validation, and rate limiting."}}
 
 {{diagram "url-edge-cases"}}
 
@@ -639,7 +639,7 @@ Error Responses:
 
 {{phase 11 "Monitoring, Observability & Cost" "5 min"}}
 
-{{say "A URL shortener needs concrete SLOs, monitoring, and cost awareness. Let me define the key metrics, alert thresholds, and cost breakdown at different scales."}}
+{{say "A URL shortener needs concrete SLOs, monitoring, and cost awareness. the key metrics, alert thresholds, and cost breakdown at different scales."}}
 
 {{diagram "url-monitoring-slos"}}
 
@@ -723,7 +723,7 @@ Error Responses:
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 
-{{say "Let me walk through the critical questions an interviewer would ask about this design."}}
+{{say "the critical questions an interviewer would ask about this design."}}
 
 {{deepQA "Critical Interview Questions" `
 <div class="dqa-item">

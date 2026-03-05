@@ -1,6 +1,6 @@
 {{phase 1 "What Is a CDN?" "3 min"}}
 
-{{say "A Content Delivery Network is a globally distributed network of servers that cache content close to end users. Instead of every request hitting your origin in us-east-1, requests are served from the nearest edge location, reducing latency from 200ms to under 20ms."}}
+{{say "A Content Delivery Network is a globally distributed network of servers that cache content close to end users. Instead of every request hitting your origin in us-east-1, requests are served from the nearest {{info \"edge location\" \"Edge location (or PoP = Point of Presence) is a CDN server geographically close to users. CloudFront has 400+ edge locations worldwide. Serving from nearby edge is faster than from your origin in one region.\"}} , reducing latency from 200ms to under 20ms."}}
 
 {{table "CDN at a Glance" (rows
   (row "Property"           "Detail")
@@ -8,8 +8,8 @@
   (row "How it works"       "Cache static/dynamic content at 400+ PoPs (Points of Presence) worldwide")
   (row "Latency reduction"  "200ms origin -> 5-20ms from edge")
   (row "Bandwidth savings"  "70-95% of requests served from cache, not origin")
-  (row "DDoS protection"    "Distributed edge absorbs attack traffic")
-  (row "TLS termination"    "Edge terminates TLS, reducing handshake latency")
+  (row "DDoS protection"    "{{info \"Distributed edge\" \"Distributed means spread across many servers in many places. A DDoS attack targeting one edge location is absorbed by the rest. No single server gets overwhelmed.\"}} absorbs attack traffic")
+  (row "{{info \"TLS termination\" \"TLS termination = CDN's edge accepts encrypted requests, decrypts them, reads the content, re-encrypts to origin. Saves handshake latency between client and origin.\""}} "Edge terminates TLS, reducing handshake latency")
 )}}
 
 {{think "Does my app actually need a CDN?"
@@ -32,9 +32,9 @@
 {{say "CDN caching operates in layers. Understanding these layers is critical for system design interviews because cache behavior directly impacts origin load and user experience."}}
 
 {{triggerQs "CDN Caching Fundamentals"
-  "What is a cache hit ratio and what target should I aim for?" "Cache hit ratio is the percentage of requests served from edge cache without hitting origin. Target 90%+ for static content, 60%+ for semi-dynamic. Below 50% means your CDN is adding latency for cache misses without saving enough origin bandwidth."
-  "What makes two requests serve different cached content?" "The cache key. By default: URL + query string. You can vary by Accept-Encoding (Gzip vs Brotli), Cookie, or custom headers. Varying by too many dimensions fragments your cache and lowers hit rate."
-  "What is stale-while-revalidate?" "Serve the cached (possibly stale) response immediately, then fetch a fresh copy from origin in the background. Users never wait for origin. The next request after background refresh gets fresh content."
+  "What is a {{info \"cache hit ratio\" \"Cache hit ratio = percent of requests served from cache (no origin request). 90% = 90 out of 100 requests use cache, 10 must hit origin. Higher is better.\"}} and what target should I aim for?" "Cache hit ratio is the percentage of requests served from edge cache without hitting origin. Target 90%+ for static content, 60%+ for semi-dynamic. Below 50% means your CDN is adding latency for cache misses without saving enough origin bandwidth."
+  "What makes two requests serve different cached content?" "The {{info \"cache key\" \"Cache key determines which response to return for a request. Default: URL + query string. Can also vary by Accept-Encoding (Gzip vs Brotli), Cookie, or custom headers.\"}} . By default: URL + query string. You can vary by Accept-Encoding (Gzip vs Brotli), {{info \"Vary\" \"Vary header tells CDN to cache different versions of the same URL. Vary: Accept-Encoding = cache separate versions for gzipped vs uncompressed.\""}} Cookie, or custom headers. Varying by too many dimensions fragments your cache and lowers hit rate."
+  "What is {{info \"stale-while-revalidate\" \"Stale-while-revalidate = serve cached data immediately even if it's out of date, then fetch fresh data in the background. User gets instant response + eventually gets fresh data.\"}} ?" "Serve the cached (possibly stale) response immediately, then fetch a fresh copy from origin in the background. Users never wait for origin. The next request after background refresh gets fresh content."
 }}
 
 {{table "CDN Caching Layers" (rows
@@ -64,7 +64,7 @@
   (how "What is the right header for HTML pages that reference versioned assets?" "Cache-Control: no-cache. HTML must always be fresh so browsers fetch the latest references to versioned JS/CSS. The JS/CSS files themselves get max-age=1year.")
 }}
 
-{{hint "s-maxage is CDN-specific; max-age controls browsers too" "Use s-maxage to cache at the CDN for longer than you trust the browser. Example: s-maxage=300, max-age=30 means CDN caches 5 min, browser revalidates after 30s."}}
+{{hint "{{info \"s-maxage\" \"s-maxage is the CDN-only version of max-age. Use s-maxage=300, max-age=30 to cache at CDN for 5 minutes, but browser for only 30 seconds.\"}} is CDN-specific; max-age controls browsers too" "Use s-maxage to cache at the CDN for longer than you trust the browser. Example: s-maxage=300, max-age=30 means CDN caches 5 min, browser revalidates after 30s."}}
 
 {{code "text" `# Nginx origin server: Cache-Control header examples
 
@@ -102,9 +102,9 @@ location /api/user/profile {
 
 {{say "Cache invalidation is one of the two hard problems in computer science. There are three main strategies for CDN cache invalidation."}}
 
-{{triggerQs "Cache Invalidation Strategy"
+{{triggerQs "{{info \"Cache Invalidation\" \"Cache invalidation = telling CDN to forget a cached response so the next request fetches fresh data from origin.\"}} Strategy"
   "Why is explicit invalidation unreliable as a primary strategy?" "It takes 1-2 minutes, has API rate limits (CloudFront: 1,000 free invalidation paths/mo), and can fail silently. Deploying new code and waiting 2 minutes for the CDN to propagate is too slow for rollouts."
-  "How does versioned URL invalidation work?" "Content hash in the filename: app.abc123.js. When content changes, the hash changes, so the URL changes. The CDN treats it as a new object and fetches from origin immediately. No invalidation needed — the old URL expires naturally."
+  "How does {{info \"versioned URL\" \"Versioned URL includes a version identifier in the filename: app.a3b4c5.js. When content changes, the hash changes, so the URL is different. Old URL expires, new URL is fresh.\"}} invalidation work?" "Content hash in the filename: app.abc123.js. When content changes, the hash changes, so the URL changes. The CDN treats it as a new object and fetches from origin immediately. No invalidation needed — the old URL expires naturally."
   "When is explicit invalidation the right tool?" "Emergency rollback only. You shipped a breaking bug and need to invalidate cached responses right now, faster than TTL expiry. Also valid for one-off content corrections."
 }}
 
@@ -140,7 +140,7 @@ location /api/user/profile {
 
 {{think "Should I pre-warm my CDN cache before a launch?"
   (whyNot "Relying on organic traffic to warm the cache" "The first users after launch hit origin. For a high-traffic launch event, those cold misses spike origin load exactly when you need capacity most.")
-  (whatIf "I pre-warm by hitting all edge locations before launch" "Possible but complex. You must know CloudFront's edge IP ranges and make requests from each. A simpler alternative: Origin Shield ensures that even if all edges are cold, only one request reaches origin per object.")
+  (whatIf "I pre-warm by hitting all edge locations before launch" "Possible but complex. You must know CloudFront's edge IP ranges and make requests from each. A simpler alternative: {{info \"Origin Shield\" \"Origin Shield is a cache layer between all edge locations and your origin. All cold edge misses go through Shield first. If Shield has it cached, origin sees only 1 request instead of N requests from N edges.\"}} ensures that even if all edges are cold, only one request reaches origin per object.")
   (how "How does Origin Shield help with cache warming?" "All cold edge misses route through Origin Shield first. If Shield has the object cached, edges get it from Shield without touching origin. One origin request warms all 400+ edges.")
 }}
 
@@ -203,7 +203,7 @@ location /api/user/profile {
 
 {{phase 8 "Interview Q&A" "3 min"}}
 
-{{say "Let me cover the most common CDN interview questions around security, when not to use a CDN, and Origin Shield."}}
+{{say "the most common CDN interview questions around security, when not to use a CDN, and Origin Shield."}}
 
 {{qa
   "How does a CDN improve security?"
