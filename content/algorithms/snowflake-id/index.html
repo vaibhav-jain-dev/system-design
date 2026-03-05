@@ -1,0 +1,256 @@
+{{phase 1 "What Is Snowflake ID?" "3 min"}}
+
+{{say "Snowflake ID is a distributed unique ID generation algorithm created by Twitter. It produces 64-bit, time-sorted, globally unique IDs without coordination between machines. Each machine generates IDs independently at up to 4,096 IDs per millisecond."}}
+
+{{diagram "algo-snowflake-bit-layout"}}
+
+{{table "Bit Field Breakdown" (rows
+  (row "Field"      "Bits"  "Max Value"       "Purpose"                              "Limit")
+  (row "Sign"       "1"     "0"               "Always 0, keeps ID positive"          "N/A")
+  (row "Timestamp"  "41"    "2,199,023,255,551" "Milliseconds since custom epoch"    "~69.7 years from epoch")
+  (row "Machine ID" "10"    "1,023"           "Unique per machine or process"        "1,024 machines")
+  (row "Sequence"   "12"    "4,095"           "Counter within same millisecond"      "4,096 IDs/ms, then wait")
+)}}
+
+{{think "Why 64 bits? It fits in a signed 64-bit integer (int64) — native in every language, no BigInteger overhead, 8 bytes on disk. The timestamp gets 41 bits because that covers 69.7 years, more than long enough with a custom epoch set near launch. Machine ID gets 10 bits (1024 machines) and sequence gets 12 bits (4096 IDs/ms). These fields sum to 63 usable bits."
+  (whyNot "128-bit IDs (UUID v4)" "UUIDs are random, not time-sorted. Random primary keys cause B-tree page splits on every insert, degrading write throughput by 5-10x. UUID is 16 bytes vs 8 bytes for Snowflake — 2x larger indexes. Snowflake gives ordering, compactness, and no coordination.")
+  (whatIf "you need more than 1024 machines" "Reallocate bits. Borrow from timestamp or sequence: 39-bit timestamp (17 years) + 14-bit machine (16,384 machines) + 10-bit sequence (1,024 IDs/ms). Or use 2 bits for datacenter + 12 bits for machine = 4 datacenters × 4,096 machines. The layout is flexible as long as fields sum to 63.")
+  (how "does the custom epoch work?" "CUSTOM_EPOCH is a Unix timestamp in milliseconds set to a fixed past date (e.g., 2024-01-01). Subtract it from the current timestamp before storing. This gives 41 bits of range starting from epoch, so IDs run out 69.7 years after epoch — not 69.7 years after 1970.")
+}}
+
+{{hint "timestamp is the most significant field" "The timestamp occupies bits 22-62 (the most significant non-sign bits). This means IDs from an earlier millisecond are always numerically smaller than IDs from a later millisecond. Time-ordering is automatic — no sorting needed."}}
+
+{{key "Snowflake IDs are time-sorted by construction. The timestamp occupies the most significant bits, so IDs are monotonically increasing. This gives excellent B-tree insert performance: inserts always append to the rightmost leaf, avoiding random page splits."}}
+
+{{triggerQs "Questions this overview triggers"
+  "How many IDs can one Snowflake generator produce per second?"
+  "4,096 IDs per millisecond × 1,000 ms = 4,096,000 IDs per second per machine. With 1,024 machines at maximum sequence utilization: 4.2 billion IDs per second total. In practice, sequence rarely exhausts within a single millisecond at typical traffic levels."
+  "How long before Snowflake IDs overflow?"
+  "41 bits of milliseconds = 2^41 = 2.2 trillion milliseconds ≈ 69.7 years from the custom epoch. If you set epoch to 2024-01-01, IDs are valid until roughly 2094. When you approach that limit, either shift the epoch (requires a migration) or allocate more bits to timestamp."
+}}
+
+{{phase 2 "Full Python Implementation" "8 min"}}
+
+{{say "Here is a complete thread-safe implementation with ID generation and parsing."}}
+
+{{code "python" `import time
+import threading
+
+CUSTOM_EPOCH = 1704067200000  # 2024-01-01 UTC in milliseconds
+MAX_MACHINE_ID = (1 << 10) - 1  # 1023
+MAX_SEQUENCE = (1 << 12) - 1    # 4095
+MACHINE_SHIFT = 12
+TIMESTAMP_SHIFT = 22            # 10 + 12
+
+class SnowflakeGenerator:
+    """Thread-safe Snowflake ID generator."""
+
+    def __init__(self, machine_id: int):
+        if not 0 <= machine_id <= MAX_MACHINE_ID:
+            raise ValueError("machine_id must be 0-1023")
+        self.machine_id = machine_id
+        self.sequence = 0
+        self.last_timestamp = -1
+        self.lock = threading.Lock()
+
+    def _current_millis(self) -> int:
+        return int(time.time() * 1000)
+
+    def _wait_next_millis(self, last_ts: int) -> int:
+        ts = self._current_millis()
+        while ts <= last_ts:
+            ts = self._current_millis()
+        return ts
+
+    def generate(self) -> int:
+        with self.lock:
+            ts = self._current_millis()
+
+            # Guard against clock moving backward
+            if ts < self.last_timestamp:
+                delta = self.last_timestamp - ts
+                if delta < 5:
+                    ts = self._wait_next_millis(self.last_timestamp)
+                else:
+                    raise Exception("Clock moved backward by {}ms".format(delta))
+
+            if ts == self.last_timestamp:
+                self.sequence = (self.sequence + 1) & MAX_SEQUENCE
+                if self.sequence == 0:  # Exhausted 4096 IDs this ms
+                    ts = self._wait_next_millis(self.last_timestamp)
+            else:
+                self.sequence = 0  # New millisecond, reset
+
+            self.last_timestamp = ts
+            return (((ts - CUSTOM_EPOCH) << TIMESTAMP_SHIFT)
+                    | (self.machine_id << MACHINE_SHIFT)
+                    | self.sequence)
+
+    @staticmethod
+    def parse(snowflake_id: int) -> dict:
+        sequence = snowflake_id & MAX_SEQUENCE
+        machine_id = (snowflake_id >> MACHINE_SHIFT) & MAX_MACHINE_ID
+        timestamp_ms = (snowflake_id >> TIMESTAMP_SHIFT) + CUSTOM_EPOCH
+        return {"timestamp_ms": timestamp_ms, "machine_id": machine_id,
+                "sequence": sequence,
+                "utc": time.strftime("%Y-%m-%d %H:%M:%S",
+                                     time.gmtime(timestamp_ms / 1000))}
+
+# --- Demo ---
+gen = SnowflakeGenerator(machine_id=1)
+ids = [gen.generate() for _ in range(5)]
+for sid in ids:
+    print("ID: {:>20d}  -> {}".format(sid, SnowflakeGenerator.parse(sid)))
+assert ids == sorted(ids), "Snowflake IDs must be time-sorted"
+`}}
+
+{{think "The mutex lock ensures thread safety within a single process. The sequence counter resets to 0 on each new millisecond and rolls over to 0 after 4095 — at which point the generator must wait for the next millisecond. Waiting is correct: it guarantees uniqueness at the cost of a sub-millisecond pause."
+  (whyNot "atomic operations instead of a mutex" "The generate function updates two shared variables atomically: last_timestamp and sequence. A compare-and-swap on one variable cannot ensure both are updated consistently. A mutex is the correct primitive here. The critical section is ~100 nanoseconds — contention is negligible.")
+  (whatIf "4096 IDs per millisecond is not enough" "Reallocate bits. Give sequence 14 bits (16,384 IDs/ms per machine) and reduce machine ID to 8 bits (256 machines). Or add multiple Snowflake generators per machine on different ports/threads, each with a unique machine_id slice.")
+  (how "does the parse method work?" "It uses bit masks and shifts in reverse. Sequence = id & 0xFFF (bottom 12 bits). Machine = (id >> 12) & 0x3FF (next 10 bits). Timestamp = (id >> 22) + CUSTOM_EPOCH (top 41 bits). Any Snowflake ID can be decoded to its exact creation time and source machine.")
+}}
+
+{{hint "ID as a timestamp" "The parse method lets you extract the creation timestamp from any Snowflake ID without a database lookup. This is useful for time-range queries: convert a target timestamp to a Snowflake ID and use it as a range boundary in a B-tree index scan."}}
+
+{{phase 3 "Clock Skew Handling" "5 min"}}
+
+{{say "The biggest risk with Snowflake IDs is clock skew. If the system clock jumps backward due to NTP correction or VM migration, you could generate duplicate IDs. This is the most common interview follow-up."}}
+
+{{table "Clock Skew Strategies" (rows
+  (row "Strategy"                   "How It Works"                                          "Trade-off")
+  (row "Refuse to generate"         "Throw error if clock < last_timestamp"                 "Safe but causes brief downtime")
+  (row "Wait for clock catch-up"    "Spin-wait until clock >= last_timestamp"                "Brief pause (< 5ms), no duplicates")
+  (row "Logical clock fallback"     "Use incrementing counter instead of wall clock"         "Breaks time-ordering guarantee")
+  (row "Lease-based timestamps"     "Fetch time from central authority (like Google TrueTime)" "Adds latency, requires coordination")
+  (row "Hybrid Logical Clock"       "Combine wall clock + logical counter"                   "Best of both, more complex")
+)}}
+
+{{think "The standard production approach is: wait if the clock moved backward by less than 5ms (happens during NTP adjustments), reject if it moved backward by more (indicates serious clock issue like VM migration). Twitter's original implementation logs a warning and waits. Discord rejects immediately to avoid blocking message delivery."
+  (whatIf "NTP corrects the clock backward by 500ms" "A 5ms threshold triggers rejection. The generator throws an exception. Upstream code must handle this — typically by routing the request to a different machine or retrying after a delay. 500ms backward skew indicates a misconfigured or misbehaving NTP setup.")
+  (how "does Google TrueTime solve this?" "GPS receivers and atomic clocks in every Google datacenter provide bounded time uncertainty intervals [earliest, latest] for the current time. Spanner uses TrueTime to guarantee global linearizability: wait until the earliest possible commit time of a transaction has passed before committing.")
+  (whatIf "you are running on AWS and a VM live-migrates" "EC2 live migration can pause the VM for 0.5-2 seconds during migration. The clock is frozen during this pause. When the VM resumes, time jumps forward (not backward). Snowflake handles forward jumps naturally — the timestamp increases, sequence resets. Backward jumps are the dangerous case.")
+}}
+
+{{avoid "Never trust that system clocks are monotonic. NTP can adjust clocks backward by seconds. VM pause and resume causes time jumps. AWS EC2 instances can skew by 10-20ms after live migration. Always guard against backward clock movement in the generate function."}}
+
+{{triggerQs "Questions this phase triggers"
+  "What happens if two machines have the same machine_id?"
+  "They can generate identical Snowflake IDs: same timestamp + same machine_id + same sequence = identical integer. This is a correctness violation, not just a collision risk. Machine IDs must be globally unique. Use ZooKeeper, etcd, or a central registration service to assign and lease machine IDs."
+  "How do you assign machine IDs in a cloud environment with autoscaling?"
+  "Three patterns: 1) ZooKeeper/etcd: instance registers on startup, gets a unique ID from 0-1023, releases it on shutdown. 2) Last 10 bits of the private IP address — works if the VPC CIDR ensures uniqueness in the last 10 bits. 3) Kubernetes StatefulSet pod ordinal index. Pattern 1 is most reliable; pattern 2 is simplest but risks collision in large VPCs."
+}}
+
+{{phase 4 "Why Time-Sorted IDs Matter" "3 min"}}
+
+{{say "Time-sorted IDs are not just a nice-to-have. They have a direct, measurable impact on database performance."}}
+
+{{diagram "algo-snowflake-btree-insert"}}
+
+{{table "Database Insert Performance: Snowflake vs UUID" (rows
+  (row "Metric"              "Snowflake ID"               "UUID v4"                   "Difference")
+  (row "Insert throughput"   "~50K inserts/sec"           "~8K inserts/sec"           "6x faster")
+  (row "Page splits"         "Near zero"                  "Frequent"                  "Major I/O savings")
+  (row "Index size"          "8 bytes (int64)"            "16 bytes (128-bit)"        "2x smaller index")
+  (row "Buffer pool hits"    "High (rightmost page hot)"  "Low (random access)"       "Less disk I/O")
+  (row "Range queries"       "Efficient (time-ordered)"   "Full index scan"           "Critical for feeds")
+)}}
+
+{{think "UUID v4 inserts are random in B-tree key space. Every insert hits a random leaf page, requiring that page to be loaded from disk if not in buffer pool. At 50K inserts/sec with 16KB pages and 1M rows, the buffer pool needs to hold the entire index to avoid I/O. Snowflake inserts always go to the rightmost leaf page — only 1 page needs to be in the buffer pool."
+  (whatIf "your database uses a hash index instead of B-tree" "Hash indexes have O(1) insert regardless of key ordering. The B-tree argument does not apply. But most production databases (PostgreSQL, MySQL, SQL Server) use B-tree indexes by default, and range queries on hash indexes require full table scans.")
+  (how "does time-ordering help feed queries?" "A social feed is 'posts by users I follow, sorted by time, last 50'. With Snowflake IDs as primary keys, this range query becomes: SELECT * FROM posts WHERE user_id IN (...) AND id > cursor ORDER BY id DESC LIMIT 50. The id > cursor condition uses the B-tree index efficiently because IDs are time-ordered.")
+}}
+
+{{hint "rightmost leaf" "In a B-tree, sequential inserts always hit the same rightmost leaf page. The database keeps this page in the buffer pool (RAM). Random inserts scatter across all leaf pages, requiring disk I/O for pages that have been evicted. This is the core reason sequential IDs give 6x higher throughput than UUIDs."}}
+
+{{key "At scale, the difference between sequential and random primary keys is 5-10x in write throughput. This is why Twitter, Discord, and Instagram all use Snowflake-style IDs instead of UUIDs."}}
+
+{{phase 5 "Comparison: ID Generation Strategies" "5 min"}}
+
+{{say "Snowflake is not the only distributed ID strategy. Let me compare it against UUID v4, ULID, and auto-increment to justify the choice."}}
+
+{{compare "Distributed ID Generation" (options
+  (best "Snowflake ID" "Time-sorted, 64-bit, no coordination needed, 4M IDs/sec per machine. Industry standard at Twitter, Discord, and Instagram. Best for systems that need sorted, compact IDs.")
+  (alt "ULID" "128-bit, time-sorted (48-bit timestamp + 80-bit random). Better than UUID v4 for databases. But 128 bits is 2x the size and 26 characters as a string. Use when you want Snowflake properties without managing machine IDs.")
+  (alt "UUID v4" "128-bit random. Universally unique with zero coordination. Not time-sorted, 36 characters, poor B-tree performance. Use only when you need zero setup and do not care about ordering or compactness.")
+  (nofit "Auto-increment" "Requires single database coordination. Bottleneck at high write rates. Exposes total record count. Only works for small-scale single-writer systems.")
+)}}
+
+{{table "ID Strategy Comparison" (rows
+  (row "Property"           "Snowflake"          "UUID v4"           "ULID"              "Auto-increment")
+  (row "Size"               "64 bits (8 bytes)"  "128 bits (16 bytes)" "128 bits (16 bytes)" "64 bits (8 bytes)")
+  (row "Time-sorted"        "Yes"                "No"                "Yes"               "Yes")
+  (row "String length"      "Up to 19 digits"    "36 characters"     "26 characters"     "Up to 19 digits")
+  (row "Coordination"       "Machine ID only"    "None"              "None"              "Single database")
+  (row "Throughput"         "4M/sec per machine"  "Unlimited"        "Unlimited"         "Limited by DB")
+  (row "B-tree friendly"   "Excellent"           "Poor"              "Good"              "Excellent")
+  (row "Reveals info"       "Timestamp + machine" "Nothing"          "Timestamp"         "Total count")
+)}}
+
+{{think "ULID is the modern alternative when you cannot manage machine IDs. It is time-sorted like Snowflake (48-bit ms timestamp prefix), but uses 80 bits of randomness per millisecond instead of a machine+sequence counter. No coordination needed, but it is 128 bits and does not tell you which machine generated it."
+  (whyNot "ULID over Snowflake" "ULID uses 80 bits of randomness, so within the same millisecond two ULIDs can be in random order. Snowflake guarantees strict ordering within a millisecond via the sequence counter. For feed pagination using the ID as a cursor, Snowflake's strict ordering matters.")
+  (whatIf "you need to hide the creation timestamp from clients" "XOR the timestamp bits with a secret before combining into the final ID. The XOR is invertible with the key so you can decode internally, but external observers cannot extract timing information. Alternatively, use UUID v7 which has the same time-sorted property but is less guessable in the randomness portion.")
+}}
+
+{{phase 6 "Production Variants" "3 min"}}
+
+{{say "Every major tech company uses a Snowflake variant with customized bit layouts for their specific needs."}}
+
+{{table "Snowflake Variants in Production" (rows
+  (row "Company"      "Bit Layout"                                  "Epoch"         "Key Customization")
+  (row "Twitter"      "41 ts + 5 datacenter + 5 worker + 12 seq"   "2010-11-04"    "Original Snowflake, open-sourced")
+  (row "Discord"      "42 ts + 10 worker + 12 seq"                 "2015-01-01"    "Extra timestamp bit for longer range")
+  (row "Instagram"    "41 ts + 13 shard + 10 seq"                  "2011-01-01"    "Shard ID from Postgres logical shard")
+  (row "Sony"         "39 ts (10ms) + 8 seq + 16 machine"          "Configurable"  "10ms resolution, 65K machines")
+  (row "Baidu"        "28 ts (sec) + 22 worker + 13 seq"           "Configurable"  "Second resolution, 4M workers")
+)}}
+
+{{hint "Discord uses 42 bits for timestamp" "One extra bit doubles the time range: 2^42 ms = ~139 years from epoch (2015). Discord chose this because they expect to operate far longer than Twitter's original 69-year horizon. They gained the extra timestamp bit by using all 64 bits (no sign bit reservation), keeping 10 worker bits (1,024 workers) and 12 sequence bits."}}
+
+{{qa
+  "Why not just use UUID v4 everywhere?"
+  "UUIDs are 128 bits and random. In a B-tree index, random inserts cause page splits on every write, degrading throughput by 5-10x vs Snowflake. At Twitter's scale (500K tweets/sec peak), that is the difference between a 10-node database cluster and a 60-node cluster."
+  "How do you assign machine IDs in a cloud environment?"
+  "Three options: 1) ZooKeeper or etcd: each instance registers on startup and gets a unique ID (0-1023). 2) Last 10 bits of the private IP address. 3) Kubernetes pod ordinal index in a StatefulSet. ZooKeeper is most reliable. IP-based risks collision in large VPCs where multiple subnets share low-order bits."
+}}
+
+{{triggerQs "Questions this section triggers"
+  "Why does Discord use a different epoch than Twitter?"
+  "Discord was founded in 2015. Setting the epoch to 2015-01-01 wastes fewer of the 41 timestamp bits on the years 1970–2015. Twitter's original epoch is 2010-11-04 (Twitter's founding era). Choosing an epoch close to service launch maximizes the usable lifespan."
+  "What is the maximum rate at which a single Snowflake generator saturates?"
+  "4,096 IDs per millisecond = 4,096,000 per second. At that point, the generator spin-waits for the next millisecond. In practice, this requires all 4096 sequence numbers to be consumed within 1 ms, which requires 4M generate() calls/sec from a single thread — almost never a real constraint."
+}}
+
+{{phase 7 "System Design Integration" "5 min"}}
+
+{{say "Snowflake IDs are used in any distributed system that needs unique, time-sorted identifiers. Here is how they integrate into a typical architecture."}}
+
+{{diagram "algo-snowflake-distributed-arch"}}
+
+{{table "Where Snowflake IDs Are Used" (rows
+  (row "System"            "What Gets an ID"       "Why Snowflake"                                    "Alternative Considered")
+  (row "Twitter"           "Tweets"                "Time-sorted feed, 500K tweets/sec peak"           "Auto-increment was bottleneck")
+  (row "Discord"           "Messages"              "Sorted messages in channels, distributed storage"  "UUID too large, not sorted")
+  (row "Instagram"         "Posts, comments"       "Feed ordering, Postgres sharding"                 "UUID caused B-tree bloat")
+  (row "URL Shortener"     "Short URL codes"       "Unique ID -> Base62 encode -> short string"       "Random generation had collisions")
+  (row "Event sourcing"    "Event IDs"             "Ordered event log across microservices"            "Auto-increment across services")
+)}}
+
+{{followup "What if you need more than 1024 machines?" "Customize the bit layout: steal bits from timestamp or sequence. Example: 39 bits timestamp (17 years) + 14 bits machine (16,384 machines) + 10 bits sequence (1,024 IDs/ms). Or use 2 bits for datacenter + 12 bits for machine = 4 datacenters × 4,096 machines each. The layout is flexible as long as fields sum to 63 usable bits plus the sign bit."}}
+
+{{phase 8 "Interview Checklist" "2 min"}}
+
+{{say "Here is a summary of every key point you need to cover when discussing Snowflake IDs in an interview."}}
+
+{{checklist
+  "64-bit layout: 1 sign + 41 timestamp + 10 machine + 12 sequence"
+  "Time-sorted: timestamp is most significant, IDs are monotonically increasing"
+  "4,096 IDs per millisecond per machine = 4M IDs/sec per machine"
+  "41-bit timestamp gives ~69 years from custom epoch"
+  "Clock skew is the biggest risk: wait < 5ms backward, reject > 5ms backward"
+  "B-tree friendly: sequential inserts avoid page splits (6x faster than UUID)"
+  "No coordination needed beyond assigning unique machine IDs at startup"
+  "Combine with Base62 for compact URL-safe strings (Snowflake -> 7-11 chars)"
+  "Used by Twitter, Discord, Instagram for sorted distributed IDs"
+}}
+
+{{key "Snowflake ID interviews test whether you understand the 64-bit layout, why time-sorted IDs give 6x better write throughput than UUID, and how to handle clock skew. Always draw the bit layout, explain each field, and discuss the clock-backward scenario with the wait-vs-reject trade-off."}}

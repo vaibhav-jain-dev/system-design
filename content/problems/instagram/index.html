@@ -1,0 +1,873 @@
+{{stageNav "Requirements & Problem Scope" 1 "API Design" 2 "Stage 1: MVP (0-1M users)" 3 "Stage 1: Upload Flow (Hop-by-Hop)" 4 "Stage 2: Growing (1M-50M users)" 5 "Stage 3: Scaling (50M-500M users)" 6 "Stage 4: Handling Peak Hours" 7 "Stage 5: Global Scale (500M+ users)" 8 "Security & Content Moderation" 9 "Analytics & Monitoring" 10 "Bottlenecks & Trade-offs" 11 "Interview Deep-Dive Q&A" 12}}
+
+{{phase 1 "Requirements & Problem Scope" "5 min"}}
+
+{{say "Let me clarify the scope. Are we designing Instagram's full platform or focusing on specific features? I'll scope it to the core: photo/video sharing with a feed, stories, likes, comments, and explore. Let me nail down the functional and non-functional requirements."}}
+
+{{hint "why scope matters for Instagram?" "Instagram has 20+ features: Reels, Shopping, DMs, Live, IGTV, AR filters, ads. A 45-minute interview cannot cover all of them. Scoping to core features (post, feed, stories, likes, comments, explore) lets you go deep on the hard problems: fan-out, media pipeline, feed ranking. Mention the others as future extensions to show awareness without derailing the design."}}
+
+{{table "Functional Requirements" (rows
+  (row "Requirement"        "Description"                                       "Priority"  "Drives")
+  (row "Upload photo/video" "Upload media with caption, filters, tags"          "P0"        "Media pipeline, S3, image processing")
+  (row "News Feed"          "See posts from followed users, ranked/chronological" "P0"      "Fan-out strategy, caching, feed ranking")
+  (row "Follow/Unfollow"    "Follow users to see their content in feed"         "P0"        "Social graph, follower count, fan-out lists")
+  (row "Like & Comment"     "Like posts, add comments with threading"           "P0"        "Counter design, notification pipeline")
+  (row "Stories"            "24-hour ephemeral content with view tracking"      "P1"        "TTL-based storage, separate feed, view dedup")
+  (row "Explore/Search"     "Discover trending content, search users/hashtags"  "P1"        "ML ranking, ElasticSearch, content indexing")
+  (row "Notifications"      "Push/in-app notifications for likes, comments, follows" "P1"   "Event-driven, fan-out, mobile push (APNs/FCM)")
+  (row "Direct Messages"    "Private messaging between users"                   "P2"        "WebSocket, message persistence, E2E encryption")
+)}}
+
+{{hint "why feed is the hardest P0?" "Upload is a straightforward pipeline (resize → S3 → CDN). Likes and comments are simple writes. But the feed requires reading posts from all followed users, ranking them, and serving within 200ms. For a user following 500 accounts who each post daily, that is 500 potential posts to rank per feed load. The fan-out strategy (write vs read) determines the entire system architecture."}}
+
+{{diagram "ig-nfr-estimates"}}
+
+{{think "Read-heavy but write volume is non-trivial: 58K read RPS vs 6K write RPS. The write amplification from fan-out makes writes the real scaling challenge. At 200TB/day media, S3 costs alone reach $55K/mo after one year. CDN transfer at $0.085/GB for 500M users loading 10 images/feed is the dominant cost."
+  (whyNot "optimize for writes first" "Writes are only 6K RPS at the surface, but fan-out-on-write amplifies each post to N follower feed updates. A user with 1K followers turns 1 write into 1,001 writes. Optimizing reads first (caching, CDN) gives you 10x headroom before you need to solve the write amplification problem.")
+  (whatIf "CDN costs dominate at scale" "At 500M DAU loading 10 feed views/day × 20 images per feed × ~15KB thumbnail = ~1.5PB/day ≈ 45PB/month. At $0.085/GB that is ~$3.8M/month on CDN alone — the single largest infrastructure cost. Negotiate reserved capacity pricing with CloudFront ($0.025/GB at commitment) to bring it down to ~$1.1M/month, use WebP/AVIF to cut image sizes by 40%, and implement aggressive client-side caching with ETags.")
+  (how "estimate storage growth" "200TB/day × 365 = 73PB/year of raw media. The 4 resize variants (150px, 320px, 640px, 1080px) total ~475KB combined vs ~2MB original, adding ~24% overhead — so total is ~90PB/year. S3 Standard at $0.023/GB = $2.1M/year. Move images older than 90 days to S3 Infrequent Access ($0.0125/GB) and older than 1 year to Glacier ($0.004/GB) using lifecycle policies to cut costs by 60%.")
+}}
+
+{{hint "why estimate storage before architecture?" "200TB/day of media uploads is the single number that drives the most architectural decisions. It tells you: S3 is mandatory (no filesystem scales to petabytes), you need a media processing pipeline (resize, transcode, thumbnails), CDN is non-negotiable (you cannot serve petabytes from origin), and lifecycle policies are required to control cost. Without this number, you might waste time debating whether to use local disk or EBS."}}
+
+{{triggerQs "Questions about requirements"
+  "How do you decide what goes into P0 vs P1?"
+  "P0 features define the core user loop: upload → feed → engage (like/comment). Without any P0 feature, the product doesn't work. P1 features (stories, explore, notifications) enhance engagement but users can still use the product without them. Instagram launched with just photo upload, feed, and likes — stories came 6 years later. Scope P0 to what gets you to product-market fit, then layer P1 features."
+  "Should you design for 500M users from the start?"
+  "No — start with MVP for 1M users, then evolve. The interview structure follows this: Phase 3 is MVP (monolith, Postgres), Phase 5 is scaling to 50M (microservices, DynamoDB), Phase 8 is global scale (multi-region). This shows the interviewer you can make pragmatic decisions at each stage rather than over-engineering from day one."
+  "How do you handle the tension between read-heavy and write-heavy patterns?"
+  "The surface-level read:write ratio is 10:1 (58K reads vs 6K writes). But fan-out-on-write amplifies each write: one post to 1K followers = 1K feed updates. This makes the effective write ratio much higher. The solution is hybrid fan-out: fan-out-on-write for normal users (<10K followers), fan-out-on-read for celebrities (>10K followers). This keeps write amplification bounded."
+}}
+
+{{phase 2 "API Design" "5 min"}}
+
+{{say "Now that requirements are scoped, let me define the core API contract. The API design reflects our priorities — P0 endpoints are the ones that handle the most traffic and need the most careful design."}}
+
+{{diagram "ig-api-design"}}
+
+{{hint "why separate media upload from post creation?" "Uploading a 5MB photo takes 2-10 seconds depending on network. Creating a post (caption, tags, metadata) takes <100ms. If you combine them in one API call, the entire request blocks for the upload duration. Separate them: POST /media/upload returns a media_id, then POST /posts references the media_id. This lets the client upload media in the background while the user types a caption."}}
+
+{{think "API design for Instagram is deceptively complex because it needs to handle very different access patterns within the same system."
+  (whyNot "a single GET /feed endpoint that returns everything" "A monolithic feed endpoint returns posts + user info + like counts + comment previews + story rings. That is 5 different data sources joined on the server. If any one source is slow (e.g., comment service degraded), the entire feed request fails. Instead, use a composition layer: GET /feed returns post IDs and lightweight metadata, client hydrates user info and engagement counts in parallel.")
+  (whatIf "you need to support both chronological and ranked feeds" "Use a feed_type query parameter: GET /feed?type=chronological vs GET /feed?type=ranked. The chronological feed is a simple time-sorted query. The ranked feed runs through an ML scoring pipeline. Both share the same post hydration logic but differ in ordering. Instagram initially shipped chronological and added ranking later — having the parameter from day one makes the transition seamless.")
+  (how "pagination works for infinite scroll" "Cursor-based pagination with opaque tokens: GET /feed?cursor=eyJ0cyI6MTY5...&limit=20. The cursor encodes the timestamp of the last item. Never use offset-based pagination — if new posts are inserted between pages, items shift and users see duplicates or miss posts. Cursor pagination is O(1) regardless of offset depth.")
+}}
+
+{{triggerQs "Questions about API design"
+  "Why cursor-based pagination over offset-based?"
+  "Offset pagination (page=5&limit=20) breaks when new content is inserted. If 3 new posts appear while the user is on page 5, page 6 will repeat 3 posts from page 5. Cursor pagination uses a timestamp or ID marker — 'give me 20 posts older than this cursor.' New insertions above the cursor don't affect results below it. Every major social API uses cursor pagination."
+  "How do you handle the presigned URL pattern for media upload?"
+  "Client calls POST /media/upload/init → server returns a presigned S3 PUT URL + upload_id. Client uploads directly to S3 using the presigned URL (never through your API server — saves bandwidth and latency). Client calls POST /media/upload/complete with upload_id → server validates the upload, triggers resize pipeline, returns media_id. This is how Instagram, Twitter, and Slack all handle media uploads."
+  "Should likes be POST /posts/{id}/like or PUT /posts/{id}/like?"
+  "POST. Like is creating a new resource (a like record), not updating the post. PUT implies idempotency — calling it twice should produce the same result. POST /like with a unique constraint (user_id, post_id) naturally handles double-like prevention at the database level. DELETE /posts/{id}/like for unlike."
+}}
+
+{{phase 3 "Stage 1: MVP (0-1M users)" "5 min"}}
+
+{{say "For MVP, I would build a monolith with Postgres, a single S3 bucket, and CloudFront. The goal is shipping fast with a clean data model we can shard later."}}
+
+{{compare "Why Postgres for MVP?" (options
+  (best "Postgres" "ACID transactions for likes (no double-like), JSONB for flexible metadata, mature ecosystem, free. Instagram itself ran on Postgres until 10M+ users. B-tree indexes handle our query patterns. Supports partial indexes, covering indexes, and has a sophisticated query planner.")
+  (alt "MySQL" "Simpler replication setup, but lacks JSONB, partial indexes, and has weaker MVCC. Postgres wins on features for a social app that needs complex queries (JOINs for feed) and flexible schema evolution.")
+  (nofit "DynamoDB at MVP" "Over-engineering. DynamoDB requires upfront access pattern design, has no JOINs (feed query becomes N+1), costs more at low scale ($1.25/M writes vs Postgres flat rate), and you lose SQL flexibility for ad-hoc analytics.")
+  (nofit "MongoDB" "Schema flexibility sounds appealing but social data is inherently relational (users follow users, users like posts). Mongo forces denormalization, leading to update anomalies. Postgres JSONB gives flexibility where needed without sacrificing joins.")
+)}}
+
+{{hint "why Postgres over DynamoDB at MVP?" "Postgres handles 5K QPS on a single instance with ACID guarantees, JOINs for feed queries, and costs $200/month on RDS. DynamoDB requires upfront access pattern design, has no JOINs (forcing N+1 queries for feed), and costs more at low scale. Instagram itself ran Postgres until 10M+ users. Switch to DynamoDB only when write throughput exceeds 10-15K WPS."}}
+
+{{diagram "ig-mvp-architecture"}}
+
+{{table "MVP Tech Stack" (rows
+  (row "Component"     "Technology"                     "Monthly Cost")
+  (row "App Server"    "2x t3.large (ECS Fargate)"     "$120")
+  (row "Database"      "RDS Postgres db.r6g.large"     "$200")
+  (row "Object Store"  "S3 Standard"                    "$23/TB")
+  (row "CDN"           "CloudFront"                     "$85/10TB")
+  (row "Cache"         "ElastiCache Redis t4g.medium"   "$50")
+  (row "Load Balancer" "ALB"                            "$25")
+  (row "Total"         "All components"                 "~$500/mo")
+)}}
+
+{{diagram "ig-mvp-tech-stack"}}
+
+{{diagram "ig-data-model"}}
+
+{{details "View SQL Schema (CREATE TABLE)" "sql" `-- MVP Schema (Postgres)
+CREATE TABLE users (
+    id          BIGSERIAL PRIMARY KEY,
+    username    VARCHAR(30) UNIQUE NOT NULL,
+    email       VARCHAR(255) UNIQUE NOT NULL,
+    bio         TEXT,
+    avatar_url  TEXT,
+    created_at  TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE posts (
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     BIGINT REFERENCES users(id),
+    caption     TEXT,
+    media_url   TEXT NOT NULL,
+    media_type  VARCHAR(10) DEFAULT 'photo',
+    created_at  TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE follows (
+    follower_id BIGINT REFERENCES users(id),
+    followee_id BIGINT REFERENCES users(id),
+    created_at  TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (follower_id, followee_id)
+);
+
+CREATE TABLE likes (
+    user_id     BIGINT REFERENCES users(id),
+    post_id     BIGINT REFERENCES posts(id),
+    created_at  TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (user_id, post_id)
+    -- Composite PK = unique constraint: prevents double-likes at DB level
+);
+
+CREATE TABLE comments (
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     BIGINT REFERENCES users(id),
+    post_id     BIGINT REFERENCES posts(id),
+    text        TEXT NOT NULL,
+    created_at  TIMESTAMP DEFAULT NOW()
+);
+`}}
+
+{{details "View Index Definitions & Justifications" "sql" `-- Indexes with justification
+-- All indexes are B-tree (Postgres default) unless noted.
+-- B-tree chosen over Hash because: supports range scans (ORDER BY, >,<),
+-- equality lookups, and prefix matching. Hash only supports equality.
+
+-- Feed query: "get posts by user, newest first"
+-- B-tree on (user_id, created_at DESC) = covering index for the feed subquery.
+-- Postgres scans the B-tree in order, no sort needed. O(log N) seek + sequential scan.
+CREATE INDEX idx_posts_user_time ON posts(user_id, created_at DESC);
+
+-- Reverse lookup: "who follows this user?" (for fan-out-on-write)
+-- PK is (follower_id, followee_id), but we need lookup by followee_id.
+-- Without this index, fan-out requires a full table scan.
+CREATE INDEX idx_follows_followee ON follows(followee_id);
+
+-- Comments: "show comments on a post, newest first"
+-- B-tree on (post_id, created_at DESC) supports paginated comment loading.
+-- Avoids sorting 10K comments per viral post on every request.
+CREATE INDEX idx_comments_post ON comments(post_id, created_at DESC);
+
+-- Like count: "how many likes does this post have?"
+-- B-tree on (post_id) enables COUNT(*) WHERE post_id = X using index-only scan.
+-- Also supports "did this user like this post?" via PK (user_id, post_id).
+CREATE INDEX idx_likes_post ON likes(post_id);
+
+-- Why NOT Hash indexes?
+-- Postgres hash indexes: no WAL logging before v10 (crash-unsafe),
+-- no range queries, no composite keys. B-tree is strictly better here.
+
+-- Why NOT GIN/GiST?
+-- GIN = inverted index, for full-text search or JSONB containment.
+-- GiST = geometric/range queries. Neither applies to our access patterns.
+-- We use Elasticsearch for full-text search at scale instead.
+`}}
+
+{{hint "why composite PK on likes?" "PRIMARY KEY (user_id, post_id) on the likes table serves double duty: it prevents double-likes at the database level (unique constraint) and provides an efficient lookup for 'did this user like this post?' without a separate index. This is cheaper and more reliable than application-level deduplication."}}
+
+{{key "MVP feed is pull-based: query follows table to get followee IDs, then query posts WHERE user_id IN (...) ORDER BY created_at DESC LIMIT 20. Simple, no infrastructure overhead."}}
+
+{{code "sql" `-- MVP Feed Query (pull-based, fan-out-on-read)
+SELECT p.*, u.username, u.avatar_url,
+       COUNT(DISTINCT l.user_id) as like_count,
+       COUNT(DISTINCT c.id) as comment_count
+FROM posts p
+JOIN users u ON p.user_id = u.id
+LEFT JOIN likes l ON p.id = l.post_id
+LEFT JOIN comments c ON p.id = c.post_id
+WHERE p.user_id IN (
+    SELECT followee_id FROM follows WHERE follower_id = :current_user
+)
+GROUP BY p.id, u.id
+ORDER BY p.created_at DESC
+LIMIT 20;
+-- For pagination, use cursor-based:
+-- WHERE p.created_at < :cursor_timestamp
+-- ORDER BY p.created_at DESC LIMIT 20;
+`}}
+
+{{diagram "ig-feed-query-result"}}
+
+{{avoid "Do not over-engineer the MVP. No Kafka, no DynamoDB, no microservices. Postgres handles 5K QPS easily. Instagram ran on a single Django/Postgres stack until 10M users."}}
+
+{{hint "why S3 for media storage?" "S3 gives you 11 nines durability, automatic cross-AZ replication, and lifecycle policies to move old photos to Glacier. EBS or local disk would require manual replication and has single-AZ blast radius. At $0.023/GB with unlimited storage, S3 is cheaper than any self-managed option at scale."}}
+
+{{triggerQs "MVP design questions"
+  "Why not start with microservices from day one?"
+  "Microservices add network latency (gRPC calls), deployment complexity (container orchestration, service discovery), distributed tracing, and operational overhead that requires 3-5 engineers just to maintain. At <1M users, a monolith deploys faster, debugs easier (single process, single log stream), and Postgres handles all query patterns. Split when team size exceeds 15 engineers or deployment frequency needs to exceed what a single deployable allows."
+  "When should you add Redis caching to the MVP?"
+  "Add Redis when your Postgres CPU consistently exceeds 60% or P99 query latency exceeds 100ms. For a social app, this typically happens around 500K-1M DAU. Start by caching user profiles (most frequently read, rarely updated) and hot post metadata. The feed query is the last thing to cache because it changes on every followee post."
+}}
+
+{{phase 4 "Stage 1: Upload Flow (Hop-by-Hop)" "5 min"}}
+
+{{say "Let me walk through the upload flow hop by hop, showing each service, its purpose, failure modes, and cost."}}
+
+{{diagram "ig-upload-read-flow"}}
+
+{{diagram "ig-write-path"}}
+
+{{diagram "ig-read-path"}}
+
+{{diagram "ig-cdn-media-pipeline"}}
+
+{{hint "why pre-signed URLs for upload?" "Pre-signed URLs let clients upload directly to S3, bypassing your application servers entirely. This avoids the bottleneck of proxying multi-MB image files through your API tier, reduces server CPU and bandwidth costs, and lets S3 handle the heavy lifting of multipart uploads with built-in retry."}}
+
+{{phase 5 "Stage 2: Growing (1M-50M users)" "8 min"}}
+
+{{say "At 1M users things still work. At 10M, the feed query slows down because popular users follow 1000+ people, and the IN clause gets expensive. This is where we add the feed service and fan-out."}}
+
+{{compare "Feed Strategy" (options
+  (best "Hybrid Fan-out" "Fan-out-on-write for normal users (pre-compute feed). Fan-out-on-read for celebrities (>100K followers). Best of both worlds.")
+  (alt "Fan-out-on-write only" "Pre-compute all feeds. Works great except for celebrities. A Bieber post would trigger 200M Redis writes.")
+  (nofit "Fan-out-on-read only" "Too slow at scale. Every feed load = N queries where N = number of followees. P99 exceeds 1 second.")
+)}}
+
+{{diagram "ig-hybrid-fanout"}}
+
+{{hint "why Redis sorted sets for feed?" "A feed is a ranked, bounded list — exactly what a Redis sorted set (ZSET) models. ZADD is O(log N), ZREVRANGE for pagination is O(log N + M), and ZREMRANGEBYRANK caps memory per user. Memcached would require serializing/deserializing the entire feed on every update, creating read-modify-write race conditions."}}
+
+{{think "Fan-out math: Average user follows 200 people. Fan-out-on-read = 200 queries per feed load. At 10M DAU x 10 loads/day = 100M feed loads = 20B DB queries/day = 230K QPS just for feed. Postgres cannot handle this. Fan-out-on-write pre-computes: each new post writes to ~200 follower feeds in Redis. At 500K posts/day (10M DAU × 5% posting rate) = 100M Redis writes/day = ~1,150 WPS. Much more manageable."
+  (whyNot "fan-out-on-read with aggressive caching" "Caching fan-out-on-read results helps repeat loads, but invalidation is the killer. When any of your 200 followees posts, the cached feed is stale. With 200 followees each posting once/day, the cache invalidates ~200 times/day per user — every 7 minutes. Cache hit ratio drops below 30%, negating most of the benefit.")
+  (whatIf "a celebrity posts" "Fan-out-on-write to 10M followers means 10M cache writes per post. At 100 posts/day from top celebrities, that is 1B cache writes/day just for celebrities. Use a hybrid approach: fan-out-on-write for normal users, fan-out-on-read for accounts with >100K followers.")
+  (how "detect celebrity accounts" "Set a follower threshold (e.g., 100K). When a user crosses the threshold, flip a flag in the user table. The posting service checks the flag: below threshold -> fan-out-on-write, above threshold -> skip fan-out, let the feed service pull on read.")
+}}
+
+{{table "Stage 2 Architecture Changes" (rows
+  (row "Change"                     "Why"                                          "New Service/Tech")
+  (row "Add Feed Service"           "Pre-compute feeds via fan-out-on-write"       "Dedicated ECS service + Redis sorted sets")
+  (row "Media Processing Pipeline"  "Generate thumbnails, resize, compress"        "S3 event -> Lambda -> save 4 sizes to S3")
+  (row "Read Replicas"              "Offload read queries from primary"            "2x RDS read replicas")
+  (row "CDN Origin Shield"          "Reduce origin requests from multiple PoPs"    "CloudFront Origin Shield ($0.009/1K)")
+  (row "Async Likes/Comments"       "Like -> SQS -> batch write to DB"            "SQS + Lambda consumer")
+  (row "ElastiCache Cluster"        "More memory for feed cache"                   "3-node r6g.large cluster")
+)}}
+
+{{diagram "ig-stage2-architecture"}}
+
+{{code "python" `# Fan-out-on-write: when user creates a post
+import redis
+import asyncpg
+
+redis_client = redis.Redis()
+
+async def fanout_post(post_id: int, author_id: int, timestamp: float):
+    # Get all followers
+    followers = await db.fetch(
+        "SELECT follower_id FROM follows WHERE followee_id = $1",
+        author_id
+    )
+    follower_count = len(followers)
+
+    # Celebrity threshold: >100K followers -> skip fan-out
+    if follower_count > 100_000:
+        # Mark as celebrity post, will be merged at read time
+        await redis_client.sadd("celebrity_posts", post_id)
+        return
+
+    # Fan-out to each follower feed (Redis sorted set)
+    pipe = redis_client.pipeline()
+    for follower in followers:
+        feed_key = f"feed:{follower['follower_id']}"
+        pipe.zadd(feed_key, {str(post_id): timestamp})
+        pipe.zremrangebyrank(feed_key, 0, -501)  # Keep latest 500
+    await pipe.execute()
+`}}
+
+{{code "python" `# Read feed: merge pre-computed + celebrity posts
+async def get_feed(user_id: int, page: int = 0, size: int = 20):
+    feed_key = f"feed:{user_id}"
+
+    # Get pre-computed feed from Redis
+    start = page * size
+    post_ids = await redis_client.zrevrange(feed_key, start, start + size - 1)
+
+    # Merge celebrity posts (fan-out-on-read for celebrities only)
+    celebrity_followees = await get_celebrity_followees(user_id)
+    if celebrity_followees:
+        celeb_posts = await db.fetch(
+            "SELECT id FROM posts WHERE user_id = ANY($1) "
+            "AND created_at > NOW() - INTERVAL '7 days' "
+            "ORDER BY created_at DESC LIMIT 50",
+            celebrity_followees
+        )
+        post_ids = merge_and_rank(post_ids, celeb_posts, size)
+
+    # Hydrate post data
+    return await hydrate_posts(post_ids)
+`}}
+
+{{qa
+  "Why not just fan-out everything including celebrities?"
+  "A celebrity with 200M followers posting once = 200M Redis writes. At 100 bytes per entry, that is 20GB of Redis writes for ONE post. It would take minutes and spike memory. The hybrid approach caps fan-out at 100K followers."
+  "How does the merge work at read time?"
+  "We query celebrity posts from DB (indexed by user_id + created_at), merge with the pre-computed Redis feed by timestamp, and return top N. The DB query is fast because it is only 5-10 celebrity accounts, each indexed."
+}}
+
+{{table "Stage 2 Cost Estimate (10M DAU)" (rows
+  (row "Component"       "Specs"                              "Monthly Cost")
+  (row "ECS (App)"       "8x t3.large (auto-scaling)"         "$480")
+  (row "ECS (Feed Svc)"  "4x t3.large"                        "$240")
+  (row "RDS Postgres"    "db.r6g.xlarge + 2 read replicas"    "$1,200")
+  (row "ElastiCache"     "3-node r6g.large cluster"           "$550")
+  (row "S3"              "~50TB stored + 500M requests"       "$1,200")
+  (row "CloudFront"      "~100TB transfer"                     "$8,500")
+  (row "SQS + Lambda"    "Like/comment processing"            "$200")
+  (row "ALB"             "2x ALB (API + media)"               "$100")
+  (row "Total"           "All components"                      "~$12,500/mo")
+)}}
+
+{{hint "why SQS for async likes/comments?" "Likes on viral posts spike to 100K+/sec. Writing each directly to the DB would exhaust connections. SQS absorbs the burst, and a Lambda consumer batch-writes at a steady 1K/sec. Users see an optimistic UI update instantly while the actual write is queued — the 2-3 second delay is invisible."}}
+
+{{triggerQs "Questions about feed design"
+  "How do you handle feed for inactive users?"
+  "Stop pre-computing feeds for users who haven't opened the app in 7+ days. When they return, compute their feed on-demand (fan-out-on-read for that first load), then resume pre-computation. This saves ~40% of fan-out write volume since most registered users are inactive."
+  "What happens when a user unfollows someone?"
+  "Remove the unfollowed user's posts from the follower's pre-computed feed cache immediately using ZREM on the Redis sorted set. For the fan-out-on-read path (celebrity posts), the feed merge query simply stops including that user's posts. Both paths converge on the same result within one feed refresh cycle."
+  "How do you rank posts in the feed beyond chronological?"
+  "Add a ranking score to each post combining recency (exponential decay), engagement rate (likes + comments / impressions), and user affinity (how often the viewer interacts with the poster). Store the score as the ZSET score instead of raw timestamp. Recompute scores periodically via a batch job and update the sorted set."
+}}
+
+{{phase 6 "Stage 3: Scaling (50M-500M users)" "8 min"}}
+
+{{say "At 50M+ users, Postgres becomes the bottleneck. We need to shard the database, move to microservices, and add proper message queuing for async processing."}}
+
+{{table "Microservices Split" (rows
+  (row "Service"            "Owns"                                "Database"                           "Why This DB")
+  (row "User Service"       "Profiles, auth, follows"             "Postgres (sharded by user_id)"      "Auth needs ACID transactions (password update + session invalidate must be atomic). Follows need range queries (get all followers). Postgres B-tree indexes handle both.")
+  (row "Post Service"       "Posts, media metadata"               "DynamoDB (PK=user_id, SK=timestamp)" "Write-heavy (5K WPS), auto-scales without manual sharding. PK/SK pattern matches our access: get posts by user sorted by time. TTL for auto-deleting stories.")
+  (row "Feed Service"       "Feed computation + cache"            "Redis cluster (sorted sets)"         "Feed is a ranked list. Redis sorted set: O(log N) insert, O(log N + M) range query. In-memory = sub-ms latency. Evict LRU when memory full — stale feed is acceptable.")
+  (row "Media Service"      "Upload, process, serve"              "S3 + Lambda"                         "S3: 11 nines durability, unlimited storage, $0.023/GB. Lambda: event-driven image processing, no idle cost. No database needed — S3 is the storage.")
+  (row "Engagement Service" "Likes, comments, shares"             "DynamoDB (sharded counters)"         "Extreme write-heavy (100K+ WPS for viral posts). DynamoDB atomic ADD operation prevents lost writes. Conditional expressions prevent double-counting.")
+  (row "Notification Svc"   "Push, in-app, email"                 "SQS + DynamoDB"                      "Async by nature — 5s delay is fine. SQS decouples producers from consumers. DynamoDB stores notification history with TTL for auto-cleanup.")
+  (row "Search/Explore"     "Hashtags, user search, trending"     "Elasticsearch"                       "Full-text search with autocomplete (prefix queries), faceted filtering, and relevance scoring. Postgres full-text is too slow at this scale.")
+)}}
+
+{{hint "why each service owns its DB?" "Shared databases create hidden coupling: one service's schema change or heavy query can break another service. With owned databases, each service can choose the optimal storage engine (Postgres for relational, DynamoDB for key-value, Redis for cache) and scale independently. The trade-off is no cross-service JOINs — you use Kafka events for data propagation instead."}}
+
+{{diagram "ig-service-db-ownership"}}
+
+{{diagram "ig-microservices-architecture"}}
+
+{{key "Each microservice owns its database. No shared DB. Services communicate via Kafka events (post_created, user_followed, post_liked) and synchronous gRPC for real-time reads."}}
+
+{{hint "why Kafka over SQS for inter-service events?" "Kafka provides ordered, replayable event streams partitioned by key (user_id). Multiple consumers (feed service, notification service, analytics) each read independently at their own pace. SQS is point-to-point: each message goes to one consumer. With Kafka, adding a new consumer (e.g., ML training pipeline) requires zero changes to producers."}}
+
+{{table "Write Path at Scale: Photo Upload" (rows
+  (row "Hop" "What Happens"                                   "Service"             "AWS Tech"                      "Failure"                          "Cost Impact")
+  (row "W1"  "Client uploads to pre-signed S3 URL"            "Media Service"       "S3 multi-part upload"          "S3 503 -> retry with jitter"      "$0.005/1K PUT")
+  (row "W2"  "S3 event triggers Lambda for processing"        "Media Service"       "Lambda + Sharp/FFmpeg"         "Lambda timeout -> DLQ retry"      "$0.20/1M invocations")
+  (row "W3"  "Lambda creates 4 sizes + saves to S3"           "Media Service"       "S3 + CloudFront invalidation"  "Partial failure -> retry from DLQ" "$0.005/1K PUT x 4")
+  (row "W4"  "Client calls POST /media with S3 key"           "Post Service"        "ALB -> ECS -> DynamoDB"        "DynamoDB throttle -> SQS buffer"  "$1.25/M writes")
+  (row "W5"  "Kafka event: post_created"                      "Post Service"        "MSK (Kafka)"                   "Kafka partition leader failover"  "$0.10/GB")
+  (row "W6"  "Feed Service consumes -> fan-out to Redis"      "Feed Service"        "MSK -> ECS -> Redis"           "Consumer lag -> catch up"         "$0.126/hr per node")
+  (row "W7"  "Notification Service consumes -> push notify"   "Notification Svc"    "MSK -> SNS -> APNs/FCM"        "SNS throttle -> backpressure"     "$0.50/1M pushes")
+)}}
+
+{{table "Read Path at Scale: Feed Load" (rows
+  (row "Hop" "What Happens"                                   "Service"             "AWS Tech"                      "Failure"                           "Latency")
+  (row "R1"  "Client requests GET /api/v1/feed"               "API Gateway"         "ALB -> ECS"                    "Circuit breaker -> cached feed"    "5ms")
+  (row "R2"  "Feed Service checks Redis sorted set"           "Feed Service"        "ElastiCache Redis cluster"     "Redis down -> DB fallback"         "1ms (cache hit)")
+  (row "R3"  "Hydrate post data from Post Service (gRPC)"     "Post Service"        "ECS -> DynamoDB"               "Post deleted -> skip"              "10ms")
+  (row "R4"  "Hydrate user data from User Service (gRPC)"     "User Service"        "ECS -> Postgres"               "Cached in local LRU"              "5ms")
+  (row "R5"  "Merge celebrity posts (fan-out-on-read)"        "Feed Service"        "DynamoDB query"                "Celebrity list cached locally"     "15ms")
+  (row "R6"  "Return assembled feed JSON"                     "API Gateway"         "Response"                       "N/A"                              "Total: ~36ms")
+  (row "R7"  "Client loads images from CDN"                   "CDN"                 "CloudFront edge"               "Cache miss -> origin (200ms)"     "<50ms")
+)}}
+
+{{diagram "ig-notification-flow"}}
+
+{{triggerQs "Microservices scaling questions"
+  "How do you handle distributed transactions across services?"
+  "Avoid distributed transactions entirely. Use the saga pattern: each service performs its local transaction and publishes an event. If a downstream step fails, publish a compensating event to undo previous steps. For example, if post creation succeeds but fan-out fails, the post remains visible but feeds catch up when the fan-out consumer recovers — no rollback needed because eventual consistency is acceptable for feeds."
+  "How do you debug issues across multiple services?"
+  "Distributed tracing with a correlation ID (trace_id) propagated through every gRPC call and Kafka message header. Use OpenTelemetry to instrument all services, send traces to Jaeger or AWS X-Ray. When a feed load is slow, the trace shows exactly which service call took the most time — e.g., Post Service hydration at 45ms instead of the expected 10ms."
+}}
+
+{{phase 7 "Stage 4: Handling Peak Hours" "5 min"}}
+
+{{say "Peak hours for Instagram: 6-9 PM local time, New Year midnight, Super Bowl, celebrity announcements. We need to handle 5-10x normal traffic without degradation."}}
+
+{{think "Normal: 58K feed RPS. Peak (10x): 580K RPS. Super Bowl: a single viral post can generate 1M likes/second. New Year midnight across time zones = sustained 3x for 12 hours as each timezone hits midnight."
+  (whyNot "just over-provision for peak" "10x capacity means 10x cost 24/7. At $12.5K/month baseline, that is $125K/month to handle peaks that occur <5% of the time. Auto-scaling with SQS write buffering handles the same peaks at ~$15K/month — the buffer absorbs spikes while new instances launch in 2-3 minutes.")
+  (whatIf "multiple viral events happen simultaneously" "Super Bowl halftime + celebrity announcement = 15-20x normal load. Pre-warm ECS capacity 30 minutes before known events using scheduled scaling. For unpredictable events, circuit breakers degrade gracefully: stop fan-out-on-write entirely, serve cached feeds, and queue all writes. Recovery takes 5-10 minutes after the spike subsides.")
+}}
+
+{{table "Peak Traffic Strategies" (rows
+  (row "Strategy"                   "Handles"                                "How")
+  (row "Auto-scaling groups"        "Gradual load increase (6-9 PM)"         "ECS auto-scale on CPU/memory. Pre-warm before known events.")
+  (row "CDN pre-warming"            "Viral content"                          "Predict trending posts, push to all PoPs before surge")
+  (row "Write buffering (SQS)"     "Like/comment spikes"                    "Queue writes, batch process at 1000/s. Users see optimistic update.")
+  (row "Sharded counters"          "1M likes/sec on one post"               "Split counter into 100 shards. Aggregate lazily. Redis INCRBY on shard.")
+  (row "Rate limiting"             "Bot traffic during events"              "Token bucket at API gateway: 100 req/min per user")
+  (row "Circuit breakers"          "Downstream service failure"             "Hystrix pattern: fail fast, serve cached/degraded feed")
+  (row "Read replicas + caching"   "Read amplification"                     "4x read replicas, 2x Redis cluster, increased TTL during peaks")
+)}}
+
+{{diagram "ig-peak-traffic"}}
+
+{{code "python" `# Sharded counter for handling 1M likes/sec on viral posts
+import redis
+import random
+
+class ShardedCounter:
+    SHARD_COUNT = 100
+
+    def __init__(self, redis_client):
+        self.redis = redis_client
+
+    async def increment(self, post_id: str):
+        shard = random.randint(0, self.SHARD_COUNT - 1)
+        await self.redis.incrby(f"likes:{post_id}:shard:{shard}", 1)
+
+    async def get_count(self, post_id: str) -> int:
+        # Aggregate all shards (cached for 5s)
+        cache_key = f"likes_total:{post_id}"
+        cached = await self.redis.get(cache_key)
+        if cached:
+            return int(cached)
+
+        pipe = self.redis.pipeline()
+        for i in range(self.SHARD_COUNT):
+            pipe.get(f"likes:{post_id}:shard:{i}")
+        values = await pipe.execute()
+
+        total = sum(int(v or 0) for v in values)
+        await self.redis.setex(cache_key, 5, total)  # Cache 5 seconds
+        return total
+`}}
+
+{{hint "why 100 shards for counters?" "With 1M likes/sec on a viral post, a single Redis key serializes all writes to one CPU core — max ~100K ops/sec. Splitting into 100 shards distributes writes across keys (and potentially nodes), giving 100x throughput. The trade-off is reads require aggregating all 100 shards, but this is cached for 5 seconds and takes <1ms with a pipeline."}}
+
+{{followup "What if Redis goes down during peak?" "Three-layer defense: 1) Local in-memory cache (Caffeine) serves stale feed for 30s. 2) Circuit breaker trips, feed service returns cached-at-CDN feed. 3) If all caches cold, degrade to Trending feed from pre-computed batch (DynamoDB). Users see content, just not personalized."}}
+
+{{diagram "ig-caching-strategy"}}
+
+{{triggerQs "Peak traffic questions"
+  "How do you pre-warm for known events like the Super Bowl?"
+  "Schedule ECS auto-scaling to spin up 3x capacity 30 minutes before the event. Pre-populate CDN caches by issuing synthetic requests for trending content across all edge PoPs. Increase Redis cluster node count and SQS throughput limits. After the event, scale down over 2 hours to avoid premature termination of in-flight requests."
+  "What gets degraded first under extreme load?"
+  "Degrade in order of user impact: (1) stop pre-computing explore/trending pages (batch job), (2) increase write buffer batch size (likes appear 10s late instead of 3s), (3) serve cached feeds without real-time celebrity post merge, (4) disable story view tracking. Core feed serving and post uploads are the last to degrade."
+}}
+
+{{avoid "Never design for peak as your baseline. You will burn money 95% of the time. Design for normal load, scale for peak. Auto-scaling + write buffering + circuit breakers handle the delta."}}
+
+{{phase 8 "Stage 5: Global Scale (500M+ users)" "5 min"}}
+
+{{say "At 500M+ users, we need multi-region deployment for latency and compliance. Users in India should not hit US-East servers."}}
+
+{{table "Multi-Region Architecture" (rows
+  (row "Region"        "Primary Workload"              "Data Replication"                      "Latency Improvement")
+  (row "us-east-1"     "North/South America"           "Primary for user data shard 0-49"      "Baseline")
+  (row "eu-west-1"     "Europe, Africa"                "Primary for user data shard 50-74"     "150ms -> 20ms for EU users")
+  (row "ap-south-1"    "India, South Asia"             "Primary for user data shard 75-99"     "250ms -> 15ms for India")
+  (row "All regions"   "CDN edge (CloudFront)"         "S3 cross-region replication"           "Images <50ms everywhere")
+)}}
+
+{{diagram "ig-multi-region"}}
+
+{{hint "why shard users by region?" "Sharding user data by region keeps most reads local — a user in India reads their own profile, feed, and followers from ap-south-1 without cross-region latency. Cross-region reads only happen for cross-region follows (e.g., Indian user following a US user), which are served from replicated DynamoDB Global Tables with <1s lag."}}
+
+{{table "Global Data Strategy" (rows
+  (row "Data Type"           "Strategy"                                     "Consistency")
+  (row "User profiles"       "Sharded by user_id, read-local-write-primary" "Strong (read-your-writes)")
+  (row "Posts"               "DynamoDB Global Tables (multi-region)"        "Eventual (< 1s)")
+  (row "Feed cache"          "Redis per-region, independently computed"     "Eventual (< 5s)")
+  (row "Media files"         "S3 CRR (Cross-Region Replication)"           "Eventual (< 15min)")
+  (row "Like/comment counts" "CRDT counters (grow-only)"                   "Eventual (no conflicts)")
+)}}
+
+{{key "Use CRDTs (Conflict-free Replicated Data Types) for counters and sets. A like counter is a grow-only counter: increments from any region merge without conflict. No coordination needed."}}
+
+{{hint "why CRDTs for multi-region counters?" "Traditional counters require coordination (locking or consensus) across regions, adding 100-300ms latency per increment. CRDTs (specifically G-Counters) allow each region to increment independently and merge by taking the max per region. The total count is the sum of all region maxes. No coordination, no conflicts, no lost writes — at the cost of brief staleness during merge propagation."}}
+
+{{qa
+  "How do you handle a user in India following someone in the US?"
+  "Follow relationship is written to the follower home region (ap-south-1). Feed computation happens locally using replicated post data from DynamoDB Global Tables. The Indian user feed service reads posts from the local DynamoDB replica."
+  "What about consistency? What if a post has not replicated yet?"
+  "DynamoDB Global Tables replicate in under 1 second. For that brief window, the feed may not include the latest post. This is acceptable because social media feeds are eventually consistent by design."
+}}
+
+{{phase 9 "Security & Content Moderation" "8 min"}}
+
+{{say "Security at Instagram scale means content moderation, spam prevention, bot detection, and account safety. Each is a system design problem on its own."}}
+
+{{diagram "ig-security-layers"}}
+
+<h3>Content Moderation Pipeline</h3>
+
+{{diagram "ig-content-moderation"}}
+
+{{table "Content Moderation Layers" (rows
+  (row "Layer"               "When"              "Technology"                    "Latency"    "Accuracy")
+  (row "Pre-upload scan"     "During upload"     "PhotoDNA hash matching"        "<100ms"     "99.9% for known bad content")
+  (row "ML classification"   "Post-upload async" "CNN image classifier (NSFW/violence/spam)" "~200ms" "95% precision, 90% recall")
+  (row "Text analysis"       "On caption/comment" "NLP toxicity model + regex blocklist" "~50ms" "92% precision")
+  (row "User reporting"      "User-triggered"     "Human review queue (SQS + dashboard)" "4-24 hours" "99%+ with human review")
+  (row "Appeal process"      "After takedown"     "Second human reviewer"         "24-48 hours" "Context-dependent")
+)}}
+
+{{think "Content moderation is the hardest security problem at scale. At 100M posts/day, even a 0.1% false positive rate means 100K wrongly blocked posts — causing creator backlash. A 0.1% false negative means 100K policy-violating posts slip through. The solution is layered: ML catches 95% automatically, human review handles escalations and appeals."
+  (whyNot "only ML moderation" "ML models have blind spots: sarcasm, cultural context, new types of harmful content not in training data. A model trained on English misses harmful content in Hindi or Arabic. Human reviewers catch these edge cases. The combination of ML (fast, scalable) + human (accurate, contextual) is the only approach that works at scale.")
+  (how "handle CSAM detection" "Use PhotoDNA or Apple's NeuralHash to compute perceptual hashes of uploaded images. Compare against NCMEC's database of known CSAM hashes in <100ms. Match = immediate block + report to NCMEC (legally required in US). This runs synchronously before the image is stored — zero tolerance, zero delay.")
+}}
+
+{{hint "why PhotoDNA over raw hash matching?" "Raw SHA-256 hashes break on any modification — cropping, resizing, or adding a filter creates a completely different hash. PhotoDNA computes a perceptual hash based on visual features, so a slightly modified version of the same image still matches. This catches 99.9% of known bad content even after common transformations."}}
+
+<h3>Bot & Spam Prevention</h3>
+
+{{table "Bot Detection Signals" (rows
+  (row "Signal"                  "Detection Method"                              "Action")
+  (row "Follow/unfollow churn"   "Follow 100+ accounts/day, unfollow 80+ next day" "Shadowban: content hidden from explore/hashtags")
+  (row "Comment spam"            "Same comment text across 10+ posts in 1 hour"  "Rate limit comments, require CAPTCHA")
+  (row "Fake engagement"         "Likes from accounts created <24h ago, no avatar" "Exclude from engagement counts")
+  (row "Automation tools"        "API calls without proper OAuth flow"           "Block API access, require re-auth")
+  (row "Credential stuffing"     ">10 failed logins from same IP in 1 minute"   "CAPTCHA challenge, temporary IP block")
+)}}
+
+{{code "python" `# Behavioral bot scoring (runs per-action, <5ms)
+class BotScorer:
+    def score(self, user_id: str, action: str) -> float:
+        signals = {
+            "account_age_days": self.get_account_age(user_id),
+            "has_avatar": self.has_profile_photo(user_id),
+            "follow_velocity_1h": self.get_follow_count(user_id, hours=1),
+            "comment_diversity": self.get_unique_comment_ratio(user_id),
+            "login_device_count": self.get_device_count(user_id),
+        }
+        # Logistic regression model, trained on labeled bot/human data
+        score = self.model.predict(signals)  # 0.0 = human, 1.0 = bot
+
+        if score > 0.8:
+            self.apply_shadowban(user_id)    # Hide from explore
+        elif score > 0.5:
+            self.require_captcha(user_id)    # Challenge on next action
+        return score
+`}}
+
+{{hint "why shadowban over hard ban?" "Hard bans are easily detected — the bot operator creates a new account. Shadowbans are invisible: the account appears normal to its owner, but content is hidden from explore, hashtag pages, and non-follower feeds. The bot operator wastes resources on an account that has no reach. This is more effective at deterring bot farms than immediate bans."}}
+
+<h3>Account Security</h3>
+
+{{table "Account Safety Features" (rows
+  (row "Feature"              "Implementation"                                  "Impact")
+  (row "2FA (TOTP)"           "Time-based OTP via authenticator app"           "Blocks 99.9% of credential stuffing")
+  (row "Login anomaly"        "Device fingerprint + geo-location change detection" "Challenge new device/location with email verification")
+  (row "Session management"   "JWT with 15-min access token, 7-day refresh"   "Compromised token expires quickly")
+  (row "Rate limiting"        "Token bucket: 100 API calls/min per user"      "Prevents automated abuse")
+  (row "Data export (GDPR)"   "Async job: package all user data as ZIP"       "Compliance with EU data portability")
+  (row "Account deletion"     "Soft delete (30-day grace) → hard delete"      "GDPR right to erasure, with recovery window")
+)}}
+
+{{triggerQs "Security questions"
+  "How do you handle GDPR data deletion at scale?"
+  "Account deletion triggers an async pipeline: 1) Soft-delete the user record (30-day recovery window). 2) After 30 days, Lambda job deletes all user data across all services: Postgres (CASCADE), DynamoDB (batch delete), S3 media files, Redis cache entries, Elasticsearch index entries, Kafka tombstone events. 3) CDN cache invalidation for all user media URLs. Total deletion time: 48-72 hours across all services. Audit log confirms completion."
+  "How do you prevent fake engagement (bought likes/followers)?"
+  "Three signals: (1) Account quality scoring — accounts with no avatar, no posts, created <24h ago get low trust scores. Engagement from low-trust accounts is excluded from public counts. (2) Temporal analysis — 10K likes arriving in 10 seconds from accounts created on the same day is clearly inorganic. (3) Network analysis — bot farms often follow each other, creating detectable clusters via graph analysis on the follower graph."
+}}
+
+<h3>Stories Implementation</h3>
+
+{{diagram "ig-stories-lifecycle"}}
+
+{{code "python" `import time
+import redis
+
+redis_client = redis.Redis()
+
+# Stories: TTL-based auto-cleanup
+# DynamoDB item with TTL
+story_item = {
+    "PK": f"USER#{user_id}",
+    "SK": f"STORY#{timestamp}",
+    "media_url": s3_key,
+    "created_at": int(time.time()),
+    "ttl": int(time.time()) + 86400,  # 24 hours
+    # DynamoDB auto-deletes when ttl < current time
+}
+
+# Check if user has seen a story (Redis bitmap)
+async def has_viewed(story_id: str, user_id: int) -> bool:
+    return await redis_client.getbit(f"story_views:{story_id}", user_id)
+
+async def mark_viewed(story_id: str, user_id: int):
+    await redis_client.setbit(f"story_views:{story_id}", user_id, 1)
+    # Auto-expire the bitmap key after 25 hours
+    await redis_client.expire(f"story_views:{story_id}", 90000)
+`}}
+
+{{hint "why Redis bitmaps for story views?" "A bitmap uses 1 bit per user_id to track who has viewed a story. For 500M users, that is only 62.5MB per story. Compare to a Set of user_ids: at 8 bytes per ID, 1M viewers would consume 8MB per story vs 62.5MB fixed for the bitmap. Bitmaps win when viewer count is high relative to total users, and the auto-expire TTL (25h) means zero cleanup code."}}
+
+{{diagram "ig-sub-problems"}}
+
+{{phase 10 "Analytics & Monitoring" "5 min"}}
+
+{{say "At Instagram scale, observability is not optional. Let me define SLOs, analytics pipelines, and the monitoring stack."}}
+
+<h3>Explore & Search</h3>
+
+{{table "Explore Page Architecture" (rows
+  (row "Component"          "Technology"                     "How It Works")
+  (row "Trending Posts"     "Pre-computed batch (hourly)"    "Spark job: engagement rate = (likes + comments) / impressions in last 6h")
+  (row "Personalized"      "ML ranking model"               "Collaborative filtering: users who liked X also liked Y")
+  (row "Hashtag Search"    "Elasticsearch"                  "Full-text search with autocomplete on hashtag index")
+  (row "User Search"       "Elasticsearch"                  "Prefix search on username + display name")
+  (row "Content Moderation" "ML classifier + human review"  "Flag NSFW/spam before indexing in explore")
+)}}
+
+{{diagram "ig-explore-search"}}
+
+{{hint "why Elasticsearch over Postgres full-text?" "Postgres full-text search (tsvector/tsquery) works at small scale but lacks autocomplete, relevance tuning, and horizontal scaling. Elasticsearch provides prefix-based autocomplete for usernames, inverted indexes for hashtag search, and distributes across nodes. At 500M posts, a single Postgres instance cannot build and maintain a GIN index fast enough for real-time search."}}
+
+<h3>User Analytics Pipeline</h3>
+
+{{diagram "ig-analytics-pipeline"}}
+
+{{table "Analytics Event Schema (Kafka)" (rows
+  (row "Event Type"        "Key Fields"                                      "Consumers")
+  (row "post_viewed"       "post_id, viewer_id, source (feed/explore/profile), timestamp" "Analytics, ML ranking model")
+  (row "post_liked"        "post_id, user_id, timestamp"                     "Analytics, engagement counter")
+  (row "post_commented"    "post_id, user_id, comment_length, timestamp"     "Analytics, notification service")
+  (row "story_viewed"      "story_id, viewer_id, view_duration_ms"           "Analytics, story ranking")
+  (row "search_query"      "query_text, user_id, result_count, click_position" "Search ranking improvement")
+  (row "follow_action"     "follower_id, followee_id, source"                "Analytics, recommendation model")
+)}}
+
+{{think "Analytics events flow through Kafka to multiple consumers independently. The key insight is that the same event stream feeds both real-time dashboards (aggregated by Flink into Redis) and batch analytics (dumped to S3 by Firehose for Spark/Athena)."
+  (whyNot "direct database writes for analytics" "At 500M DAU with 20 events/session, that is 10B events/day. Direct DynamoDB writes at $1.25/M = $12,500/day just for analytics writes. Kafka + S3 Parquet + Athena costs ~$500/day for the same data volume. Plus, database writes in the hot path add latency to every user interaction.")
+  (how "compute engagement metrics in real-time" "Kafka Streams or Flink aggregates events per 1-minute windows: impressions, likes, comments per post. Output goes to Redis counters for real-time dashboards and feeds the explore ranking model. Latency: 1-2 minutes from event to dashboard update.")
+}}
+
+{{table "Analytics Query Examples" (rows
+  (row "Query"                          "Technology"                    "Latency"      "Cost")
+  (row "Real-time engagement rate"      "Flink → Redis counters"        "<2 min lag"   "~$200/day (Flink)")
+  (row "Daily active users"             "S3 Parquet → Athena"          "~30 seconds"  "$5/TB scanned")
+  (row "Top posts by engagement"        "Pre-computed → DynamoDB"      "<10ms"        "Negligible")
+  (row "User retention cohorts"         "S3 Parquet → Spark"           "~5 minutes"   "~$50/run (EMR)")
+  (row "Content moderation metrics"     "Flink → Grafana"              "Real-time"    "~$50/day")
+)}}
+
+<h3>Monitoring & SLOs</h3>
+
+{{diagram "ig-monitoring-slos"}}
+
+{{table "Service Level Objectives (SLOs)" (rows
+  (row "Metric"               "Target"                 "Measurement"                              "Error Budget")
+  (row "Feed Availability"    "99.99%"                 "Successful feed loads / total requests"    "52 min downtime/year")
+  (row "Feed Latency"         "p99 < 300ms"            "End-to-end feed load time"                "Alert if p99 > 500ms for 5 min")
+  (row "Upload Success"       "99.9%"                  "Successful uploads / total attempts"      "Alert if < 99.5% for 10 min")
+  (row "Image Load Time"      "p99 < 200ms"            "CDN image delivery latency"               "Alert if p99 > 500ms")
+  (row "Notification Delivery" "99.5% within 5 seconds" "Push notification delivery latency"       "Alert if lag > 30s for 5 min")
+)}}
+
+{{table "Key Metrics & Alerts" (rows
+  (row "Metric"                     "Source"               "Alert Threshold"                    "Action")
+  (row "Feed Load Errors"           "ALB 5xx rate"         "> 0.1% for 5 minutes"               "Page on-call, check Post Service health")
+  (row "Kafka Consumer Lag"         "MSK metrics"          "> 100K messages for 10 minutes"     "Scale consumers, check for stuck partitions")
+  (row "Redis Memory Usage"         "ElastiCache"          "> 80% maxmemory"                    "Scale cluster, check eviction rate")
+  (row "DynamoDB Throttles"         "CloudWatch"           "> 10 throttled requests/sec"         "Enable auto-scaling, check hot partitions")
+  (row "S3 Upload Errors"           "S3 metrics"           "> 0.5% error rate"                  "Check S3 rate limits, randomize key prefixes")
+  (row "CDN Cache Hit Ratio"        "CloudFront"           "< 80% for 30 minutes"               "Check origin health, TTL configuration")
+  (row "ML Moderation Queue"        "Custom metric"        "> 10K pending reviews"               "Scale moderation Lambda, alert content team")
+)}}
+
+{{think "The most important monitoring insight for Instagram: feed latency is the primary user experience metric. If feeds take >500ms, users perceive the app as slow and engagement drops. Cache hit ratio is the early warning — if it drops below 80%, something is wrong upstream."
+  (whyNot "just monitor HTTP error rates" "Error rates miss silent degradations. A feed that loads in 2 seconds instead of 200ms is technically successful but functionally broken. Latency percentile monitoring (especially p99) catches the long tail of slow requests that affect millions of users.")
+  (how "set up distributed tracing" "OpenTelemetry instrumentation on all services. Trace a feed request: ALB (1ms) → Feed Service (5ms) → Redis cache check (0.5ms) → Post Service gRPC (10ms) → User Service gRPC (5ms) → celebrity post merge (15ms) → response (36ms total). When p99 spikes, the trace shows exactly which service call degraded.")
+}}
+
+{{hint "why separate SLOs per feature?" "Feed availability matters more than explore availability — users tolerate explore being slow but not their feed. Upload success matters more than notification delivery — a lost photo is unrecoverable but a delayed notification is just annoying. Different SLOs let you prioritize engineering effort on what matters most to users."}}
+
+{{phase 11 "Bottlenecks & Trade-offs" "8 min"}}
+
+{{table "Key Trade-offs" (rows
+  (row "Trade-off"                       "Choice"                          "Rationale"                                      "What You Lose")
+  (row "SQL vs NoSQL for posts"          "Postgres at MVP &#8594; DynamoDB at scale" "MVP needs JOINs for feed. At 50M+ users, DynamoDB auto-scales writes without manual sharding." "Lose ad-hoc SQL queries, JOINs, transactions across tables")
+  (row "Fan-out-on-write vs read"        "Hybrid (threshold: 100K followers)" "Write for normal users (pre-compute feed), read for celebrities (avoid 200M Redis writes per post)." "Hybrid adds code complexity: two read paths, merge logic, celebrity detection")
+  (row "Strong vs eventual consistency"  "Eventual for feed, strong for likes" "Feed lag of 1-5s is invisible. But double-like is bad UX: use PK constraint (user_id, post_id)." "Eventual means a user might not see their own post in feed for 1-5s after posting")
+  (row "Push vs pull for notifications"  "Push (FCM/APNs) + SSE fallback"  "Real-time engagement drives retention. SSE for web where push tokens are not available." "Push requires device token management, FCM/APNs rate limits, and delivery is not guaranteed")
+  (row "Monolith &#8594; microservices" "Split at 10M users"               "Ship fast first. Split when team size > 15 engineers or deploy frequency needs exceed monolith." "Microservices add network latency (gRPC calls), distributed tracing, and operational complexity")
+  (row "Single &#8594; multi-region"    "Multi-region at 100M+"           "Latency for India/EU (250ms &#8594; 15ms) + GDPR compliance requires EU data residency." "Cross-region replication lag, conflict resolution (CRDTs), 3x infrastructure cost")
+)}}
+
+{{table "Potential Bottlenecks" (rows
+  (row "Bottleneck"                  "Symptom"                          "Root Cause"                                    "Fix")
+  (row "Feed computation"            "Feed load >500ms"                 "Fan-out-on-read: N queries per followee"       "Pre-compute with fan-out-on-write + Redis sorted sets")
+  (row "Hot partitions (celebrity)"  "DynamoDB throttling on one PK"    "All reads/writes to same partition key"         "Write sharding: PK = user_id#shard_N, read scatter-gather across shards")
+  (row "Like counter contention"    "Counter drift, lost writes"       "Concurrent INCR on single Redis key"           "Sharded counters: 100 shards, random shard selection, lazy aggregation every 5s")
+  (row "Image upload spike"          "S3 503 errors"                    "S3 partitions by prefix, hot prefix = throttle" "Randomize S3 key prefix (hash-based), retry with exponential backoff + jitter")
+  (row "DB connection exhaustion"    "Postgres max_connections hit"     "Each ECS task holds a connection pool"          "PgBouncer connection pooling (transaction mode) + read replicas")
+  (row "CDN cache miss storm"        "Origin S3/ALB overloaded"        "TTL expiry causes all PoPs to refetch"          "Origin Shield (single regional cache) + stale-while-revalidate header")
+)}}
+
+{{say "Let me go deeper on two critical interview topics: distributed ID generation and counter collision prevention. These are follow-up questions that separate senior candidates."}}
+
+{{qa
+  "How does the database generate IDs and ensure no collisions at scale?"
+  "At MVP, Postgres BIGSERIAL (auto-increment) works fine on a single primary. But when we shard Postgres or move to DynamoDB, auto-increment breaks because each shard generates its own sequence. Three solutions: (1) Snowflake IDs: 64-bit IDs encoding timestamp + machine_id + sequence. Each worker generates unique IDs independently with no coordination. Instagram uses a similar approach. (2) UUID v7: time-ordered UUIDs that are sortable and unique across shards, 128-bit. (3) Pre-generated key service (KGS): batch-generate ID ranges, assign ranges to workers. We choose Snowflake-style IDs because they are 64-bit (half the storage of UUID), time-sortable (no random I/O on B-tree inserts), and require zero coordination between workers."
+  "What about counters? How do you prevent lost writes when 1M users like a post simultaneously?"
+  "A naive INCR on a single Redis key serializes all writes to one core — at best 100K ops/sec, but with network overhead more like 50K. For 1M likes/sec, you need sharded counters: split the counter into N shards (e.g., 100), each writer picks a random shard, INCRBY 1. To read: aggregate all shards (SUM). Trade-off: reads are slightly stale (aggregate every 5s and cache). The deeper problem is ensuring exactly-once counting — if a client retries after timeout, the like might be counted twice. Fix: the likes table PK (user_id, post_id) acts as an idempotency key. Before incrementing the counter, check if the like already exists. Use a Lua script in Redis to atomically check-and-increment. At DynamoDB scale: use atomic ADD with a conditional expression on a deduplification attribute."
+}}
+
+{{diagram "ig-distributed-counter"}}
+
+{{triggerQs "Bottleneck deep-dive questions"
+  "How do you handle hot partitions in DynamoDB?"
+  "DynamoDB partitions by hash of the partition key. A celebrity's user_id becomes a hot key — all their post reads/writes hit one partition. Fix with write sharding: append a random suffix (PK = user_id#shard_0 through user_id#shard_9). Reads scatter-gather across all 10 shards and merge. DynamoDB adaptive capacity also helps by redistributing throughput to hot partitions, but it reacts slowly (minutes) — sharding is proactive."
+  "What is the most cost-effective way to handle DB connection exhaustion?"
+  "PgBouncer in transaction mode pools connections: 200 ECS tasks each wanting 20 connections = 4,000 connections, but PgBouncer maps them to 200 actual Postgres connections. Postgres max_connections above 500 degrades performance due to process-per-connection architecture. PgBouncer is a single binary with <1ms overhead per query. Combined with read replicas, this handles 50K+ QPS."
+}}
+
+{{diagram "ig-scaling-timeline"}}
+
+{{say "Let me paint the full distributed system picture. At 500M+ DAU, Instagram is not one system but a constellation of specialized systems communicating through event streams, each optimized for its specific access pattern."}}
+
+{{diagram "ig-distributed-system"}}
+
+{{table "Distributed System Properties" (rows
+  (row "CAP Property"        "How We Handle It"                                          "Concrete Example")
+  (row "Partition Tolerance"  "Required. All services tolerate network partitions."       "If Kafka broker fails, producers buffer locally. Consumers catch up when partition heals.")
+  (row "Availability"        "Prioritized over consistency for feed/explore."             "Feed serves from Redis cache even if Post Svc is down. Degraded but available.")
+  (row "Consistency"         "Tunable per data type. Strong for auth/likes, eventual for feed." "Like uses PK constraint (strong). Feed uses fan-out + cache (eventual, 1-5s lag).")
+  (row "Idempotency"        "All write APIs are idempotent via natural keys or idempotency tokens." "Like: PK (user_id, post_id). Upload: client-generated upload_id prevents duplicate posts on retry.")
+  (row "Ordering"           "Kafka partitioned by user_id guarantees per-user ordering."  "Posts by same user appear in correct order in feed. Cross-user ordering is best-effort.")
+)}}
+
+{{qa
+  "How do services communicate? Sync or async?"
+  "Both, with a clear rule: reads are synchronous (gRPC, <10ms latency), writes are asynchronous (Kafka events). When Feed Svc needs to hydrate a post, it calls Post Svc via gRPC. When a new post is created, Post Svc publishes a post_created event to Kafka, and Feed Svc consumes it asynchronously for fan-out. This separation means write failures do not block reads."
+  "What happens if Kafka goes down?"
+  "Services have a local write-ahead buffer (in-memory + disk) that holds events until Kafka recovers. MSK has 99.95% SLA with multi-AZ replication. If a consumer falls behind, Kafka retains messages for 7 days. The feed might lag by minutes during an outage, but no data is lost. For likes/comments, we also write directly to DynamoDB (dual-write) so the source-of-truth database always has the data."
+}}
+
+{{hint "why gRPC for sync reads, Kafka for async writes?" "Reads need low latency (<10ms) and immediate responses — gRPC with protobuf gives you binary serialization, HTTP/2 multiplexing, and generated client/server stubs. Writes can tolerate delay — Kafka provides durability (replicated log), ordering (per-partition), and fan-out (multiple consumers). Using Kafka for reads would add 100ms+ latency from consumer polling. Using gRPC for writes would couple services and lose the replay/audit trail."}}
+
+{{key "The distributed system vision is: event-driven microservices where each service owns its data, communicates changes through Kafka, and is independently deployable and scalable. Reads are synchronous gRPC for low latency, writes are asynchronous events for reliability. Every write is idempotent, every read has a cache fallback."}}
+
+{{checklist
+  "Start MVP: monolith + Postgres + S3 + CloudFront (~$500/mo)"
+  "At 10M users: add feed service with hybrid fan-out (Redis sorted sets)"
+  "At 50M users: split into microservices, Kafka for events, DynamoDB for posts"
+  "Hybrid fan-out: write for normal users, read for celebrities (>100K followers)"
+  "Sharded counters for viral posts (100 shards, aggregate lazily)"
+  "Media pipeline: S3 -> Lambda -> 4 sizes -> CloudFront"
+  "Stories: DynamoDB TTL for 24h auto-delete, Redis bitmap for view tracking"
+  "Content moderation: PhotoDNA (sync) + ML classifier (async) + human review"
+  "Bot prevention: behavioral scoring + shadowban + follow/unfollow churn detection"
+  "Account security: 2FA, login anomaly detection, JWT session management"
+  "Analytics: Kafka &#8594; Flink (real-time) + Firehose (batch S3) + ML training"
+  "Monitoring: per-feature SLOs, distributed tracing (OpenTelemetry), Grafana dashboards"
+  "Peak handling: auto-scale + SQS write buffer + circuit breakers"
+  "Multi-region at 500M+: DynamoDB Global Tables + S3 CRR + per-region Redis"
+  "CRDTs for conflict-free multi-region counters"
+}}
+
+{{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
+
+{{say "Let me walk through the critical questions an interviewer would ask about this design."}}
+
+{{deepQA "Critical Interview Questions" `
+<div class="dqa-item">
+  <div class="dqa-q">Why choose Postgres over MySQL for the MVP, and at what point should you migrate to DynamoDB?</div>
+  <div class="dqa-a">
+    For an MVP serving &lt;1M users, <span class="dqa-key">Postgres</span> wins on developer productivity: it has native JSON support (JSONB), rich indexing (GIN, GiST), and a mature ecosystem. MySQL could work, but Postgres's <span class="dqa-key">ACID guarantees</span> with MVCC mean fewer surprises under concurrent writes — critical when you have a single database handling uploads, likes, comments, and feed queries simultaneously. The cost difference at MVP scale is negligible (~$200/mo for an RDS db.r6g.large).
+    <br><br>
+    The migration trigger to <span class="dqa-key">DynamoDB</span> is not a fixed user count — it's when your <span class="dqa-key">write throughput exceeds what a single Postgres instance can handle</span> (~10K-15K writes/sec on a well-tuned instance). For Instagram, this happens around 10-50M users depending on engagement rates. DynamoDB gives you single-digit-ms latency at any scale with on-demand capacity, but you lose joins, transactions across items, and ad-hoc queries. The trade-off is: you pay for <span class="dqa-key">eventual consistency</span> (unless you use strong-read, which costs 2x) and must denormalize your data model completely.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">What happens if you try to shard Postgres instead of migrating to DynamoDB?</div>
+      <div class="dqa-sub-a">
+        Sharding Postgres is viable but operationally expensive. You need to pick a <a class="dqa-link" href="/algo/consistent-hashing">consistent hashing</a> strategy for shard keys (typically user_id), handle cross-shard queries manually (e.g., a feed query touching 200 users across 16 shards), manage rebalancing when adding shards, and maintain schema migrations across all shards simultaneously. Tools like Citus help, but you're now running a distributed database with Postgres semantics — at that point, DynamoDB's fully managed sharding at $1.25/million writes is often cheaper than the engineering team needed to maintain sharded Postgres.
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">How does Instagram actually handle this in production?</div>
+          <div class="dqa-deep-a">Instagram famously stayed on sharded Postgres far longer than most companies — they sharded by user_id across thousands of Postgres instances using a custom sharding layer. Their key insight was that most queries are user-scoped (my posts, my feed, my likes), so cross-shard queries are rare. They use <span class="dqa-key">logical sharding with a mapping table</span>: a lightweight service maps user_id → shard_id, and each shard is a full Postgres instance. Resharding is done by splitting a shard into two and updating the mapping. This worked because their access patterns are highly localized — but it required a dedicated infrastructure team of 5-10 engineers just for the Postgres layer.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="dqa-item">
+  <div class="dqa-q">Fan-out-on-write vs fan-out-on-read: what's the basis for the 100K follower threshold?</div>
+  <div class="dqa-a">
+    The threshold comes from a <span class="dqa-key">cost-per-post calculation</span>. With fan-out-on-write, each post triggers N Redis ZADD operations (one per follower). At a median post rate of 0.5 posts/day for active users, a user with 100K followers generates 100K × 0.5 = <span class="dqa-key">50K Redis writes/day</span>. A Redis ZADD costs ~0.05ms, so that's 2.5 seconds of Redis time per post — acceptable. But a celebrity with 10M followers would generate 10M writes per post, taking ~500 seconds of Redis time and consuming ~80MB of memory just for that single fan-out. The 100K threshold is where fan-out cost exceeds the cost of a few hundred on-read merges per feed request.
+    <br><br>
+    If the threshold is wrong, the impact is asymmetric: too low means more read-time merges (higher P99 feed latency, target &lt;200ms), too high means Redis write amplification and memory pressure. You should <span class="dqa-key">measure and adjust dynamically</span> — some systems use 50K, others 500K, depending on infrastructure costs and read/write ratios.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">What about bursty traffic when a celebrity posts — how does that interact with the hybrid model?</div>
+      <div class="dqa-sub-a">
+        Celebrity posts use <span class="dqa-key">fan-out-on-read</span>, so the post is written once to the celebrity's post list and merged at read time. But the burst comes from millions of followers opening their feed simultaneously after a push notification. This creates a <span class="dqa-key">thundering herd</span> on the celebrity's post list in cache. The mitigation is a <a class="dqa-link" href="/algo/token-bucket">token bucket</a> rate limiter on feed requests combined with <span class="dqa-key">request coalescing</span>: if 10K requests arrive for the same celebrity's latest posts within 50ms, only one actually hits the cache/database, and the rest wait for that result.
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">How exactly do you handle the thundering herd on celebrity feed merge without degrading P99 latency?</div>
+          <div class="dqa-deep-a">Three layers: (1) <span class="dqa-key">Stale-while-revalidate</span> — serve the previous cached feed while asynchronously merging the new celebrity post, so most users see the post within 2-5 seconds rather than all at once. (2) <span class="dqa-key">Probabilistic early expiration</span> — instead of all caches expiring at the same TTL, add jitter (TTL ± 20%) so the thundering herd is spread over ~60 seconds. (3) <span class="dqa-key">Single-flight pattern</span> — at the application layer, use a singleflight mutex so only one goroutine/thread fetches the celebrity's post list per cache node, and all other waiters receive the same result. Combined, these keep P99 feed latency under 300ms even during a Beyoncé-posts-at-the-Super-Bowl scenario.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="dqa-item">
+  <div class="dqa-q">Why use Redis sorted sets for the feed cache instead of Memcached or DynamoDB?</div>
+  <div class="dqa-a">
+    The feed is an <span class="dqa-key">ordered, bounded list</span> — you need the latest ~500 post IDs per user, sorted by timestamp/score. <a class="dqa-link" href="/fund/storage/redis">Redis</a> sorted sets (ZSET) give you O(log N) insertion, O(log N + M) range queries, and automatic deduplication by member — exactly what a feed needs. Memcached only supports flat key-value blobs, so you'd have to serialize/deserialize the entire feed list on every update (~4KB per user × 500 post IDs), which means <span class="dqa-key">read-modify-write race conditions</span> under concurrent fan-out. DynamoDB could work (sort key = timestamp), but at $1.25/million writes and ~500M feed updates/day, you'd pay ~$625/day just for feed writes vs. ~$50/day for Redis cluster memory.
+    <br><br>
+    The eviction strategy matters: each user's sorted set is capped at 500 entries using <span class="dqa-key">ZREMRANGEBYRANK</span> after each insert, keeping memory bounded. At 500M users with 20% daily active, you need ~100M sorted sets × ~4KB = ~400GB of Redis memory, which fits in a 50-node Redis Cluster (8GB each) with replication.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">What happens when a Redis node goes down? How do you avoid cold-start on the feed cache?</div>
+      <div class="dqa-sub-a">
+        Two strategies: (1) <span class="dqa-key">Redis Cluster with replicas</span> — each master has 1-2 replicas, so a node failure triggers automatic failover in ~15 seconds with minimal data loss (only the last few seconds of writes if using async replication). (2) <span class="dqa-key">Lazy reconstruction</span> — if a user's feed is missing from cache (cold start), the Feed Service fetches the latest 500 posts from the users they follow via a parallel scatter-gather query to the Post Service, merges and sorts them, and populates the cache. This takes ~50-200ms, which is acceptable as a one-time cost. To avoid a mass cold-start after a full cluster failure, we persist Redis snapshots (RDB) to S3 every 5 minutes.
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">Redis Cluster vs Redis Sentinel — which is the right choice for the feed cache and why?</div>
+          <div class="dqa-deep-a"><span class="dqa-key">Redis Cluster</span> is the right choice. Sentinel provides only high availability (automatic failover) for a single master, not horizontal scaling. With 400GB of feed data, you need data sharding across ~50 nodes, which only Redis Cluster provides via <a class="dqa-link" href="/algo/consistent-hashing">consistent hashing</a> over 16,384 hash slots. Cluster also handles rebalancing when adding nodes. Sentinel would require application-level sharding (managing which user maps to which Redis instance), which is the same complexity you're trying to avoid by not sharding Postgres. The trade-off: Cluster has slightly higher operational complexity (slot migrations during scaling) and doesn't support multi-key operations across slots — but feed operations are always single-key (one sorted set per user), so this limitation doesn't apply.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="dqa-item">
+  <div class="dqa-q">How do you handle like counts at 1M likes/sec on a viral post without melting the database?</div>
+  <div class="dqa-a">
+    Direct COUNT(*) on a likes table would require scanning millions of rows per query — at 1M likes/sec on a viral post, this is a non-starter. Instead, use <span class="dqa-key">sharded counters</span>: split the like count for a single post across N counter shards (e.g., 100). Each like increments a random shard: <code>INCR post:{id}:likes:{rand(0,99)}</code>. The display count is the sum of all shards, computed lazily and cached for 5 seconds. This reduces write contention by 100x — instead of 1M writes/sec to one key, you have 10K writes/sec across 100 keys.
+    <br><br>
+    For <span class="dqa-key">deduplication</span> (preventing double-likes), the source of truth is a DynamoDB table with partition key = post_id and sort key = user_id. The conditional write (<code>PutItem</code> with <code>attribute_not_exists</code>) ensures exactly-once semantics. The sharded counter is eventually consistent — it might briefly show 1,000,003 instead of 1,000,001, but this is acceptable for a social media like count.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">Why not just use COUNT(*) with a covering index on the likes table?</div>
+      <div class="dqa-sub-a">
+        Even with a covering index on (post_id, user_id), COUNT(*) on a post with 10M likes requires scanning 10M index entries. On Postgres, this takes ~2-5 seconds because MVCC means the database must check visibility for each row. On DynamoDB, a Query with Select=COUNT still consumes read capacity proportional to item count. The <span class="dqa-key">fundamental problem</span> is that COUNT is O(N) in all databases — there's no magic index that maintains a pre-computed count without write amplification. Sharded counters trade <span class="dqa-key">perfect accuracy for O(1) reads</span>: reading 100 shards and summing is constant time regardless of total likes.
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">How do you ensure exactly-once like counting when the user might tap the like button multiple times or retry on network failure?</div>
+          <div class="dqa-deep-a">Three layers of protection: (1) <span class="dqa-key">Client-side debounce</span> — the UI disables the button for 500ms after a tap and deduplicates locally. (2) <span class="dqa-key">Idempotent write to DynamoDB</span> — the likes table has PK = (post_id, user_id), so duplicate PutItem is a no-op. The conditional expression <code>attribute_not_exists(post_id)</code> returns ConditionalCheckFailedException on duplicates, and we only increment the sharded counter on successful writes. (3) <span class="dqa-key">Reconciliation job</span> — a periodic batch job (every 10 minutes) compares the sharded counter sum against the actual COUNT from DynamoDB for hot posts, correcting any drift. This gives us eventually-exact counts: real-time accuracy within ±0.1%, perfect accuracy within 10 minutes. See also how <a class="dqa-link" href="/problem/url-shortener">URL shortener</a> handles similar counter challenges at scale.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="dqa-item">
+  <div class="dqa-q">What's the CAP trade-off for the feed service — do you choose AP or CP, and what are the consequences?</div>
+  <div class="dqa-a">
+    The feed is firmly <span class="dqa-key">AP (Available + Partition-tolerant)</span>. During a network partition, we continue serving feeds from the local Redis cache even if the Feed Service can't reach the Post Service or Kafka. The worst case is a user sees a <span class="dqa-key">stale feed</span> — missing the last 30 seconds of posts — which is far better than showing an error page. Social media feeds have a natural tolerance for staleness: users don't notice if a post appears 5 seconds late, but they absolutely notice a 500 error.
+    <br><br>
+    The concrete consistency window is <span class="dqa-key">1-5 seconds</span> under normal operation (Kafka consumer lag + cache propagation) and up to <span class="dqa-key">30-60 seconds</span> during degraded conditions. We chose AP because the business cost of inconsistency (a user sees a post 5s late) is negligible, while the business cost of unavailability (app shows error, user churns) is ~$0.10-$1.00 per incident per user in lifetime value.
+    <div class="dqa-sub">
+      <div class="dqa-sub-q">What about like counts showing the wrong number — is that also AP, and when does it matter?</div>
+      <div class="dqa-sub-a">
+        Like counts are <span class="dqa-key">tunable consistency</span>. For display purposes (showing "1.2M likes"), AP with eventual consistency is fine — the sharded counter is stale by up to 5 seconds. But for the <span class="dqa-key">has-the-user-liked-this</span> check (the filled vs. unfilled heart), we need strong consistency because showing the wrong state feels like a bug. This read goes directly to DynamoDB with <code>ConsistentRead=true</code>, bypassing the cache. The cost is 2x read capacity units, but it's a point lookup (single item, &lt;1ms), so the latency and cost impact is minimal. This is a key interview insight: <span class="dqa-key">different fields of the same object can have different consistency requirements</span>.
+        <div class="dqa-deep">
+          <div class="dqa-deep-q">What's the actual consistency window for feed updates, and how can you minimize it without sacrificing availability?</div>
+          <div class="dqa-deep-a">The consistency window breaks down as: Kafka produce latency (~5ms) + consumer poll interval (~100ms) + fan-out write time (~50ms for 500 followers) + client poll/push delay (~1-3s). Total: <span class="dqa-key">~1.5-3.5 seconds</span> end-to-end. To minimize without sacrificing availability: (1) Use <span class="dqa-key">WebSocket push</span> instead of polling to cut 1-3s of client delay to ~50ms. (2) Reduce Kafka consumer poll interval to 50ms (trade-off: higher CPU on consumers). (3) For the posting user's own feed, use <span class="dqa-key">read-your-own-writes</span> — after uploading, the client optimistically inserts the post into the local feed state before the server confirms fan-out, so the user sees their own post instantly. This brings perceived consistency to &lt;100ms for the poster and &lt;2 seconds for followers, while keeping the system fully AP.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+`}}
+
+{{key "Instagram's core challenge is the feed. Everything else (upload, like, comment) is straightforward CRUD. The interview differentiator is explaining the hybrid fan-out strategy and when fan-out-on-read vs fan-out-on-write applies."}}

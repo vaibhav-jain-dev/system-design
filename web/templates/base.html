@@ -1,0 +1,641 @@
+{{define "base.html"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Design Prep</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%236366F1'/><text x='50' y='72' font-size='60' font-weight='bold' text-anchor='middle' fill='white'>SD</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="/static/js/htmx.min.js"></script>
+    <script defer src="/static/js/alpine.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/go.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/nginx.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/yaml.min.js"></script>
+</head>
+<body>
+    <div class="app">
+        <!-- Mobile header -->
+        <header class="app-header">
+            <button class="sidebar-toggle" onclick="document.querySelector('.app').classList.toggle('sidebar-open')">
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+            <h1 class="app-title">System Design Prep</h1>
+        </header>
+
+        <!-- Sidebar -->
+        <aside class="sidebar" x-data="{ openCats: {} }">
+            <div class="sidebar-header">
+                <h2>System Design Prep</h2>
+            </div>
+
+            {{template "sidebar.html" .}}
+        </aside>
+
+        <!-- Overlay for mobile sidebar -->
+        <div class="sidebar-overlay" onclick="document.querySelector('.app').classList.remove('sidebar-open')"></div>
+
+        <!-- Main content area -->
+        <main class="detail" id="detail">
+            {{if eq .PageType "problem"}}
+                {{template "detail_problem.html" .}}
+            {{else if eq .PageType "fundamental"}}
+                {{template "detail_fund.html" .}}
+            {{else if eq .PageType "algorithm"}}
+                {{template "detail_algo.html" .}}
+            {{else if eq .PageType "pattern"}}
+                {{template "detail_pattern.html" .}}
+            {{else if eq .PageType "concept"}}
+                {{template "detail_concept.html" .}}
+            {{else}}
+                {{template "welcome.html" .}}
+            {{end}}
+        </main>
+    </div>
+
+    <!-- Reading Progress, Syntax Highlighting, Sidebar Auto-Collapse -->
+    <script>
+    (function() {
+        const STORAGE_KEY = 'sd-prep-progress';
+        const detail = document.getElementById('detail');
+
+        // ── Close popups on outside click ────────────
+        document.addEventListener('click', function(e) {
+            if (!e.target.closest('.diagram-info')) {
+                document.querySelectorAll('.diagram-info.active').forEach(el => el.classList.remove('active'));
+            }
+            if (!e.target.closest('.hint-trigger')) {
+                document.querySelectorAll('.hint-popup.show').forEach(el => el.classList.remove('show'));
+            }
+        });
+
+        // ── Progress persistence ──────────────────
+        function loadProgress() {
+            try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
+            catch { return {}; }
+        }
+
+        function saveProgress(data) {
+            const current = loadProgress();
+            Object.assign(current, data);
+            current.lastVisited = new Date().toISOString();
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
+        }
+
+        function trackPage() {
+            const path = window.location.pathname + window.location.search;
+            saveProgress({ lastPage: path });
+        }
+
+        // ── Scroll position per topic ─────────────
+        let scrollTimeout;
+        if (detail) {
+            detail.addEventListener('scroll', function() {
+                clearTimeout(scrollTimeout);
+                scrollTimeout = setTimeout(function() {
+                    const path = window.location.pathname;
+                    if (path === '/') return;
+                    const scrollData = loadProgress().scrollPositions || {};
+                    scrollData[path] = detail.scrollTop;
+                    saveProgress({ scrollPositions: scrollData });
+                }, 200);
+            });
+        }
+
+        function restoreScroll() {
+            const path = window.location.pathname;
+            const positions = loadProgress().scrollPositions || {};
+            if (positions[path] && detail) {
+                requestAnimationFrame(function() {
+                    detail.scrollTop = positions[path];
+                });
+            } else if (detail) {
+                detail.scrollTop = 0;
+            }
+        }
+
+        // ── Syntax highlighting ───────────────────
+        function highlightCode() {
+            if (typeof hljs === 'undefined') return;
+            document.querySelectorAll('.code-block code').forEach(function(block) {
+                if (block.dataset.highlighted) return;
+                var lang = block.closest('.code-block')?.getAttribute('data-lang');
+                if (lang) {
+                    // Normalize lang names
+                    var langMap = { 'golang': 'go', 'py': 'python', 'javascript': 'js', 'sh': 'bash', 'shell': 'bash' };
+                    lang = langMap[lang] || lang;
+                    block.className = 'language-' + lang;
+                }
+                hljs.highlightElement(block);
+            });
+        }
+
+        // ── Sidebar auto-collapse ─────────────────
+        function collapseSidebarSections() {
+            var path = window.location.pathname;
+            var activeType = '';
+            if (path.startsWith('/problem/')) activeType = 'problem';
+            else if (path.startsWith('/fund/')) activeType = 'fundamental';
+            else if (path.startsWith('/algo/')) activeType = 'algorithm';
+            else if (path.startsWith('/pattern/')) activeType = 'pattern';
+
+            document.querySelectorAll('.sidebar-section').forEach(function(section) {
+                var type = section.getAttribute('data-section-type');
+                if (!type) return;
+                if (activeType && type !== activeType) {
+                    section.classList.add('collapsed');
+                } else {
+                    section.classList.remove('collapsed');
+                }
+            });
+        }
+
+        // ── Stage Nav auto-highlight ─────────────
+        var stageObserver = null;
+        function initStageNav() {
+            if (stageObserver) { stageObserver.disconnect(); stageObserver = null; }
+            var navItems = document.querySelectorAll('.stage-nav-item');
+            if (!navItems.length) return;
+            var phases = document.querySelectorAll('.phase-header[id]');
+            if (!phases.length) return;
+
+            // Map phase id → nav item
+            var idToNav = {};
+            navItems.forEach(function(item) {
+                var href = item.getAttribute('href') || '';
+                if (href.startsWith('#')) idToNav[href.slice(1)] = item;
+            });
+
+            var currentActive = null;
+            stageObserver = new IntersectionObserver(function(entries) {
+                // Find the topmost visible phase header
+                var visible = [];
+                entries.forEach(function(entry) {
+                    if (entry.isIntersecting) visible.push(entry);
+                });
+                if (!visible.length) return;
+                // Pick the one closest to top
+                visible.sort(function(a, b) {
+                    return a.boundingClientRect.top - b.boundingClientRect.top;
+                });
+                var id = visible[0].target.id;
+                if (currentActive === id) return;
+                currentActive = id;
+                navItems.forEach(function(n) { n.classList.remove('active'); });
+                if (idToNav[id]) {
+                    idToNav[id].classList.add('active');
+                    // Scroll nav item into view
+                    idToNav[id].scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+                }
+            }, {
+                root: book.active ? document.querySelector('.book-viewport') : document.getElementById('detail'),
+                rootMargin: '-10% 0px -70% 0px',
+                threshold: 0
+            });
+
+            phases.forEach(function(ph) { stageObserver.observe(ph); });
+
+            // Also track scroll for non-intersection fallback
+            var scrollRoot = book.active ? document.querySelector('.book-viewport') : document.getElementById('detail');
+            if (scrollRoot) {
+                scrollRoot.addEventListener('scroll', function() {
+                    // Re-check which phase header is nearest top
+                    var best = null;
+                    var bestDist = Infinity;
+                    phases.forEach(function(ph) {
+                        var rect = ph.getBoundingClientRect();
+                        var dist = Math.abs(rect.top - 80);
+                        if (rect.top <= 120 && dist < bestDist) {
+                            bestDist = dist;
+                            best = ph;
+                        }
+                    });
+                    if (best && best.id !== currentActive) {
+                        currentActive = best.id;
+                        navItems.forEach(function(n) { n.classList.remove('active'); });
+                        if (idToNav[best.id]) {
+                            idToNav[best.id].classList.add('active');
+                            idToNav[best.id].scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+                        }
+                    }
+                }, { passive: true });
+            }
+        }
+
+        // ── Section anchor IDs and permalink links ──
+        function initSectionAnchors() {
+            var detail = document.getElementById('detail');
+            if (!detail) return;
+
+            // Get the current phase prefix for context (e.g., from problem slug)
+            var slug = window.location.pathname.split('/').filter(Boolean).pop() || '';
+
+            // Process phase headers — they already have IDs, just add anchor links
+            detail.querySelectorAll('.phase-header[id]').forEach(function(ph) {
+                if (ph.querySelector('.section-anchor')) return; // already processed
+                var id = ph.id;
+                var anchor = document.createElement('a');
+                anchor.className = 'section-anchor';
+                anchor.href = '#' + id;
+                anchor.textContent = '#';
+                anchor.title = 'Copy link to this section';
+                anchor.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    history.replaceState(null, '', '#' + id);
+                    ph.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    navigator.clipboard && navigator.clipboard.writeText(window.location.href);
+                });
+                // Add ID badge
+                var badge = document.createElement('span');
+                badge.className = 'section-id-badge';
+                badge.textContent = id;
+                ph.appendChild(anchor);
+                ph.appendChild(badge);
+            });
+
+            // Process h3 subsection headers — generate unique IDs
+            var h3Counter = {};
+            detail.querySelectorAll('h3').forEach(function(h3) {
+                if (h3.id && h3.querySelector('.section-anchor')) return; // already processed
+
+                // Find parent phase for context
+                var prevPhase = null;
+                var el = h3.previousElementSibling;
+                while (el) {
+                    if (el.classList && el.classList.contains('phase-header')) { prevPhase = el; break; }
+                    el = el.previousElementSibling;
+                }
+                // Walk up and backwards more broadly
+                if (!prevPhase) {
+                    var walker = h3;
+                    while (walker) {
+                        if (walker.classList && walker.classList.contains('phase-header')) { prevPhase = walker; break; }
+                        walker = walker.previousElementSibling || (walker.parentElement !== detail ? walker.parentElement : null);
+                    }
+                }
+
+                var phasePrefix = prevPhase ? prevPhase.id : 'sec';
+                var text = h3.textContent.trim().toLowerCase()
+                    .replace(/[^a-z0-9\s-]/g, '')
+                    .replace(/\s+/g, '-')
+                    .substring(0, 40);
+                var baseId = phasePrefix + '--' + text;
+
+                // Ensure uniqueness
+                if (h3Counter[baseId]) {
+                    h3Counter[baseId]++;
+                    baseId += '-' + h3Counter[baseId];
+                } else {
+                    h3Counter[baseId] = 1;
+                }
+
+                h3.id = baseId;
+                h3.style.scrollMarginTop = '80px';
+
+                var anchor = document.createElement('a');
+                anchor.className = 'section-anchor';
+                anchor.href = '#' + baseId;
+                anchor.textContent = '#';
+                anchor.title = 'Copy link to this section';
+                anchor.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    history.replaceState(null, '', '#' + baseId);
+                    h3.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    navigator.clipboard && navigator.clipboard.writeText(window.location.href);
+                });
+
+                var badge = document.createElement('span');
+                badge.className = 'section-id-badge';
+                badge.textContent = baseId;
+                h3.appendChild(anchor);
+                h3.appendChild(badge);
+            });
+        }
+
+        // ── HTMX swap handler ─────────────────────
+        document.addEventListener('htmx:afterSwap', function(e) {
+            if (e.detail.target.id === 'detail') {
+                trackPage();
+                highlightCode();
+                collapseSidebarSections();
+                initSectionAnchors();
+                requestAnimationFrame(function() { initBook(); initStageNav(); restoreScroll(); });
+            }
+        });
+
+        // ── Continue reading on home page ─────────
+        if (window.location.pathname === '/') {
+            var progress = loadProgress();
+            if (progress.lastPage && progress.lastPage !== '/') {
+                var welcome = document.querySelector('.welcome');
+                if (welcome) {
+                    var continueDiv = document.createElement('div');
+                    continueDiv.className = 'continue-reading';
+
+                    var link = document.createElement('a');
+                    link.setAttribute('href', progress.lastPage);
+                    link.setAttribute('hx-get', progress.lastPage);
+                    link.setAttribute('hx-target', '#detail');
+                    link.setAttribute('hx-swap', 'innerHTML');
+                    link.setAttribute('hx-push-url', 'true');
+                    link.className = 'btn btn-primary';
+                    link.textContent = 'Continue Reading \u2192';
+                    if (typeof htmx !== 'undefined') htmx.process(link);
+
+                    var hint = document.createElement('span');
+                    hint.className = 'continue-hint';
+                    hint.textContent = 'Last visited: ' + new Date(progress.lastVisited).toLocaleDateString();
+
+                    continueDiv.appendChild(link);
+                    continueDiv.appendChild(hint);
+                    welcome.insertBefore(continueDiv, welcome.querySelector('.welcome-quick'));
+                }
+            }
+        }
+
+        // ── Book Mode (wide screen pagination) ───
+        var book = { page: 0, total: 1, active: false, colW: 0, gap: 56 };
+        var BOOK_MIN_WIDTH = 1600;
+
+        function initBook() {
+            var d = document.getElementById('detail');
+            if (!d) return;
+            destroyBook();
+
+            // Don't activate for welcome page or narrow screens
+            if (window.innerWidth < BOOK_MIN_WIDTH || d.querySelector('.welcome')) return;
+
+            // Create viewport wrapper
+            var vp = document.createElement('div');
+            vp.className = 'book-viewport';
+            var inner = document.createElement('div');
+            inner.className = 'book-inner';
+
+            // Move all children into inner
+            while (d.firstChild) inner.appendChild(d.firstChild);
+            vp.appendChild(inner);
+            d.appendChild(vp);
+
+            // Create controls
+            var ctrl = document.createElement('div');
+            ctrl.className = 'book-controls';
+            ctrl.innerHTML =
+                '<button class="book-btn book-prev" title="Previous (←)">' +
+                '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>' +
+                '</button>' +
+                '<div class="book-dots" id="book-dots"></div>' +
+                '<span class="book-page-info">Page ' +
+                '<input type="number" class="book-page-input" id="book-input" min="1" value="1">' +
+                ' of <span id="book-total">1</span></span>' +
+                '<button class="book-btn book-next" title="Next (→)">' +
+                '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>' +
+                '</button>';
+            d.appendChild(ctrl);
+
+            // Wire buttons
+            ctrl.querySelector('.book-prev').onclick = function() { bookGo(book.page - 1); };
+            ctrl.querySelector('.book-next').onclick = function() { bookGo(book.page + 1); };
+            document.getElementById('book-input').onchange = function() { bookGo(parseInt(this.value, 10) - 1); };
+
+            d.classList.add('book-active');
+            book.active = true;
+            book.page = 0;
+
+            // Calculate after layout settles
+            requestAnimationFrame(function() {
+                requestAnimationFrame(calcBook);
+            });
+        }
+
+        function destroyBook() {
+            var d = document.getElementById('detail');
+            if (!d) return;
+            var vp = d.querySelector('.book-viewport');
+            var ctrl = d.querySelector('.book-controls');
+            if (vp) {
+                var inner = vp.querySelector('.book-inner');
+                var frag = document.createDocumentFragment();
+                if (inner) { while (inner.firstChild) frag.appendChild(inner.firstChild); }
+                d.insertBefore(frag, vp);
+                vp.remove();
+            }
+            if (ctrl) ctrl.remove();
+            d.classList.remove('book-active');
+            book.active = false;
+            book.page = 0;
+        }
+
+        function calcBook() {
+            var inner = document.querySelector('.book-inner');
+            if (!inner) return;
+            var vp = inner.parentElement;
+            var vpW = vp.clientWidth;
+            var vpH = vp.clientHeight;
+            if (vpW <= 0 || vpH <= 0) return;
+
+            var gap = book.gap;
+            // Account for .book-viewport padding (48px left + 48px right = 96px)
+            var availableW = vpW - 96;
+            var colW = Math.floor((availableW - gap) / 2);
+            book.colW = colW;
+
+            // ── Sentinel-based column measurement ──
+            // Remove any old sentinel
+            var old = inner.querySelector('.book-sentinel');
+            if (old) old.remove();
+
+            // Add a tiny sentinel at the very end of content
+            var sentinel = document.createElement('div');
+            sentinel.className = 'book-sentinel';
+            sentinel.style.cssText = 'height:1px;width:1px;clear:both;break-inside:avoid;';
+            inner.appendChild(sentinel);
+
+            // Step 1: Measure content height in single-column mode
+            inner.style.cssText = 'width:' + colW + 'px;height:auto;column-count:1;';
+
+            requestAnimationFrame(function() {
+                var singleH = inner.scrollHeight;
+
+                // Step 2: Estimate columns needed with generous buffer
+                // Account for phase-header break-before gaps
+                var phases = inner.querySelectorAll('.phase-header').length;
+                var breakWaste = Math.max(0, phases - 1) * (vpH * 0.5);
+                var estCols = Math.ceil((singleH + breakWaste) / vpH);
+                estCols = Math.ceil(estCols * 1.5); // 50% safety margin
+                if (estCols % 2 !== 0) estCols++;
+                estCols = Math.max(4, estCols);
+
+                // Step 3: Apply multi-column with generous width
+                var totalW = estCols * colW + (estCols - 1) * gap;
+                inner.style.cssText = 'width:' + totalW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);';
+
+                // Step 4: Wait for multi-column layout, then measure sentinel position
+                requestAnimationFrame(function() {
+                requestAnimationFrame(function() {
+                    var innerRect = inner.getBoundingClientRect();
+                    var sRect = sentinel.getBoundingClientRect();
+                    var contentRight = sRect.right - innerRect.left;
+
+                    // Debug: check if sentinel is visible
+                    var sentinelVisible = sRect.right > innerRect.left && sRect.right < innerRect.right;
+                    var sentinelX = sRect.right - window.innerWidth / 2; // relative to screen center
+
+                    // Actual columns from sentinel position
+                    // contentRight position / column unit width (colW + gap)
+                    var actualCols = Math.max(2, Math.ceil(contentRight / (colW + gap)));
+                    if (actualCols % 2 !== 0) actualCols++;
+
+                    // Set final width to exactly fit
+                    var finalW = actualCols * colW + (actualCols - 1) * gap;
+                    inner.style.cssText = 'width:' + finalW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);transition:transform 0.45s cubic-bezier(0.16,1,0.3,1);';
+
+                    // Debug logging
+                    console.log('Book calc:', {
+                        vpW: vpW,
+                        vpH: vpH,
+                        colW: colW,
+                        singleH: singleH,
+                        estCols: estCols,
+                        innerRect: {left: Math.round(innerRect.left), right: Math.round(innerRect.right), width: Math.round(innerRect.width)},
+                        sRect: {left: Math.round(sRect.left), right: Math.round(sRect.right)},
+                        contentRight: Math.round(contentRight),
+                        sentinelVisible: sentinelVisible,
+                        actualCols: actualCols,
+                        'book.total': Math.max(1, actualCols / 2),
+                        finalW: finalW
+                    });
+
+                    book.total = Math.max(1, actualCols / 2);
+                    updateBookUI();
+                    bookGo(Math.min(book.page, book.total - 1));
+                });
+                });
+            });
+        }
+
+        function updateBookUI() {
+            var totalEl = document.getElementById('book-total');
+            var inputEl = document.getElementById('book-input');
+            if (totalEl) totalEl.textContent = book.total;
+            if (inputEl) inputEl.max = book.total;
+
+            // Build dots (max 15)
+            var dotsEl = document.getElementById('book-dots');
+            if (dotsEl) {
+                dotsEl.innerHTML = '';
+                if (book.total <= 15) {
+                    for (var i = 0; i < book.total; i++) {
+                        var dot = document.createElement('span');
+                        dot.className = 'book-dot' + (i === book.page ? ' active' : '');
+                        dot.dataset.page = i;
+                        dot.onclick = function() { bookGo(parseInt(this.dataset.page)); };
+                        dot.style.cursor = 'pointer';
+                        dotsEl.appendChild(dot);
+                    }
+                }
+            }
+        }
+
+        function bookGo(p) {
+            if (p < 0) p = 0;
+            if (p >= book.total) p = book.total - 1;
+            book.page = p;
+
+            var inner = document.querySelector('.book-inner');
+            if (!inner) return;
+
+            // Each spread = 2 columns. Offset = spreadIndex * (2*colW + 2*gap)
+            // But actually: spread N starts at column 2N
+            // Column position = colIndex * (colW + gap)
+            // Spread N starts at column 2N, position = 2N * (colW + gap)
+            var offset = p * 2 * (book.colW + book.gap);
+            inner.style.transform = 'translateX(-' + offset + 'px)';
+
+            // Update input
+            var inputEl = document.getElementById('book-input');
+            if (inputEl) inputEl.value = p + 1;
+
+            // Update dots
+            document.querySelectorAll('.book-dot').forEach(function(dot, i) {
+                dot.classList.toggle('active', i === p);
+            });
+
+            // Update button states
+            var prev = document.querySelector('.book-prev');
+            var next = document.querySelector('.book-next');
+            if (prev) prev.disabled = p === 0;
+            if (next) next.disabled = p >= book.total - 1;
+        }
+
+        // Keyboard navigation
+        document.addEventListener('keydown', function(e) {
+            if (!book.active) return;
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+            if (e.key === 'ArrowRight' || e.key === 'PageDown') { e.preventDefault(); bookGo(book.page + 1); }
+            if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); bookGo(book.page - 1); }
+            if (e.key === 'Home') { e.preventDefault(); bookGo(0); }
+            if (e.key === 'End') { e.preventDefault(); bookGo(book.total - 1); }
+        });
+
+        // Mouse wheel page turn in book mode
+        (function() {
+            var wheelTimeout;
+            var d = document.getElementById('detail');
+            if (d) {
+                d.addEventListener('wheel', function(e) {
+                    if (!book.active) return;
+                    // Allow scrolling in overflow containers (code blocks, tables, diagrams)
+                    var t = e.target;
+                    while (t && t !== d) {
+                        if (t.scrollHeight > t.clientHeight || t.scrollWidth > t.clientWidth) {
+                            var style = window.getComputedStyle(t);
+                            if (style.overflow === 'auto' || style.overflow === 'scroll' ||
+                                style.overflowY === 'auto' || style.overflowY === 'scroll' ||
+                                style.overflowX === 'auto' || style.overflowX === 'scroll') return;
+                        }
+                        t = t.parentElement;
+                    }
+                    e.preventDefault();
+                    clearTimeout(wheelTimeout);
+                    wheelTimeout = setTimeout(function() {
+                        if (e.deltaY > 0) bookGo(book.page + 1);
+                        else if (e.deltaY < 0) bookGo(book.page - 1);
+                    }, 80);
+                }, { passive: false });
+            }
+        })();
+
+        // Recalculate on resize
+        var resizeTimeout;
+        window.addEventListener('resize', function() {
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(function() {
+                if (window.innerWidth >= BOOK_MIN_WIDTH && !book.active) initBook();
+                else if (window.innerWidth < BOOK_MIN_WIDTH && book.active) destroyBook();
+                else if (book.active) calcBook();
+            }, 200);
+        });
+
+        // ── Initial setup ─────────────────────────
+        trackPage();
+        collapseSidebarSections();
+        initSectionAnchors();
+        // Delay highlight until hljs loads
+        if (typeof hljs !== 'undefined') {
+            highlightCode();
+        } else {
+            window.addEventListener('load', highlightCode);
+        }
+        // Init book mode + stage nav after content is rendered
+        requestAnimationFrame(function() { initBook(); initStageNav(); restoreScroll(); });
+    })();
+    </script>
+</body>
+</html>{{end}}
