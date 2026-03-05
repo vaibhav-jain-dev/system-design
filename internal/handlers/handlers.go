@@ -216,13 +216,13 @@ func (h *Handler) renderContent(contentPath string) template.HTML {
 	tmpl, err := template.New("content").Funcs(h.funcMap).Parse(string(data))
 	if err != nil {
 		log.Printf("Content template parse error in %s: %v", filePath, err)
-		return template.HTML(`<div class="content-error">Template error: ` + err.Error() + `</div>`)
+		return template.HTML(`<div class="content-error">Template error: ` + template.HTMLEscapeString(err.Error()) + `</div>`)
 	}
 
 	var sb strings.Builder
 	if err := tmpl.Execute(&sb, nil); err != nil {
 		log.Printf("Content template exec error in %s: %v", filePath, err)
-		return template.HTML(`<div class="content-error">Render error: ` + err.Error() + `</div>`)
+		return template.HTML(`<div class="content-error">Render error: ` + template.HTMLEscapeString(err.Error()) + `</div>`)
 	}
 
 	return template.HTML(sb.String())
