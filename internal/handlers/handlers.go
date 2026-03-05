@@ -35,6 +35,7 @@ func New(reg *registry.Registry, templateFS, contentFS fs.FS, funcMap template.F
 			"web/templates/context_card.html",
 			"web/templates/doc_card.html",
 			"web/templates/detail_concept.html",
+			"web/templates/detail_quick.html",
 		))
 
 	return &Handler{
@@ -72,13 +73,14 @@ func countChildFundamentals(children []registry.Fundamental) int {
 // baseData returns common template data shared by all handlers.
 func (h *Handler) baseData() map[string]interface{} {
 	return map[string]interface{}{
-		"Problems":             h.reg.Problems,
-		"Fundamentals":         h.reg.Fundamentals,
-		"FundamentalGroups":    h.reg.GroupedFundamentals(),
-		"Algorithms":           h.reg.Algorithms,
-		"Patterns":             h.reg.Patterns,
-		"Concepts":             h.reg.Concepts,
-		"TotalFundamentals":    countFundamentals(h.reg.Fundamentals),
+		"Problems":          h.reg.Problems,
+		"Fundamentals":      h.reg.Fundamentals,
+		"FundamentalGroups": h.reg.GroupedFundamentals(),
+		"Algorithms":        h.reg.Algorithms,
+		"Patterns":          h.reg.Patterns,
+		"Concepts":          h.reg.Concepts,
+		"QuickCategories":   h.reg.QuickCategories,
+		"TotalFundamentals": countFundamentals(h.reg.Fundamentals),
 	}
 }
 
@@ -321,6 +323,34 @@ func (h *Handler) ConceptDetail(w http.ResponseWriter, r *http.Request) {
 
 	if isHTMX(r) {
 		if err := h.templates.ExecuteTemplate(w, "detail_concept.html", data); err != nil {
+			log.Printf("Template error: %v", err)
+			http.Error(w, "Internal error", 500)
+		}
+		return
+	}
+
+	if err := h.templates.ExecuteTemplate(w, "base.html", data); err != nil {
+		log.Printf("Template error: %v", err)
+		http.Error(w, "Internal error", 500)
+	}
+}
+
+// QuickCategoryDetail renders a quick-answer category page.
+func (h *Handler) QuickCategoryDetail(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	cat := h.reg.GetQuickCategory(slug)
+	if cat == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	data := h.baseData()
+	data["QuickCategory"] = cat
+	data["ActiveSlug"] = "quick-" + slug
+	data["PageType"] = "quick"
+
+	if isHTMX(r) {
+		if err := h.templates.ExecuteTemplate(w, "detail_quick.html", data); err != nil {
 			log.Printf("Template error: %v", err)
 			http.Error(w, "Internal error", 500)
 		}

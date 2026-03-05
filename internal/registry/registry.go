@@ -80,6 +80,30 @@ type Pattern struct {
 	Path        string `yaml:"path"`
 }
 
+// QuickQuestion is a short interview Q&A (question + what you need to say).
+type QuickQuestion struct {
+	Number   int    `yaml:"number"`
+	Question string `yaml:"question"`
+	Needed   string `yaml:"needed"`
+
+	// Optional cross-references (slugs)
+	RelatedProblems     []string `yaml:"related_problems"`
+	RelatedFundamentals []string `yaml:"related_fundamentals"`
+
+	// Resolved references (populated after load)
+	RelatedProblemRefs     []*Problem     `yaml:"-"`
+	RelatedFundamentalRefs []*Fundamental `yaml:"-"`
+}
+
+// QuickCategory groups related quick questions under a topic.
+type QuickCategory struct {
+	Slug        string          `yaml:"slug"`
+	Title       string          `yaml:"title"`
+	Description string          `yaml:"description"`
+	NumberRange string          `yaml:"number_range"`
+	Questions   []QuickQuestion `yaml:"questions"`
+}
+
 // ConceptAppearance records where a concept appears (section-level granularity).
 type ConceptAppearance struct {
 	Type    string `yaml:"type"`    // "problem", "fundamental", "algorithm", "pattern"
@@ -107,27 +131,30 @@ type ConceptCategory struct {
 }
 
 type registryFile struct {
-	Problems     []Problem         `yaml:"problems"`
-	Fundamentals []Fundamental     `yaml:"fundamentals"`
-	Algorithms   []Algorithm       `yaml:"algorithms"`
-	Patterns     []Pattern         `yaml:"patterns"`
-	Concepts     []ConceptCategory `yaml:"concepts"`
+	Problems        []Problem        `yaml:"problems"`
+	Fundamentals    []Fundamental    `yaml:"fundamentals"`
+	Algorithms      []Algorithm      `yaml:"algorithms"`
+	Patterns        []Pattern        `yaml:"patterns"`
+	Concepts        []ConceptCategory `yaml:"concepts"`
+	QuickCategories []QuickCategory  `yaml:"quick_categories"`
 }
 
 // Registry holds the loaded knowledge graph.
 type Registry struct {
-	Problems     []*Problem
-	Fundamentals []*Fundamental
-	Algorithms   []*Algorithm
-	Patterns     []*Pattern
-	Concepts     []*ConceptCategory
+	Problems        []*Problem
+	Fundamentals    []*Fundamental
+	Algorithms      []*Algorithm
+	Patterns        []*Pattern
+	Concepts        []*ConceptCategory
+	QuickCategories []*QuickCategory
 
-	problemsBySlug       map[string]*Problem
-	fundamentalsBySlug   map[string]*Fundamental
-	fundamentalAncestors map[string][]*Fundamental
-	algorithmsBySlug     map[string]*Algorithm
-	patternsBySlug       map[string]*Pattern
-	conceptsBySlug       map[string]*Concept
+	problemsBySlug        map[string]*Problem
+	fundamentalsBySlug    map[string]*Fundamental
+	fundamentalAncestors  map[string][]*Fundamental
+	algorithmsBySlug      map[string]*Algorithm
+	patternsBySlug        map[string]*Pattern
+	conceptsBySlug        map[string]*Concept
+	quickCategoriesBySlug map[string]*QuickCategory
 }
 
 // Load parses _registry.yaml and builds the knowledge graph with reverse links.
@@ -143,12 +170,13 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 	}
 
 	reg := &Registry{
-		problemsBySlug:       make(map[string]*Problem),
-		fundamentalsBySlug:   make(map[string]*Fundamental),
-		fundamentalAncestors: make(map[string][]*Fundamental),
-		algorithmsBySlug:     make(map[string]*Algorithm),
-		patternsBySlug:       make(map[string]*Pattern),
-		conceptsBySlug:       make(map[string]*Concept),
+		problemsBySlug:        make(map[string]*Problem),
+		fundamentalsBySlug:    make(map[string]*Fundamental),
+		fundamentalAncestors:  make(map[string][]*Fundamental),
+		algorithmsBySlug:      make(map[string]*Algorithm),
+		patternsBySlug:        make(map[string]*Pattern),
+		conceptsBySlug:        make(map[string]*Concept),
+		quickCategoriesBySlug: make(map[string]*QuickCategory),
 	}
 
 	// Index fundamentals (including children)
@@ -262,6 +290,26 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 		}
 	}
 
+	// Index quick categories and resolve cross-references
+	for i := range raw.QuickCategories {
+		cat := &raw.QuickCategories[i]
+		reg.QuickCategories = append(reg.QuickCategories, cat)
+		reg.quickCategoriesBySlug[cat.Slug] = cat
+		for j := range cat.Questions {
+			q := &cat.Questions[j]
+			for _, pSlug := range q.RelatedProblems {
+				if p := reg.problemsBySlug[pSlug]; p != nil {
+					q.RelatedProblemRefs = append(q.RelatedProblemRefs, p)
+				}
+			}
+			for _, fSlug := range q.RelatedFundamentals {
+				if f := reg.fundamentalsBySlug[fSlug]; f != nil {
+					q.RelatedFundamentalRefs = append(q.RelatedFundamentalRefs, f)
+				}
+			}
+		}
+	}
+
 	return reg, nil
 }
 
@@ -322,6 +370,11 @@ func (r *Registry) GetPattern(slug string) *Pattern {
 // GetConcept returns a concept by slug.
 func (r *Registry) GetConcept(slug string) *Concept {
 	return r.conceptsBySlug[slug]
+}
+
+// GetQuickCategory returns a quick category by slug.
+func (r *Registry) GetQuickCategory(slug string) *QuickCategory {
+	return r.quickCategoriesBySlug[slug]
 }
 
 // FundamentalGroup groups top-level fundamentals under a category name
