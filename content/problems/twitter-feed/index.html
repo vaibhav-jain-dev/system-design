@@ -1,0 +1,583 @@
+{{stageNav "Requirements & Problem Scope" 1 "Capacity Estimation" 2 "API Design" 3 "Fan-out Strategies" 4 "System Architecture" 5 "Timeline Generation & Caching" 6 "Data Model" 7 "Celebrity Problem" 8 "Feed Ranking Algorithm" 9 "Trending Topics & Search" 10 "Scaling & Failure Modes" 11 "Interview Deep-Dive Q&A" 12}}
+
+{{phase 1 "Requirements & Problem Scope" "5 min"}}
+
+{{say "I'll design the Twitter home feed — the core product experience. Let me clarify scope before diving in. Are we designing tweet posting and the home timeline, or also search, notifications, and DMs? I'll assume home feed is the primary focus: users post tweets, follow others, and see a timeline of followed accounts' tweets. I'll include trending topics and feed ranking as secondary scope."}}
+
+{{diagram "tf-requirements"}}
+
+{{think "The hardest part of this problem is the fanout strategy — how writes propagate to followers. This is the crux of the interview."
+  (whyNot "naive read-time fan-out for all users" "A user with 1000 follows triggers 1000 DB reads per timeline request. At 300M DAU each loading feed 10x/day = 3T reads/day. DB melts.")
+  (whatIf "we just cache everything in Redis" "Memory cost is real: 500M users × 800 tweets × 8 bytes/tweet_id = 3.2TB RAM. Feasible with a Redis cluster but you need a hybrid strategy to avoid wasting cache on inactive users.")
+}}
+
+{{hint "scope the write vs read ratio" "Twitter is extremely read-heavy: 28B feed reads/day vs 500K tweets/min writes (~720M/day). That's ~40:1 reads to writes. This ratio drives the fanout-on-write default."}}
+
+{{triggerQs "Phase 1 interview triggers"
+  "Do we need to support chronological AND algorithmic ranking?"
+  "Start with chronological for simplicity. Algorithmic ranking is a ranking layer on top — same underlying tweet storage. I'll design for both and add the ML ranking step at read time."
+  "How fresh does the feed need to be?"
+  "Within 5-10 seconds for non-celebrity accounts. Celebrity tweets can lag up to 30 seconds due to the hybrid strategy. Users polling every 30s as fallback, SSE for real-time push."
+}}
+
+{{phase 2 "Capacity Estimation" "3 min"}}
+
+{{say "Let me run numbers quickly to validate the architecture. 500M registered users, 300M DAU. 500K tweets per minute — that's about 8,300 writes per second. Each tweet is roughly 200 bytes for text plus metadata. Tweet storage: 8,300 × 200 bytes = 1.6 MB/s, about 50 GB/day, 18 TB/year. Read traffic: 28B reads/day, roughly 325K reads per second at peak. Timeline delivery target: under 200ms P99."}}
+
+{{diagram "tf-architecture"}}
+
+{{table "Scale Numbers" (rows
+  (row "Metric" "Value" "Notes")
+  (row "Registered users" "500M" "")
+  (row "DAU" "300M" "60% of registered")
+  (row "Tweet writes" "500K/min = 8.3K/s" "Peak 2–3× = ~25K/s")
+  (row "Tweet reads" "28B/day = 325K/s" "40:1 read/write ratio")
+  (row "Avg follows per user" "200" "Long tail: 0–150M")
+  (row "Timeline cache per user" "800 tweet IDs × 8B = 6.4KB" "Redis sorted set")
+  (row "Total timeline RAM" "300M × 6.4KB = 1.9TB" "Active users only")
+  (row "Tweet storage" "50GB/day → 18TB/year" "Cassandra, 3× replication = 54TB")
+)}}
+
+{{hint "why 800 tweets cap" "800 is Twitter's actual internal cap. Users rarely scroll more than 200 tweets. Capping prevents runaway memory growth and keeps ZADD/ZRANGE O(log N) fast."}}
+
+{{phase 3 "API Design" "5 min"}}
+
+{{say "Three core API surfaces: tweet creation, home timeline fetch, and real-time delivery. I'll design REST for tweet CRUD and timeline reads, with SSE for push notifications of new tweets."}}
+
+{{diagram "tf-api-design"}}
+
+{{code "http" `# Post a tweet
+POST /v1/tweets
+Authorization: Bearer {token}
+Body: { "text": "...", "media_ids": [], "reply_to": null }
+Response 201: { "tweet_id": "1234567890", "created_at": "..." }
+
+# Get home timeline
+GET /v1/timeline/home?cursor={tweet_id}&limit=20
+Authorization: Bearer {token}
+Response 200: {
+  "tweets": [ { "tweet_id": "...", "author": {...}, "text": "...", "likes": 42 } ],
+  "next_cursor": "...",
+  "has_more": true
+}
+
+# Real-time new tweet stream
+GET /v1/timeline/stream
+Accept: text/event-stream
+Authorization: Bearer {token}
+# SSE events: data: { "tweet_id": "...", "author_id": "...", "text": "..." }
+
+# Get tweet
+GET /v1/tweets/{tweet_id}
+
+# Like a tweet
+POST /v1/tweets/{tweet_id}/likes
+
+# Follow a user
+POST /v1/users/{user_id}/follow`}}
+
+{{hint "cursor-based pagination" "Use tweet_id (Snowflake, time-sortable) as cursor, not offset. Offset breaks when new tweets insert at page 0. tweet_id cursors are stable: ZRANGEBYSCORE user:{id}:timeline (−∞, cursor_id) LIMIT 20."}}
+
+{{hint "SSE over WebSocket for feed" "SSE is unidirectional server→client, stateless, auto-reconnects, works over HTTP/2 multiplexing. WebSocket is bidirectional — overkill for feed delivery. Use WebSocket only for DMs."}}
+
+{{triggerQs "Phase 3 interview triggers"
+  "How do you handle tweet media (images, video)?"
+  "Media upload is a separate flow: POST /v1/media returns a media_id, then tweet creation references media_ids. The tweet object stores media_ids; the CDN URL is generated at read time. Media bytes never flow through the tweet API."
+  "How do you implement the cursor for the hybrid celebrity timeline?"
+  "The cursor is the lowest tweet_id in the last page. At read time, the merge function uses this as the starting point: scan the pre-computed timeline cache from cursor backward, then merge-in celebrity tweets above the cursor. The merged result is re-sorted by timestamp before slicing."
+}}
+
+{{phase 4 "Fan-out Strategies" "10 min"}}
+
+{{say "This is the core design challenge. I'll walk through three strategies and land on a hybrid. Fanout-on-write pushes tweet IDs to every follower's timeline cache at write time. Fanout-on-read generates the timeline dynamically at request time. The hybrid applies each strategy based on the follower count of the tweet's author."}}
+
+{{diagram "tf-fanout-strategies"}}
+
+{{compare "Fanout Strategy" (options
+  (best "Hybrid: write for < 50K followers, read for celebrities" "Optimal cost/latency trade-off. Hot users don't pay 100M write amplification per tweet. Normal users get instant pre-computed timelines.")
+  (alt "Fanout-on-write for all" "Simple. Fast reads. Breaks for celebrities: Elon Musk tweet = 150M Redis writes in seconds. Write queue backs up, timeline delivery lags for all users.")
+  (nofit "Fanout-on-read for all" "Zero write amplification. But timeline generation requires fetching tweets from 1000 followed accounts, sorting in memory, paginating. 1000 DB reads per timeline load. 325K RPS × 1000 = 325M DB reads/s. Impossible.")
+)}}
+
+{{think "The threshold of 50K followers is empirical, not algorithmic. Twitter's actual threshold is closer to this range."
+  (whyNot "use 1M as the celebrity threshold" "At 1M followers, fanout-on-write still costs 1M Redis writes per tweet. A verified account with 1M followers tweeting once per minute = 1M writes/min from one user alone. The threshold needs to keep aggregate write amplification bounded.")
+  (whatIf "a user crosses the 50K threshold mid-fanout" "The follower service maintains a follower_count field. When a fanout job starts, it reads the author's current follower_count. If > 50K, it skips fanout and marks the tweet as celebrity-mode. Race conditions are benign: a tweet might get partial fanout, and the read-time merge catches the gap.")
+}}
+
+{{code "python" `# Fanout worker (runs asynchronously after tweet is stored)
+def fanout_tweet(tweet_id: str, author_id: str, timestamp: float):
+    author = user_service.get(author_id)
+
+    if author.follower_count > 50_000:
+        # Celebrity: skip fanout, will be merged at read time
+        celebrity_set.add(author_id)
+        return
+
+    # Normal user: push tweet_id to all followers' timeline caches
+    follower_ids = follower_service.get_followers(author_id)  # paginated
+    pipeline = redis.pipeline()
+    for follower_id in follower_ids:
+        key = f"user:{follower_id}:timeline"
+        pipeline.zadd(key, {tweet_id: timestamp})
+        # Cap at 800 most recent tweets
+        pipeline.zremrangebyrank(key, 0, -801)
+    pipeline.execute()
+
+# Scheduled in batches of 1000 followers, spread over multiple workers`}}
+
+{{hint "Redis pipeline for fanout" "Without pipelining, 200 followers × 2 commands = 400 round-trips at 0.1ms each = 40ms. With pipeline, all 400 commands flush in one round-trip = <1ms. Critical for keeping fanout latency under 1 second for normal users."}}
+
+{{hint "why cap at 800 not more" "User behavior data: 95th percentile scroll depth is < 200 tweets per session. 800 provides 4× buffer for scroll-happy users. Each additional 100 tweets = 6.4KB more RAM per user × 300M users = 1.9TB incremental. Cap is a cost decision, not a correctness one."}}
+
+{{triggerQs "Phase 4 interview triggers"
+  "What happens to a follower's timeline when they come online after a week offline?"
+  "Their timeline cache likely has the top 800 tweets that were fanned out. For celebrities they follow, the read-time merge adds recent celebrity tweets on top. If the cache is cold (evicted), the timeline service falls back to a cold-start query: fetch the 20 most recent users the person follows, union their tweets from Cassandra, sort, cache the result."
+  "How do you handle the fanout queue backing up during a viral event?"
+  "The fanout workers consume from a Kafka topic partitioned by author_id. During viral spikes, the queue depth grows but workers process at a steady rate — 100K fanout writes/s is sustainable with a Redis cluster. The tweet is immediately visible to anyone who directly visits the author's profile (tweets by user query). Timeline delivery just lags behind by seconds to minutes depending on queue depth."
+}}
+
+{{phase 5 "System Architecture" "8 min"}}
+
+{{say "Let me map the full request flow. Write path: client posts tweet → Tweet Service → stores in Cassandra → publishes to Kafka → Fanout Service consumes and writes to Redis timelines. Read path: client requests timeline → Timeline Service → reads Redis sorted set → fetches tweet objects from Cassandra → merges celebrity tweets → returns ranked list."}}
+
+{{diagram "tf-architecture"}}
+
+{{think "The separation of Tweet Service (write) from Timeline Service (read) is critical for independent scaling."
+  (whyNot "combine tweet storage and timeline generation in one service" "Tweet writes are 8K/s, timeline reads are 325K/s — 40× asymmetry. A combined service would need 40× the replicas for reads, making the write path unnecessarily replicated. Separate services let you scale each dimension independently.")
+  (whatIf "Kafka falls behind and fanout is delayed 30 seconds" "Users see their timeline as it was 30 seconds ago. This is acceptable per our 30s freshness SLA. The tweet is still stored in Cassandra and visible on the author's profile page immediately. Kafka consumer lag monitoring alerts at > 10s lag so we can scale up fanout workers.")
+}}
+
+{{hint "Cassandra for tweet storage" "Tweets are append-only writes keyed by (user_id, tweet_id). Cassandra's LSM-tree handles sequential writes extremely well. Reads are by user_id + time range — exactly the partition key + clustering key pattern Cassandra optimizes for. No joins needed."}}
+
+{{triggerQs "Phase 5 interview triggers"
+  "Why Kafka between Tweet Service and Fanout Service? Why not call Fanout directly?"
+  "Fanout for a tweet with 200 followers takes ~10ms in Redis. Fanout for a user with 50K followers takes ~500ms. If Tweet Service called Fanout synchronously, tweet creation would block for half a second. Kafka decouples the write: tweet is committed in < 5ms, fanout happens asynchronously. Also, multiple consumers can process the same tweet event — fanout, search indexing, notification service, analytics all read the same Kafka topic."
+  "How do you handle retweets in the fanout model?"
+  "A retweet creates a new tweet object with a reference_tweet_id. The fanout logic is identical — the retweet's tweet_id gets pushed to the retweeter's followers' timelines. At read time, the Timeline Service fetches the reference tweet to render the full retweet card. Storage cost: one additional row in Cassandra per retweet. No media duplication."
+}}
+
+{{phase 6 "Timeline Generation & Caching" "8 min"}}
+
+{{say "The timeline read path has two sub-cases: warm cache (user has a pre-computed Redis sorted set) and cold start (cache miss or first load). For warm cache, we fetch tweet IDs from Redis, hydrate from Cassandra, merge celebrity tweets, and optionally re-rank. For cold start, we reconstruct from Cassandra and seed the cache."}}
+
+{{diagram "tf-timeline-generation"}}
+
+{{code "python" `# Timeline Service: read path
+def get_home_timeline(user_id: str, cursor: str = None, limit: int = 20):
+    timeline_key = f"user:{user_id}:timeline"
+
+    # 1. Fetch pre-computed tweet IDs from Redis (fanout-on-write results)
+    if cursor:
+        # Cursor is a tweet_id (Snowflake, sortable by timestamp)
+        tweet_ids = redis.zrangebyscore(
+            timeline_key, "-inf", cursor,
+            start=0, num=limit + 50,  # fetch extra to account for celebrity merge
+            withscores=False
+        )
+    else:
+        tweet_ids = redis.zrevrange(timeline_key, 0, limit + 49)
+
+    # 2. Merge celebrity tweets at read time
+    celebrity_ids = follow_service.get_celebrity_follows(user_id)
+    celebrity_tweets = []
+    for celeb_id in celebrity_ids:
+        # Fetch last 50 tweets from each celebrity
+        celeb_tweets = cassandra.query(
+            "SELECT tweet_id, created_at FROM tweets WHERE user_id=? ORDER BY tweet_id DESC LIMIT 50",
+            celeb_id
+        )
+        celebrity_tweets.extend(celeb_tweets)
+
+    # 3. Sorted merge: O(N log K) where K = number of celebrities followed
+    all_ids = sorted(
+        set(tweet_ids) | {t.tweet_id for t in celebrity_tweets},
+        key=lambda tid: snowflake_timestamp(tid),
+        reverse=True
+    )[:limit]
+
+    # 4. Hydrate tweet objects (multi-get from Cassandra or tweet cache)
+    tweets = tweet_service.mget(all_ids)
+
+    # 5. Cache miss: seed timeline from Cassandra
+    if not tweet_ids:
+        seed_timeline_cache(user_id)
+
+    return tweets
+
+
+def seed_timeline_cache(user_id: str):
+    follows = follow_service.get_follows(user_id, exclude_celebrities=True)
+    pipeline = redis.pipeline()
+    for followed_id in follows:
+        recent = cassandra.query(
+            "SELECT tweet_id, created_at FROM tweets WHERE user_id=? ORDER BY tweet_id DESC LIMIT 20",
+            followed_id
+        )
+        for tweet in recent:
+            pipeline.zadd(f"user:{user_id}:timeline",
+                         {tweet.tweet_id: tweet.created_at.timestamp()})
+    pipeline.zremrangebyrank(f"user:{user_id}:timeline", 0, -801)
+    pipeline.execute()`}}
+
+{{hint "why sorted merge not full re-sort" "Sorted merge (heapq.merge in Python) runs in O(N log K) where K is the number of celebrity accounts. If a user follows 5 celebrities each contributing 50 tweets, that's O(250 log 5) ≈ 580 operations. A full re-sort of 250+800 items is O(1050 log 1050) ≈ 11K operations. The merge is 19× cheaper."}}
+
+{{hint "ZREMRANGEBYRANK for capping" "After ZADD, run ZREMRANGEBYRANK key 0 -801 to remove the lowest-scored element (oldest tweet) when size exceeds 800. This is O(log N + M) where M is items removed — nearly always 1. Keeps the sorted set bounded."}}
+
+{{code "redis" `# Redis timeline operations
+# Add tweet to follower's timeline
+ZADD user:12345:timeline 1709654400.0 "tweet:9876543210"
+
+# Fetch latest 20 tweets
+ZREVRANGE user:12345:timeline 0 19
+
+# Fetch 20 tweets before cursor (for pagination)
+ZRANGEBYSCORE user:12345:timeline -inf 1709654399.0 LIMIT 0 20 REV
+
+# Cap at 800: remove oldest if over limit
+ZREMRANGEBYRANK user:12345:timeline 0 -801
+
+# Check timeline size
+ZCARD user:12345:timeline`}}
+
+{{phase 7 "Data Model" "8 min"}}
+
+{{say "Four main data stores: Cassandra for tweets and user profiles, Redis for timelines and counters, follow graph in a dedicated graph store or Cassandra, and Elasticsearch for full-text search. Let me walk through each schema."}}
+
+{{diagram "tf-data-model"}}
+
+{{table "Cassandra: tweets table" (rows
+  (row "Column" "Type" "Notes")
+  (row "user_id" "UUID (partition key)" "All tweets by a user on same partition")
+  (row "tweet_id" "Snowflake ID (clustering key DESC)" "Time-sortable, uniquely identifies tweet")
+  (row "text" "TEXT" "Max 280 chars")
+  (row "media_ids" "LIST<UUID>" "CDN object keys")
+  (row "reply_to_tweet_id" "Snowflake ID" "NULL for top-level tweets")
+  (row "retweet_of" "Snowflake ID" "NULL if not a retweet")
+  (row "created_at" "TIMESTAMP" "Derived from tweet_id but stored for readability")
+  (row "like_count" "COUNTER" "Cassandra counter type — use Redis for hot path")
+  (row "retweet_count" "COUNTER" "")
+)}}
+
+{{table "Cassandra: follows table" (rows
+  (row "Column" "Type" "Notes")
+  (row "follower_id" "UUID (partition key)" "Who is following")
+  (row "followed_id" "UUID (clustering key)" "Who they follow")
+  (row "created_at" "TIMESTAMP" "When follow occurred")
+)}}
+
+{{table "Redis data structures" (rows
+  (row "Key Pattern" "Type" "Contents" "TTL")
+  (row "user:{id}:timeline" "Sorted Set" "tweet_id → timestamp, max 800" "7 days")
+  (row "tweet:{id}:likes" "String (counter)" "Like count integer" "1 hour (sync to DB)")
+  (row "tweet:{id}" "Hash" "Hydrated tweet object" "1 hour")
+  (row "trending:{window}" "Sorted Set" "hashtag → count" "1 hour rolling")
+  (row "celebrity_ids" "Set" "author_ids with >50K followers" "No TTL, updated on follow")
+)}}
+
+{{think "Like counts are a classic eventual consistency trade-off."
+  (whyNot "increment like count in Cassandra on every like" "Cassandra counter columns use LWW (last-write-wins) conflict resolution. At high like rates (viral tweet: 10K likes/second), Cassandra counter increments cause write hotspots on the tweet partition. Redis INCR is O(1), atomic, and handles 100K ops/s per key trivially.")
+  (whatIf "Redis crashes and we lose 60 seconds of like counts" "We lose at most 60 seconds of increments. For a tweet with 10K likes/s, that's a potential 600K like count drift — about 6% for a tweet with 10M likes. Acceptable. Users don't notice. We can also use Redis AOF persistence to reduce this window to seconds.")
+}}
+
+{{hint "Snowflake IDs as clustering keys" "Snowflake IDs encode timestamp in the high bits, making them sortable by time. Using tweet_id DESC as Cassandra's clustering key means the most recent tweets are physically adjacent on disk — range reads for timeline reconstruction are sequential IO, not random."}}
+
+{{phase 8 "Celebrity Problem Deep Dive" "8 min"}}
+
+{{say "Let me detail the celebrity problem specifically. When Elon Musk posts a tweet with 150M followers, fanout-on-write would require 150M Redis ZADD operations. At 100K ops/s, that's 25 minutes — completely unacceptable. The hybrid approach routes celebrity tweets to fanout-on-read, but we need to make read-time merge fast."}}
+
+{{diagram "tf-celebrity-problem"}}
+
+{{think "The celebrity problem is about write amplification, not just latency."
+  (whyNot "pre-shard the celebrity fanout across 1000 workers running in parallel" "Even at 1000 parallel workers, 150M writes in parallel generates 150M concurrent Redis connections. Redis cluster can handle ~1M ops/s across shards. 150M operations still take 2.5 minutes. The problem is total work, not parallelism. The write amplification is fundamentally unsolvable for celebrities.")
+  (whatIf "a user follows 100 celebrity accounts each with 10M+ followers" "At read time, the merge must fetch recent tweets from 100 celebrity timelines from Cassandra. 100 parallel queries × 50 tweets each = 5000 tweet IDs to merge-sort. At 1ms per Cassandra query in parallel, that's 1ms + sort time ≈ 5-10ms overhead. Acceptable. But cap celebrity fetches to 50 per merge to bound latency.")
+}}
+
+{{code "python" `# Celebrity tweet merge (read-time, called during timeline generation)
+import heapq
+
+def merge_celebrity_tweets(precomputed_ids: list, user_id: str) -> list:
+    """
+    Sorted merge of pre-computed timeline + celebrity tweets.
+    Time: O(N log K) where K = number of celebrities followed.
+    Space: O(K * batch_size) for celebrity tweet buffers.
+    """
+    celebrity_follows = celebrity_service.get_celebrity_follows(user_id)
+
+    if not celebrity_follows:
+        return precomputed_ids  # Fast path: no celebrities
+
+    # Fetch recent tweets from each celebrity (parallel Cassandra reads)
+    celebrity_batches = parallel_fetch([
+        (celeb_id, 50)  # 50 most recent per celebrity
+        for celeb_id in celebrity_follows[:50]  # cap at 50 celebrities
+    ])
+
+    # Build min-heap for sorted merge (negate timestamp for max-heap behavior)
+    heap = []
+    for batch_idx, batch in enumerate(celebrity_batches):
+        for tweet_id in batch:
+            ts = snowflake_to_timestamp(tweet_id)
+            heapq.heappush(heap, (-ts, batch_idx, tweet_id))
+
+    # Insert precomputed timeline into heap
+    for tweet_id in precomputed_ids:
+        ts = snowflake_to_timestamp(tweet_id)
+        heapq.heappush(heap, (-ts, -1, tweet_id))
+
+    # Extract in sorted order, dedup
+    merged = []
+    seen = set()
+    while heap and len(merged) < 200:
+        _, _, tweet_id = heapq.heappop(heap)
+        if tweet_id not in seen:
+            seen.add(tweet_id)
+            merged.append(tweet_id)
+
+    return merged`}}
+
+{{hint "parallel celebrity fetches" "Issue all celebrity Cassandra reads in parallel using asyncio or a thread pool. 50 parallel reads × 1ms each = 1ms total (not 50ms serial). This is the difference between 200ms P99 and 2.5s P99 for users following many celebrities."}}
+
+{{hint "celebrity_ids Redis Set" "Maintain a Redis Set of celebrity author IDs (follower_count > 50K). Updated on every follow/unfollow event via a Kafka consumer. At read time, SMEMBERS followed_ids ∩ celebrity_ids gives the celebrity intersection in O(N) where N is follows. Cheaper than querying user service for follower counts."}}
+
+{{triggerQs "Phase 8 interview triggers"
+  "What if a user transitions from normal to celebrity (50K follower threshold crossing)?"
+  "A background job periodically recalculates follower counts and updates the celebrity_ids Redis Set. When a user crosses 50K, their future tweets skip fanout. Their existing fanned-out tweet IDs remain in followers' caches (no need to remove). For followers, the read-time merge seamlessly adds new celebrity tweets going forward. No backfill needed."
+  "How do you handle a celebrity unfollowing scenario — someone unfollows Taylor Swift?"
+  "Remove followed_id from the user's follow list in the follows table. Update the follow graph cache. At next timeline load, the celebrity merge step no longer includes Taylor Swift's tweets. No need to retroactively remove her tweets from the pre-computed timeline — they will naturally scroll off as new tweets push them below the cursor. For immediate removal, delete from Redis sorted set: ZREM user:{id}:timeline tweet_ids_from_taylor. This is a background job triggered by the unfollow event."
+}}
+
+{{phase 9 "Feed Ranking Algorithm" "5 min"}}
+
+{{say "Chronological is the default and simplest. For algorithmic ranking, we score each tweet in the candidate set using engagement signals and personalization features, then re-sort the 200-tweet candidate pool before slicing the top 20 for the response."}}
+
+{{diagram "tf-ranking-algorithm"}}
+
+{{think "Ranking is a re-ranking layer on top of the retrieval layer, not a replacement."
+  (whyNot "rank at index time (pre-compute ranked positions)" "Relevance signals change: a tweet's engagement score at T+0 is different from T+24h. Pre-computing ranked positions would require re-ranking every tweet in every follower's timeline whenever any signal changes. That's write amplification of engagement events, not just tweets.")
+  (whatIf "the ranking model takes 50ms to score 200 tweets" "50ms is acceptable for algorithmic feed. Add it to the retrieval time: 10ms Redis + 5ms celebrity merge + 50ms ranking = 65ms. Well under 200ms P99. Optimize the model to run on a GPU inference server if latency becomes an issue — batch score the 200 candidates in a single forward pass.")
+}}
+
+{{table "Ranking Signals" (rows
+  (row "Signal" "Type" "Weight" "Notes")
+  (row "Tweet recency" "Time decay" "High" "Exponential decay: score × e^(−λt)")
+  (row "Like rate" "Engagement velocity" "High" "Likes per hour since posting")
+  (row "Retweet rate" "Engagement velocity" "Medium" "Social proof signal")
+  (row "Reply rate" "Engagement depth" "Medium" "Indicates conversation quality")
+  (row "User-author affinity" "Personalization" "High" "How often user engages with this author")
+  (row "Media presence" "Content signal" "Low" "Image/video tweets get mild boost")
+  (row "Author verification" "Trust signal" "Low" "Slight boost for verified accounts")
+  (row "Content similarity" "Personalization" "Medium" "Embedding cosine similarity to user interests")
+)}}
+
+{{hint "affinity score computation" "Maintain a Redis Hash user:{id}:affinity mapping author_id → interaction_count. Increment on like, retweet, reply, click. Decay by 0.99 daily. This gives a real-time author affinity score without needing ML for the personalization component."}}
+
+{{phase 10 "Trending Topics & Search Indexing" "5 min"}}
+
+{{say "Trending topics uses a sliding window counter over hashtag mentions. Full-text search uses Elasticsearch synced from Cassandra via Kafka. Let me cover both."}}
+
+{{diagram "tf-trending-topics"}}
+
+{{code "python" `# Trending topics: sliding 1-hour window with Redis sorted sets
+import time
+
+def record_hashtag_mention(hashtag: str):
+    """Called by Tweet Service for each hashtag in new tweet."""
+    now = time.time()
+    window_key = f"trending:{int(now // 300)}"  # 5-minute bucket
+
+    # Increment this hashtag's count in the current 5-min bucket
+    redis.zincrby(window_key, 1, hashtag)
+    redis.expire(window_key, 3600)  # Keep for 1 hour
+
+
+def get_trending_hashtags(top_n: int = 50) -> list:
+    """Aggregate last 12 × 5-min buckets = 1 hour window."""
+    now = time.time()
+    current_bucket = int(now // 300)
+
+    # ZUNIONSTORE across the last 12 buckets
+    bucket_keys = [
+        f"trending:{current_bucket - i}"
+        for i in range(12)
+    ]
+
+    result_key = f"trending:merged:{current_bucket}"
+    redis.zunionstore(result_key, bucket_keys, aggregate="SUM")
+    redis.expire(result_key, 300)  # Cache for 5 minutes
+
+    # Return top N hashtags by count
+    return redis.zrevrange(result_key, 0, top_n - 1, withscores=True)
+
+
+# Example output:
+# [("#WorldCup", 142500.0), ("#AI", 98300.0), ("#TechNews", 45200.0), ...]`}}
+
+{{hint "5-minute buckets vs 1-second buckets" "One key per second for 3600 seconds = 3600 Redis keys per metric. Impractical. 5-minute buckets = 12 keys per hour. ZUNIONSTORE over 12 keys is cheap and gives 1-hour trending with 5-minute granularity — sufficient for trending detection."}}
+
+{{diagram "tf-search-indexing"}}
+
+{{code "yaml" `# Elasticsearch tweet index mapping
+{
+  "mappings": {
+    "properties": {
+      "tweet_id":    { "type": "keyword" },
+      "author_id":   { "type": "keyword" },
+      "text":        { "type": "text", "analyzer": "english" },
+      "hashtags":    { "type": "keyword" },
+      "created_at":  { "type": "date" },
+      "like_count":  { "type": "integer" },
+      "retweet_count": { "type": "integer" }
+    }
+  }
+}
+
+# Sync flow: Cassandra → Kafka → ES consumer
+# Kafka consumer reads tweet_created events, writes to ES
+# Lag target: < 5 seconds for search index freshness
+# Index only non-deleted, non-spam tweets (filtered by moderation service)`}}
+
+{{triggerQs "Phase 10 interview triggers"
+  "How do you prevent spam hashtags from dominating trending?"
+  "Two layers: first, the trending counter only counts tweets from non-spam accounts (moderation service maintains a blocklist; spam tweets are not counted). Second, apply velocity damping: a hashtag that jumps from 0 to 100K mentions in 5 minutes is anomalous — flag for human review and optionally throttle its trending score. Twitter also applies geographic normalization so a local hashtag doesn't trend globally."
+  "How do you make tweet search feel instant given ES indexing lag?"
+  "For the author's own tweets, return results directly from Cassandra (strong consistency). For general search, ES handles it. The 5-second indexing lag is invisible to users in practice — they don't search for tweets posted in the last 5 seconds. For breaking news search, prioritize higher-engagement tweets which are indexed first due to Kafka partition ordering."
+}}
+
+{{phase 11 "Scaling & Failure Modes" "5 min"}}
+
+{{say "Let me cover horizontal scaling for each layer and the top failure modes with mitigations. Three highest-risk failure modes: Redis timeline cache failure, Cassandra partition hotspot, and fanout worker backlog during viral events."}}
+
+{{diagram "tf-scaling"}}
+
+{{diagram "tf-failure-modes"}}
+
+{{table "Scaling Approach by Layer" (rows
+  (row "Layer" "Scaling Method" "Bottleneck")
+  (row "Tweet Service" "Stateless, horizontal auto-scale" "None — thin write layer")
+  (row "Kafka" "Add partitions, partition by author_id" "Partition rebalancing lag")
+  (row "Fanout Workers" "Kafka consumer group, add consumers" "Redis write throughput")
+  (row "Redis (timelines)" "Shard by user_id mod N, Redis Cluster" "Memory capacity")
+  (row "Cassandra" "Add nodes, auto-rebalance ring" "Write hotspots on viral tweets")
+  (row "Timeline Service" "Stateless, horizontal auto-scale" "Celebrity merge latency")
+  (row "Elasticsearch" "Add shard replicas for read scale" "Index lag during tweet storms")
+)}}
+
+{{think "Redis cluster sharding is the most operationally complex piece."
+  (whyNot "use a single Redis instance for all timelines" "1.9TB of timeline data in a single Redis instance requires a server with > 2TB RAM — costly, and a single point of failure. Redis Cluster shards by key hash slot: user:12345:timeline hashes to slot 4501, routed to the owning node. Transparent to clients using cluster-aware client libraries.")
+  (whatIf "the Redis cluster loses a primary node during peak traffic" "Redis Cluster promotes a replica to primary within 1-10 seconds (cluster-node-timeout). During this window, writes to that shard return CLUSTERDOWN errors. The fanout worker retries with exponential backoff. Timeline reads for affected users fall back to Cassandra cold-start query. Latency spikes from <5ms to ~50ms for affected users — visible but not catastrophic.")
+}}
+
+{{avoid "Don't skip read-time fallback for cold cache. If Redis is down or cold, the Timeline Service must fall back to Cassandra — without this, a Redis restart would mean 300M users see empty feeds until all timelines are rehydrated."}}
+
+{{checklist "Fan-out strategy accounts for celebrity threshold (50K followers)" "Timeline capped at 800 tweets to bound Redis memory" "Celebrity merge uses parallel Cassandra reads with 50-celebrity cap" "Trending uses sliding window buckets (ZUNIONSTORE), not a single counter" "Snowflake IDs enable time-sortable cursor pagination" "Redis pipeline for fanout writes (not individual ZADD per follower)" "Like counts in Redis with periodic sync to Cassandra (eventual consistency)" "SSE for real-time push + 30s polling fallback" "Cold-start fallback: seed timeline from Cassandra on Redis miss" "Elasticsearch for full-text search, synced via Kafka under 5s lag"}}
+
+{{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
+
+{{deepQA "Critical Interview Questions" `
+<div class="dqa-item">
+  <div class="dqa-q">Elon Musk posts a tweet with 150M followers — how do you deliver it to all followers without melting the system?</div>
+  <div class="dqa-a">Elon's account is in the <span class="dqa-key">celebrity set</span> (follower_count > 50K), so his tweet skips fanout entirely. The tweet is written to Cassandra and published to Kafka in under 5ms. Fanout workers see the event and immediately discard it — no Redis writes. When any of his 150M followers next loads their home timeline, the <span class="dqa-key">read-time celebrity merge</span> fetches his last 50 tweets from Cassandra in parallel with the pre-computed timeline Redis fetch, merges by timestamp, and returns the result. Total additional latency for celebrity merge: ~2ms for the Cassandra read (warm OS cache) + O(50 log K) sort.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">How do you know at read time that a user follows Elon?</div>
+    <div class="dqa-sub-a">The follow graph is stored in Cassandra (follower_id → followed_id). At timeline read time, the service fetches the user's full follow list, intersects with the <span class="dqa-key">celebrity_ids Redis Set</span> using SINTER, and gets the list of celebrity accounts to merge. SINTER is O(N × M) where N is follows count and M is celebrity set size — fast even for users with 5K follows.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">What if the celebrity_ids Set itself becomes a hotspot — read by 300M users every timeline load?</div>
+      <div class="dqa-deep-a">Cache the celebrity_ids Set in each Timeline Service instance's local memory, refreshed every 30 seconds from Redis. A local HashMap lookup is 10ns vs a Redis round-trip of 0.5ms. The Set rarely changes — only when accounts cross the 50K threshold — so a 30s staleness is acceptable. This removes the Redis read entirely from the hot path for celebrity detection.</div>
+    </div>
+  </div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What about the SSE stream — do 150M users get a push event for Elon's tweet?</div>
+    <div class="dqa-sub-a">No — pushing via SSE to 150M concurrent connections is not feasible. SSE push is only used for accounts in the normal fanout path (< 50K followers). For celebrity follows, the client polls via <span class="dqa-key">GET /v1/timeline/home</span> every 30 seconds, which triggers the read-time merge and surfaces new celebrity tweets. Users following very active celebrities see them within 30 seconds — acceptable per the freshness SLA.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How does Twitter's actual "For You" tab differ — does it still use this celebrity merge approach?</div>
+      <div class="dqa-deep-a">The "For You" algorithmic tab uses a candidate retrieval + ranking pipeline that is largely <span class="dqa-key">fanout-on-read</span> for all users, not just celebrities. It retrieves candidates from network graph, engagement graph, and interest-based embeddings, then runs a two-tower neural network for ranking. The celebrity merge problem still applies — celebrity tweet candidates are fetched from Cassandra at query time and scored through the same ranking model.</div>
+    </div>
+  </div>
+</div>
+
+<div class="dqa-item">
+  <div class="dqa-q">A user follows 1000 accounts — how do you generate their home timeline in under 200ms?</div>
+  <div class="dqa-a">The pre-computed Redis sorted set for this user already contains the most recent 800 tweet IDs fanned out from the 950 non-celebrity accounts they follow. Reading 20 tweet IDs from the sorted set is <span class="dqa-key">O(log N) ≈ 1ms</span>. For the 50 celebrity accounts in their follows, parallel Cassandra reads (50 concurrent queries, 1ms each) return recent tweets in 1ms wall time. The sorted merge of 1000 + 2500 candidates takes < 1ms. Hydrating 20 tweet objects via Redis Hash multi-get adds 1ms. Total: 1 + 1 + 1 + 1 = 4ms for data fetching. Network + serialization + ranking adds ~50ms. Well under 200ms.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What if this user's timeline cache is cold (first login after 2 weeks away)?</div>
+    <div class="dqa-sub-a">Cold start: the Timeline Service runs <span class="dqa-key">seed_timeline_cache()</span> — fetch last 20 tweets from each of the 950 non-celebrity follows from Cassandra (950 parallel queries, but batched in groups of 100). Each batch takes ~5ms. Total seed: ~50ms for 950 accounts in 10 batches. We return the first page to the user immediately from the seed result before the full cache is populated, so the user sees content in < 200ms. Background workers continue populating the cache.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you avoid a thundering herd when 10M users all come back online simultaneously after a Twitter outage?</div>
+      <div class="dqa-deep-a">Stagger cold-start cache seeding with a <span class="dqa-key">jitter queue</span>: instead of seeding all 10M timelines simultaneously, the Timeline Service pushes seed requests to a Kafka topic with a rate limiter (e.g., 100K seeds/s). Each seed takes ~50ms of Cassandra load. At 100K seeds/s, 10M seeds complete in 100 seconds. During this window, uncached timelines fall back to direct Cassandra queries — slower (100-200ms) but functional. The Cassandra cluster is sized with this burst in mind.</div>
+    </div>
+  </div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">How does the cursor work for pagination when the pre-computed timeline and celebrity tweets are merged?</div>
+    <div class="dqa-sub-a">The cursor is the <span class="dqa-key">tweet_id of the last tweet on the current page</span> (Snowflake ID encodes timestamp). On the next request, the Timeline Service fetches pre-computed IDs with score < cursor_timestamp from Redis, and celebrity tweets with created_at < cursor_timestamp from Cassandra. The merge only considers tweets older than the cursor. This ensures no tweet appears twice across pages, even as new tweets arrive between page loads.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">What if a celebrity posts 5 tweets between page 1 and page 2 — do they all appear at the top of page 2?</div>
+      <div class="dqa-deep-a">No. The cursor filters to tweets older than the cursor timestamp. The 5 new celebrity tweets have timestamps newer than the cursor and are excluded from page 2. They will appear when the user refreshes from the top (cursor reset to "now"). This is the correct UX: new tweets appear at the top on refresh, not injected mid-scroll. The same logic applies to normal fanout tweets.</div>
+    </div>
+  </div>
+</div>
+
+<div class="dqa-item">
+  <div class="dqa-q">A user unfollows someone — how do you remove their tweets from the timeline immediately?</div>
+  <div class="dqa-a">For normal users (non-celebrity), the unfollow event triggers a <span class="dqa-key">background cleanup job</span>: read the unfollowed user's recent tweet IDs from Cassandra (last 800 tweets), then issue a Redis pipeline of ZREM commands on the follower's timeline sorted set. At 100 tweets/s removal rate, removing 800 tweets takes ~8ms in Redis. The timeline immediately reflects the removal on the next page load. For celebrities, no cleanup is needed — their tweets are fetched at read time from the follow list, and since the unfollow removes them from the follow list, they no longer appear in the celebrity merge step.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What about tweets from the unfollowed user that were retweeted by others still in the follow list?</div>
+    <div class="dqa-sub-a">Retweets create new tweet objects with a unique tweet_id. The retweet's tweet_id was fanned out from the retweeter, not the original author. The cleanup job only removes tweet IDs authored by the unfollowed user — retweet objects have <span class="dqa-key">author_id = retweeter_id</span>, not original_author_id. So retweets from mutual follows remain in the timeline. This is correct behavior: the user unfollowed the original author, not everyone who retweeted them.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you handle a block — the user blocks someone, requiring immediate and retroactive removal?</div>
+      <div class="dqa-deep-a">A block is stricter than an unfollow. On block: (1) immediately add blocker_id + blocked_id to a <span class="dqa-key">blocklist Redis Set</span>, (2) trigger the same timeline cleanup job to remove the blocked user's tweets, (3) at read time, filter the merged candidate set against the blocklist before returning results. The read-time filter handles edge cases like retweets of the blocked user's content appearing via third parties. SISMEMBER blocklist at read time is O(1) per tweet candidate.</div>
+    </div>
+  </div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What if the unfollowed user posted 5000 tweets — removing all from the timeline sorted set is expensive?</div>
+    <div class="dqa-sub-a">The timeline sorted set is capped at 800 tweets. The unfollowed user contributed at most 800 of those 800 entries (and in practice far fewer — they share the 800 slots with everyone else the user follows). The cleanup job only needs to ZREM tweet IDs that are actually in the set, which is a bounded operation. In the worst case (only following one person), it's 800 ZREM commands — a 1ms Redis pipeline operation.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you make sure the unfollow cleanup is durable — what if the cleanup worker crashes mid-job?</div>
+      <div class="dqa-deep-a">The unfollow event is written to Kafka before the HTTP 200 is returned to the client. The cleanup consumer processes with <span class="dqa-key">at-least-once delivery</span>: it commits its Kafka offset only after the Redis cleanup completes. If the worker crashes mid-cleanup, it replays the event from the last committed offset and re-runs the cleanup. ZREM is idempotent — removing an already-removed member is a no-op. So replaying is safe.</div>
+    </div>
+  </div>
+</div>
+
+<div class="dqa-item">
+  <div class="dqa-q">How do you implement chronological vs algorithmic ranking, and what signals does the ML model use?</div>
+  <div class="dqa-a">Chronological ranking requires no ML: the timeline sorted set is ordered by tweet timestamp (Snowflake ID score), so ZREVRANGE returns tweets newest-first directly. Algorithmic ranking is a <span class="dqa-key">re-ranking layer</span> on top of the same 200-tweet candidate pool: score each candidate with a gradient boosted model or two-tower neural network, sort by score descending, return top 20. Switching between modes is a per-user flag: if ranking_mode = "chronological", skip scoring and return raw ZREVRANGE output.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What features does the ranking model use?</div>
+    <div class="dqa-sub-a">Six feature groups: <span class="dqa-key">recency</span> (exponential decay on tweet age), <span class="dqa-key">engagement velocity</span> (likes + retweets per hour since posting), <span class="dqa-key">author affinity</span> (how often this user has liked/replied to this author, tracked in Redis Hash), <span class="dqa-key">content signals</span> (media presence, tweet length, hashtag count), <span class="dqa-key">social proof</span> (how many of your other follows liked this tweet), and <span class="dqa-key">content embeddings</span> (cosine similarity between tweet embedding and user interest profile embedding). Author affinity and social proof are real-time features served from Redis; embeddings are updated daily via batch ML pipeline.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you train the model without introducing a feedback loop that amplifies already-popular content?</div>
+      <div class="dqa-deep-a">Use <span class="dqa-key">inverse propensity scoring (IPS)</span>: weight training examples inversely by the probability the tweet was shown. Tweets shown to 10M users get weight 1/10M; tweets shown to 1K users get weight 1/1K. This corrects the position bias where highly-ranked tweets get more engagement simply because they're shown more. Additionally, inject a 5% explore budget — show randomly sampled tweets regardless of score — to collect unbiased engagement data for model training.</div>
+    </div>
+  </div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">How do you serve the ranking model at 325K timeline reads per second with < 50ms latency?</div>
+    <div class="dqa-sub-a">Batch inference: the Timeline Service sends a batch of 200 (user_id, tweet_id, features) tuples to the <span class="dqa-key">Ranking Service</span>, which runs a forward pass on GPU and returns 200 scores in a single call. GPU throughput: an A10 GPU can process ~10K feature vectors/ms. 200 vectors = 0.02ms compute time. Network round-trip to GPU server: ~2ms. Total ranking latency: ~5ms per timeline request. At 325K RPS, 325K ranking requests/s — deploy a GPU fleet of ~50 A10 instances (each handling ~7K RPS).</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">What happens if the Ranking Service is down — does the timeline break?</div>
+      <div class="dqa-deep-a">Degrade gracefully to chronological ranking. The Timeline Service has a circuit breaker on the Ranking Service call — if latency exceeds 50ms or error rate exceeds 1%, open the circuit and bypass ranking. Users see chronological feed (still correct and functional) until the Ranking Service recovers. This is a non-critical path: feed availability > feed ranking quality. The circuit breaker resets automatically after 30 seconds.</div>
+    </div>
+  </div>
+</div>
+
+<div class="dqa-item">
+  <div class="dqa-q">How do you detect and suppress spam and bot tweets before they spread in the timeline?</div>
+  <div class="dqa-a">Three-layer defense: <span class="dqa-key">pre-publish ML classification</span> (block obvious spam before the tweet enters Cassandra), <span class="dqa-key">async content moderation</span> (flag and suppress within seconds of publish), and <span class="dqa-key">read-time filtering</span> (check blocklist at timeline generation time to suppress previously-missed spam). For most spam, the async layer catches it in 1-3 seconds — before the fanout reaches most followers' timelines.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">How does async content moderation work at Twitter scale?</div>
+    <div class="dqa-sub-a">Every tweet published to Kafka is consumed by a <span class="dqa-key">Moderation Service</span> that runs a spam/abuse classifier (text + metadata features: URL patterns, account age, tweet rate, follower/following ratio). If the classifier score exceeds a threshold, the tweet's status in Cassandra is set to "suppressed" and its tweet_id is added to a <span class="dqa-key">suppressed_ids Redis Set</span>. The entire pipeline runs in < 500ms. Meanwhile, the fanout worker checks suppressed_ids before writing to each follower's timeline — if the tweet is suppressed, fanout is skipped. Tweets already fanned out are cleaned up by a background job.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you handle coordinated inauthentic behavior — a botnet of 100K accounts all retweeting the same content?</div>
+      <div class="dqa-deep-a">Velocity anomaly detection: the Moderation Service tracks retweet volume per tweet_id in a Redis sliding window. A tweet receiving 10K retweets in 60 seconds is anomalous (normal viral content grows more slowly). This triggers a <span class="dqa-key">coordinated amplification flag</span> — the tweet is queued for human review and its trending contribution is zeroed out. Simultaneously, the 100K bot accounts are flagged by a graph analysis job that detects account clusters with similar creation timestamps, similar following patterns, and synchronized activity. Flagged accounts enter a "low trust" state where their tweets have 0 fanout amplification.</div>
+    </div>
+  </div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What if a legitimate tweet is incorrectly suppressed by the classifier — how do you handle false positives?</div>
+    <div class="dqa-sub-a">Every suppressed tweet is queued for <span class="dqa-key">human review</span> within 24 hours. Users can appeal via the tweet detail page ("This tweet was incorrectly removed"). If a human reviewer overturns the suppression: (1) update tweet status to "active" in Cassandra, (2) remove tweet_id from suppressed_ids Redis Set, (3) trigger retroactive fanout to followers who would have received the tweet. Retroactive fanout uses the same fanout worker with a "delayed" flag. For celebrities, no retroactive fanout is needed — the tweet reappears naturally at next read-time merge.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you measure and iterate on classifier accuracy without exposing users to more harmful content?</div>
+      <div class="dqa-deep-a">Use a <span class="dqa-key">shadow suppression</span> experiment: run the new classifier in parallel with the current classifier but don't act on the new classifier's decisions — only log them. Compare false positive and false negative rates against human reviewer ground truth labels. Once the new classifier shows 15% fewer false positives with < 5% increase in false negatives on the holdout set, promote it to production. All classifier decisions are logged to a data warehouse for offline analysis and model retraining using the human review labels as supervision signal.</div>
+    </div>
+  </div>
+</div>
+`}}
+
+{{key "Twitter feed design reduces to one core trade-off: fanout-on-write gives O(1) reads at the cost of O(followers) writes per tweet — use it for normal users, skip it for celebrities and merge at read time."}}
