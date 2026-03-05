@@ -1,0 +1,286 @@
+{{phase 1 "What Is Geospatial Indexing?" "3 min"}}
+
+{{say "A geospatial index lets a database answer proximity queries efficiently — find all restaurants within 2km, or the 10 nearest drivers. Without one, latitude and longitude are just two floating-point columns, and a B-tree index on them cannot answer radius queries without a full table scan."}}
+
+{{think "Why can't a standard B-tree answer 'within 5km'?"
+  (whyNot "B-tree on lat/lng" "A B-tree sorts on one dimension. A radius query spans two dimensions simultaneously — you would need to scan every row where lat is in a range AND lng is in a range, then compute actual distance. That is a full table scan on any large dataset.")
+  (how "Spatial index key insight" "A spatial index maps 2D (or 3D) coordinates into a 1D key space where nearby points produce nearby keys. This lets you use a range scan to find candidate rows, then apply an exact distance filter to the small candidate set.")
+}}
+
+{{diagram "fund-geospatial-overview"}}
+
+{{table "Geospatial Index Options at a Glance" (rows
+  (row "Index Type"   "Structure"         "Best For"                        "Latency")
+  (row "GeoHash"      "Base32 string"     "Prefix search, cache keys"       "< 1ms in Redis")
+  (row "S2 Cells"     "64-bit cell ID"    "Polygon containment, Google Maps" "< 1ms in memory")
+  (row "H3 Hexagons"  "64-bit index"      "Aggregation, equal-area zones"    "< 1ms in memory")
+  (row "PostGIS GIST" "R-tree variant"    "Complex joins, durability"        "~10ms at 1M rows")
+  (row "Redis GEO"    "Sorted set score"  "Real-time nearest-N lookup"       "Sub-ms, TTL-aware")
+)}}
+
+{{triggerQs "Opening Questions"
+  "Why can't you just put a regular index on latitude and longitude columns?"
+  "A B-tree index on lat gives you efficient range scans on one dimension, and same for lng, but a proximity query needs both dimensions at once. The database would intersect two index scans and still compute distance on potentially millions of candidates. A spatial index collapses 2D into 1D so a single range scan retrieves a tight candidate set — typically thousands of rows, not millions."
+  "What is the difference between a bounding-box query and a radius query?"
+  "A bounding-box query returns all points within a rectangle (min_lat, max_lat, min_lng, max_lng). It is fast but imprecise — corners of the box are farther than the specified radius. A radius query applies an exact Haversine or ST_DWithin distance filter on top of the bounding-box candidates. Spatial indexes almost always do bounding-box first, then exact filter."
+}}
+
+{{phase 2 "GeoHash" "5 min"}}
+
+{{say "GeoHash divides the world into a hierarchical grid. Each cell is encoded as a base32 string. The key insight: two points that share a longer prefix are closer together. This maps geographic proximity to string-prefix proximity — which any key-value store can exploit."}}
+
+{{think "GeoHash prefix sharing is powerful but has a critical edge case."
+  (whyNot "pure prefix matching" "Two points separated by only 1 meter can have completely different GeoHash prefixes if they sit on opposite sides of a cell boundary. Always query the 8 neighboring cells in addition to the target cell.")
+  (how "GeoHash precision vs length" "Each additional base32 character roughly halves cell dimensions. A 6-character GeoHash covers ~1.2km × 0.6km. A 9-character GeoHash covers ~4.8m × 4.8m. Choose precision based on acceptable error, not maximum accuracy.")
+  (whatIf "user is exactly on a cell boundary" "Their GeoHash prefix differs from a point 2 meters away across the boundary. The fix: expand your search to all 8 adjacent cells. Redis GEOSEARCH handles this internally — but if you implement GeoHash yourself, always fetch neighbors.")
+}}
+
+{{diagram "fund-geospatial-geohash"}}
+
+{{table "GeoHash Precision Reference" (rows
+  (row "Length" "Cell Width"  "Cell Height" "Use Case")
+  (row "4"      "~39km"       "~20km"       "City-level bounding")
+  (row "5"      "~4.9km"      "~4.9km"      "Neighborhood search")
+  (row "6"      "~1.2km"      "~0.6km"      "Street-level search")
+  (row "7"      "~153m"       "~153m"       "Building-level search")
+  (row "9"      "~4.8m"       "~4.8m"       "Precise driver location")
+)}}
+
+{{hint "when to use GeoHash as a cache key" "GeoHash strings work directly as Redis or Memcached keys for tiling. Cache expensive POI queries per cell: key = 'poi:restaurants:dp3wj'. Invalidate the cell key when a restaurant opens or closes in that area."}}
+
+{{triggerQs "GeoHash Interview Questions"
+  "What is the boundary problem in GeoHash and how do you fix it?"
+  "Two points near a cell edge share no common prefix despite being meters apart. Fix: always query the 8 surrounding cells in addition to the target cell. Redis GEOSEARCH handles this automatically. If implementing manually, compute the 8 neighbor hashes using bit manipulation on the GeoHash encoding."
+  "How does GeoHash enable proximity search in a relational database without PostGIS?"
+  "Store the GeoHash string as a VARCHAR column with a B-tree index. For a 5km search at precision-6, compute the target cell and its 8 neighbors, then do a WHERE geohash_6 IN (...9 values...). This is a 9-row index lookup with exact distance post-filter — no full scan."
+}}
+
+{{phase 3 "S2 Cells" "4 min"}}
+
+{{say "S2 is Google's geometry library. It projects Earth's sphere onto six cube faces, then recursively subdivides each face into a quadtree. Every cell gets a 64-bit ID. S2's strength is polygon operations — containment, intersection, and covering — which GeoHash handles poorly."}}
+
+{{think "S2 is the right tool for polygon containment, not point lookup."
+  (how "S2 hierarchy" "Level 0 is a cube face (~85M km²). Level 30 is ~1cm². For driver matching use level 14 (~0.6km²). For geofencing use level 10 (~100km²). You choose the level based on the smallest feature you need to represent.")
+  (whyNot "GeoHash for geofences" "GeoHash cells are rectangles in lat/lng space — distorted at high latitudes. S2 cells are designed on a sphere and maintain consistent shape globally. Google Maps, Pokémon GO, and Bing Maps use S2 for polygon operations precisely because distortion is minimal.")
+  (whatIf "your polygon spans multiple S2 cells" "S2 computes a cell covering — the minimal set of cells that covers the polygon. Store these cell IDs. To test containment, find the S2 cell for a point and check if any covering cell contains it — O(log N) tree traversal.")
+}}
+
+{{diagram "fund-geospatial-s2"}}
+
+{{hint "S2 cell ID is just a 64-bit integer" "Store it in a BIGINT column with a B-tree index. Containment queries become range scans on integer IDs — fast and portable across any database without spatial extensions."}}
+
+{{triggerQs "S2 Interview Questions"
+  "Why does Google Maps use S2 instead of GeoHash?"
+  "S2 cells are defined on a sphere with minimal distortion — area and shape remain consistent from equator to poles. GeoHash cells are lat/lng rectangles that become very elongated near the poles. S2 also natively supports polygon covering, which is essential for routing, geofencing, and map tile generation."
+  "How would you implement geofencing for 10,000 delivery zones using S2?"
+  "For each zone polygon, compute an S2 cell covering at level 12 (~300m cells). Store all covering cell IDs in a table: (zone_id, s2_cell_id). For each delivery location, get its S2 cell ID and check parent cells up the hierarchy against the table. One indexed lookup per level — typically 5-10 lookups total to confirm containment."
+}}
+
+{{phase 4 "H3 Hexagonal Grid" "4 min"}}
+
+{{say "H3 is Uber's hexagonal hierarchical grid. Every cell at a given resolution has the same area. Hexagons tile perfectly with no gaps and each hexagon has exactly 6 equidistant neighbors — making spatial aggregation uniform. This is why Uber uses H3 for surge pricing zones."}}
+
+{{think "Equal-area cells change what's possible for analytics."
+  (how "H3 resolution guide" "Resolution 5 = 252km² per cell (~city district). Resolution 8 = 0.74km² per cell (~neighborhood). Resolution 11 = 0.0003km² per cell (~building). Uber uses resolution 7-9 for surge zones. Resolution 8 is the most common for demand/supply analytics.")
+  (whyNot "rectangles for demand aggregation" "A rectangular grid near the equator covers a different area than the same grid near the poles. Driver supply per cell is not comparable across latitudes. H3 cells at the same resolution always cover the same area, so demand/supply ratios are directly comparable anywhere on Earth.")
+  (whatIf "a surge zone spans multiple H3 cells" "H3 is designed for this — compact and fill operations aggregate child cells into a parent. Uber computes surge multiplier per resolution-8 cell and propagates upward to resolution-6 for display. Each cell aggregates independently without boundary distortion.")
+}}
+
+{{diagram "fund-geospatial-h3"}}
+
+{{table "H3 vs GeoHash vs S2" (rows
+  (row "Property"       "GeoHash"          "S2"                  "H3")
+  (row "Shape"          "Rectangle"        "Quadrilateral"       "Hexagon")
+  (row "Equal area"     "No"               "Approximate"         "Yes")
+  (row "Neighbors"      "8 (corner touch)" "4-8"                 "6 (edge share)")
+  (row "Polygon ops"    "Poor"             "Excellent"           "Good")
+  (row "Aggregation"    "Moderate"         "Moderate"            "Excellent")
+  (row "Key type"       "String"           "64-bit int"          "64-bit int")
+  (row "Used by"        "Foursquare, Redis" "Google, Pokémon GO"  "Uber, Foursquare")
+)}}
+
+{{hint "H3 for surge pricing" "Compute supply (active drivers) and demand (ride requests) per resolution-8 H3 cell every 30 seconds. Surge multiplier = demand / supply, clamped to [1.0, 5.0]. Store in Redis with key 'surge:h3:{cell_id}' and TTL 60s. Riders query their current H3 cell to get the local surge multiplier — one Redis GET."}}
+
+{{phase 5 "Redis GEO Commands" "6 min"}}
+
+{{say "Redis GEO stores coordinates in a sorted set where the score is a 52-bit GeoHash. GEOADD is O(log N). GEOSEARCH finds the nearest N members or all within a radius — it's the go-to for real-time driver matching because it combines the proximity query and result sorting in one command."}}
+
+{{avoid "GEORADIUS is deprecated since Redis 6.2. Use GEOSEARCH instead. Also: Redis GEO uses a 52-bit geohash internally — accurate to about 0.6 meters. Do not claim it's GPS-exact. And GEO keys have no built-in TTL per member — use EXPIRE on the whole key or manage TTL externally."}}
+
+{{diagram "fund-geospatial-redis-geo"}}
+
+{{code "python" `import redis
+import time
+
+r = redis.Redis(host='localhost', port=6379)
+
+# Add a driver location (key, longitude, latitude, member_name)
+r.geoadd('drivers:active', (-73.9857, 40.7484, 'driver:1001'))
+r.geoadd('drivers:active', (-73.9923, 40.7614, 'driver:1002'))
+r.geoadd('drivers:active', (-73.9712, 40.7580, 'driver:1003'))
+
+# Find drivers within 5km of Times Square (GEOSEARCH replaces deprecated GEORADIUS)
+# Returns list of (member, distance) tuples
+results = r.geosearch(
+    'drivers:active',
+    longitude=-73.9857,
+    latitude=40.7484,
+    radius=5,
+    unit='km',
+    sort='ASC',      # nearest first
+    count=10,        # top 10 only
+    withcoord=True,
+    withdist=True
+)
+
+for member, dist, coord in results:
+    print(f'{member}: {dist:.2f}km away at {coord}')
+
+# Driver goes offline: remove from the geo key
+r.zrem('drivers:active', 'driver:1001')
+
+# Simulate TTL per-member: use a separate hash with last_seen timestamps
+r.hset('drivers:last_seen', 'driver:1001', int(time.time()))
+
+# Cleanup stale drivers (run every 30s via background job)
+cutoff = int(time.time()) - 60   # offline > 60s
+all_drivers = r.hgetall('drivers:last_seen')
+stale = [d for d, t in all_drivers.items() if int(t) < cutoff]
+if stale:
+    r.zrem('drivers:active', *stale)
+    r.hdel('drivers:last_seen', *stale)
+`}}
+
+{{think "Redis GEO is the right call for real-time location matching."
+  (how "why sorted set as backend" "The 52-bit GeoHash fits in a sorted set score (float64). GEOSEARCH performs a range scan on that score, expanding the range until it captures the requested radius. It handles the boundary problem internally by scanning multiple adjacent ranges.")
+  (whyNot "storing raw lat/lng in Redis hashes" "You lose the proximity index. You would have to HGETALL all drivers and compute distance in your application — O(N) at 100K concurrent drivers. Redis GEO keeps the index in the sorted set score, so GEOSEARCH is O(N+log M) where N is results and M is total members.")
+  (whatIf "a driver sends location updates every second at 500K concurrent drivers" "500K GEOADD/sec. One Redis node handles ~100K ops/sec. Shard by city or geographic region — each city gets its own 'drivers:active:{city}' key on a separate Redis node. Uber runs hundreds of Redis shards for this workload.")
+}}
+
+{{triggerQs "Redis GEO Interview Questions"
+  "How does Redis GEO handle the boundary problem that affects raw GeoHash?"
+  "Redis GEOSEARCH internally scans multiple adjacent score ranges in the sorted set, not just the single range corresponding to the target cell. This is equivalent to searching the target cell plus its 8 neighbors but done automatically within the C implementation. The caller sees a clean radius interface — no neighbor computation needed."
+  "How do you handle driver location expiry in Redis GEO? There is no per-member TTL."
+  "Two patterns: (1) Use a parallel Redis hash 'drivers:last_seen' storing Unix timestamps. A background job runs every 30 seconds, finds members with timestamps older than 60 seconds, and calls ZREM on the GEO key. (2) Use separate per-city GEO keys with a full key TTL, rebuilt every minute from your location service's stream. Pattern 1 is simpler. Pattern 2 is more resilient to missed removals."
+  "What is the precision limit of Redis GEO and does it matter for ride-sharing?"
+  "Redis GEO uses a 52-bit GeoHash which gives ~0.6 meter accuracy. For ride-sharing, this is more than sufficient — drivers are matched within 2-5km and dispatched to street-level addresses. The 0.6m error is imperceptible. Precision only matters if you are doing centimeter-scale surveying, not application-level location matching."
+}}
+
+{{phase 6 "PostGIS & Fallback" "4 min"}}
+
+{{say "PostGIS is PostgreSQL's spatial extension. When you need durability, complex spatial joins, or historical location queries, PostGIS with a GIST index handles them well. It is slower than Redis GEO — roughly 10ms for a radius query on 1 million rows — but it never loses data and supports the full SQL query language."}}
+
+{{diagram "fund-geospatial-postgis"}}
+
+{{code "sql" `-- Setup: add a geography column and GIST index
+ALTER TABLE drivers ADD COLUMN location GEOGRAPHY(POINT, 4326);
+CREATE INDEX idx_drivers_location ON drivers USING GIST(location);
+
+-- Update driver position
+UPDATE drivers
+SET location = ST_MakePoint(-73.9857, 40.7484)::geography,
+    updated_at = NOW()
+WHERE driver_id = 1001;
+
+-- Find all active drivers within 5000 meters of a pickup point
+-- ST_DWithin on geography type uses meters (not degrees)
+SELECT
+    driver_id,
+    ST_Distance(location, ST_MakePoint(-73.9857, 40.7484)::geography) AS dist_meters
+FROM drivers
+WHERE
+    status = 'active'
+    AND ST_DWithin(
+        location,
+        ST_MakePoint(-73.9857, 40.7484)::geography,
+        5000   -- 5km in meters
+    )
+ORDER BY dist_meters
+LIMIT 10;
+
+-- GIST index makes ST_DWithin fast: bounding box filter first,
+-- exact distance computed only on ~hundreds of candidates
+`}}
+
+{{code "python" `import psycopg2
+
+def find_nearby_drivers(lng: float, lat: float, radius_m: int = 5000, limit: int = 10):
+    conn = psycopg2.connect('postgresql://localhost/rideshare')
+    cur = conn.cursor()
+    cur.execute('''
+        SELECT driver_id,
+               ST_Distance(location,
+                   ST_MakePoint(%s, %s)::geography) AS dist_meters
+        FROM drivers
+        WHERE status = 'active'
+          AND ST_DWithin(location,
+                         ST_MakePoint(%s, %s)::geography,
+                         %s)
+        ORDER BY dist_meters
+        LIMIT %s
+    ''', (lng, lat, lng, lat, radius_m, limit))
+    return cur.fetchall()
+`}}
+
+{{hint "PostGIS as write-through store" "Write driver locations to PostGIS for durability and to Redis GEO for speed. Reads go to Redis. If Redis is unavailable, fall back to PostGIS — accepting the 10ms latency vs 0.5ms. PostGIS also becomes your source of truth for billing, audit, and historical trip replay."}}
+
+{{triggerQs "PostGIS Interview Questions"
+  "How fast is a PostGIS radius query on 1 million driver rows?"
+  "With a GIST index and ST_DWithin on a geography column, roughly 5-15ms for a 5km radius returning 10-100 rows. The GIST index prunes the candidate set to a few thousand rows using a bounding-box filter; exact distance is computed only on that small set. Without the GIST index it would be a full sequential scan — 2-5 seconds."
+  "When would you choose PostGIS over Redis GEO for a production system?"
+  "Four scenarios: (1) You need durability — Redis GEO loses data on restart without persistence configured. (2) You need historical queries — 'where was driver X at 3pm last Tuesday'. (3) You need complex spatial joins — 'drivers in the downtown zone who have completed > 100 trips'. (4) Your query rate is low enough that 10ms is acceptable — internal ops tooling, analytics dashboards, not the critical dispatch path."
+}}
+
+{{phase 7 "Choosing the Right Index" "4 min"}}
+
+{{say "Match the index to the query pattern. Redis GEO for real-time nearest-N lookups with TTL. H3 for aggregation and equal-area analytics. S2 for polygon containment and geofencing. PostGIS when you need durability, SQL joins, or historical data."}}
+
+{{compare "Geospatial Index Selection" (options
+  (best "Redis GEO" "Real-time driver/rider matching. Sub-ms latency. TTL-aware. Use when freshness and speed matter more than durability.")
+  (best "H3" "Demand/supply aggregation, surge pricing zones, heat maps. Equal-area cells make density comparisons meaningful.")
+  (alt "S2" "Polygon containment and geofencing. Complex polygon operations. Used when you need precise boundary definitions over large regions.")
+  (alt "PostGIS GIST" "Durable spatial queries, historical location analysis, complex spatial joins. Accept 10ms latency in exchange for full SQL expressiveness.")
+  (nofit "B-tree on lat/lng" "Cannot answer radius queries without a full table scan. Never use raw columns without a spatial index.")
+)}}
+
+{{table "Production Cost Comparison" (rows
+  (row "System"        "Ops/sec per node"  "Latency"   "Cost at 500K drivers")
+  (row "Redis GEO"     "100K GEOADD/sec"   "0.5ms"     "~5 r6g.xlarge = ~$1,500/mo")
+  (row "PostGIS GIST"  "5K queries/sec"    "10ms"      "~2 db.r6g.2xl RDS = ~$800/mo")
+  (row "H3 + Redis"    "100K/sec"          "0.5ms"     "Same as Redis GEO — key is just a cell ID")
+  (row "S2 + Postgres" "5K queries/sec"    "5ms"       "BIGINT index, same cost as PostGIS")
+)}}
+
+{{think "The real system uses all of these layers together."
+  (how "Uber's actual stack" "Redis GEO for real-time dispatch (sub-ms). H3 for surge pricing computed every 30s (equal-area aggregation). PostGIS for historical trip data, driver earnings, and audit. S2 for geofence containment checks at airport zones and restricted areas.")
+  (whatIf "Redis GEO cluster goes down during peak hours" "Fall back to PostGIS for dispatch. Accept 10ms vs 0.5ms latency. At 1,000 match requests/sec, PostGIS can handle this with 2 read replicas. Pre-test the failover path — it should be automatic via your location service circuit breaker.")
+}}
+
+{{phase 8 "Interview Summary" "2 min"}}
+
+{{say "In an interview, the answer is never 'use a spatial index' — it is which one and why. Redis GEO for real-time matching. H3 for analytics. S2 for polygon operations. PostGIS for durability. Most production systems use two or three of these layers together."}}
+
+{{avoid "Do not say Redis GEO gives you exact GPS precision. It uses a 52-bit GeoHash accurate to 0.6 meters — sufficient for ride-sharing but not surveying. Also: GEORADIUS is deprecated since Redis 6.2. Always say GEOSEARCH. And never propose a B-tree on raw lat/lng columns — it cannot answer radius queries efficiently."}}
+
+{{table "Company Usage Reference" (rows
+  (row "Company"     "Technology"   "Use Case")
+  (row "Uber"        "H3 + Redis"   "Surge pricing zones + real-time driver dispatch")
+  (row "Google Maps" "S2"           "Map tile rendering, polygon containment, routing")
+  (row "Pokémon GO"  "S2"           "Spawn zones, gym regions, geofencing")
+  (row "Foursquare"  "GeoHash"      "Venue search, neighborhood clustering")
+  (row "Lyft"        "Redis GEO"    "Driver matching, ETA computation")
+  (row "DoorDash"    "H3 + PostGIS" "Delivery zone definition + order history")
+)}}
+
+{{checklist
+  "B-tree on lat/lng = full table scan for radius queries — always use a spatial index"
+  "GeoHash: shared prefix = proximity, but check 8 neighbors for boundary safety"
+  "S2: sphere-aware, best for polygon containment and geofencing"
+  "H3: equal-area hexagons, best for demand/supply aggregation and surge zones"
+  "Redis GEO: 52-bit GeoHash as sorted-set score, use GEOSEARCH not GEORADIUS"
+  "PostGIS GIST: ~10ms at 1M rows, durable, full SQL — use as fallback or write-through"
+  "Production systems layer all three: Redis for speed, PostGIS for durability, H3 for analytics"
+  "Always expire stale driver entries from Redis GEO — no per-member TTL, manage externally"
+}}
+
+{{key "Geospatial indexing maps 2D coordinates into a 1D key space — the right index depends entirely on your query pattern: Redis GEO for real-time nearest-N, H3 for equal-area aggregation, S2 for polygon containment, and PostGIS when you need SQL joins and durability."}}
