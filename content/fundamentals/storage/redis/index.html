@@ -1,19 +1,19 @@
 {{phase 1 "What Is Redis?" "3 min"}}
 
-{{say "Redis is an in-memory key-value store. Sub-millisecond reads. Used as a cache, session store, rate limiter, pub/sub broker, and distributed lock."}}
+{{say "Redis is an in-memory key-value store. {{info \"sub-millisecond\" \"less than 1/1000th of a second\"}} reads — responses arrive in microseconds. Used as a cache, session store, rate limiter, {{info \"pub/sub broker\" \"message delivery system where one sender broadcasts to many listeners\"}}, and distributed lock."}}
 
 {{triggerQs "Before You Dive In"
   "Why would you reach for Redis instead of just caching in your application process?"
   "In-process caches are lost on restart, not shared across multiple app servers, and consume your app's heap memory. Redis gives you a shared, persistent (optionally), horizontally-visible cache that survives app restarts and scales independently of your application tier."
   "Is Redis a database or a cache?"
-  "Both, depending on how you configure it. With no persistence it is a pure cache. With AOF + RDB it can be a primary store for certain workloads like session data, rate-limit counters, and leaderboards. For most systems it sits in front of a relational database as a cache layer."
+  "Both, depending on how you configure it. With no {{info \"persistence\" \"saving data to disk so it survives restarts\"}} it is a pure cache. With {{info \"AOF\" \"Append-Only File: logs every write to disk\"}} + {{info \"RDB\" \"database snapshot saved to disk at a point in time\"}} it can store data long-term for sessions, rate-limit counters, and leaderboards. For most systems it sits in front of a relational database as a cache layer."
   "What is the most important thing to understand about Redis before a system design interview?"
   "Data structure selection. Redis is not just GET/SET — sorted sets, HyperLogLog, and bitmaps each solve a specific class of problems. Knowing which structure to reach for and why is what separates strong candidates."
 }}
 
 {{qa
   "Why Redis over Memcached?"
-  "Redis has native data structures: sorted sets, lists, hashes, streams. Memcached is strings only. Redis also supports persistence (RDB/AOF), replication, Lua scripting, and pub/sub. Use Memcached only if you need pure GET/SET at maximum CPU throughput."
+  "Redis has native data structures: sorted sets, lists, hashes, streams. Memcached is strings only. Redis also supports {{info \"persistence\" \"saving data to disk\"}} (RDB/AOF), {{info \"replication\" \"copying data to backup nodes\"}}, {{info \"Lua scripting\" \"writing custom logic that runs inside Redis atomically\"}}, and {{info \"pub/sub\" \"publish/subscribe messaging\"}}.  Use Memcached only if you need pure GET/SET at maximum CPU throughput."
   "When would you pick Memcached?"
   "Pure cache with no other requirements. Memcached is multi-threaded and uses all CPU cores natively; Redis command execution is single-threaded per shard (though network I/O can be multi-threaded since Redis 6.0 via io-threads). If you only need GET/SET at maximum throughput and have multiple cores to burn, Memcached wins on raw ops/sec per node."
 }}
@@ -21,11 +21,11 @@
 {{table "Redis at a Glance" (rows
   (row "Property"        "Detail")
   (row "Type"            "In-memory key-value store with data structures")
-  (row "Latency"         "Sub-millisecond (< 0.5ms p99 typical)")
-  (row "Throughput"      "100K+ ops/sec per node (single-threaded)")
-  (row "Persistence"     "RDB snapshots + AOF append-only log")
-  (row "Replication"     "Leader-follower async replication")
-  (row "Clustering"      "Hash slots (16,384 slots across shards)")
+  (row "{{info \"Latency\" \"Time from request to response, in ms\"}}"         "Sub-millisecond (< 0.5ms p99 typical)")
+  (row "{{info \"Throughput\" \"Operations processed per second\"}}"      "100K+ ops/sec per node (single-threaded)")
+  (row "Persistence"     "{{info \"RDB\" \"Point-in-time snapshots\"}} snapshots + {{info \"AOF\" \"Append-Only File\"}} log")
+  (row "{{info \"Replication\" \"Copying data to backup nodes\"}}"     "Leader-follower async {{info \"replication\" \"Copying data across nodes\"}}")
+  (row "Clustering"      "Hash slots (16,384 slots across {{info \"shards\" \"Data partitions on separate nodes\"}})")
   (row "Max Memory"      "Configurable, typically 64GB per node")
   (row "Protocol"        "RESP (Redis Serialization Protocol)")
 )}}
@@ -47,12 +47,12 @@
 )}}
 
 {{think "Why sorted sets are the most underappreciated structure"
-  (whyNot "a regular Set for leaderboards" "Sets have no ordering — you cannot retrieve members ranked by score without reading all members and sorting in your application, which is O(N log N) and not atomic. Sorted sets maintain order inherently, so ZREVRANGE for top-N is O(log N + M) where M is the result size.")
+  (whyNot "a regular Set for leaderboards" "A regular Set has no built-in ranking — to rank 10 million players, you'd read all 10M into memory and sort them in your code (billions of operations). Sorted sets maintain ranking automatically, so getting top-N is instant — thousands of times faster.")
   (whatIf "you use a sorted set for rate limiting but forget to call ZREMRANGEBYSCORE" "Old timestamps accumulate forever. The key grows unbounded, ZCARD always increases, and every user eventually gets rate-limited permanently even with low traffic. Always pair ZADD with ZREMRANGEBYSCORE to clean the sliding window.")
   (how "does the sliding window rate limiter work atomically" "Use a pipeline: (1) ZREMRANGEBYSCORE to remove entries older than window_start, (2) ZADD the current timestamp, (3) ZCARD to count remaining entries, (4) EXPIRE to auto-clean the key. Pipelines are not atomic by default — for true atomicity wrap in a Lua script so no other command interleaves between the count check and the decision.")
 }}
 
-{{hint "why Hash for user profiles vs. a JSON String" "Storing user data as a JSON string forces you to deserialize the entire blob to update one field. With a Hash, HSET updates a single field in O(1) without touching the rest. At 10M sessions each reading 3 fields, the difference is significant network and CPU overhead."}}
+{{hint "why Hash for user profiles vs. a JSON String" "Storing user data as one JSON string forces you to read everything, change one field, then rewrite it all. With a Hash, you update just that one field directly. At 10M users reading 3 fields each, that's ~30M full string reads avoided. Big CPU and network savings."}}
 
 {{code "python" `import redis
 import time
@@ -100,7 +100,7 @@ user_id = r.hget("session:abc123", "user_id")
 
 {{phase 3 "Caching Strategies" "5 min"}}
 
-{{say "Caching is the most common use of Redis. The caching strategy you choose affects consistency, performance, and complexity. Let me walk through the four main patterns."}}
+{{say "Caching is the most common use of Redis. The strategy you pick affects how fresh data is, how fast it is, and how complex your code becomes. Here are the four main patterns."}}
 
 {{compare "Caching Patterns" (options
   (best "Cache-Aside (Lazy Load)" "App checks cache -> miss -> reads DB -> writes cache. Simple, only caches what is needed. Most common pattern in production.")
@@ -109,7 +109,7 @@ user_id = r.hget("session:abc123", "user_id")
   (nofit "Refresh-Ahead" "Cache pre-fetches before TTL expires. Complex to tune, requires access pattern prediction. Rarely worth it in practice.")
 )}}
 
-{{hint "why cache-aside over write-through as the default" "Write-through caches every write, including writes to data that is never read. If only 5% of your user records are hot, write-through wastes 95% of cache space on cold data. Cache-aside only promotes data that has actually been requested, so the working set in Redis reflects real access patterns."}}
+{{hint "why cache-aside over write-through as the default" "Write-through caches everything immediately on write, including data no one reads. If only 5% of user records are popular, you waste 95% of expensive Redis memory on unpopular data. Cache-aside waits until someone asks for data before caching it. Redis only holds popular items. Smarter use of memory."}}
 
 {{diagram "fund-redis-cache-aside"}}
 
@@ -164,7 +164,7 @@ async def delete_user_cache(user_id: int):
 
 {{qa
   "What is the thundering herd problem?"
-  "When a popular cache key expires, all concurrent requests miss simultaneously and hammer the DB at once. Fix with a distributed lock: only one request rebuilds the cache, others wait or serve stale data. At 10K RPS, a single popular key expiring can send 10K simultaneous queries to your DB in milliseconds."
+  "When a popular cache key expires, all concurrent requests miss simultaneously. Imagine if 10,000 users all ask 'what's the current user count?' at the exact same millisecond, and you have to query the DB 10,000 times in parallel. Fix: one request rebuilds the cache, others wait. This technique is called a 'distributed lock'."
   "How do you prevent stale cache?"
   "Set TTL based on staleness tolerance: URL shortener redirects can be 24h, user profiles 5-15 min, stock prices 1s or no cache. On writes, immediately delete or update the cache key. The delete approach (cache invalidation) is safer — a missed write leaves a stale entry for at most TTL seconds rather than indefinitely."
 }}
@@ -182,7 +182,7 @@ async def delete_user_cache(user_id: int):
 
 {{phase 4 "ElastiCache Configuration" "5 min"}}
 
-{{say "AWS ElastiCache is managed Redis. You get automatic failover, patching, backups, and monitoring. Let me cover the key configuration choices."}}
+{{say "AWS ElastiCache is {{info \"managed Redis\" \"AWS runs the Redis servers for you\"}}.  You get automatic failover (if primary crashes, standby takes over), patching, backups, and monitoring. Here are the key configuration choices you need to make."}}
 
 {{table "ElastiCache Instance Types" (rows
   (row "Instance"         "vCPU"  "Memory"   "Network"       "$/hr"    "$/month"    "Use Case")
@@ -193,7 +193,7 @@ async def delete_user_cache(user_id: int):
   (row "cache.r6g.2xlarge" "8"    "52.82 GB" "Up to 10 Gbps"  "$0.504"  "~$368"      "Heavy caching load")
 )}}
 
-{{hint "why r6g (memory-optimized) over t4g (burstable) for production" "t4g instances use CPU credits — they burst to full speed for short periods then throttle when credits run out. Redis workloads are bursty by nature (traffic spikes during peak hours). A t4g.medium under sustained load will exhaust CPU credits and latency will spike from sub-millisecond to tens of milliseconds. r6g instances have consistent, non-burstable CPU."}}
+{{hint "why r6g (memory-optimized) over t4g (burstable) for production" "t4g instances have a budget of CPU time — like a phone battery that throttles when used up. During peak hours, Redis gets hammered, uses up its budget, and then slows down from <1ms latency to 50ms+. r6g instances have unlimited CPU that never throttles. For something as latency-sensitive as a cache, that matters."}}
 
 {{table "ElastiCache Cluster Modes" (rows
   (row "Mode"                    "Topology"                        "Max Memory"        "Use Case")
@@ -203,7 +203,7 @@ async def delete_user_cache(user_id: int):
 )}}
 
 {{think "Cluster mode disabled vs. cluster mode enabled"
-  (whyNot "cluster mode enabled for all workloads" "Cluster mode requires all multi-key operations to target the same hash slot — you cannot use MGET, pipelines, or Lua scripts across keys that hash to different slots. This breaks many application patterns and forces key prefixing with hash tags like {user}:profile and {user}:settings to co-locate keys. The added complexity is only worth it when your dataset exceeds a single node's memory or when write throughput exceeds a single primary.")
+  (whyNot "cluster mode enabled for all workloads" "Cluster mode requires all multi-key operations to target the same {{info \"hash slot\" \"partition determined by the key name\"}}.  You cannot use MGET (get multiple keys), {{info \"pipelines\" \"send multiple commands at once\"}} or Lua scripts across keys on different partitions. This breaks application patterns and forces weird key naming like {user}:profile and {user}:settings. Only use cluster mode when your data is huge or write throughput exceeds a single server.")
   (whatIf "you start with cluster mode disabled and need to migrate to enabled later" "ElastiCache does not support in-place migration from disabled to enabled. You need to stand up a new cluster, run a migration script to bulk-copy data (using SCAN + DUMP/RESTORE or a tool like redis-copy), update your connection string, and do a cutover. Plan for this upfront if your dataset is likely to exceed 50-60GB within 12 months.")
 }}
 
@@ -250,7 +250,7 @@ auth-token: <token>               # Require password
   (row "allkeys-random"   "Evict random key"                            "Never (unless testing)")
 )}}
 
-{{hint "why allkeys-lru?" "allkeys-lru evicts the least recently used key from ALL keys. volatile-lru only evicts keys with a TTL set — if you forget to set TTL on some keys, they will never be evicted and will consume memory permanently until Redis fills up and returns OOM errors. allkeys-lru is safer as the default because it works regardless of whether developers remembered to set TTLs."}}
+{{hint "why allkeys-lru?" "allkeys-lru deletes the oldest-accessed key when memory is full. volatile-lru only deletes keys with a {{info \"TTL\" \"Time To Live: automatic expiration date\"}} set. If you forget to set TTL on some keys, they stay forever, eventually filling memory and breaking Redis. allkeys-lru forgives mistakes: it deletes old stuff whether or not it has a TTL."}}
 
 {{think "Choosing between allkeys-lru and allkeys-lfu"
   (whyNot "allkeys-lfu for a social media feed cache" "LFU tracks access frequency. A celebrity post from yesterday has a high frequency count but low recent access — LFU will keep it in cache while evicting a trending post from 5 minutes ago that has only been accessed 10 times. LRU is better when recency matters more than total frequency, which is true for most feed and news workloads.")
@@ -297,7 +297,7 @@ auth-token: <token>               # Require password
 
 {{phase 7 "Common Interview Patterns" "5 min"}}
 
-{{say "Let me show the most common Redis patterns that come up in system design interviews."}}
+{{say "the most common Redis patterns that come up in system design interviews."}}
 
 {{table "Redis Interview Patterns" (rows
   (row "Pattern"                "Redis Feature"         "Example")
@@ -313,7 +313,7 @@ auth-token: <token>               # Require password
   (row "Queue"                  "List + BRPOP"          "Simple task queue")
 )}}
 
-{{hint "why SET NX EX for distributed locks instead of SETNX then EXPIRE separately" "SETNX and EXPIRE as two separate commands are not atomic. If the process crashes between SETNX (lock acquired) and EXPIRE (TTL set), the lock key has no TTL and will never be released — a deadlock. SET key value NX EX timeout is a single atomic command introduced in Redis 2.6.12 that sets the key and TTL in one operation, eliminating this race condition."}}
+{{hint "why SET NX EX for distributed locks instead of SETNX then EXPIRE separately" "If you use two separate commands (one to claim the lock, one to set a timer), a crash between them leaves a permanent lock — a deadlock that never releases. SET NX EX combines both into one atomic action: 'claim the lock AND set the timer' happens together. No crash can break it apart."}}
 
 {{think "Distributed lock design decisions"
   (whyNot "a simple SETNX without a unique lock ID" "Without a unique lock ID, any client can call DEL to release the lock — including a client that never held it, or a client whose lock already expired and was acquired by someone else. Store a unique UUID as the lock value and use a Lua script to atomically check-and-delete: only delete the key if its value matches your UUID.")

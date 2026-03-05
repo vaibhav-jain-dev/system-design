@@ -10,21 +10,21 @@
 }}
 
 {{table "Load Balancer Layers" (rows
-  (row "Layer"   "OSI Layer"  "Protocol Awareness"              "Example")
-  (row "L4"      "Transport"  "TCP/UDP only, no content inspection" "AWS NLB, HAProxy TCP mode")
-  (row "L7"      "Application" "HTTP headers, paths, cookies, gRPC" "AWS ALB, Nginx, Envoy")
+  (row "Layer"   "{{info \"OSI Layer\" \"OSI (Open Systems Interconnection) is a 7-layer model: 1=Physical, 2=Data Link, 3=Network (IP), 4=Transport (TCP/UDP), 5=Session, 6=Presentation, 7=Application (HTTP). Higher layers know more about the data.\""}} "Protocol Awareness"              "Example")
+  (row "{{info \"L4\" \"L4 (Layer 4, Transport layer) = TCP/UDP. LB sees only IP addresses and port numbers, not HTTP paths or hostnames.\""}} "Transport"  "TCP/UDP only, no content inspection" "AWS {{info \"NLB\" \"NLB (Network Load Balancer) = Layer 4 load balancer. No HTTP awareness. Ultra-fast, supports static IPs, handles MQTT and other non-HTTP protocols.\"}} , HAProxy TCP mode")
+  (row "{{info \"L7\" \"L7 (Layer 7, Application layer) = HTTP, HTTPS, WebSocket, gRPC. LB can read HTTP headers, paths, hostnames to make routing decisions.\""}} "Application" "HTTP headers, paths, cookies, gRPC" "AWS {{info \"ALB\" \"ALB (Application Load Balancer) = Layer 7 load balancer. Understands HTTP/HTTPS. Can route by path (/api vs /static) or hostname (api.example.com vs web.example.com).\"}} , Nginx, Envoy")
 )}}
 
 {{think "L4 vs L7: which do I choose?"
   (whyNot "L4 for web APIs" "You lose path-based routing, header inspection, WAF, and gRPC health checks. L4 just forwards TCP packets — it cannot distinguish /api from /static.")
   (whatIf "I need both static IPs and L7 routing" "Chain NLB (static IP) in front of ALB (L7 routing). NLB passes TCP to ALB. You get both features at the cost of ~$16/mo extra and slightly more latency.")
-  (how "When does L4 beat L7?" "Non-HTTP protocols (MQTT, FIX, custom TCP), latency under 100 microseconds, or TLS passthrough where you cannot decrypt traffic at the LB.")
+  (how "When does L4 beat L7?" "Non-HTTP protocols (MQTT, FIX, custom TCP), latency under 100 microseconds, or {{info \"TLS passthrough\" \"TLS passthrough = LB forwards encrypted traffic without decrypting it. LB cannot read HTTP paths or make smart routing decisions. Used when client-LB encryption matters more than smart routing.\"}} where you cannot decrypt traffic at the LB.")
 }}
 
 {{hint "L7 is the default for web services" "90% of web workloads use L7. L4 is a deliberate choice for specific constraints, not the starting point."}}
 
 {{compare "Load Balancer Types" (options
-  (best "ALB (Layer 7)" "HTTP-aware: path routing, host routing, WebSocket, gRPC, WAF integration. Best for web APIs and microservices.")
+  (best "ALB (Layer 7)" "HTTP-aware: path routing, host routing, WebSocket, gRPC, {{info \"WAF\" \"WAF (Web Application Firewall) = filters HTTP requests by rule (block bots, limit by country, SQL injection detection). Sits in front of ALB.\"}} integration. Best for web APIs and microservices.")
   (alt "NLB (Layer 4)" "TCP/UDP passthrough. Static IP. Ultra-low latency (<100us). Best for non-HTTP protocols, gaming, IoT.")
   (nofit "Classic LB" "Legacy AWS offering. AWS recommends migrating to ALB/NLB. No new features since 2016.")
 )}}
@@ -42,10 +42,10 @@
 {{table "Routing Algorithms" (rows
   (row "Algorithm"            "How It Works"                                    "Best For"                              "Drawback")
   (row "Round Robin"          "Requests go to servers 1, 2, 3, 1, 2, 3..."     "Stateless APIs, uniform servers"       "Ignores server load differences")
-  (row "Weighted Round Robin" "Server A gets 3x traffic vs Server B"           "Mixed instance sizes (c5.large + c5.xlarge)" "Manual weight configuration")
-  (row "Least Connections"    "Route to server with fewest active connections"  "Long-lived connections, WebSocket"     "Does not account for request complexity")
-  (row "IP Hash"              "Hash client IP to always same server"            "Sticky sessions without cookies"       "Uneven distribution if IP range is skewed")
-  (row "Consistent Hashing"   "Hash ring, minimal redistribution on scale"     "Cache-aware routing, Redis cluster"    "More complex to implement")
+  (row "{{info \"Weighted Round Robin\" \"Weighted Round Robin assigns each server a weight. Server A weight=3 gets 3x more traffic than Server B weight=1. Use for mixed instance sizes.\"}} " "Server A gets 3x traffic vs Server B"           "Mixed instance sizes (c5.large + c5.xlarge)" "Manual weight configuration")
+  (row "{{info \"Least Connections\" \"Least Connections counts active connections per server and routes to the server with fewest. Great for long-lived connections like WebSocket.\"}} " "Route to server with fewest active connections"  "Long-lived connections, WebSocket"     "Does not account for request complexity")
+  (row "{{info \"IP Hash\" \"IP Hash hashes the client's IP address to pick a server. Same client always goes to same server. Not cookie-based, works with any protocol.\"}} " "Hash client IP to always same server"            "Sticky sessions without cookies"       "Uneven distribution if IP range is skewed")
+  (row "{{info \"Consistent Hashing\" \"Consistent Hashing uses a hash ring. Adding/removing a server only redistributes 1/N keys instead of reshuffling everything. Used by Redis Cluster, DynamoDB.\""}} "Hash ring, minimal redistribution on scale"     "Cache-aware routing, Redis cluster"    "More complex to implement")
   (row "Random"               "Randomly pick a server"                          "Simple load tests"                     "No guarantee of even distribution")
 )}}
 
@@ -65,13 +65,13 @@ class ConsistentHashRing:
     def __init__(self, nodes=None, virtual_nodes=150):
         self.ring = {}
         self.sorted_keys = []
-        self.virtual_nodes = virtual_nodes
+        self.virtual_nodes = virtual_nodes  # 150 virtual copies per server for uniform distribution
         if nodes:
             for node in nodes:
                 self.add_node(node)
 
     def add_node(self, node: str):
-        """Add a node with virtual nodes for better distribution."""
+        """Add a node with virtual node copies on the hash ring for even distribution."""
         for i in range(self.virtual_nodes):
             key = self._hash(f"{node}:{i}")
             self.ring[key] = node
@@ -114,17 +114,17 @@ class ConsistentHashRing:
   (row "Type"          "Checks"                          "Detection Time"          "Use Case")
   (row "TCP"           "Can establish TCP connection"     "~5s (3 failed x interval)" "Non-HTTP services, databases")
   (row "HTTP"          "GET /health returns 200"          "~15s (configurable)"     "Web services, APIs")
-  (row "gRPC"          "gRPC health check protocol"       "~10s"                    "gRPC microservices")
-  (row "Deep/Custom"   "/health/deep checks DB + cache"   "~30s (more comprehensive)" "Monitoring dashboards only")
+  (row "{{info \"gRPC\" \"gRPC is a modern RPC (Remote Procedure Call) protocol over HTTP/2. Faster and more efficient than REST for service-to-service communication.\"}} " "gRPC health check protocol"       "~10s"                    "gRPC microservices")
+  (row "{{info \"Deep/Custom\" \"Deep health check queries downstream services (database, cache, external APIs). Should NOT be used on LB. Use only for monitoring alerts.\"}} " "/health/deep checks DB + cache"   "~30s (more comprehensive)" "Monitoring dashboards only")
 )}}
 
-{{think "Shallow vs deep health check — where does each belong?"
+{{think "{{info \"Shallow\" \"Shallow health check = only verifies the app process is alive and can respond. Does NOT check database or downstream dependencies.\"}} vs {{info \"deep\" \"Deep health check = verifies the app AND all its dependencies (database, cache, external APIs). More comprehensive but slower.\"}} health check — where does each belong?"
   (whyNot "Deep check on load balancer" "One slow DB query cascades: LB removes instance, remaining instances handle more load, their DB queries slow, LB removes them too. Cascading removal kills your fleet.")
   (whatIf "My app is up but DB is down" "Shallow LB check keeps the instance in rotation. It will return 500s. That is correct behavior — the outage surfaces at the DB layer, not as a mysterious capacity reduction.")
   (how "How do I alert on DB failure without a deep LB check?" "Set up a separate monitoring health check (DataDog, CloudWatch Synthetics) that hits /health/deep and pages on failure.")
 }}
 
-{{hint "Match detection time to your SLA" "If your SLA requires 99.9% uptime, a 90-second detection window is too long for a complete instance failure. Set 10s interval, 2 threshold = 20s max detection."}}
+{{hint "Match detection time to your {{info \"SLA\" \"SLA (Service Level Agreement) = a promise to uptime. 99.9% = 43 minutes of downtime allowed per month. 99.99% = 4 minutes per month. Shorter detection windows help meet stricter SLAs.\"}} " "If your SLA requires 99.9% uptime, a 90-second detection window is too long for a complete instance failure. Set 10s interval, 2 threshold = 20s max detection."}}
 
 {{code "python" `# Health check endpoint examples
 
