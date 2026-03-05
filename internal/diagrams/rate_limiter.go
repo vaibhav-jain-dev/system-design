@@ -234,13 +234,13 @@ Retry-After: 45</div>
 		Type:        TypeHTML,
 		HTML: `<div class="d-flow-v">
   <div class="d-flow">
-    <div class="d-box indigo" style="min-width:140px;text-align:center">
-      <strong>Bucket</strong><br>
+    <div class="d-box indigo" data-tip="Two fields stored in Redis HASH: tokens (float) and last_refill (unix timestamp). O(1) memory per key." style="min-width:140px;text-align:center">
+      <strong>Bucket</strong> <span class="d-metric size">O(1)</span><br>
       capacity: 10<br>
       tokens: 7
     </div>
     <div class="d-arrow">&#8592;</div>
-    <div class="d-box green" style="min-width:120px;text-align:center">
+    <div class="d-box green" data-tip="Tokens refill continuously. On each check, calculate elapsed time since last_refill and add (elapsed × rate). Cap at capacity." style="min-width:120px;text-align:center">
       <strong>Refill</strong><br>
       +2 tokens/sec
     </div>
@@ -249,18 +249,18 @@ Retry-After: 45</div>
   <div class="d-flow">
     <div class="d-branch">
       <div class="d-branch-arm">
-        <div class="d-box green">tokens &#8805; 1?</div>
+        <div class="d-box green" data-tip="Decrement tokens by 1 atomically. Refill first, then check.">tokens &#8805; 1?</div>
         <div class="d-arrow-down">&#8595; YES</div>
-        <div class="d-box green">tokens-- &#8594; ALLOW</div>
+        <div class="d-box green"><span class="d-status active"></span>tokens-- &#8594; ALLOW</div>
       </div>
       <div class="d-branch-arm">
-        <div class="d-box red">tokens &lt; 1?</div>
+        <div class="d-box red" data-tip="Return 429 with Retry-After = (1 - tokens) / refill_rate seconds.">tokens &lt; 1?</div>
         <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box red">REJECT (429)</div>
+        <div class="d-box red"><span class="d-status error"></span>REJECT (429)</div>
       </div>
     </div>
   </div>
-  <div class="d-label">Burst: can send up to 'capacity' requests instantly, then rate-limited to refill_rate/sec</div>
+  <div class="d-caption">Burst: can send up to <strong>capacity</strong> requests instantly, then rate-limited to refill_rate/sec. Used by AWS API Gateway.</div>
 </div>`,
 	})
 
@@ -294,7 +294,7 @@ Retry-After: 45</div>
     weighted = 84 &#215; 0.75 + 36 = <strong>99</strong><br>
     limit = 100 &#8594; <strong>ALLOW</strong> (1 remaining)
   </div>
-  <div class="d-label">Eliminates boundary burst: smoothly transitions between windows using time-weighted average</div>
+  <div class="d-caption">Eliminates boundary burst: smoothly transitions between windows using time-weighted average. <strong>Used by Cloudflare and Stripe.</strong></div>
 </div>`,
 	})
 
@@ -346,24 +346,24 @@ Retry-After: 45</div>
 		ContentFile: "problems/rate-limiter",
 		Type:        TypeHTML,
 		HTML: `<div class="d-flow-v">
-  <div class="d-box blue" style="text-align:center"><strong>Client Request</strong></div>
+  <div class="d-box blue" data-tip="HTTPS request with API key in header or JWT Bearer token. Client-side should implement exponential backoff on 429." style="text-align:center"><span class="d-step">1</span><strong>Client Request</strong></div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box gray" style="text-align:center">Route 53 (DNS)</div>
+  <div class="d-box gray" data-tip="DNS resolution adds ~1-5ms. Use Route 53 latency-based routing for multi-region." style="text-align:center">Route 53 (DNS) <span class="d-metric latency">&lt;5ms</span></div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box green" style="text-align:center">ALB (Load Balancer)</div>
+  <div class="d-box green" data-tip="Application Load Balancer distributes across ECS containers. TLS termination happens here." style="text-align:center">ALB (Load Balancer) <span class="d-metric latency">~1ms</span></div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box indigo" style="text-align:center"><strong>API Server (ECS)</strong></div>
+  <div class="d-box indigo" data-tip="ECS Fargate containers. Rate limit middleware runs as first middleware in chain, before auth." style="text-align:center"><span class="d-step">2</span><strong>API Server (ECS)</strong> <span class="d-metric throughput">100K RPS</span></div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box amber" style="text-align:center;border:2px solid var(--amber)">
-    <strong>Rate Limit Middleware</strong><br>
+  <div class="d-box amber" data-tip="Middleware extracts key (API key &gt; JWT user_id &gt; IP fallback), loads tier rules, then calls Redis Lua script. Total overhead &lt;1ms." style="text-align:center;border:2px solid var(--amber)">
+    <span class="d-step">3</span><strong>Rate Limit Middleware</strong><br>
     Extract key (API key or IP) &#8594; Check rules &#8594; Query Redis
   </div>
   <div class="d-arrow-down">&#8595;</div>
   <div class="d-flow">
     <div class="d-branch">
       <div class="d-branch-arm">
-        <div class="d-box red" style="text-align:center">
-          <strong>Redis</strong><br>
+        <div class="d-box red" data-tip="Single EVAL command runs atomically. No race conditions. 1 TCP round-trip replaces 3-5 separate commands." style="text-align:center">
+          <span class="d-step">4</span><strong>Redis</strong> <span class="d-metric latency">&lt;1ms</span><br>
           Lua script (atomic)<br>
           INCR + EXPIRE
         </div>
@@ -374,20 +374,25 @@ Retry-After: 45</div>
   <div class="d-flow">
     <div class="d-branch">
       <div class="d-branch-arm">
-        <div class="d-box green" style="text-align:center">
-          <strong>ALLOW</strong><br>
+        <div class="d-box green" data-tip="Headers: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset (Unix epoch)" style="text-align:center">
+          <span class="d-status active"></span><strong>ALLOW</strong><br>
           Continue to app logic<br>
           Add X-RateLimit-* headers
         </div>
       </div>
       <div class="d-branch-arm">
-        <div class="d-box red" style="text-align:center">
-          <strong>REJECT</strong><br>
+        <div class="d-box red" data-tip="Return 429 with Retry-After header (seconds). Client should back off exponentially." style="text-align:center">
+          <span class="d-status error"></span><strong>REJECT</strong><br>
           429 Too Many Requests<br>
           + Retry-After header
         </div>
       </div>
     </div>
+  </div>
+  <div class="d-legend">
+    <div class="d-legend-item"><div class="d-legend-color green"></div>Success path</div>
+    <div class="d-legend-item"><div class="d-legend-color red"></div>Rejection path</div>
+    <div class="d-legend-item"><div class="d-legend-color amber"></div>Decision point</div>
   </div>
 </div>`,
 	})
@@ -399,22 +404,20 @@ Retry-After: 45</div>
 		ContentFile: "problems/rate-limiter",
 		Type:        TypeHTML,
 		HTML: `<div class="d-flow-v">
-  <div class="d-box blue">H1: Client sends API request with API key or JWT</div>
-  <div class="d-label">HTTPS &#8594; TLS termination at ALB</div>
+  <div class="d-box blue" data-tip="Client includes API key in X-API-Key header or JWT in Authorization: Bearer. HTTPS/TLS 1.3."><span class="d-step">1</span>Client sends API request with API key or JWT</div>
+  <div class="d-label">HTTPS &#8594; TLS termination at ALB <span class="d-metric latency">~10ms TLS</span></div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box gray">H2: ALB routes to healthy ECS container</div>
-  <div class="d-label">Round-robin or least-connections &#8226; Health check: /health</div>
+  <div class="d-box gray" data-tip="ALB distributes via round-robin or least-connections. Health check on /health every 30s."><span class="d-step">2</span>ALB routes to healthy ECS container <span class="d-metric latency">~1ms</span></div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box indigo">H3: Middleware extracts rate limit key</div>
-  <div class="d-label">Parse JWT &#8594; user_id OR API-Key header &#8594; key OR IP fallback</div>
+  <div class="d-box indigo" data-tip="Priority: API-Key header → JWT user_id → X-Forwarded-For IP → socket IP. Key format: rl:{identity}:{endpoint}"><span class="d-step">3</span>Middleware extracts rate limit key <span class="d-metric latency">&lt;0.1ms</span></div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box amber">H4: Lua script executes atomically in Redis</div>
-  <div class="d-label">&lt; 1ms &#8226; Single eval replaces 3 separate commands &#8226; No race conditions</div>
+  <div class="d-box amber" data-tip="EVAL sha1 1 key limit window now → returns {allowed: bool, remaining: int, reset: epoch}"><span class="d-step">4</span>Lua script executes atomically in Redis <span class="d-metric latency">&lt;1ms</span></div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box green">H5a: ALLOWED &#8594; Continue to application logic</div>
-  <div class="d-box red">H5b: REJECTED &#8594; Return 429 with Retry-After</div>
+  <div class="d-box green"><span class="d-step">5a</span><span class="d-status active"></span>ALLOWED &#8594; Continue to application logic</div>
+  <div class="d-box red"><span class="d-step">5b</span><span class="d-status error"></span>REJECTED &#8594; Return 429 with Retry-After</div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box blue">H6: Response includes X-RateLimit-* headers (always)</div>
+  <div class="d-box blue" data-tip="Always present regardless of allow/reject: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, X-RateLimit-Policy"><span class="d-step">6</span>Response includes X-RateLimit-* headers (always)</div>
+  <div class="d-caption">Total overhead: <strong>&lt;2ms</strong> added to every request. The Redis call dominates (~0.5ms avg).</div>
 </div>`,
 	})
 
@@ -565,21 +568,21 @@ Retry-After: 45</div>
 		ContentFile: "problems/rate-limiter",
 		Type:        TypeHTML,
 		HTML: `<div class="d-flow-v">
-  <div class="d-box blue" style="text-align:center"><strong>App Server</strong><br>EVAL lua_script 1 key limit window now</div>
+  <div class="d-box blue" data-tip="EVALSHA uses cached script SHA1 — avoids sending full script on every call. Falls back to EVAL on cache miss." style="text-align:center"><span class="d-step">1</span><strong>App Server</strong><br>EVAL lua_script 1 key limit window now</div>
   <div class="d-arrow-down">&#8595; single TCP round-trip</div>
-  <div class="d-box red" style="text-align:center;border:2px solid var(--red)">
-    <strong>Redis (Atomic Execution)</strong><br>
+  <div class="d-box red" data-tip="Redis is single-threaded. Lua script blocks ALL other commands during execution. Keep scripts under 5ms." style="text-align:center;border:2px solid var(--red)">
+    <span class="d-step">2</span><strong>Redis (Atomic Execution)</strong> <span class="d-metric latency">&lt;1ms</span><br>
     No other commands execute during Lua script
   </div>
   <div class="d-arrow-down">&#8595;</div>
   <div class="d-cols">
     <div class="d-col">
       <div class="d-flow-v">
-        <div class="d-box amber">1. HMGET key tokens last_refill</div>
-        <div class="d-box amber">2. Calculate refilled tokens</div>
-        <div class="d-box amber">3. Check if tokens &#8805; 1</div>
-        <div class="d-box amber">4. HMSET key new_tokens now</div>
-        <div class="d-box amber">5. EXPIRE key ttl</div>
+        <div class="d-box amber" data-tip="Read current state: remaining tokens and timestamp of last refill">1. HMGET key tokens last_refill</div>
+        <div class="d-box amber" data-tip="new_tokens = min(capacity, old_tokens + (now - last_refill) × rate)">2. Calculate refilled tokens</div>
+        <div class="d-box amber" data-tip="If tokens ≥ 1: allowed=true, tokens--. Else: allowed=false.">3. Check if tokens &#8805; 1</div>
+        <div class="d-box amber" data-tip="Persist new token count and current timestamp atomically">4. HMSET key new_tokens now</div>
+        <div class="d-box amber" data-tip="TTL = ceil(capacity / refill_rate) + 1 second buffer. Auto-cleanup of inactive keys.">5. EXPIRE key ttl</div>
       </div>
     </div>
     <div class="d-col">
@@ -595,7 +598,8 @@ Retry-After: 45</div>
     </div>
   </div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box blue" style="text-align:center">Return {allowed, remaining}</div>
+  <div class="d-box blue" style="text-align:center"><span class="d-step">3</span>Return {allowed, remaining, reset_at}</div>
+  <div class="d-caption">Total Redis time: <strong>&lt;0.5ms</strong> per check. Script is cached (EVALSHA) after first call.</div>
 </div>`,
 	})
 
@@ -629,7 +633,7 @@ Retry-After: 45</div>
       </div>
     </div>
   </div>
-  <div class="d-label">3 shards &#215; 2 nodes = 6 nodes total &#8226; 300K+ ops/sec &#8226; 39 GB memory</div>
+  <div class="d-caption">3 shards × 2 nodes = 6 nodes total <span class="d-metric throughput">300K+ ops/sec</span> <span class="d-metric size">39 GB memory</span> <span class="d-metric cost">~$550/mo</span></div>
 </div>`,
 	})
 
@@ -761,9 +765,9 @@ Retry-After: 45</div>
     <div class="d-group">
       <div class="d-group-title">Monthly Infrastructure</div>
       <div class="d-flow-v">
-        <div class="d-box red" style="text-align:center"><strong>ElastiCache Redis</strong><br>3 shards &#215; 2 nodes (r6g.large)<br><strong>$550/mo</strong></div>
-        <div class="d-box gray" style="text-align:center"><strong>ECS Fargate (sidecar)</strong><br>CPU overhead minimal<br><strong>$0</strong> (existing containers)</div>
-        <div class="d-box blue" style="text-align:center"><strong>CloudWatch</strong><br>Custom metrics for hits<br><strong>$30/mo</strong></div>
+        <div class="d-box red" data-tip="r6g.large: 2 vCPUs, 13 GB RAM, Graviton2. ~$92/mo per node × 6 nodes = $550/mo" style="text-align:center"><strong>ElastiCache Redis</strong><br>3 shards &#215; 2 nodes (r6g.large)<br><strong>$550/mo</strong> <span class="d-metric cost">94%</span></div>
+        <div class="d-box gray" data-tip="Rate limiting runs as middleware inside existing ECS containers. No additional compute cost." style="text-align:center"><strong>ECS Fargate (sidecar)</strong><br>CPU overhead minimal<br><strong>$0</strong> (existing containers)</div>
+        <div class="d-box blue" data-tip="Custom metrics: rate_limit_hit, rate_limit_miss, rate_limit_error per endpoint/tier. $0.30 per custom metric/mo." style="text-align:center"><strong>CloudWatch</strong><br>Custom metrics for hits<br><strong>$30/mo</strong> <span class="d-metric cost">5%</span></div>
       </div>
     </div>
   </div>

@@ -356,7 +356,8 @@ func makeDiagramFunc(reg *diagrams.Registry) func(string, ...string) template.HT
 	}
 }
 
-// renderDiagram renders a Diagram from the registry with interactive info icon.
+// renderDiagram renders a Diagram from the registry with interactive info icon,
+// fullscreen toggle, and zoom controls.
 func renderDiagram(d *diagrams.Diagram) template.HTML {
 	// Build info icon with tooltip if description exists
 	infoHTML := ""
@@ -368,25 +369,45 @@ func renderDiagram(d *diagrams.Diagram) template.HTML {
 			</span>`, template.HTMLEscapeString(d.Description))
 	}
 
+	// Fullscreen toggle button
+	fullscreenBtn := `<button class="diagram-fullscreen-btn" title="Toggle fullscreen" onclick="event.stopPropagation(); var d=this.closest('.diagram-container'); d.classList.toggle('fullscreen'); if(d.classList.contains('fullscreen')){document.body.style.overflow='hidden'}else{document.body.style.overflow=''}">
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+	</button>`
+
+	// Zoom controls
+	zoomControls := `<div class="diagram-zoom-controls">
+		<button class="diagram-zoom-btn" title="Zoom in" onclick="event.stopPropagation(); var c=this.closest('.diagram-container'); var s=parseFloat(c.dataset.zoom||'1'); s=Math.min(s+0.15,2); c.dataset.zoom=s; c.querySelector('.diagram-body').style.transform='scale('+s+')'; c.querySelector('.diagram-body').style.transformOrigin='top center'">+</button>
+		<button class="diagram-zoom-btn" title="Zoom out" onclick="event.stopPropagation(); var c=this.closest('.diagram-container'); var s=parseFloat(c.dataset.zoom||'1'); s=Math.max(s-0.15,0.5); c.dataset.zoom=s; c.querySelector('.diagram-body').style.transform='scale('+s+')'; c.querySelector('.diagram-body').style.transformOrigin='top center'">−</button>
+		<button class="diagram-zoom-btn" title="Reset zoom" onclick="event.stopPropagation(); var c=this.closest('.diagram-container'); c.dataset.zoom='1'; c.querySelector('.diagram-body').style.transform='scale(1)'">⊙</button>
+	</div>`
+
 	switch d.Type {
 	case diagrams.TypeImage:
 		return template.HTML(fmt.Sprintf(
-			`<div class="diagram-container diagram-interactive" data-slug="%s">
+			`<div class="diagram-container diagram-interactive" data-slug="%s" data-zoom="1">
 				<div class="diagram-header">
 					<div class="diagram-title">%s</div>
 					%s
+					%s
 				</div>
-				<img src="/static/img/diagrams/%s" alt="%s" class="diagram-img" loading="lazy">
-			</div>`, d.Slug, d.Title, infoHTML, d.ImagePath, d.Title))
+				<div class="diagram-body">
+					<img src="/static/img/diagrams/%s" alt="%s" class="diagram-img" loading="lazy">
+				</div>
+				%s
+			</div>`, d.Slug, d.Title, infoHTML, fullscreenBtn, d.ImagePath, d.Title, zoomControls))
 	default: // TypeHTML
 		return template.HTML(fmt.Sprintf(
-			`<div class="diagram-container diagram-interactive" data-slug="%s">
+			`<div class="diagram-container diagram-interactive" data-slug="%s" data-zoom="1">
 				<div class="diagram-header">
 					<div class="diagram-title">%s</div>
+					%s
+					%s
+				</div>
+				<div class="diagram-body">
 					%s
 				</div>
 				%s
-			</div>`, d.Slug, d.Title, infoHTML, d.HTML))
+			</div>`, d.Slug, d.Title, infoHTML, fullscreenBtn, d.HTML, zoomControls))
 	}
 }
 
