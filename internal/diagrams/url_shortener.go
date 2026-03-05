@@ -12,15 +12,15 @@ func registerURLShortener(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">P0 — Core (Must Have)</div>
       <div class="d-flow-v">
-        <div class="d-box green">POST /api/v1/urls &#8594; shorten URL, returns short_code</div>
-        <div class="d-box green">GET /{short_code} &#8594; 301 redirect to original URL</div>
+        <div class="d-box green" data-tip="Returns 201 + short_code. Idempotent if same URL shortened twice — each call creates a new code."><div class="d-tag green">Core</div>POST /api/v1/urls &#8594; shorten URL, returns short_code</div>
+        <div class="d-box green" data-tip="301 Moved Permanently. Browser caches redirect for 24h. Zero latency on repeat visits."><div class="d-tag green">Core</div>GET /{short_code} &#8594; 301 redirect to original URL</div>
       </div>
     </div>
     <div class="d-group">
       <div class="d-group-title">P1 — Important</div>
       <div class="d-flow-v">
-        <div class="d-box blue">PUT /api/v1/urls?alias=my-link &#8594; custom alias</div>
-        <div class="d-box blue">TTL per URL (default 5 years) &#8594; auto-expiration</div>
+        <div class="d-box blue" data-tip="User-supplied alias up to 30 chars. Validated against reserved words, profanity filter, and homoglyph check.">PUT /api/v1/urls?alias=my-link &#8594; custom alias</div>
+        <div class="d-box blue" data-tip="DynamoDB TTL attribute. Default 5 years (1825 days). Background scanner deletes within 48h of expiry at no cost.">TTL per URL (default 5 years) &#8594; auto-expiration</div>
       </div>
     </div>
   </div>
@@ -28,8 +28,8 @@ func registerURLShortener(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">P2 — Nice to Have</div>
       <div class="d-flow-v">
-        <div class="d-box gray">GET /api/v1/urls/{code}/stats &#8594; click analytics</div>
-        <div class="d-box gray">DELETE /api/v1/urls/{code} &#8594; remove short URL</div>
+        <div class="d-box gray" data-tip="Click count + geo breakdown from click_analytics table. Served async — never affects redirect latency.">GET /api/v1/urls/{code}/stats &#8594; click analytics</div>
+        <div class="d-box gray" data-tip="Sets expires_at = now() for soft delete; DynamoDB TTL cleans up within 48h. Cached 301s still work until they expire.">DELETE /api/v1/urls/{code} &#8594; remove short URL</div>
       </div>
     </div>
   </div>
@@ -47,11 +47,11 @@ func registerURLShortener(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">301 Moved Permanently</div>
       <div class="d-flow-v">
-        <div class="d-box green">Browser caches redirect locally</div>
-        <div class="d-box green">CDN caches at edge PoPs</div>
-        <div class="d-box green">Repeat visits never hit origin</div>
-        <div class="d-box amber">Cannot change destination after caching</div>
-        <div class="d-box amber">Lose analytics on cached clicks</div>
+        <div class="d-box green" data-tip="Browser stores redirect in local cache; subsequent clicks never leave the browser. Zero latency.">Browser caches redirect locally</div>
+        <div class="d-box green" data-tip="CloudFront serves cached 301 from the nearest edge PoP. Eliminates round-trip to origin.">CDN caches at edge PoPs</div>
+        <div class="d-box green" data-tip="No origin hit = no server cost. Scales to millions of clicks at near-zero marginal cost.">Repeat visits never hit origin</div>
+        <div class="d-box amber" data-tip="Cache-Control: max-age=86400. Once cached, destination is locked for up to 24h in browsers.">Cannot change destination after caching</div>
+        <div class="d-box amber" data-tip="No server request = no click event. Use 302 or server-side redirect to preserve analytics.">Lose analytics on cached clicks</div>
       </div>
       <div class="d-flow-v">
         <div class="d-label">Traffic flow (2nd click by same user):</div>
@@ -109,10 +109,15 @@ func registerURLShortener(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">Scale Math</div>
       <div class="d-flow-v">
-        <div class="d-box purple">100M new URLs/day = 1,157 write QPS (5x peak = 5,785)</div>
-        <div class="d-box purple">10:1 read:write = 11,570 read QPS (5x peak = 57,850)</div>
-        <div class="d-box purple">5 years: 100M &#215; 365 &#215; 5 = 182.5B total URLs</div>
-        <div class="d-box amber">Storage: 182.5B &#215; 500B = ~91 TB over 5 years</div>
+        <div class="d-box purple" data-tip="100M / 86,400s = 1,157 avg. 5x safety factor for peak bursts during viral events.">100M new URLs/day = <span class="d-metric throughput">1,157 write QPS</span> (5x peak = <span class="d-metric throughput">5,785</span>)</div>
+        <div class="d-box purple" data-tip="10:1 read-to-write ratio is typical for link shorteners. Most traffic is redirects, not URL creation.">10:1 read:write = <span class="d-metric throughput">11,570 read QPS</span> (5x peak = <span class="d-metric throughput">57,850</span>)</div>
+        <div class="d-box purple" data-tip="5-year horizon is the default TTL. After 5 years URLs auto-expire unless explicitly renewed.">5 years: 100M &#215; 365 &#215; 5 = <span class="d-metric size">182.5B</span> total URLs</div>
+        <div class="d-box amber" data-tip="500 bytes per row: short_code (7B) + original_url (200B) + metadata (293B). DynamoDB max item 400KB — no concern.">Storage: 182.5B &#215; 500B = <span class="d-metric size">~91 TB</span> over 5 years</div>
+      </div>
+      <div class="d-flow">
+        <div class="d-number"><div class="d-number-value">100M</div><div class="d-number-label">URLs/day</div></div>
+        <div class="d-number"><div class="d-number-value">57K</div><div class="d-number-label">peak read RPS</div></div>
+        <div class="d-number"><div class="d-number-value">91 TB</div><div class="d-number-label">5-yr storage</div></div>
       </div>
     </div>
   </div>
@@ -130,19 +135,19 @@ func registerURLShortener(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">Bandwidth Estimation</div>
       <div class="d-flow-v">
-        <div class="d-box blue">Read: 11,570 RPS &#215; 500B = 5.8 MB/s avg</div>
-        <div class="d-box blue">Peak read bandwidth: 57,850 &#215; 500B = 29 MB/s</div>
-        <div class="d-box blue">Write: 1,157 RPS &#215; 1KB (req body) = 1.2 MB/s</div>
-        <div class="d-box amber">Daily egress: 5.8 MB/s &#215; 86,400 = ~500 GB/day</div>
+        <div class="d-box blue" data-tip="500B per redirect response: short_code lookup + 301 Location header. Average, not peak.">Read: 11,570 RPS &#215; 500B = <span class="d-metric throughput">5.8 MB/s avg</span></div>
+        <div class="d-box blue" data-tip="5x safety factor applied to average RPS. CloudFront absorbs most of this at edge.">Peak read bandwidth: 57,850 &#215; 500B = <span class="d-metric throughput">29 MB/s</span></div>
+        <div class="d-box blue" data-tip="1KB request body: URL string + metadata. Write path is 10x less traffic than reads.">Write: 1,157 RPS &#215; 1KB (req body) = <span class="d-metric throughput">1.2 MB/s</span></div>
+        <div class="d-box amber" data-tip="At $0.085/GB CloudFront egress: ~$42.50/day or ~$1,275/mo just for egress. Budget for this.">Daily egress: 5.8 MB/s &#215; 86,400 = <span class="d-metric size">~500 GB/day</span></div>
       </div>
     </div>
     <div class="d-group">
       <div class="d-group-title">Caching Estimation (80/20 Rule)</div>
       <div class="d-flow-v">
-        <div class="d-box green">20% hot URLs generate 80% traffic</div>
-        <div class="d-box green">Daily URLs to cache: 100M &#215; 0.2 = 20M URLs</div>
-        <div class="d-box green">Cache memory: 20M &#215; 500B = 10 GB (fits 1 Redis node)</div>
-        <div class="d-box purple">At 90% cache hit: only 1,157 RPS reach DB</div>
+        <div class="d-box green" data-tip="Pareto principle: top 20% of URLs (viral content, popular links) account for 80% of redirect traffic.">20% hot URLs generate 80% traffic</div>
+        <div class="d-box green" data-tip="Daily active set resets each day. Cumulative storage grows but working set stays ~20M URLs.">Daily URLs to cache: 100M &#215; 0.2 = <span class="d-metric size">20M URLs</span></div>
+        <div class="d-box green" data-tip="r6g.large = 13 GB RAM, ~$92/mo. Comfortably holds 20M × 500B = 10 GB working set.">Cache memory: 20M &#215; 500B = <span class="d-metric size">10 GB</span> (fits 1 Redis node)</div>
+        <div class="d-box purple" data-tip="95% cache hit means 5% of 57K peak = ~2.9K RPS actually reach DynamoDB. Well within on-demand limits.">At 90% cache hit: only <span class="d-metric throughput">1,157 RPS</span> reach DB</div>
       </div>
     </div>
   </div>
@@ -150,11 +155,11 @@ func registerURLShortener(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">Infrastructure Sizing</div>
       <div class="d-flow-v">
-        <div class="d-box indigo">API Servers: 4-6 instances (each handles 2-3K RPS)</div>
-        <div class="d-box indigo">Database: DynamoDB on-demand (auto-scales)</div>
-        <div class="d-box indigo">Cache: 1x r6g.large (13 GB) &#8594; 3-node cluster at scale</div>
-        <div class="d-box indigo">CDN: CloudFront 400+ PoPs (absorbs 60%+ reads)</div>
-        <div class="d-box indigo">KGS: 2 Lambda instances + DynamoDB table</div>
+        <div class="d-box indigo" data-tip="ECS Fargate tasks, 2 vCPU / 4 GB each. Auto-scale on CPU 60%. Stateless — scale horizontally without coordination.">API Servers: <span class="d-metric throughput">4-6 instances</span> (each handles 2-3K RPS)</div>
+        <div class="d-box indigo" data-tip="On-demand billing: $1.25/M reads, $1.25/M writes. Switch to provisioned + reserved at 10K+ sustained RPS to save ~70%.">Database: DynamoDB on-demand (auto-scales)</div>
+        <div class="d-box indigo" data-tip="r6g.large: 13 GB RAM, ~$92/mo. Cluster mode: 3 primary + 2 replicas each = 9 nodes for HA and read scaling.">Cache: 1x r6g.large (<span class="d-metric size">13 GB</span>) &#8594; 3-node cluster at scale</div>
+        <div class="d-box indigo" data-tip="CloudFront absorbs 60%+ of reads at the edge. Each cache hit saves a DynamoDB read (~$0.00000125).">CDN: CloudFront 400+ PoPs (absorbs <span class="d-metric throughput">60%+</span> reads)</div>
+        <div class="d-box indigo" data-tip="KGS pre-generates key batches of 1000. Lambda invocations cost ~$0.0000002 each. 2 instances for HA.">KGS: 2 Lambda instances + DynamoDB table</div>
       </div>
     </div>
   </div>

@@ -12,11 +12,11 @@ func registerInstagram(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">P0 — Core (Must Have)</div>
       <div class="d-flow-v">
-        <div class="d-box green">POST /api/v1/media &#8594; upload photo, returns media_id</div>
-        <div class="d-box green">GET /api/v1/feed &#8594; paginated feed (cursor-based)</div>
-        <div class="d-box green">POST /api/v1/follow/{user_id} &#8594; follow/unfollow</div>
-        <div class="d-box green">POST /api/v1/like/{post_id} &#8594; toggle like</div>
-        <div class="d-box green">POST /api/v1/comment/{post_id} &#8594; add comment</div>
+        <div class="d-box green" data-tip="Multipart upload: client gets pre-signed S3 URL, uploads directly, then POSTs metadata. Max 50MB. Returns media_id for CDN URL construction.">POST /api/v1/media &#8594; upload photo, returns media_id <div class="d-tag green">recommended</div></div>
+        <div class="d-box green" data-tip="Cursor-based pagination (cursor=last_post_id). Limit 20 items. Sorted by score DESC. Avoids OFFSET N which degrades with depth.">GET /api/v1/feed &#8594; paginated feed (cursor-based)</div>
+        <div class="d-box green" data-tip="Idempotent toggle: follow if not following, unfollow if following. Returns 200 with new state. Writes to follows table and triggers fan-out.">POST /api/v1/follow/{user_id} &#8594; follow/unfollow</div>
+        <div class="d-box green" data-tip="Idempotent: second like is a no-op (409 if duplicate). Composite PK (user_id, post_id) enforces dedup. Counter incremented via sharded Redis INCR.">POST /api/v1/like/{post_id} &#8594; toggle like</div>
+        <div class="d-box green" data-tip="Writes to comments table with (post_id, created_at) index. Max 2200 chars. Async toxicity check — published immediately, removed async if flagged.">POST /api/v1/comment/{post_id} &#8594; add comment</div>
       </div>
     </div>
   </div>
@@ -24,16 +24,16 @@ func registerInstagram(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">P1 — Important</div>
       <div class="d-flow-v">
-        <div class="d-box blue">POST /api/v1/stories &#8594; 24hr ephemeral content</div>
-        <div class="d-box blue">GET /api/v1/explore &#8594; trending + personalized</div>
-        <div class="d-box blue">GET /api/v1/notifications &#8594; SSE/WebSocket</div>
+        <div class="d-box blue" data-tip="DynamoDB TTL field set to now+86400s. S3 lifecycle deletes media at 25h. Redis sorted set holds story order. View tracking via bitmap.">POST /api/v1/stories &#8594; 24hr ephemeral content</div>
+        <div class="d-box blue" data-tip="Pre-computed explore feed from ML ranking model. Batch Spark job runs hourly. Personalized per interest cluster. Cached in Redis, refreshed on scroll.">GET /api/v1/explore &#8594; trending + personalized</div>
+        <div class="d-box blue" data-tip="SSE preferred for unidirectional push. EventSource reconnects automatically. Falls back to long-polling for older clients. Max 100K concurrent SSE connections per gateway.">GET /api/v1/notifications &#8594; SSE/WebSocket</div>
       </div>
     </div>
     <div class="d-group">
       <div class="d-group-title">P2 — Nice to Have</div>
       <div class="d-flow-v">
-        <div class="d-box gray">POST /api/v1/messages/{user_id} &#8594; DMs</div>
-        <div class="d-box gray">POST /api/v1/reels &#8594; short video</div>
+        <div class="d-box gray" data-tip="E2E encrypted DMs require separate key exchange infra. Separate WebSocket cluster. Out of scope for initial design — adds significant complexity.">POST /api/v1/messages/{user_id} &#8594; DMs</div>
+        <div class="d-box gray" data-tip="Video transcoding pipeline (FFmpeg) adds significant cost and latency. Separate upload flow from photos. Out of scope for initial design.">POST /api/v1/reels &#8594; short video</div>
       </div>
     </div>
   </div>
@@ -51,11 +51,11 @@ func registerInstagram(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">NFR Targets</div>
       <div class="d-flow-v">
-        <div class="d-box green">Availability: 99.99% (52 min downtime/yr)</div>
-        <div class="d-box green">Latency: Feed load &lt; 200ms p99</div>
-        <div class="d-box blue">Scale: 2B MAU, 500M DAU</div>
-        <div class="d-box blue">Read:Write ratio: ~10:1</div>
-        <div class="d-box amber">Consistency: Eventual for feed, strong for likes</div>
+        <div class="d-box green" data-tip="99.99% = 52 min downtime/yr. Achieved via multi-AZ deployment, ALB health checks, auto-scaling, and circuit breakers.">Availability: 99.99% (52 min downtime/yr)</div>
+        <div class="d-box green" data-tip="p99 &lt;200ms for feed. Achieved by: Redis cache (1-2ms), CDN edge (&lt;50ms for images), read replicas. Measure with CloudWatch p99 latency alarm.">Latency: Feed load &lt; 200ms p99 <span class="d-metric latency">&lt;200ms p99</span></div>
+        <div class="d-box blue" data-tip="2B MAU = monthly active. 500M DAU = daily active. 25% DAU/MAU ratio. Peak during events: 10x baseline.">Scale: 2B MAU, 500M DAU <span class="d-metric throughput">500M DAU</span></div>
+        <div class="d-box blue" data-tip="10 reads per write means caching is extremely effective. Redis hit rate target: 95%+. Cache-first architecture justified.">Read:Write ratio: ~10:1</div>
+        <div class="d-box amber" data-tip="Feed is eventual: stale by up to 5min (Redis TTL). Likes are strong: composite PK in Postgres enforces dedup. Auth is always strong consistency.">Consistency: Eventual for feed, strong for likes</div>
       </div>
     </div>
   </div>
@@ -63,14 +63,20 @@ func registerInstagram(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">Back-of-Envelope Math</div>
       <div class="d-flow-v">
-        <div class="d-box purple">500M DAU &#215; 10 loads/day = 5B feed req/day &#8776; 58K RPS</div>
-        <div class="d-box purple">100M photos/day &#8776; 1,150 uploads/sec (5x peak = 5,750/sec)</div>
-        <div class="d-box purple">Likes/comments add 10x writes &#8594; total ~6K write RPS</div>
-        <div class="d-box amber">100M/day &#215; 2MB avg = 200 TB/day new media</div>
-        <div class="d-box amber">Year 1 storage: ~73 PB (200TB &#215; 365)</div>
+        <div class="d-box purple" data-tip="500M &#215; 10 = 5B/day ÷ 86400s = 57,870 RPS. Round to 58K. Peak 10x = 580K RPS. This drives the caching and fan-out architecture.">500M DAU &#215; 10 loads/day = 5B feed req/day &#8776; <span class="d-metric throughput">58K RPS</span></div>
+        <div class="d-box purple" data-tip="100M ÷ 86400 = 1,157 uploads/sec baseline. 5x peak = 5,785/sec. Pre-signed URLs offload this traffic from app servers to S3 directly.">100M photos/day &#8776; <span class="d-metric throughput">1,150 uploads/sec</span> (5x peak = 5,750/sec)</div>
+        <div class="d-box purple" data-tip="Likes + comments are ~10x photo count. Each like is a DB write (DynamoDB) and a Redis INCR. Total write RPS ~6K sustained, 60K peak.">Likes/comments add 10x writes &#8594; total <span class="d-metric throughput">~6K write RPS</span></div>
+        <div class="d-box amber" data-tip="100M photos &#215; 2MB = 200TB raw. After 4-size resize pipeline: thumbnail(15KB)+small(40KB)+medium(120KB)+full(300KB) = 475KB total per photo. Actual: ~47TB/day.">100M/day &#215; 2MB avg = <span class="d-metric size">200 TB/day new media</span></div>
+        <div class="d-box amber" data-tip="200TB &#215; 365 = 73PB/year. S3 Standard: $23/TB = $1.7M/mo. S3 Intelligent-Tiering moves cold data to cheaper tiers automatically.">Year 1 storage: <span class="d-metric size">~73 PB</span> (200TB &#215; 365)</div>
       </div>
     </div>
   </div>
+</div>
+<div class="d-flow">
+  <div class="d-number"><div class="d-number-value">58K</div><div class="d-number-label">Feed RPS</div></div>
+  <div class="d-number"><div class="d-number-value">1,150</div><div class="d-number-label">Upload/sec</div></div>
+  <div class="d-number"><div class="d-number-value">200 TB</div><div class="d-number-label">Media/day</div></div>
+  <div class="d-number"><div class="d-number-value">73 PB</div><div class="d-number-label">Year-1 Storage</div></div>
 </div>`,
 	})
 
@@ -83,17 +89,17 @@ func registerInstagram(r *Registry) {
 		HTML:        `<div class="d-cols">
   <div class="d-col">
     <div class="d-flow-v">
-      <div class="d-box blue">Client (iOS / Android / Web)</div>
+      <div class="d-box blue" data-tip="Mobile-first. iOS and Android clients use HTTP/2. Web uses React SPA. Client prefetches feed on app launch to hide latency."><span class="d-step">1</span> Client (iOS / Android / Web)</div>
       <div class="d-arrow-down">&#8595;</div>
-      <div class="d-box purple">CloudFront (CDN)</div>
+      <div class="d-box purple" data-tip="Caches static assets (JS, CSS, images) at 400+ PoPs. Cache-Control: max-age=31536000 for immutable assets. Reduces origin load by 90%."><span class="d-step">2</span> CloudFront (CDN) <span class="d-metric latency">&lt;50ms</span></div>
       <div class="d-arrow-down">&#8595;</div>
-      <div class="d-box purple">ALB (Load Balancer)</div>
+      <div class="d-box purple" data-tip="Layer 7 load balancer. Round-robin across ECS tasks. Health checks every 10s. Connection draining 30s on deploys. Terminates TLS."><span class="d-step">3</span> ALB (Load Balancer) <span class="d-metric latency">1ms</span></div>
       <div class="d-arrow-down">&#8595;</div>
-      <div class="d-box green">ECS (Django / FastAPI Monolith)</div>
+      <div class="d-box green" data-tip="Single Django/FastAPI process handles all routes. 2&#215; t3.large at MVP. Stateless — any instance handles any request. Scale horizontally as load grows."><span class="d-step">4</span> ECS (Django / FastAPI Monolith) <div class="d-tag green">start here</div></div>
       <div class="d-arrow-down">&#8595;</div>
       <div class="d-row">
-        <div class="d-box indigo">Postgres (RDS)</div>
-        <div class="d-box red">Redis (ElastiCache)</div>
+        <div class="d-box indigo" data-tip="Single RDS Postgres db.r6g.large. ACID for all writes. B-tree indexes on (user_id, created_at). Upgrade to read replicas when p99 &gt; 50ms.">Postgres (RDS) <span class="d-metric latency">5-20ms</span></div>
+        <div class="d-box red" data-tip="Single ElastiCache node for session storage and feed cache. 5-min TTL on feed, 1-hr on profiles. Upgrade to cluster when memory &gt; 80%.">Redis (ElastiCache) <span class="d-metric latency">&lt;1ms</span></div>
       </div>
     </div>
   </div>
@@ -101,15 +107,16 @@ func registerInstagram(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">MEDIA STORAGE</div>
       <div class="d-flow-v">
-        <div class="d-box amber">S3 Bucket (Photos)</div>
-        <div class="d-label">Pre-signed URL upload</div>
+        <div class="d-box amber" data-tip="Client gets pre-signed URL (15-min expiry), uploads directly to S3. Bypasses app server — avoids 200TB/day saturating ECS. 11 nines durability."><span class="d-step">1</span> S3 Bucket (Photos) <div class="d-tag blue">S3</div></div>
+        <div class="d-label">Pre-signed URL upload (bypasses app server)</div>
         <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box purple">CloudFront (CDN)</div>
+        <div class="d-box purple" data-tip="S3 origin + CloudFront distribution. Cache-Control: public, max-age=31536000. WebP served to supporting clients. Reduces S3 GET costs by 10x."><span class="d-step">2</span> CloudFront (CDN) <span class="d-metric latency">&lt;50ms global</span></div>
         <div class="d-label">Edge-cached images</div>
       </div>
     </div>
   </div>
-</div>`,
+</div>
+<div class="d-caption">MVP runs as a single monolith on 2 ECS tasks. Start here and extract services only when a specific bottleneck is measured. Total cost: ~$500/mo for &lt;1M users.</div>`,
 	})
 
 	r.Register(&Diagram{
@@ -123,8 +130,8 @@ func registerInstagram(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">Compute</div>
       <div class="d-flow-v">
-        <div class="d-box green">ECS Fargate: 2&#215; t3.large &#8212; $120/mo</div>
-        <div class="d-box purple">ALB (Load Balancer) &#8212; $25/mo</div>
+        <div class="d-box green" data-tip="2 Fargate tasks, each 2 vCPU 4GB RAM. Auto-scales to 8 tasks at CPU>70%. Stateless — sessions in Redis. $120/mo baseline.">ECS Fargate: 2&#215; t3.large &#8212; <span class="d-metric cost">$120/mo</span></div>
+        <div class="d-box purple" data-tip="Layer 7 load balancer with TLS termination. Health checks every 10s. Connection draining 30s. Cross-zone enabled.">ALB (Load Balancer) &#8212; <span class="d-metric cost">$25/mo</span> <div class="d-tag blue">recommended</div></div>
       </div>
     </div>
   </div>
@@ -132,8 +139,8 @@ func registerInstagram(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">Storage</div>
       <div class="d-flow-v">
-        <div class="d-box indigo">RDS Postgres db.r6g.large &#8212; $200/mo</div>
-        <div class="d-box red">ElastiCache Redis t4g.medium &#8212; $50/mo</div>
+        <div class="d-box indigo" data-tip="db.r6g.large: 2 vCPU, 16GB RAM. gp3 500GB SSD. Multi-AZ standby for failover. Upgrade to r6g.2xlarge when connections exceed 1K/sec.">RDS Postgres db.r6g.large &#8212; <span class="d-metric cost">$200/mo</span></div>
+        <div class="d-box red" data-tip="t4g.medium: 2 vCPU, 4GB RAM. Sufficient for &lt;1M users. Upgrade to cluster when memory exceeds 80% or latency &gt;5ms.">ElastiCache Redis t4g.medium &#8212; <span class="d-metric cost">$50/mo</span></div>
       </div>
     </div>
   </div>
