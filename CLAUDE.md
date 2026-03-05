@@ -38,11 +38,11 @@ system-design/
 │   ├── registry/registry.go             # Parses _registry.yaml → builds knowledge graph with reverse links
 │   ├── handlers/handlers.go             # All HTTP handlers: Dashboard, ProblemDetail, FundamentalDetail, etc.
 │   ├── macros/macros.go                 # Go template FuncMap: say, thought, avoid, key, phase, code, qa, diagram, etc.
-│   └── diagrams/                        # Centralized diagram registry (102 diagrams total)
+│   └── diagrams/                        # Centralized diagram registry (113 diagrams total)
 │       ├── registry.go                  # Diagram struct, Registry type, BuildDefault()
 │       ├── rate_limiter.go              # 19 diagrams (slug prefix: rl-)
-│       ├── instagram.go                 # 24 diagrams (slug prefix: ig-)
-│       ├── url_shortener.go             # 21 diagrams (slug prefix: url-)
+│       ├── instagram.go                 # 28 diagrams (slug prefix: ig-)
+│       ├── url_shortener.go             # 28 diagrams (slug prefix: url-)
 │       ├── algorithms.go                # 13 diagrams (slug prefix: algo-)
 │       ├── fundamentals.go              # 15 diagrams (slug prefix: fund-)
 │       ├── patterns.go                  # 10 diagrams (slug prefix: pat-)
@@ -302,8 +302,8 @@ type Diagram struct {
 | Prefix | Domain | File | Count |
 |--------|--------|------|-------|
 | `rl-` | Rate Limiter | `rate_limiter.go` | 19 |
-| `ig-` | Instagram | `instagram.go` | 24 |
-| `url-` | URL Shortener | `url_shortener.go` | 21 |
+| `ig-` | Instagram | `instagram.go` | 28 |
+| `url-` | URL Shortener | `url_shortener.go` | 28 |
 | `algo-` | Algorithms | `algorithms.go` | 13 |
 | `fund-` | Fundamentals | `fundamentals.go` | 15 |
 | `pat-` | Patterns | `patterns.go` | 10 |
@@ -335,7 +335,7 @@ type Diagram struct {
 
 ### Layout (base.html)
 
-Two-panel layout: **sidebar** (collapsible tree) + **detail area** (content view).
+Full-width **detail area** (content view) with **sidebar** as a fixed-position overlay (collapsible tree). The sidebar sits on top of the detail area rather than beside it; the detail area spans the full viewport width.
 
 - HTMX partial swaps: clicking sidebar items sends `HX-Request: true`, server returns only the detail template (not full page). Direct URL access returns full page.
 - Alpine.js: sidebar tree expand/collapse (client-side only, no server round-trip)
@@ -405,7 +405,7 @@ Template data always includes: `Problems`, `Fundamentals`, `Algorithms`, `Patter
 ## Startup Sequence (main.go)
 
 1. Load `content/_registry.yaml` → build `Registry` (problems, fundamentals with reverse links, algorithms, patterns)
-2. Build `diagrams.Registry` via `diagrams.BuildDefault()` (registers all 102 diagrams)
+2. Build `diagrams.Registry` via `diagrams.BuildDefault()` (registers all 113 diagrams)
 3. Create `template.FuncMap` via `macros.FuncMap(diagramReg)` (macros get diagram registry for slug lookup)
 4. Create `Handler` with registry, template FS, content FS, and FuncMap
 5. Parse all layout templates with FuncMap

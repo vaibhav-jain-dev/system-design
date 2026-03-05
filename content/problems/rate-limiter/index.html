@@ -40,9 +40,11 @@
 
 {{phase 2 "Capacity Estimation" "3 min"}}
 
+{{say "Let me estimate the throughput requirements so we can pick the right storage and architecture."}}
+
 {{diagram "rl-capacity-estimation"}}
 
-{{hint "why estimate ops/sec before picking storage?" "The storage choice depends entirely on whether we need sub-millisecond reads. At 500K req/sec, even a 5ms Redis call would add 2,500 seconds of cumulative latency per second across the fleet. This forces us to Redis over DynamoDB (10-20ms) before we even look at features."}}
+{{hint "why estimate ops/sec before picking storage?" "The storage choice depends entirely on whether we need sub-millisecond reads. At 500K req/sec, even a 5ms Redis call requires 2,500 CPU-seconds of parallel processing capacity per second across the fleet. This forces us to Redis over DynamoDB (10-20ms) before we even look at features."}}
 
 {{say "Redis handles 100K+ ops/sec per node easily. A 3-node ElastiCache cluster gives us 300K+ ops/sec with replication. For 500K peak, we might need 6 nodes or use Lua scripts to reduce round trips."}}
 
@@ -50,9 +52,20 @@
 
 {{phase 3 "API Design with Rate Headers" "3 min"}}
 
+{{say "The rate limit response headers are critical. Every response — allowed or rejected — must include X-RateLimit-Limit, X-RateLimit-Remaining, and X-RateLimit-Reset so clients can self-throttle."}}
+
 {{diagram "rl-headers"}}
 
 {{diagram "rl-rules-config"}}
+
+{{hint "why rate headers on every response?" "Without rate headers, clients have no visibility into their remaining quota. They blast requests until they hit a 429, then back off aggressively. With headers, well-behaved SDKs (Stripe, AWS) read X-RateLimit-Remaining and proactively slow down at 10% remaining. This transforms a thundering herd of 429s into smooth self-throttling."}}
+
+{{triggerQs "Questions about rate headers"
+  "What happens if a client ignores the rate limit headers?"
+  "The rate limiter still enforces the limit server-side — headers are advisory, not enforcement. Clients that ignore headers get 429 responses with a Retry-After header. After repeated violations, you can escalate: temporary IP block, reduced limit tier, or CAPTCHA challenge. The headers exist to help good clients behave well, not to replace server-side enforcement."
+  "Should rate limit headers use seconds or a Unix timestamp for the reset value?"
+  "X-RateLimit-Reset should be a Unix timestamp (seconds since epoch) indicating when the window resets. Retry-After should be relative seconds until the client can retry. Using relative seconds for Reset is ambiguous if there is clock skew between client and server. GitHub, Stripe, and Twitter all use Unix timestamps for Reset and relative seconds for Retry-After."
+}}
 
 {{phase 4 "Algorithm Deep Dive" "10 min"}}
 
@@ -122,7 +135,7 @@ class TokenBucket:
 
 {{diagram "rl-sliding-window"}}
 
-{{hint "why weighted average across two windows?" "A true sliding window log stores every request timestamp and counts entries in [now-window, now]. That is O(N) memory. The sliding window counter approximates this with O(1) memory by keeping only two counters (current window, previous window) and weighting the previous window by how much of it overlaps the current window. The error is bounded at under 0.003% for random traffic patterns."}}
+{{hint "why weighted average across two windows?" "A true sliding window log stores every request timestamp and counts entries in [now-window, now]. That is O(N) memory. The sliding window counter approximates this with O(1) memory by keeping only two counters (current window, previous window) and weighting the previous window by how much of it overlaps the current window. The error is typically within a few percent of the true count for uniform traffic patterns."}}
 
 {{code "python" `import time
 import redis
@@ -133,7 +146,7 @@ class SlidingWindowCounter:
     - Combines fixed window simplicity with sliding window accuracy
     - Uses weighted count from current and previous window
     - Memory: O(1) per key (just two counters)
-    - Accuracy: within 0.003% of true sliding window
+    - Accuracy: typically within a few percent of true sliding window
     """
 
     def __init__(self, redis_client: redis.Redis):
@@ -193,6 +206,8 @@ class SlidingWindowCounter:
   (nofit "Sliding Window Log" "O(N) memory per key where N is requests in window. Does not scale for high-throughput APIs. Only use for very low rate limits like login attempts.")
 )}}
 
+{{qa "When should you pick Token Bucket over Sliding Window Counter?" "Use Token Bucket when the API contract explicitly allows bursts — for example, AWS API Gateway lets you send 5,000 requests instantly, then throttles to a steady rate. Token Bucket models this naturally: bucket capacity is the burst limit, refill rate is the sustained rate. Sliding Window Counter has no concept of burst tolerance — it enforces a flat count per window. If your API says '100 requests per minute with no burst allowance,' Sliding Window Counter is simpler and more accurate." "What about combining both?" "You can layer them: Token Bucket for burst control on a per-second granularity, Sliding Window Counter for a per-minute or per-hour cap. Run both checks in a single Lua script and reject if either fails. This gives you burst tolerance for short-term spikes while enforcing a hard ceiling over longer periods."}}
+
 {{triggerQs "Questions this section might trigger"
   "Why not use a simple counter instead of sliding window?"
   "A simple counter resets at window boundaries, allowing 2x burst at the reset point. If the limit is 100/min and a user sends 100 requests at 0:59 and 100 at 1:00, they get 200 in 2 seconds. Sliding window counter prevents this by weighting the previous window, so requests near the boundary carry over into the new window's calculation."
@@ -218,6 +233,7 @@ from fastapi.responses import JSONResponse
 app = FastAPI()
 
 # Rate limit middleware
+@app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     # Extract rate limit key
     api_key = request.headers.get("X-API-Key")
@@ -286,7 +302,7 @@ local now = tonumber(ARGV[3])
 local member = ARGV[4]
 
 -- Remove entries outside the window
-redis.call('ZREMRANGEBYSCORE', key, 0, now - window * 1000)
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
 
 -- Count entries in current window
 local count = redis.call('ZCARD', key)
@@ -295,8 +311,11 @@ if count >= limit then
     return {0, 0, redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')[2]}
 end
 
--- Add current request
-redis.call('ZADD', key, now, member)
+-- Add current request with unique member (now + random suffix)
+-- Sorted set members must be unique; two requests at the same ms
+-- with the same member value would overwrite, undercounting.
+local unique_member = now .. ':' .. math.random(1000000)
+redis.call('ZADD', key, now, unique_member)
 redis.call('PEXPIRE', key, window * 1000)
 
 return {1, limit - count - 1, 0}
@@ -308,6 +327,8 @@ return {1, limit - count - 1, 0}
   (whatIf "a user sends requests from two regions simultaneously" "With per-region limits, they get 2x the intended global limit. With async gossip sync (1-5 second delay), they might get 1.1-1.5x for the sync window. Most companies accept this: the cost of slightly over-counting is lower than the cost of added latency or reduced availability. Determined attackers can exploit this, but volume-based DDoS protection sits above the rate limiter and catches it.")
   (how "async gossip sync works" "Each region runs its own Redis with full local counts. A background process (every 1-5 seconds) publishes a delta to a shared message bus (Kinesis or Pub/Sub). Other regions consume deltas and add them to a 'remote' counter. The local rate check uses local_count + remote_count_estimate. This trades exact accuracy for sub-millisecond local reads.")
 }}
+
+{{qa "How do you count accurately across multiple Redis nodes in a cluster?" "You don't count across nodes — you ensure all keys for the same rate limit subject land on the same node using Redis hash tags. A key like rl:{user:123}:endpoint1 hashes only the {user:123} portion, so all endpoints for user 123 go to the same shard. The Lua script then runs locally on that one shard with full atomicity. Without hash tags, keys scatter across shards, and Lua scripts that touch multiple keys will fail with a CROSSSLOT error." "What if one user's traffic is so high it overwhelms a single shard?" "That is a hot-key problem. Solutions: 1) local in-process rate limiting with a short TTL cache (accept slight over-counting), 2) shard the user's key across N slots by appending a modulo suffix (rl:{user:123:0}, rl:{user:123:1}) and summing counts, or 3) use request coalescing to batch multiple checks into one Redis call per event-loop tick."}
 
 {{hint "why hash tags matter in Redis Cluster?" "In Redis Cluster, keys are distributed across 16,384 hash slots. A Lua script can only touch keys in the same slot. Without hash tags, rl:user:123:endpoint1 and rl:user:123:endpoint2 might land on different shards, making a unified Lua script impossible. Hash tags like rl:{user:123}:endpoint force both keys to the same slot by hashing only the bracketed portion."}}
 
@@ -321,6 +342,8 @@ return {1, limit - count - 1, 0}
 }}
 
 {{phase 7 "Data Model & Redis Schema" "3 min"}}
+
+{{say "The Redis data model depends on which algorithm you pick. Sliding window counter uses simple string keys, token bucket uses a hash, and sliding window log uses sorted sets. Let me walk through the schema for each."}}
 
 {{diagram "rl-data-model"}}
 
@@ -373,9 +396,13 @@ activedefrag: yes                 # Defragment memory proactively
 
 {{avoid "Do not enable Redis persistence (RDB/AOF) for rate limiting. Rate limit counters are ephemeral. Persistence adds disk I/O latency and is pointless since counters reset on window expiry anyway. If Redis restarts, counters rebuild naturally from incoming requests."}}
 
+{{qa "Should you use Redis Cluster mode or a single shard with replicas for rate limiting?" "Redis Cluster mode for any production deployment beyond a single team's API. A single shard maxes out at ~100K ops/sec and 13 GB memory. With 50M active rate limit keys at 100 bytes each = 5 GB, a single shard works — but you have no horizontal scaling runway. Cluster mode with 3 shards gives 300K ops/sec and 39 GB, and you can add shards without downtime. The trade-off: Lua scripts must use hash tags to ensure all keys for a single rate check land on the same shard." "What about Redis Sentinel instead of Cluster?" "Sentinel provides high availability (automatic failover) but not horizontal scaling — it is still a single shard with replicas. Use Sentinel only if your rate limit key count fits in one node and your ops/sec is under 100K. Beyond that, Cluster mode is required. In ElastiCache, 'Cluster Mode Enabled' gives you both: automatic failover per shard plus horizontal scaling across shards."}}
+
 {{hint "why volatile-lru over allkeys-lru?" "volatile-lru only evicts keys that have a TTL set. Our rate limit keys all have TTLs (by design), so they are eligible for eviction. Keys without TTLs (like config or schema data you might share this Redis instance with) are protected. If you use allkeys-lru, Redis will evict anything including non-ephemeral data, which can cause subtle bugs."}}
 
 {{phase 9 "Trade-offs & Edge Cases" "5 min"}}
+
+{{say "The algorithm is the easy part — the edge cases are where rate limiters fail in production. Let me cover the critical failure scenarios and how to handle them."}}
 
 {{diagram "rl-tradeoffs"}}
 
@@ -386,6 +413,8 @@ activedefrag: yes                 # Defragment memory proactively
   (whatIf "an attacker uses millions of rotating IPs to bypass IP-based limits" "IP-based limits alone are insufficient against botnets. Layer rate limiting: IP limit (coarse, catches single-source abuse) + fingerprint limit (browser fingerprint, TLS fingerprint for API clients) + behavioral limit (flag accounts that pattern-match abuse even within per-user limits). For unauthenticated endpoints, CAPTCHA challenges after hitting a lower threshold are more effective than higher IP limits.")
   (how "clock skew affects distributed rate limiting" "If two app servers have clocks skewed by 500ms, a request arriving at the window boundary may be counted in different windows on different servers. NTP keeps servers within 1-10ms in practice. For a 60-second window, 10ms of clock skew causes at most 0.017% window misalignment — negligible. For sub-second windows (100ms), clock skew matters more and you should use a centralized time source via Redis SERVER TIME command.")
 }}
+
+{{qa "Should the rate limiter fail-open or fail-closed when Redis is unavailable?" "Fail-open is correct for most services. If Redis is down, allow all requests through rather than rejecting everything. A brief period of unlimited traffic is far less damaging than a total outage. The exception: security-critical endpoints like login or payment, where unlimited traffic enables brute-force attacks or fraud. For those, fail-closed with a local in-memory fallback counter that enforces a conservative limit (e.g., 10 req/sec per IP)." "How do you implement the fail-open/fail-closed toggle per endpoint?" "Store a per-endpoint policy in the rate limit config: {endpoint: '/login', fail_mode: 'closed', fallback_limit: 10}. In the middleware, wrap the Redis call in a try/catch. On Redis timeout or connection error, check the fail_mode. If open, return allowed. If closed, check the local in-memory counter (a simple map[string]int with a goroutine that resets it every second). This local counter is per-process so it under-counts across multiple servers, but it is better than nothing."}}
 
 {{hint "why return 429 with Retry-After instead of silently dropping?" "Silent drops look like network errors to clients, causing aggressive retries that make the overload worse. A 429 with Retry-After tells the client exactly when to retry, enabling coordinated backoff. Well-behaved SDKs (AWS SDK, Stripe SDK) respect Retry-After and sleep rather than immediately retrying. This turns a thundering herd into a smooth retry distribution."}}
 
@@ -400,18 +429,22 @@ activedefrag: yes                 # Defragment memory proactively
 
 {{phase 10 "Cost Estimates" "2 min"}}
 
+{{say "Let me break down the infrastructure cost. The Redis cluster is the only dedicated cost — rate limiting middleware itself is negligible CPU overhead."}}
+
 {{diagram "rl-cost-breakdown"}}
 
 {{hint "why the Redis cluster cost dominates?" "App server CPU for rate limit middleware is negligible — a Lua script check is ~0.1ms of CPU per request. The Redis cluster is the only dedicated infrastructure cost. At $580/month for a 3-shard cluster handling 300K ops/sec, that is $0.000002 per rate limit check. This is cheaper than the cost of one fraudulent request to most APIs."}}
 
 {{think "Rate limiting infrastructure is cheap. The real cost is engineering time to get it right."
   (whatIf "you need to scale to 5M req/sec" "A 3-shard cluster handles 300K ops/sec. For 5M, you need roughly 50 shards (~$10K/month). At that scale, evaluate whether a purpose-built solution like Envoy's rate limiting service or a commercial solution (Kong, Apigee) is more cost-effective than a custom Redis implementation. The custom solution likely wins if you have the engineering capacity to operate it.")
-  (how "cost per check breaks down" "Redis ElastiCache r6g.large: ~$194/month per node, 6 nodes = $1,164/month. Data transfer within the same AZ is free. Cross-AZ replication reads: $0.01/GB. At 500K req/sec with 200-byte payloads per check, cross-AZ transfer is ~3 TB/month = $30. Total: ~$1,194/month for 500K ops/sec capacity.")
+  (how "cost per check breaks down" "Redis ElastiCache r6g.large: ~$97/month per node, 6 nodes = $582/month. Data transfer within the same AZ is free. Cross-AZ replication reads: $0.01/GB. At 500K req/sec with 200-byte payloads per check, cross-AZ transfer is ~3 TB/month = $30. Total: ~$612/month for 500K ops/sec capacity.")
 }}
 
 {{hint "why disable persistence to reduce cost?" "ElastiCache charges extra for Redis with Multi-AZ persistence. Since rate limit counters are ephemeral by design, you get no benefit from persistence. Disabling it saves ~20% on ElastiCache cost and reduces latency by eliminating disk I/O on write paths."}}
 
 {{phase 11 "Sub-Problems & Building Blocks" "3 min"}}
+
+{{say "Let me summarize the building blocks and how they connect. Each of these is a sub-problem worth diving into if the interviewer asks."}}
 
 {{diagram "rl-sub-problems"}}
 
@@ -432,11 +465,13 @@ activedefrag: yes                 # Defragment memory proactively
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 
+{{say "Let me walk through the critical questions an interviewer would ask about this design."}}
+
 {{deepQA "Rate Limiting Algorithms & Trade-offs" `
 <div class="dqa-item">
   <div class="dqa-q">Why is Sliding Window Counter preferred over Token Bucket for most production rate limiters?</div>
   <div class="dqa-a">
-    <span class="dqa-key">Sliding Window Counter</span> provides the best balance of accuracy and simplicity. It uses only <span class="dqa-key">O(1) memory per key</span> (two counters: current window + previous window), eliminates the <span class="dqa-key">boundary burst problem</span> of Fixed Window, and requires no complex state management like Token Bucket's floating-point token tracking. Cloudflare and Stripe both use variants of this algorithm. The weighted average calculation <code>prev_count × weight + curr_count</code> achieves within <span class="dqa-key">0.003% accuracy</span> of a true sliding window log while using constant memory.
+    <span class="dqa-key">Sliding Window Counter</span> provides the best balance of accuracy and simplicity. It uses only <span class="dqa-key">O(1) memory per key</span> (two counters: current window + previous window), eliminates the <span class="dqa-key">boundary burst problem</span> of Fixed Window, and requires no complex state management like Token Bucket's floating-point token tracking. Cloudflare and Stripe both use variants of this algorithm. The weighted average calculation <code>prev_count × weight + curr_count</code> achieves within <span class="dqa-key">high accuracy</span> of a true sliding window log while using constant memory.
     <div class="dqa-sub">
       <div class="dqa-sub-q">When would you choose Token Bucket over Sliding Window Counter?</div>
       <div class="dqa-sub-a">
@@ -448,7 +483,7 @@ activedefrag: yes                 # Defragment memory proactively
       </div>
       <div class="dqa-sub-q">What is the exact formula for Sliding Window Counter accuracy?</div>
       <div class="dqa-sub-a">
-        The error bound is <code>|estimated - actual| ≤ (prev_window_count × elapsed_fraction / window_size)</code>. In practice, the maximum error occurs when traffic is perfectly periodic. For <span class="dqa-key">random traffic patterns</span> (which is the real world), the error approaches zero. Cloudflare published benchmarks showing &lt;0.003% error at 10K RPS.
+        The error bound is <code>|estimated - actual| ≤ (prev_window_count × elapsed_fraction / window_size)</code>. In practice, the maximum error occurs when traffic is perfectly periodic. For <span class="dqa-key">random traffic patterns</span> (which is the real world), the error approaches zero. Cloudflare published benchmarks showing error well under 1% at 10K RPS.
       </div>
     </div>
   </div>

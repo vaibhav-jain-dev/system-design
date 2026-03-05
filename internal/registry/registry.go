@@ -3,6 +3,7 @@ package registry
 import (
 	"fmt"
 	"io/fs"
+	"log"
 	"sort"
 
 	"gopkg.in/yaml.v3"
@@ -158,6 +159,8 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 				reverseLink := *link
 				reverseLink.ProblemRef = p
 				f.UsedBy = append(f.UsedBy, reverseLink)
+			} else {
+				log.Printf("WARNING: problem %q references non-existent fundamental %q", p.Slug, link.Fundamental)
 			}
 		}
 	}
@@ -170,6 +173,8 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 		for _, problemSlug := range a.UsedIn {
 			if p, ok := reg.problemsBySlug[problemSlug]; ok {
 				a.UsedInProblems = append(a.UsedInProblems, p)
+			} else {
+				log.Printf("WARNING: algorithm %q references non-existent problem %q", a.Slug, problemSlug)
 			}
 		}
 	}
@@ -240,35 +245,13 @@ func (r *Registry) GetFundamental(slug string) *Fundamental {
 // AllFundamentals returns all fundamentals (flat, including children).
 func (r *Registry) AllFundamentals() []*Fundamental {
 	var all []*Fundamental
-	for slug, f := range r.fundamentalsBySlug {
-		_ = slug
+	for _, f := range r.fundamentalsBySlug {
 		all = append(all, f)
 	}
 	sort.Slice(all, func(i, j int) bool {
 		return all[i].Slug < all[j].Slug
 	})
 	return all
-}
-
-// FundamentalsByReferenceCount returns fundamentals sorted by how many problems use them (desc).
-func (r *Registry) FundamentalsByReferenceCount() []*Fundamental {
-	all := r.AllFundamentals()
-	sort.Slice(all, func(i, j int) bool {
-		if len(all[i].UsedBy) != len(all[j].UsedBy) {
-			return len(all[i].UsedBy) > len(all[j].UsedBy)
-		}
-		return all[i].Slug < all[j].Slug
-	})
-	return all
-}
-
-// TopLevelCategories returns top-level fundamental categories for sidebar grouping.
-func (r *Registry) TopLevelCategories() map[string][]*Fundamental {
-	cats := make(map[string][]*Fundamental)
-	for _, f := range r.Fundamentals {
-		cats[categoryFromSlug(f.Slug)] = append(cats[categoryFromSlug(f.Slug)], f)
-	}
-	return cats
 }
 
 // GetAlgorithm returns an algorithm by slug.
@@ -284,13 +267,4 @@ func (r *Registry) GetPattern(slug string) *Pattern {
 // GetConcept returns a concept by slug.
 func (r *Registry) GetConcept(slug string) *Concept {
 	return r.conceptsBySlug[slug]
-}
-
-func categoryFromSlug(slug string) string {
-	for i, c := range slug {
-		if c == '/' {
-			return slug[:i]
-		}
-	}
-	return slug
 }

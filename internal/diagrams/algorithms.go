@@ -25,17 +25,17 @@ func registerAlgorithms(r *Registry) {
       <div class="d-flow">
         <div class="d-box gray"><span class="d-step">3</span> 1991239 % 62 = 25</div>
         <div class="d-arrow">→</div>
-        <div class="d-box amber">z</div>
+        <div class="d-box amber">U</div>
       </div>
       <div class="d-flow">
         <div class="d-box gray"><span class="d-step">4</span> 32116 % 62 = 4</div>
         <div class="d-arrow">→</div>
-        <div class="d-box amber">e</div>
+        <div class="d-box amber">a</div>
       </div>
       <div class="d-flow">
         <div class="d-box gray"><span class="d-step">5</span> 517 % 62 = 21</div>
         <div class="d-arrow">→</div>
-        <div class="d-box amber">v</div>
+        <div class="d-box amber">w</div>
       </div>
       <div class="d-flow">
         <div class="d-box gray"><span class="d-step">6</span> 8 % 62 = 8</div>
@@ -268,11 +268,11 @@ func registerAlgorithms(r *Registry) {
   <div class="d-group-title">After adding D (4 nodes)</div>
   <div class="d-bit-array">
     <div class="d-bit on" style="background: var(--blue, #3b82f6); flex: 25;">A: 25%</div>
-    <div class="d-bit on" style="background: var(--amber, #f59e0b); flex: 8;">D: 8%</div>
+    <div class="d-bit on" style="background: var(--amber, #f59e0b); flex: 25;">D: 25%</div>
     <div class="d-bit on" style="background: var(--green, #22c55e); flex: 25;">B: 25%</div>
     <div class="d-bit on" style="background: var(--purple, #a855f7); flex: 25;">C: 25%</div>
   </div>
-  <div class="d-label" style="margin-top: 0.5rem;">Node D takes ~8% of keys from B (its clockwise neighbor). Nodes A and C are unaffected. Total keys moved: ~25% (K/4), not 75% like modulo.</div>
+  <div class="d-label" style="margin-top: 0.5rem;">Node D takes ~25% of keys (K/4) proportionally from all existing nodes via virtual nodes. Total keys moved: ~25% (K/4), not 75% like modulo.</div>
 </div>`,
 	})
 
