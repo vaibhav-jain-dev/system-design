@@ -35,13 +35,13 @@
   (how "calculate the 5% DB hit rate" "Layer 1: browser 301 cache absorbs 30% of repeat visitors. 70% remain. Layer 2: CloudFront absorbs 60% of those. 28% remain. Layer 3: ElastiCache absorbs 95% of those. 1.4% remain. Round up to ~5% for cold starts, cache evictions, and new URLs. 57,850 × 5% = 2,893 DynamoDB reads/s.")
 }}
 
-{{hint "why estimate before designing?" "The capacity numbers directly drive architecture choices. At 100 RPS, a single Postgres instance works fine. At 57K RPS with 100:1 read-write ratio, you need a key-value store (DynamoDB), multi-layer caching, and a CDN. If you design first and estimate later, you might over-engineer (microservices for 100 RPS) or under-engineer (single Postgres for 57K RPS)."}}
+{{hint "why estimate before designing?" "The capacity numbers directly drive architecture choices. At 100 RPS, a single Postgres instance works fine. At 57K RPS with 10:1 read-write ratio, you need a key-value store (DynamoDB), multi-layer caching, and a CDN. If you design first and estimate later, you might over-engineer (microservices for 100 RPS) or under-engineer (single Postgres for 57K RPS)."}}
 
 {{triggerQs "Questions about requirements"
   "How do you estimate the read-to-write ratio?"
-  "URL shorteners are read-heavy by nature. Every URL is created once but clicked many times. Industry data: bit.ly sees 100:1 read-to-write ratio. Start with this as a baseline, then adjust based on your use case. If the shortener is for internal tools (fewer clicks per link), ratio drops to 10:1. For social sharing (viral links), it can exceed 1000:1."
+  "URL shorteners are read-heavy by nature. Every URL is created once but clicked many times. Industry data suggests 10:1 read-to-write ratio is a reasonable baseline. For internal tools (fewer clicks per link), ratio drops to 5:1. For social sharing (viral links), it can exceed 100:1 or even 1000:1."
   "What assumptions are you making about the scale?"
-  "100M new URLs/day (roughly bit.ly scale). 100:1 read-to-write ratio = 10B redirects/day. Peak factor of 5x = 57,850 RPS peak reads. These numbers are aggressive — most companies are 10-100x smaller. But designing for this scale demonstrates you can handle the hard problems. Always state your assumptions explicitly so the interviewer can adjust."
+  "100M new URLs/day (roughly bit.ly scale). 10:1 read-to-write ratio = 1B redirects/day. Peak factor of 5x = 57,850 RPS peak reads. These numbers are aggressive — most companies are 10-100x smaller. But designing for this scale demonstrates you can handle the hard problems. Always state your assumptions explicitly so the interviewer can adjust."
   "Should you support URL editing after creation?"
   "No for the default case. Editing a URL after creation breaks 301 caching — browsers that cached the old redirect will keep going to the old destination until their cache expires. If editing is required (enterprise feature), issue 302 redirects for editable URLs so every click passes through your servers. Charge this as a premium feature."
 }}
@@ -143,7 +143,7 @@ Status: 200 OK
 
 {{think "The GSI projection matters for cost. Using ALL projection (full item copy) means the user dashboard query returns all fields in a single read. KEYS_ONLY would require a follow-up GetItem per URL, turning O(1) into O(n) reads."
   (whyNot "a separate analytics table query from the main table" "Analytics queries (clicks by country, device, etc.) have completely different access patterns than URL redirects. Mixing them in the same table creates hot partitions: a viral URL with 10M clicks/day would have 10M analytics writes competing with redirect reads on the same partition. Separate tables isolate the workloads.")
-  (how "handle a viral URL (hot partition)" "DynamoDB adaptive capacity kicks in within minutes, redistributing throughput to hot partitions. But the real defense is the cache: a viral URL has 95%+ cache hit rate, so only 5% of reads reach DynamoDB. For a URL getting 10M clicks/day, that is only 500K DB reads/day — well within a single partition's 3,000 RCU capacity (3M reads/sec max).")
+  (how "handle a viral URL (hot partition)" "DynamoDB adaptive capacity kicks in within minutes, redistributing throughput to hot partitions. But the real defense is the cache: a viral URL has 95%+ cache hit rate, so only 5% of reads reach DynamoDB. For a URL getting 10M clicks/day, that is only 500K DB reads/day — well within a single partition's 3,000 RCU capacity (3,000 reads/sec max for ≤4KB items).")
 }}
 
 {{details "View Postgres Schema & Index Justifications (click to expand)" "sql" `-- If using Postgres (MVP or alternative approach):
@@ -229,7 +229,7 @@ def base62_encode(num: int) -> str:
     while num > 0:
         result.append(ALPHABET[num % 62])
         num //= 62
-    return "".join(reversed(result)).zfill(7)
+    return "".join(reversed(result)).ljust(7, ALPHABET[0])
 
 def base62_decode(s: str) -> int:
     """Decode Base62 string to integer."""
@@ -383,7 +383,7 @@ async def resolve_short_url(short_code: str) -> str:
   (row "Multi-AZ deployment"   "ECS tasks across 3 AZs"                   "Single AZ failure (33% capacity lost)" "< 1 minute (ALB auto-routes)")
   (row "Database replication"  "DynamoDB: 3 replicas across AZs (built-in)" "Node failure, data corruption"       "Transparent (< 1 second)")
   (row "Cache failover"        "ElastiCache Multi-AZ auto-failover"       "Redis primary crash"                   "10-30 seconds (promote replica)")
-  (row "Circuit breaker"       "Hystrix on DynamoDB calls"                "DB throttling or latency spikes"       "Immediate (serve from cache)")
+  (row "Circuit breaker"       "Resilience4j on DynamoDB calls"                "DB throttling or latency spikes"       "Immediate (serve from cache)")
   (row "Retry with jitter"     "Exponential backoff + random jitter"      "Transient failures"                    "Prevents thundering herd on recovery")
   (row "Rate limiting"         "Token bucket at ALB: 100 req/s per user"  "Abuse, bot traffic, DDoS"              "Immediate (HTTP 429)")
   (row "Graceful degradation"  "Serve from cache when DB is degraded"     "Partial outage"                        "Reads: 95% still work. Writes: buffer in SQS.")

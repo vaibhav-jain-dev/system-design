@@ -25,7 +25,7 @@
 {{think "Read-heavy but write volume is non-trivial: 58K read RPS vs 6K write RPS. The write amplification from fan-out makes writes the real scaling challenge. At 200TB/day media, S3 costs alone reach $55K/mo after one year. CDN transfer at $0.085/GB for 500M users loading 10 images/feed is the dominant cost."
   (whyNot "optimize for writes first" "Writes are only 6K RPS at the surface, but fan-out-on-write amplifies each post to N follower feed updates. A user with 1K followers turns 1 write into 1,001 writes. Optimizing reads first (caching, CDN) gives you 10x headroom before you need to solve the write amplification problem.")
   (whatIf "CDN costs dominate at scale" "At 500M users loading 10 images per feed view, CDN transfer reaches ~4PB/month. At $0.085/GB that is $340K/month on CDN alone. Negotiate reserved capacity pricing with CloudFront ($0.025/GB at commitment), use WebP/AVIF to cut image sizes by 40%, and implement aggressive client-side caching with ETags.")
-  (how "estimate storage growth" "200TB/day × 365 = 73PB/year of raw media. With 4 resize variants per image, that is ~290PB. S3 Standard at $0.023/GB = $6.7M/year. Move images older than 90 days to S3 Infrequent Access ($0.0125/GB) and older than 1 year to Glacier ($0.004/GB) using lifecycle policies to cut costs by 60%.")
+  (how "estimate storage growth" "200TB/day × 365 = 73PB/year of raw media. The 4 resize variants (150px, 320px, 640px, 1080px) total ~475KB combined vs ~2MB original, adding ~24% overhead — so total is ~90PB/year. S3 Standard at $0.023/GB = $2.1M/year. Move images older than 90 days to S3 Infrequent Access ($0.0125/GB) and older than 1 year to Glacier ($0.004/GB) using lifecycle policies to cut costs by 60%.")
 }}
 
 {{hint "why estimate storage before architecture?" "200TB/day of media uploads is the single number that drives the most architectural decisions. It tells you: S3 is mandatory (no filesystem scales to petabytes), you need a media processing pipeline (resize, transcode, thumbnails), CDN is non-negotiable (you cannot serve petabytes from origin), and lifecycle policies are required to control cost. Without this number, you might waste time debating whether to use local disk or EBS."}}
@@ -187,7 +187,10 @@ WHERE p.user_id IN (
 )
 GROUP BY p.id, u.id
 ORDER BY p.created_at DESC
-LIMIT 20 OFFSET :offset;
+LIMIT 20;
+-- For pagination, use cursor-based:
+-- WHERE p.created_at < :cursor_timestamp
+-- ORDER BY p.created_at DESC LIMIT 20;
 `}}
 
 {{diagram "ig-feed-query-result"}}
@@ -231,7 +234,7 @@ LIMIT 20 OFFSET :offset;
 
 {{hint "why Redis sorted sets for feed?" "A feed is a ranked, bounded list — exactly what a Redis sorted set (ZSET) models. ZADD is O(log N), ZREVRANGE for pagination is O(log N + M), and ZREMRANGEBYRANK caps memory per user. Memcached would require serializing/deserializing the entire feed on every update, creating read-modify-write race conditions."}}
 
-{{think "Fan-out math: Average user follows 200 people. Fan-out-on-read = 200 queries per feed load. At 10M DAU x 10 loads/day = 100M feed loads = 20B DB queries/day = 230K QPS just for feed. Postgres cannot handle this. Fan-out-on-write pre-computes: each new post writes to ~200 follower feeds in Redis. At 50K posts/day = 10M Redis writes/day = 115 WPS. Much more manageable."
+{{think "Fan-out math: Average user follows 200 people. Fan-out-on-read = 200 queries per feed load. At 10M DAU x 10 loads/day = 100M feed loads = 20B DB queries/day = 230K QPS just for feed. Postgres cannot handle this. Fan-out-on-write pre-computes: each new post writes to ~200 follower feeds in Redis. At 500K posts/day (10M DAU × 5% posting rate) = 100M Redis writes/day = ~1,150 WPS. Much more manageable."
   (whyNot "fan-out-on-read with aggressive caching" "Caching fan-out-on-read results helps repeat loads, but invalidation is the killer. When any of your 200 followees posts, the cached feed is stale. With 200 followees each posting once/day, the cache invalidates ~200 times/day per user — every 7 minutes. Cache hit ratio drops below 30%, negating most of the benefit.")
   (whatIf "a celebrity posts" "Fan-out-on-write to 10M followers means 10M cache writes per post. At 100 posts/day from top celebrities, that is 1B cache writes/day just for celebrities. Use a hybrid approach: fan-out-on-write for normal users, fan-out-on-read for accounts with >100K followers.")
   (how "detect celebrity accounts" "Set a follower threshold (e.g., 100K). When a user crosses the threshold, flip a flag in the user table. The posting service checks the flag: below threshold -> fan-out-on-write, above threshold -> skip fan-out, let the feed service pull on read.")
@@ -838,7 +841,7 @@ async def mark_viewed(story_id: str, user_id: int):
         Even with a covering index on (post_id, user_id), COUNT(*) on a post with 10M likes requires scanning 10M index entries. On Postgres, this takes ~2-5 seconds because MVCC means the database must check visibility for each row. On DynamoDB, a Query with Select=COUNT still consumes read capacity proportional to item count. The <span class="dqa-key">fundamental problem</span> is that COUNT is O(N) in all databases — there's no magic index that maintains a pre-computed count without write amplification. Sharded counters trade <span class="dqa-key">perfect accuracy for O(1) reads</span>: reading 100 shards and summing is constant time regardless of total likes.
         <div class="dqa-deep">
           <div class="dqa-deep-q">How do you ensure exactly-once like counting when the user might tap the like button multiple times or retry on network failure?</div>
-          <div class="dqa-deep-a">Three layers of protection: (1) <span class="dqa-key">Client-side debounce</span> — the UI disables the button for 500ms after a tap and deduplicates locally. (2) <span class="dqa-key">Idempotent write to DynamoDB</span> — the likes table has PK = (post_id, user_id), so duplicate PutItem is a no-op. The conditional expression <code>attribute_not_exists(user_id)</code> returns ConditionalCheckFailedException on duplicates, and we only increment the sharded counter on successful writes. (3) <span class="dqa-key">Reconciliation job</span> — a periodic batch job (every 10 minutes) compares the sharded counter sum against the actual COUNT from DynamoDB for hot posts, correcting any drift. This gives us eventually-exact counts: real-time accuracy within ±0.1%, perfect accuracy within 10 minutes. See also how <a class="dqa-link" href="/problem/url-shortener">URL shortener</a> handles similar counter challenges at scale.</div>
+          <div class="dqa-deep-a">Three layers of protection: (1) <span class="dqa-key">Client-side debounce</span> — the UI disables the button for 500ms after a tap and deduplicates locally. (2) <span class="dqa-key">Idempotent write to DynamoDB</span> — the likes table has PK = (post_id, user_id), so duplicate PutItem is a no-op. The conditional expression <code>attribute_not_exists(post_id)</code> returns ConditionalCheckFailedException on duplicates, and we only increment the sharded counter on successful writes. (3) <span class="dqa-key">Reconciliation job</span> — a periodic batch job (every 10 minutes) compares the sharded counter sum against the actual COUNT from DynamoDB for hot posts, correcting any drift. This gives us eventually-exact counts: real-time accuracy within ±0.1%, perfect accuracy within 10 minutes. See also how <a class="dqa-link" href="/problem/url-shortener">URL shortener</a> handles similar counter challenges at scale.</div>
         </div>
       </div>
     </div>

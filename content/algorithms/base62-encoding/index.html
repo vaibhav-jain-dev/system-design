@@ -165,7 +165,7 @@ func Decode(encoded string) (uint64, error) {
 )}}
 
 {{think "Counter + Base62 is the correct default. Hash-based generation seems appealing because the same URL always produces the same code (useful for deduplication), but the birthday paradox collision rate becomes significant at scale."
-  (whyNot "hash-based generation" "At 1 billion existing URLs in a 3.52 trillion keyspace, birthday paradox collision probability is ~0.014% per insert — roughly 14,000 collisions per 100 million writes. Each needs a DB retry.")
+  (whyNot "hash-based generation" "At 1 billion existing URLs in a 3.52 trillion keyspace, birthday paradox collision probability is ~0.028% per insert — roughly 28,000 collisions per 100 million writes. Each needs a DB retry.")
   (whatIf "you need deduplication (same URL → same code)" "Store a reverse index: long_url → short_code. On write, check this index first. If found, return the existing code. Use counter-based IDs for the code itself — do not hash.")
   (how "does the KGS (Key Generation Service) work?" "A separate service pre-generates millions of Base62 codes and stores them in a 'used' and 'available' table. App servers fetch a batch of 1000 codes on startup. No collision possible because KGS marks codes as used before handing them out.")
 }}
@@ -181,7 +181,7 @@ def hash_based_encode(long_url: str, attempt: int = 0) -> str:
     raw = long_url if attempt == 0 else f"{long_url}:{attempt}"
     md5_hex = hashlib.md5(raw.encode()).hexdigest()
 
-    # Take first 43 bits of MD5 (enough for 7 Base62 chars)
+    # Take first 44 bits of MD5 (enough for 7 Base62 chars)
     num = int(md5_hex[:11], 16) % (62 ** 7)
 
     chars = []
@@ -201,7 +201,7 @@ def create_short_url(long_url: str, db) -> str:
     raise Exception("Too many collisions, falling back to KGS")
 `}}
 
-{{avoid "Never rely on random generation without collision detection. At 1 billion existing URLs in a 3.52 trillion keyspace, the birthday paradox gives a collision rate of roughly 0.014% per insert — about 14,000 collisions per 100 million inserts."}}
+{{avoid "Never rely on random generation without collision detection. At 1 billion existing URLs in a 3.52 trillion keyspace, the birthday paradox gives a collision rate of roughly 0.028% per insert — about 28,000 collisions per 100 million inserts."}}
 
 {{triggerQs "Questions this phase triggers"
   "How do you prevent two servers from generating the same counter ID?"

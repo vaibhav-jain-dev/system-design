@@ -54,7 +54,7 @@ func registerInstagram(r *Registry) {
         <div class="d-box green">Availability: 99.99% (52 min downtime/yr)</div>
         <div class="d-box green">Latency: Feed load &lt; 200ms p99</div>
         <div class="d-box blue">Scale: 2B MAU, 500M DAU</div>
-        <div class="d-box blue">Read:Write ratio: 100:1</div>
+        <div class="d-box blue">Read:Write ratio: ~10:1</div>
         <div class="d-box amber">Consistency: Eventual for feed, strong for likes</div>
       </div>
     </div>

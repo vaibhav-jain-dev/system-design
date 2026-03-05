@@ -42,7 +42,7 @@
 
 {{diagram "rl-capacity-estimation"}}
 
-{{hint "why estimate ops/sec before picking storage?" "The storage choice depends entirely on whether we need sub-millisecond reads. At 500K req/sec, even a 5ms Redis call would add 2,500 seconds of cumulative latency per second across the fleet. This forces us to Redis over DynamoDB (10-20ms) before we even look at features."}}
+{{hint "why estimate ops/sec before picking storage?" "The storage choice depends entirely on whether we need sub-millisecond reads. At 500K req/sec, even a 5ms Redis call requires 2,500 CPU-seconds of parallel processing capacity per second across the fleet. This forces us to Redis over DynamoDB (10-20ms) before we even look at features."}}
 
 {{say "Redis handles 100K+ ops/sec per node easily. A 3-node ElastiCache cluster gives us 300K+ ops/sec with replication. For 500K peak, we might need 6 nodes or use Lua scripts to reduce round trips."}}
 
@@ -122,7 +122,7 @@ class TokenBucket:
 
 {{diagram "rl-sliding-window"}}
 
-{{hint "why weighted average across two windows?" "A true sliding window log stores every request timestamp and counts entries in [now-window, now]. That is O(N) memory. The sliding window counter approximates this with O(1) memory by keeping only two counters (current window, previous window) and weighting the previous window by how much of it overlaps the current window. The error is bounded at under 0.003% for random traffic patterns."}}
+{{hint "why weighted average across two windows?" "A true sliding window log stores every request timestamp and counts entries in [now-window, now]. That is O(N) memory. The sliding window counter approximates this with O(1) memory by keeping only two counters (current window, previous window) and weighting the previous window by how much of it overlaps the current window. The error is typically within a few percent of the true count for uniform traffic patterns."}}
 
 {{code "python" `import time
 import redis
@@ -133,7 +133,7 @@ class SlidingWindowCounter:
     - Combines fixed window simplicity with sliding window accuracy
     - Uses weighted count from current and previous window
     - Memory: O(1) per key (just two counters)
-    - Accuracy: within 0.003% of true sliding window
+    - Accuracy: typically within a few percent of true sliding window
     """
 
     def __init__(self, redis_client: redis.Redis):
@@ -218,6 +218,7 @@ from fastapi.responses import JSONResponse
 app = FastAPI()
 
 # Rate limit middleware
+@app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     # Extract rate limit key
     api_key = request.headers.get("X-API-Key")
@@ -286,7 +287,7 @@ local now = tonumber(ARGV[3])
 local member = ARGV[4]
 
 -- Remove entries outside the window
-redis.call('ZREMRANGEBYSCORE', key, 0, now - window * 1000)
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
 
 -- Count entries in current window
 local count = redis.call('ZCARD', key)
@@ -406,7 +407,7 @@ activedefrag: yes                 # Defragment memory proactively
 
 {{think "Rate limiting infrastructure is cheap. The real cost is engineering time to get it right."
   (whatIf "you need to scale to 5M req/sec" "A 3-shard cluster handles 300K ops/sec. For 5M, you need roughly 50 shards (~$10K/month). At that scale, evaluate whether a purpose-built solution like Envoy's rate limiting service or a commercial solution (Kong, Apigee) is more cost-effective than a custom Redis implementation. The custom solution likely wins if you have the engineering capacity to operate it.")
-  (how "cost per check breaks down" "Redis ElastiCache r6g.large: ~$194/month per node, 6 nodes = $1,164/month. Data transfer within the same AZ is free. Cross-AZ replication reads: $0.01/GB. At 500K req/sec with 200-byte payloads per check, cross-AZ transfer is ~3 TB/month = $30. Total: ~$1,194/month for 500K ops/sec capacity.")
+  (how "cost per check breaks down" "Redis ElastiCache r6g.large: ~$97/month per node, 6 nodes = $582/month. Data transfer within the same AZ is free. Cross-AZ replication reads: $0.01/GB. At 500K req/sec with 200-byte payloads per check, cross-AZ transfer is ~3 TB/month = $30. Total: ~$612/month for 500K ops/sec capacity.")
 }}
 
 {{hint "why disable persistence to reduce cost?" "ElastiCache charges extra for Redis with Multi-AZ persistence. Since rate limit counters are ephemeral by design, you get no benefit from persistence. Disabling it saves ~20% on ElastiCache cost and reduces latency by eliminating disk I/O on write paths."}}
@@ -436,7 +437,7 @@ activedefrag: yes                 # Defragment memory proactively
 <div class="dqa-item">
   <div class="dqa-q">Why is Sliding Window Counter preferred over Token Bucket for most production rate limiters?</div>
   <div class="dqa-a">
-    <span class="dqa-key">Sliding Window Counter</span> provides the best balance of accuracy and simplicity. It uses only <span class="dqa-key">O(1) memory per key</span> (two counters: current window + previous window), eliminates the <span class="dqa-key">boundary burst problem</span> of Fixed Window, and requires no complex state management like Token Bucket's floating-point token tracking. Cloudflare and Stripe both use variants of this algorithm. The weighted average calculation <code>prev_count × weight + curr_count</code> achieves within <span class="dqa-key">0.003% accuracy</span> of a true sliding window log while using constant memory.
+    <span class="dqa-key">Sliding Window Counter</span> provides the best balance of accuracy and simplicity. It uses only <span class="dqa-key">O(1) memory per key</span> (two counters: current window + previous window), eliminates the <span class="dqa-key">boundary burst problem</span> of Fixed Window, and requires no complex state management like Token Bucket's floating-point token tracking. Cloudflare and Stripe both use variants of this algorithm. The weighted average calculation <code>prev_count × weight + curr_count</code> achieves within <span class="dqa-key">high accuracy</span> of a true sliding window log while using constant memory.
     <div class="dqa-sub">
       <div class="dqa-sub-q">When would you choose Token Bucket over Sliding Window Counter?</div>
       <div class="dqa-sub-a">
@@ -448,7 +449,7 @@ activedefrag: yes                 # Defragment memory proactively
       </div>
       <div class="dqa-sub-q">What is the exact formula for Sliding Window Counter accuracy?</div>
       <div class="dqa-sub-a">
-        The error bound is <code>|estimated - actual| ≤ (prev_window_count × elapsed_fraction / window_size)</code>. In practice, the maximum error occurs when traffic is perfectly periodic. For <span class="dqa-key">random traffic patterns</span> (which is the real world), the error approaches zero. Cloudflare published benchmarks showing &lt;0.003% error at 10K RPS.
+        The error bound is <code>|estimated - actual| ≤ (prev_window_count × elapsed_fraction / window_size)</code>. In practice, the maximum error occurs when traffic is perfectly periodic. For <span class="dqa-key">random traffic patterns</span> (which is the real world), the error approaches zero. Cloudflare published benchmarks showing error well under 1% at 10K RPS.
       </div>
     </div>
   </div>

@@ -18,24 +18,24 @@ func registerAlgorithms(r *Registry) {
     <div class="d-group-title">Repeated divide-by-62</div>
     <div class="d-flow-v" style="gap: 0.25rem;">
       <div class="d-flow">
-        <div class="d-box gray">123456789 % 62 = 17</div>
+        <div class="d-box gray">123456789 % 62 = 33</div>
         <div class="d-arrow">→</div>
-        <div class="d-box amber">r</div>
+        <div class="d-box amber">H</div>
       </div>
       <div class="d-flow">
-        <div class="d-box gray">1991239 % 62 = 25</div>
+        <div class="d-box gray">1991238 % 62 = 46</div>
         <div class="d-arrow">→</div>
-        <div class="d-box amber">z</div>
+        <div class="d-box amber">U</div>
       </div>
       <div class="d-flow">
-        <div class="d-box gray">32116 % 62 = 4</div>
+        <div class="d-box gray">32116 % 62 = 0</div>
         <div class="d-arrow">→</div>
-        <div class="d-box amber">e</div>
+        <div class="d-box amber">a</div>
       </div>
       <div class="d-flow">
-        <div class="d-box gray">517 % 62 = 21</div>
+        <div class="d-box gray">518 % 62 = 22</div>
         <div class="d-arrow">→</div>
-        <div class="d-box amber">v</div>
+        <div class="d-box amber">w</div>
       </div>
       <div class="d-flow">
         <div class="d-box gray">8 % 62 = 8</div>
@@ -46,8 +46,8 @@ func registerAlgorithms(r *Registry) {
   </div>
   <div class="d-arrow-down">↓</div>
   <div class="d-label">Read remainders bottom-to-top</div>
-  <div class="d-box green">Result: "ivezr"</div>
-  <div class="d-label" style="margin-top: 0.5rem;">Decode: 8*62^4 + 21*62^3 + 4*62^2 + 25*62 + 17 = 123456789</div>
+  <div class="d-box green">Result: "iwaUH"</div>
+  <div class="d-label" style="margin-top: 0.5rem;">Decode: 8*62^4 + 22*62^3 + 0*62^2 + 46*62 + 33 = 123456789</div>
 </div>`,
 	})
 
@@ -253,11 +253,11 @@ func registerAlgorithms(r *Registry) {
   <div class="d-group-title">After adding D (4 nodes)</div>
   <div class="d-bit-array">
     <div class="d-bit on" style="background: var(--blue, #3b82f6); flex: 25;">A: 25%</div>
-    <div class="d-bit on" style="background: var(--amber, #f59e0b); flex: 8;">D: 8%</div>
+    <div class="d-bit on" style="background: var(--amber, #f59e0b); flex: 25;">D: 25%</div>
     <div class="d-bit on" style="background: var(--green, #22c55e); flex: 25;">B: 25%</div>
     <div class="d-bit on" style="background: var(--purple, #a855f7); flex: 25;">C: 25%</div>
   </div>
-  <div class="d-label" style="margin-top: 0.5rem;">Node D takes ~8% of keys from B (its clockwise neighbor). Nodes A and C are unaffected. Total keys moved: ~25% (K/4), not 75% like modulo.</div>
+  <div class="d-label" style="margin-top: 0.5rem;">Node D takes ~25% of keys (K/4) proportionally from all existing nodes via virtual nodes. Total keys moved: ~25% (K/4), not 75% like modulo.</div>
 </div>`,
 	})
 
