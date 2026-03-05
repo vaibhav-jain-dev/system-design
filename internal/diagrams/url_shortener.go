@@ -57,7 +57,7 @@ func registerURLShortener(r *Registry) {
         <div class="d-label">Traffic flow (2nd click by same user):</div>
         <div class="d-box blue">Browser</div>
         <div class="d-arrow-down">&#8595; cached locally</div>
-        <div class="d-box green">&#10003; Direct to destination (0ms)</div>
+        <div class="d-box green"><span class="d-status active"></span>&#10003; Direct to destination <span class="d-metric latency">0ms</span></div>
       </div>
     </div>
   </div>
@@ -83,7 +83,7 @@ func registerURLShortener(r *Registry) {
   </div>
 </div>
 <div class="d-flow-v">
-  <div class="d-box indigo">Best practice: 301 by default for performance &#8212; switch to 302 only for links needing click tracking or mutable destinations</div>
+  <div class="d-box indigo" data-tip="Twitter uses 301. Bitly uses 302 (analytics). Choose based on whether you need click counting or speed.">Best practice: 301 by default for performance &#8212; switch to 302 only for links needing click tracking or mutable destinations</div>
 </div>`,
 	})
 
@@ -98,10 +98,10 @@ func registerURLShortener(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">NFR Targets</div>
       <div class="d-flow-v">
-        <div class="d-box green">Availability: 99.99% (52 min downtime/yr)</div>
-        <div class="d-box green">Redirect latency: &lt; 10ms p99</div>
-        <div class="d-box blue">Durability: never lose a URL mapping</div>
-        <div class="d-box amber">Consistency: eventual OK (cache + DB sync)</div>
+        <div class="d-box green" data-tip="52 minutes downtime per year. Multi-AZ deployment, auto-scaling, health checks.">Availability: 99.99% <span class="d-metric throughput">52 min/yr</span></div>
+        <div class="d-box green" data-tip="p50 < 5ms (cache hit), p99 < 10ms (cache miss + DB). CDN hits are < 2ms.">Redirect latency: &lt; 10ms p99</div>
+        <div class="d-box blue" data-tip="DynamoDB 11 9's durability. Point-in-time recovery enabled. Cross-region replication for DR.">Durability: never lose a URL mapping</div>
+        <div class="d-box amber" data-tip="Cache TTL 1h means updates take up to 1h to propagate. Acceptable for URL shortener — URLs rarely change.">Consistency: eventual OK (cache + DB sync)</div>
       </div>
     </div>
   </div>
@@ -199,12 +199,12 @@ func registerURLShortener(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">Access Patterns</div>
       <div class="d-flow-v">
-        <div class="d-box green">Redirect: GetItem(PK=short_code) &#8594; O(1), &lt;5ms</div>
-        <div class="d-box green">Create: PutItem(condition: attribute_not_exists)</div>
-        <div class="d-box blue">User URLs: Query(GSI, user_id) &#8594; paginated</div>
-        <div class="d-box blue">Delete: DeleteItem(PK=short_code)</div>
-        <div class="d-box amber">Expiration: TTL auto-deletes expired URLs</div>
-        <div class="d-box amber">Analytics: atomic ADD on click_count</div>
+        <div class="d-box green" data-tip="GetItem by partition key is always O(1) regardless of table size. Single-digit ms.">Redirect: GetItem(PK=short_code) <span class="d-metric latency">&lt;5ms</span></div>
+        <div class="d-box green" data-tip="attribute_not_exists prevents overwriting existing URLs. Idempotent with condition.">Create: PutItem(condition: attribute_not_exists)</div>
+        <div class="d-box blue" data-tip="GSI query returns user's URLs sorted by created_at. Cursor-based pagination with ExclusiveStartKey.">User URLs: Query(GSI, user_id) &#8594; paginated</div>
+        <div class="d-box blue" data-tip="Soft delete: set expires_at to now. Hard delete: DeleteItem. Cache invalidation via CloudFront API.">Delete: DeleteItem(PK=short_code)</div>
+        <div class="d-box amber" data-tip="DynamoDB TTL runs a background scanner. Items deleted within 48h of expiry. No cost for TTL deletes.">Expiration: TTL auto-deletes expired URLs</div>
+        <div class="d-box amber" data-tip="UpdateItem with SET click_count = click_count + :one. Atomic, no read-modify-write race.">Analytics: atomic ADD on click_count</div>
       </div>
     </div>
   </div>
@@ -459,30 +459,37 @@ func registerURLShortener(r *Registry) {
 		ContentFile: "problems/url-shortener",
 		Type:        TypeHTML,
 		HTML: `<div class="d-flow-v">
-  <div class="d-box blue">Clients (Browser / Mobile / API consumers)</div>
+  <div class="d-box blue" data-tip="Browser, mobile apps, and API consumers. 100M new URLs/day, 10:1 read:write ratio.">Clients (Browser / Mobile / API consumers) <span class="d-metric throughput">57K peak RPS</span></div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box purple">Route 53 (DNS) &#8594; latency-based routing</div>
+  <div class="d-box purple" data-tip="Latency-based routing sends users to the nearest region. Weighted routing for blue/green deploys.">Route 53 (DNS) &#8594; latency-based routing <span class="d-metric latency">&lt;5ms</span></div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box purple">CloudFront (CDN) &#8212; 301 cached at edge, 60%+ hits absorbed</div>
+  <div class="d-box purple" data-tip="400+ edge PoPs worldwide. Cache 301 redirects with TTL 24h. Absorbs 60%+ of read traffic."><span class="d-status active"></span>CloudFront (CDN) &#8212; 301 cached at edge <span class="d-metric throughput">60% absorbed</span></div>
   <div class="d-arrow-down">&#8595; cache miss</div>
-  <div class="d-box indigo">ALB (Load Balancer) &#8212; TLS termination, health checks</div>
+  <div class="d-box indigo" data-tip="Application Load Balancer. TLS termination, /health check every 30s. Cross-AZ distribution.">ALB (Load Balancer) &#8212; TLS termination <span class="d-metric latency">~1ms</span></div>
   <div class="d-arrow-down">&#8595;</div>
   <div class="d-row">
-    <div class="d-box green">API Server 1</div>
+    <div class="d-box green" data-tip="Stateless ECS Fargate tasks. Auto-scale on CPU 60%. Each handles 2-3K RPS.">API Server 1</div>
     <div class="d-box green">API Server 2</div>
     <div class="d-box green">API Server N</div>
   </div>
   <div class="d-arrow-down">&#8595;</div>
   <div class="d-row">
-    <div class="d-box red">ElastiCache Redis (L3 cache)</div>
-    <div class="d-box amber">DynamoDB (source of truth)</div>
-    <div class="d-box purple">KGS (key generation)</div>
+    <div class="d-box red" data-tip="Cache-aside pattern. 10 GB covers 20M hot URLs. 95% hit rate. TTL 1h.">ElastiCache Redis <span class="d-metric latency">&lt;1ms</span></div>
+    <div class="d-box amber" data-tip="Source of truth. On-demand capacity. GetItem O(1) by short_code PK.">DynamoDB <span class="d-metric latency">~5ms</span></div>
+    <div class="d-box purple" data-tip="Pre-generates batches of unique keys. Lambda + DynamoDB. Each API server holds a local batch of 1000 keys.">KGS</div>
   </div>
   <div class="d-arrow-down">&#8595; async analytics</div>
   <div class="d-row">
-    <div class="d-box gray">Kinesis (click stream)</div>
+    <div class="d-box gray" data-tip="Click events streamed asynchronously. No impact on redirect latency.">Kinesis (click stream)</div>
     <div class="d-box gray">Lambda (aggregate)</div>
     <div class="d-box gray">S3 (archive)</div>
+  </div>
+  <div class="d-legend">
+    <div class="d-legend-item"><div class="d-legend-color purple"></div>Network edge</div>
+    <div class="d-legend-item"><div class="d-legend-color green"></div>Compute</div>
+    <div class="d-legend-item"><div class="d-legend-color red"></div>Cache</div>
+    <div class="d-legend-item"><div class="d-legend-color amber"></div>Storage</div>
+    <div class="d-legend-item"><div class="d-legend-color gray"></div>Analytics (async)</div>
   </div>
 </div>`,
 	})
@@ -498,17 +505,17 @@ func registerURLShortener(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">WRITE PATH (Create Short URL)</div>
       <div class="d-flow-v">
-        <div class="d-box blue">Client: POST /api/v1/urls</div>
+        <div class="d-box blue"><span class="d-step">1</span>Client: POST /api/v1/urls</div>
         <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box purple">ALB &#8594; healthy ECS task</div>
+        <div class="d-box purple" data-tip="Round-robin to healthy ECS container. TLS terminated here."><span class="d-step">2</span>ALB &#8594; healthy ECS task <span class="d-metric latency">~1ms</span></div>
         <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box green">Validate URL format + Safe Browsing check</div>
+        <div class="d-box green" data-tip="URL format validation + Google Safe Browsing API check (async, non-blocking). Reject malicious URLs."><span class="d-step">3</span>Validate URL + Safe Browsing <span class="d-metric latency">~50ms</span></div>
         <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box red">Get next key from local KGS batch</div>
+        <div class="d-box red" data-tip="Each server holds 1000 pre-generated keys. Refill when 200 remain. No contention, O(1) assignment."><span class="d-step">4</span>Get next key from local KGS batch <span class="d-metric latency">&lt;0.1ms</span></div>
         <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box amber">DynamoDB PutItem (short_code &#8594; long_url)</div>
+        <div class="d-box amber" data-tip="Conditional PutItem: attribute_not_exists(short_code). Guarantees uniqueness. On-demand billing."><span class="d-step">5</span>DynamoDB PutItem <span class="d-metric latency">~5ms</span></div>
         <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box gray">Return 201 + short URL to client</div>
+        <div class="d-box gray"><span class="d-step">6</span>Return 201 + short URL</div>
       </div>
     </div>
   </div>
@@ -516,20 +523,20 @@ func registerURLShortener(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">READ PATH (Redirect)</div>
       <div class="d-flow-v">
-        <div class="d-box blue">Client: GET /Ab3xK9</div>
+        <div class="d-box blue"><span class="d-step">1</span>Client: GET /Ab3xK9</div>
         <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box purple">CloudFront: cache HIT? &#8594; 301 (&lt;5ms)</div>
+        <div class="d-box purple" data-tip="301 cached with Cache-Control: max-age=86400. 60% of traffic served here."><span class="d-step">2</span>CloudFront: cache HIT? &#8594; 301 <span class="d-metric latency">&lt;5ms</span></div>
         <div class="d-arrow-down">&#8595; MISS</div>
-        <div class="d-box indigo">ALB &#8594; ECS task</div>
+        <div class="d-box indigo"><span class="d-step">3</span>ALB &#8594; ECS task</div>
         <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box red">ElastiCache: GET url:Ab3xK9</div>
-        <div class="d-label">HIT (95%)? &#8594; return 301</div>
+        <div class="d-box red" data-tip="Cache key: url:{short_code}. Value: original URL. Hit rate ~95% for warm codes."><span class="d-step">4</span>ElastiCache: GET url:Ab3xK9 <span class="d-metric latency">&lt;1ms</span></div>
+        <div class="d-label"><span class="d-status active"></span>HIT (95%)? &#8594; return 301</div>
         <div class="d-arrow-down">&#8595; MISS (5%)</div>
-        <div class="d-box amber">DynamoDB: GetItem(PK=Ab3xK9)</div>
+        <div class="d-box amber" data-tip="Single-digit ms. GetItem by PK is O(1) regardless of table size."><span class="d-step">5</span>DynamoDB: GetItem <span class="d-metric latency">~5ms</span></div>
         <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box red">Write to ElastiCache (TTL 1h)</div>
+        <div class="d-box red"><span class="d-step">6</span>Write to ElastiCache (TTL 1h)</div>
         <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box gray">Return 301 + Location header</div>
+        <div class="d-box gray"><span class="d-step">7</span>Return 301 + Location header</div>
       </div>
     </div>
   </div>
@@ -543,17 +550,14 @@ func registerURLShortener(r *Registry) {
 		ContentFile: "problems/url-shortener",
 		Type:        TypeHTML,
 		HTML: `<div class="d-flow-v">
-  <div class="d-box blue">L1: Browser Cache (301 Cache-Control: max-age=86400)</div>
-  <div class="d-label">~30% hit rate. Zero latency. Browser never contacts server.</div>
+  <div class="d-box blue" data-tip="HTTP 301 sets Cache-Control: max-age=86400 (24h). Browser caches locally — subsequent clicks are instant. Trade-off: lose analytics for cached clicks.">L1: Browser Cache (301 Cache-Control: max-age=86400) <span class="d-metric latency">0ms</span> <span class="d-metric throughput">~30% hit</span></div>
   <div class="d-arrow-down">&#8595; miss</div>
-  <div class="d-box purple">L2: CloudFront Edge (400+ PoPs, TTL 24h)</div>
-  <div class="d-label">~60% hit rate. &lt;5ms latency. Geographic distribution.</div>
+  <div class="d-box purple" data-tip="400+ edge PoPs globally. TTL 24h. Cache key is the URL path. Invalidation via CreateInvalidation API if URL destination changes.">L2: CloudFront Edge (400+ PoPs, TTL 24h) <span class="d-metric latency">&lt;5ms</span> <span class="d-metric throughput">~60% hit</span></div>
   <div class="d-arrow-down">&#8595; miss</div>
-  <div class="d-box red">L3: ElastiCache Redis (regional, TTL 1h)</div>
-  <div class="d-label">~95% hit rate. &lt;1ms latency. 10 GB covers 20M hot URLs.</div>
+  <div class="d-box red" data-tip="Cache-aside pattern. Key: url:{short_code}. 20M hot URLs × 500B = 10 GB. r6g.large = 13 GB. TTL 1h to balance freshness vs hit rate.">L3: ElastiCache Redis (regional, TTL 1h) <span class="d-metric latency">&lt;1ms</span> <span class="d-metric throughput">~95% hit</span></div>
   <div class="d-arrow-down">&#8595; miss (5%)</div>
-  <div class="d-box amber">L4: DynamoDB (source of truth)</div>
-  <div class="d-label">100% hit rate. ~5ms latency. Only ~2,900 RPS reach here at peak.</div>
+  <div class="d-box amber" data-tip="Source of truth. On-demand capacity scales automatically. GetItem by PK is always O(1). TTL attribute auto-deletes expired URLs.">L4: DynamoDB (source of truth) <span class="d-metric latency">~5ms</span> <span class="d-metric throughput">~2.9K RPS</span></div>
+  <div class="d-caption">Combined hit rate across all layers: <strong>99.7%</strong> of redirects served from cache. Only <strong>~170 RPS</strong> reach DynamoDB at peak.</div>
 </div>`,
 	})
 
@@ -738,9 +742,9 @@ func registerURLShortener(r *Registry) {
 		ContentFile: "problems/url-shortener",
 		Type:        TypeHTML,
 		HTML: `<div class="d-flow-v">
-  <div class="d-box blue">Redirect happens (GET /{code} &#8594; 301)</div>
+  <div class="d-box blue"><span class="d-step">1</span>Redirect happens (GET /{code} &#8594; 301)</div>
   <div class="d-arrow-down">&#8595; fire-and-forget async</div>
-  <div class="d-box green">Kinesis Data Streams (click event: code, IP, timestamp, user-agent)</div>
+  <div class="d-box green" data-tip="Non-blocking PutRecord call. If Kinesis is down, click data is lost (acceptable trade-off for redirect latency)."><span class="d-step">2</span>Kinesis Data Streams <span class="d-metric latency">&lt;1ms async</span></div>
   <div class="d-arrow-down">&#8595;</div>
   <div class="d-branch">
     <div class="d-branch-arm">
