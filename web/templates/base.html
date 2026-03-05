@@ -436,77 +436,79 @@
             var colW = Math.floor((availableW - gap) / 2);
             book.colW = colW;
 
-            // ── Sentinel-based column measurement ──
-            // Remove any old sentinel
-            var old = inner.querySelector('.book-sentinel');
-            if (old) old.remove();
-
-            // Add a tiny sentinel at the very end of content
-            var sentinel = document.createElement('div');
-            sentinel.className = 'book-sentinel';
-            sentinel.style.cssText = 'height:1px;width:1px;clear:both;break-inside:avoid;';
-            inner.appendChild(sentinel);
-
             // Step 1: Measure content height in single-column mode
             inner.style.cssText = 'width:' + colW + 'px;height:auto;column-count:1;';
 
             requestAnimationFrame(function() {
                 var singleH = inner.scrollHeight;
-
-                // Step 2: Estimate columns needed with generous buffer
-                // Account for phase-header break-before gaps
                 var phases = inner.querySelectorAll('.phase-header').length;
-                var breakWaste = Math.max(0, phases - 1) * (vpH * 0.5);
+
+                // Step 2: GENEROUS column estimation to ensure all content fits
+                // Account for phase-header break-before gaps with 70% waste assumption
+                var breakWaste = Math.max(0, phases - 1) * (vpH * 0.7);
                 var estCols = Math.ceil((singleH + breakWaste) / vpH);
-                estCols = Math.ceil(estCols * 1.5); // 50% safety margin
+                // Apply 250% safety multiplier (2.5x) to ensure we never underestimate
+                estCols = Math.ceil(estCols * 2.5);
                 if (estCols % 2 !== 0) estCols++;
-                estCols = Math.max(4, estCols);
+                estCols = Math.max(8, estCols); // Minimum 8 columns (4 pages)
 
-                // Step 3: Apply multi-column with generous width
+                // Step 3: Apply multi-column layout with the generous estimate
                 var totalW = estCols * colW + (estCols - 1) * gap;
-                inner.style.cssText = 'width:' + totalW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);';
+                inner.style.cssText = 'width:' + totalW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);transition:transform 0.45s cubic-bezier(0.16,1,0.3,1);';
 
-                // Step 4: Wait for multi-column layout, then measure sentinel position
-                requestAnimationFrame(function() {
-                requestAnimationFrame(function() {
+                // Step 4: Wait for layout to fully settle, then measure actual content
+                setTimeout(function() {
+                    // Remove old sentinel if exists
+                    var oldSent = inner.querySelector('.book-sentinel');
+                    if (oldSent) oldSent.remove();
+
+                    // Add sentinel to measure end of content
+                    var sentinel = document.createElement('div');
+                    sentinel.className = 'book-sentinel';
+                    sentinel.style.cssText = 'height:1px;width:1px;';
+                    inner.appendChild(sentinel);
+
+                    // Measure sentinel position to find actual content extent
                     var innerRect = inner.getBoundingClientRect();
                     var sRect = sentinel.getBoundingClientRect();
                     var contentRight = sRect.right - innerRect.left;
 
-                    // Debug: check if sentinel is visible
-                    var sentinelVisible = sRect.right > innerRect.left && sRect.right < innerRect.right;
-                    var sentinelX = sRect.right - window.innerWidth / 2; // relative to screen center
+                    // Calculate actual columns needed based on content extent
+                    var actualCols = estCols;
+                    if (contentRight > colW) {
+                        // More precise calculation: how many column units fit the content
+                        actualCols = Math.max(2, Math.ceil(contentRight / (colW + gap)));
+                        // Ensure even number of columns (for 2-column spreads)
+                        if (actualCols % 2 !== 0) actualCols++;
+                        // Respect estimated minimum
+                        actualCols = Math.max(actualCols, estCols - 2);
+                    }
+                    actualCols = Math.max(4, actualCols);
 
-                    // Actual columns from sentinel position
-                    // contentRight position / column unit width (colW + gap)
-                    var actualCols = Math.max(2, Math.ceil(contentRight / (colW + gap)));
-                    if (actualCols % 2 !== 0) actualCols++;
-
-                    // Set final width to exactly fit
+                    // Adjust width based on actual content
                     var finalW = actualCols * colW + (actualCols - 1) * gap;
-                    inner.style.cssText = 'width:' + finalW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);transition:transform 0.45s cubic-bezier(0.16,1,0.3,1);';
+                    inner.style.width = finalW + 'px';
 
-                    // Debug logging
-                    console.log('Book calc:', {
-                        vpW: vpW,
-                        vpH: vpH,
-                        colW: colW,
-                        singleH: singleH,
-                        estCols: estCols,
-                        innerRect: {left: Math.round(innerRect.left), right: Math.round(innerRect.right), width: Math.round(innerRect.width)},
-                        sRect: {left: Math.round(sRect.left), right: Math.round(sRect.right)},
-                        contentRight: Math.round(contentRight),
-                        sentinelVisible: sentinelVisible,
-                        actualCols: actualCols,
-                        'book.total': Math.max(1, actualCols / 2),
-                        finalW: finalW
+                    var pageCount = Math.max(1, actualCols / 2);
+
+                    console.log('📖 Book Pagination:', {
+                        screenWidth: vpW,
+                        screenHeight: vpH,
+                        columnWidth: colW,
+                        contentHeightSingleCol: singleH,
+                        phaseCount: phases,
+                        estimatedColumns: estCols,
+                        actualColumns: actualCols,
+                        totalPages: pageCount,
+                        contentExtent: Math.round(contentRight) + 'px',
+                        finalWidth: finalW + 'px',
+                        allContentFits: contentRight <= finalW
                     });
 
-                    book.total = Math.max(1, actualCols / 2);
+                    book.total = pageCount;
                     updateBookUI();
                     bookGo(Math.min(book.page, book.total - 1));
-                });
-                });
+                }, 150); // Increased timeout to ensure layout is fully settled
             });
         }
 
