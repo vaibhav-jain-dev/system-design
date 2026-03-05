@@ -142,7 +142,28 @@ problems:
 ```go
 type Problem struct {
     Slug, Title, Description, Path string
+    NFRs []ProblemNFR                        // Non-functional requirement tags with phase mappings
     Uses []UsageLink                        // Forward links to fundamentals
+}
+
+type ProblemNFR struct {
+    Slug   string    // e.g. "scalability", "performance" (from StandardNFRs)
+    Phases []int     // which phase numbers address this NFR
+    Title  string    // resolved from StandardNFRs (e.g. "Scalability")
+    Color  string    // resolved CSS color (e.g. "#6366F1")
+}
+
+// StandardNFRs defines the 8 canonical NFRs with display metadata.
+// Add new NFR types here — they become available for all problems.
+var StandardNFRs = map[string]NFRDef{
+    "scalability":   {Title: "Scalability",   Color: "#6366F1"},
+    "performance":   {Title: "Performance",   Color: "#2563EB"},
+    "availability":  {Title: "Availability",  Color: "#059669"},
+    "consistency":   {Title: "Consistency",   Color: "#D97706"},
+    "durability":    {Title: "Durability",    Color: "#7C3AED"},
+    "security":      {Title: "Security",      Color: "#DC2626"},
+    "cost":          {Title: "Cost",          Color: "#64748B"},
+    "observability": {Title: "Observability", Color: "#0891B2"},
 }
 
 type Fundamental struct {
@@ -165,6 +186,7 @@ type UsageLink struct {
     Fundamental    string                    // Forward: fundamental slug
     Problem        string                    // Reverse: problem slug (auto-filled)
     Config, Why, NotThis, Risk, Caveats string  // Rich context fields
+    NFRs           []string                  // Which NFRs this fundamental use addresses
     FundamentalRef *Fundamental              // Resolved pointer
     ProblemRef     *Problem                  // Resolved pointer
 }
@@ -609,10 +631,65 @@ fundamentals:
 - "Let me think about this..." (just give the answer)
 - "There are several approaches..." (name the best one first)
 
+## NFR (Non-Functional Requirements) Filter System
+
+Each problem page shows an interactive NFR selector panel. All NFRs are selected by default (no filtering). Deselecting an NFR dims the phases and context cards that don't address it, helping focus on what matters for a given requirement.
+
+### 8 Standard NFRs
+
+| Slug | Display Title | Color | What it covers |
+|------|--------------|-------|---------------|
+| `scalability` | Scalability | Indigo | Horizontal scaling, sharding, capacity |
+| `performance` | Performance | Blue | Latency, throughput, caching, CDN |
+| `availability` | Availability | Green | Fault tolerance, multi-AZ, failover |
+| `consistency` | Consistency | Amber | CAP tradeoffs, strong/eventual consistency |
+| `durability` | Durability | Purple | Data persistence, backup, WAL |
+| `security` | Security | Red | Auth, encryption, abuse prevention |
+| `cost` | Cost | Gray | Cost analysis, managed vs self-hosted |
+| `observability` | Observability | Cyan | Monitoring, tracing, logging, metrics |
+
+To add a new NFR type, add it to `var StandardNFRs` in `internal/registry/registry.go`.
+
+### YAML Format for Problems
+
+```yaml
+problems:
+  - slug: my-problem
+    nfrs:
+      - slug: scalability       # must match a key in StandardNFRs
+        phases: [1, 3, 5, 7]   # phase numbers that address this NFR
+      - slug: performance
+        phases: [1, 2, 4, 5, 6]
+      - slug: availability
+        phases: [1, 5, 8]
+    uses:
+      - fundamental: storage/redis
+        nfrs: [performance, availability]  # which NFRs this use addresses
+        config: "..."
+        ...
+```
+
+### How It Works
+
+1. **Registry**: `ProblemNFR.Phases` maps phase numbers → NFR slugs. `UsageLink.NFRs` tags context cards.
+2. **Handler**: Builds two JSON maps (`PhaseNFRMapJSON`, `UseNFRMapJSON`) and passes them to the template.
+3. **Template**: NFR chips rendered in `.nfr-panel`, JSON maps stored as `data-*` attributes.
+4. **Macro**: `{{phase N "Title" "Time"}}` adds `data-phase="N"` attribute to enable JS lookup.
+5. **JS** (`initNFRFilter`): On load and HTMX swap, reads JSON maps, wires chip click handlers, dims/restores phase sections and context cards on toggle.
+
+### What Gets Dimmed
+
+- **Phase sections**: The phase header `<div class="phase-header">` and all content until the next phase header in `.detail-content` get class `nfr-section-dim` (opacity 0.18) when the phase's NFR tags don't include any selected NFR.
+- **Context cards**: The "Uses Fundamentals" cards at the bottom get dimmed when their `UsageLink.NFRs` don't match.
+- **Untagged phases** (no NFRs in YAML): Always visible regardless of selection.
+- **All selected**: Nothing dimmed — normal view.
+
+---
+
 ## Common Tasks
 
 ### Add a new problem
-1. Add entry to `content/_registry.yaml` under `problems:` with slug, title, description, path, and `uses:` links
+1. Add entry to `content/_registry.yaml` under `problems:` with slug, title, description, path, `nfrs:` phase mappings, and `uses:` links (with `nfrs:` per use)
 2. Create `content/problems/{slug}/index.html` following the Gold Standard above (12 phases, stageNav, deepQA)
 3. Create `internal/diagrams/{domain}.go` with diagram registrations, add to `BuildDefault()` in `registry.go`
 4. Restart server

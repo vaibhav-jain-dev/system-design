@@ -350,6 +350,7 @@
                 highlightCode();
                 collapseSidebarSections();
                 initSectionAnchors();
+                initNFRFilter();
                 requestAnimationFrame(function() {
                     var pref = localStorage.getItem(BOOK_PREF_KEY);
                     if (pref !== '0') {
@@ -705,10 +706,121 @@
             initBook();
         }
 
+        // ══════════════════════════════════════════════════════════════════════
+        // NFR Filter System
+        // Reads NFR panel on problem pages, tags phase sections and context
+        // cards with data-nfr attributes, then dims/restores them on chip toggle.
+        // ══════════════════════════════════════════════════════════════════════
+
+        var nfrState = {
+            phaseMap: {},   // "1" → ["scalability", "performance"]
+            useMap:   {}    // "storage/redis" → ["performance", "availability"]
+        };
+
+        function initNFRFilter() {
+            var panel = document.getElementById('nfr-panel');
+            if (!panel) {
+                nfrState.phaseMap = {};
+                nfrState.useMap   = {};
+                return;
+            }
+
+            try {
+                nfrState.phaseMap = JSON.parse(panel.dataset.nfrMap   || '{}');
+                nfrState.useMap   = JSON.parse(panel.dataset.useNfrMap || '{}');
+            } catch(e) {
+                nfrState.phaseMap = {};
+                nfrState.useMap   = {};
+            }
+
+            // Wire chip clicks
+            panel.querySelectorAll('.nfr-chip').forEach(function(chip) {
+                chip.addEventListener('click', function() {
+                    chip.classList.toggle('nfr-chip--selected');
+                    updateNFRFilter();
+                });
+            });
+
+            // Wire "Select All" button
+            var allBtn = document.getElementById('nfr-select-all');
+            if (allBtn) {
+                allBtn.addEventListener('click', function() {
+                    panel.querySelectorAll('.nfr-chip').forEach(function(c) {
+                        c.classList.add('nfr-chip--selected');
+                    });
+                    updateNFRFilter();
+                });
+            }
+
+            // Tag context cards with their NFR slugs from the useMap
+            Object.keys(nfrState.useMap).forEach(function(slug) {
+                var nfrs = nfrState.useMap[slug];
+                document.querySelectorAll('[data-fund-slug="' + slug + '"]').forEach(function(card) {
+                    card.dataset.nfr = nfrs.join(',');
+                });
+            });
+
+            // All selected on load → no dimming needed
+        }
+
+        function updateNFRFilter() {
+            var panel = document.getElementById('nfr-panel');
+            if (!panel) return;
+
+            var selected = new Set();
+            panel.querySelectorAll('.nfr-chip.nfr-chip--selected').forEach(function(c) {
+                selected.add(c.dataset.nfr);
+            });
+
+            var totalChips = panel.querySelectorAll('.nfr-chip').length;
+            var allSelected = (selected.size === totalChips) || (selected.size === 0);
+
+            // ── Phase section dimming ──────────────────────────────────────────
+            // Walk direct children of .detail-content, bucket them into phase sections.
+            // A section = [phaseHeader, ...everything until the next phaseHeader].
+            var contentEl = document.querySelector('.detail-content');
+            if (contentEl) {
+                var sections = [];
+                var cur = null;
+                Array.from(contentEl.children).forEach(function(el) {
+                    if (el.classList.contains('phase-header')) {
+                        cur = { header: el, elements: [] };
+                        sections.push(cur);
+                    } else if (cur) {
+                        cur.elements.push(el);
+                    }
+                });
+
+                sections.forEach(function(section) {
+                    var phaseNum = section.header.getAttribute('data-phase');
+                    var nfrs     = phaseNum ? (nfrState.phaseMap[phaseNum] || []) : [];
+                    var dimmed;
+                    if (!nfrs.length || allSelected) {
+                        dimmed = false; // untagged phase or all-selected → always visible
+                    } else {
+                        dimmed = !nfrs.some(function(n) { return selected.has(n); });
+                    }
+                    section.header.classList.toggle('nfr-section-dim', dimmed);
+                    section.elements.forEach(function(el) {
+                        el.classList.toggle('nfr-section-dim', dimmed);
+                    });
+                });
+            }
+
+            // ── Context card dimming ───────────────────────────────────────────
+            document.querySelectorAll('[data-nfr]').forEach(function(el) {
+                var elNFRs = el.dataset.nfr.split(',').filter(Boolean);
+                if (!elNFRs.length) return;
+                var dimmed = !allSelected && !elNFRs.some(function(n) { return selected.has(n); });
+                el.classList.toggle('nfr-section-dim', dimmed);
+            });
+        }
+
         // ── Initial setup ────────────────────────────────────────────────────
         trackPage();
         collapseSidebarSections();
         initSectionAnchors();
+        initNFRFilter();
         if (typeof hljs !== 'undefined') {
             highlightCode();
         } else {
