@@ -446,76 +446,36 @@
             var colW = Math.floor((availableW - gap) / 2);
             book.colW = colW;
 
-            // ── Sentinel-based column measurement ──
-            // Remove any old sentinel
-            var old = inner.querySelector('.book-sentinel');
-            if (old) old.remove();
-
-            // Add a tiny sentinel at the very end of content
-            var sentinel = document.createElement('div');
-            sentinel.className = 'book-sentinel';
-            sentinel.style.cssText = 'height:1px;width:1px;clear:both;break-inside:avoid;';
-            inner.appendChild(sentinel);
-
             // Step 1: Measure content height in single-column mode
             inner.style.cssText = 'width:' + colW + 'px;height:auto;column-count:1;';
 
             requestAnimationFrame(function() {
                 var singleH = inner.scrollHeight;
 
-                // Step 2: Estimate columns needed with generous buffer
-                // Account for phase-header break-before gaps
+                // Step 2: Estimate columns needed (with buffer for break-inside blocks)
                 var phases = inner.querySelectorAll('.phase-header').length;
-                var breakWaste = Math.max(0, phases - 1) * (vpH * 0.5);
+                var breakWaste = Math.max(0, phases - 1) * (vpH * 0.35);
                 var estCols = Math.ceil((singleH + breakWaste) / vpH);
-                estCols = Math.ceil(estCols * 1.5); // 50% safety margin
+                estCols = Math.ceil(estCols * 1.25);
                 if (estCols % 2 !== 0) estCols++;
-                estCols = Math.max(4, estCols);
+                estCols = Math.max(2, estCols);
 
-                // Step 3: Apply multi-column with generous width
-                var totalW = estCols * colW + (estCols - 1) * gap;
-                inner.style.cssText = 'width:' + totalW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);';
+                // Step 3: Apply multi-column layout
+                var estW = estCols * colW + (estCols - 1) * gap;
+                inner.style.cssText = 'width:' + estW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);';
 
-                // Step 4: Wait for multi-column layout, then measure sentinel position
+                // Step 4: Read actual rendered width and derive accurate page count
                 requestAnimationFrame(function() {
-                requestAnimationFrame(function() {
-                    var innerRect = inner.getBoundingClientRect();
-                    var sRect = sentinel.getBoundingClientRect();
-                    var contentRight = sRect.right - innerRect.left;
-
-                    // Debug: check if sentinel is visible
-                    var sentinelVisible = sRect.right > innerRect.left && sRect.right < innerRect.right;
-                    var sentinelX = sRect.right - window.innerWidth / 2; // relative to screen center
-
-                    // Actual columns from sentinel position
-                    // contentRight position / column unit width (colW + gap)
-                    var actualCols = Math.max(2, Math.ceil(contentRight / (colW + gap)));
+                    var renderedW = Math.max(inner.scrollWidth, inner.getBoundingClientRect().width);
+                    var actualCols = Math.max(2, Math.ceil((renderedW + gap) / (colW + gap)));
                     if (actualCols % 2 !== 0) actualCols++;
 
-                    // Set final width to exactly fit
                     var finalW = actualCols * colW + (actualCols - 1) * gap;
                     inner.style.cssText = 'width:' + finalW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);transition:transform 0.45s cubic-bezier(0.16,1,0.3,1);';
-
-                    // Debug logging
-                    console.log('Book calc:', {
-                        vpW: vpW,
-                        vpH: vpH,
-                        colW: colW,
-                        singleH: singleH,
-                        estCols: estCols,
-                        innerRect: {left: Math.round(innerRect.left), right: Math.round(innerRect.right), width: Math.round(innerRect.width)},
-                        sRect: {left: Math.round(sRect.left), right: Math.round(sRect.right)},
-                        contentRight: Math.round(contentRight),
-                        sentinelVisible: sentinelVisible,
-                        actualCols: actualCols,
-                        'book.total': Math.max(1, actualCols / 2),
-                        finalW: finalW
-                    });
 
                     book.total = Math.max(1, actualCols / 2);
                     updateBookUI();
                     bookGo(Math.min(book.page, book.total - 1));
-                });
                 });
             });
         }
