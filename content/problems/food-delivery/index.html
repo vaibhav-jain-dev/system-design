@@ -133,6 +133,39 @@ CANCELLED (terminal)`}}
 
 {{hint "READY → PICKED_UP trigger" "Partner confirms pickup via the app (QR scan at restaurant). This creates GPS geofence verification — partner must be within 200m of restaurant coordinates to confirm pickup. Prevents fraudulent pickup confirmations."}}
 
+{{think "Payment uses the Saga pattern — a sequence of local transactions with compensating rollbacks. Order → Payment → Restaurant Payout are three separate services. If payment succeeds but restaurant payout fails, the saga compensates: refund the customer, mark order CANCELLED, notify restaurant. Each step in the saga is idempotent and has a compensating transaction."
+  (whyNot "two-phase commit (2PC) across services" "2PC requires all participants to agree before committing. If the payment service is slow (2–5s), 2PC holds distributed locks across all three services for that duration. At 350 orders/sec, that's 350 × 5s = 1750 concurrent distributed locks. System grinds to a halt.")
+  (how "saga idempotency works" "Each saga step stores its idempotency key (order_id + step_name) in the target service's DB before executing. On retry, if the key exists, skip the step. This makes retry safe — POST /payments/charge is safe to call twice with the same order_id.")
+}}
+
+{{code "python" `# Saga orchestrator for order → payment → restaurant payout
+class OrderSagaOrchestrator:
+    def execute(self, order_id: str) -> SagaResult:
+        saga_log = []
+
+        # Step 1: Charge customer
+        payment_result = payment_service.charge(
+            order_id=order_id,
+            idempotency_key=f"order-{order_id}-payment"
+        )
+        if not payment_result.success:
+            return SagaResult(success=False, reason="payment_failed")
+        saga_log.append(("payment_charged", payment_result.transaction_id))
+
+        # Step 2: Notify restaurant (restaurant payout is deferred to delivery)
+        restaurant_result = restaurant_service.accept_order(order_id)
+        if not restaurant_result.success:
+            # Compensate: refund customer
+            payment_service.refund(
+                transaction_id=payment_result.transaction_id,
+                reason="restaurant_unavailable"
+            )
+            return SagaResult(success=False, reason="restaurant_unavailable")
+
+        # Step 3: Restaurant payout happens at DELIVERED transition (not here)
+        # Payout is idempotent: payout_service.pay(order_id) → skips if already paid
+        return SagaResult(success=True)`}}
+
 {{triggerQs "Order lifecycle questions"
   "How do you handle a restaurant going offline mid-order?"
   "We detect via heartbeat miss (30s timeout). The order service transitions PREPARING → EXCEPTION. Customer gets notification, automatic refund initiated. The matching service blacklists the restaurant for 10 minutes to prevent new assignments."
@@ -501,6 +534,16 @@ CREATE TABLE order_events (
 
 {{avoid "Don't call the state 'stuck' in an interview. Say 'the order is in an indeterminate state pending escalation.' Engineers say stuck; system designers say 'pending escalation with a defined timeout and fallback.'"}}
 
+{{thought "Rider offline mid-delivery: the 60s Redis TTL fires, the order transitions to PARTNER_UNREACHABLE. We cannot reassign because the food is with the partner. Auto-escalate to human ops after 5 minutes. If unresolved in 20 minutes, auto-refund and flag partner account. This is correct — never auto-reassign a PICKED_UP order."}}
+
+{{thought "Payment gateway outage: order is ACCEPTED, restaurant is preparing, but payment is pending. Use a circuit breaker pattern: if payment service error rate > 10% in 60s, open the circuit — stop accepting new orders temporarily and show 'payment processing unavailable' in the app. Queue in-flight payment retries with exponential backoff (1s, 2s, 4s, 8s, up to 3 attempts). If all retries fail, cancel the order and issue a credit (not a refund — credits are instant, refunds take 3–5 days)."}}
+
+{{compare "Startup vs Enterprise ETA Architecture" (options
+  (best "Enterprise: Kafka + Flink streaming ETA" "Real-time stream processing: driver location events → Flink job → dynamic ETA update every 10 seconds. OSRM routing engine cluster for sub-50ms route calculation. Handles 500K concurrent orders. Complex to operate.")
+  (alt "Mid-scale: Kafka + Lambda consumers + caching" "Kafka events trigger Lambda functions for ETA recalculation. OSRM or HERE API for routing. Cache ETA in Redis with 10s TTL. Good up to 100K concurrent orders. Simpler ops.")
+  (nofit "Startup: polling every 30 seconds" "Order service polls partner location table every 30s and calls Google Maps API for ETA. Works at < 1000 concurrent orders. Google Maps costs $0.005/request — at scale this is $1.5K/day for 300K orders. Functional but not scalable.")
+)}}
+
 {{phase 11 "Scaling & Cost Estimates" "5 min"}}
 
 {{say "Scaling is about three independent bottlenecks: location write throughput, matching query throughput, and order read throughput. Each scales differently."}}
@@ -530,6 +573,22 @@ CREATE TABLE order_events (
 {{think "At $29K/month for 300M orders/month, infra cost is $0.097 per order. At $2–3 average delivery fee, infra is ~3–5% of revenue. Healthy margin. The biggest optimization lever is Cassandra — location history is cold data, could compress 4:1 with ZSTD to cut storage cost to $2,100."
   (whyNot "managed services for everything" "Managed Cassandra (AWS Keyspaces) costs 3–5x self-managed for write-heavy workloads. At 125K writes/sec, Keyspaces would be ~$42K/month vs $8,400 self-managed. This is worth calling out.")
 }}
+
+{{compare "Orders DB: DynamoDB vs Aurora PostgreSQL" (options
+  (best "Aurora PostgreSQL (current design)" "ACID transactions for order state machine. Complex queries for surge zone analytics. Auto-scaling storage. At 10M orders/day with 2KB/order = 20GB/day write. r6g.2xlarge primary handles 5000 writes/sec. ~$1,400/month with 3 read replicas. Familiar operational model.")
+  (alt "DynamoDB" "Truly serverless, auto-scales to any write throughput instantly. Single-digit ms at any scale. Best for simple key-value access patterns. Order lookup by order_id or customer_id: perfect fit. Problem: surge zone analytics and complex joins require DynamoDB Streams → Lambda → separate analytics store. Extra complexity and cost.")
+  (nofit "MongoDB Atlas" "Document model fits order + line items naturally. But ACID multi-document transactions are slower than Postgres. At 10M orders/day, the operational expertise requirement and license cost outweigh the flexibility benefit over well-tuned Postgres.")
+)}}
+
+{{table "DynamoDB vs Aurora Cost at 1M Daily Orders" (rows
+  (row "Metric" "DynamoDB On-Demand" "Aurora PostgreSQL")
+  (row "Write cost" "$1.25/M writes × 1M = $1.25/day" "Fixed instance: $46/day (r6g.xlarge)")
+  (row "Read cost" "$0.25/M reads × 10M = $2.50/day" "Included in instance")
+  (row "Storage (6mo)" "$0.25/GB × 3.6TB = $900/mo" "$0.10/GB × 3.6TB = $360/mo")
+  (row "Monthly total" "~$1,100" "~$1,740")
+  (row "Break-even" "DynamoDB cheaper below ~500K orders/day" "Aurora cheaper above ~500K orders/day")
+  (row "Operational risk" "No index design mistakes are fatal" "Needs DBA expertise for query tuning")
+)}}
 
 {{hint "Kafka partition count" "Start with 6 partitions per topic, one per shard key (city). At 350 orders/sec with 6 partitions, each partition handles ~58 events/sec — well within Kafka's 1MB/sec per partition limit. Scale to 12 partitions if you split into top-12 metros."}}
 
@@ -654,3 +713,12 @@ CREATE TABLE order_events (
 `}}
 
 {{key "The hardest part of food delivery design is the location-matching-ETA feedback loop: Redis GEORADIUS answers 'who is near?' in 2ms, greedy constraint filtering answers 'who is best?' in another 2ms, and TTL-based expiry answers 'who is offline?' without any explicit event — design these three primitives correctly and the rest follows."}}
+
+{{triggerQs "Common interview follow-up directions"
+  "How would you add surge pricing?"
+  "Use H3 hex cells (resolution 8, ~0.7km²) per city. Every 5 minutes, a Kafka consumer tallies order requests vs available partners per cell and writes surge_multiplier to Redis. The matching service reads multiplier when quoting fare. Notify high-demand zones to partners via push. Cap at 3x to avoid PR backlash. Same approach as ride-hailing."
+  "How do you support group orders (multiple people ordering together)?"
+  "A group order has one cart owner and N contributors. Contributors add items within a time window (15 minutes). When window closes or owner checks out, the aggregate order is placed atomically. Key constraint: all items must be from the same restaurant (or handle multi-restaurant orders as separate deliveries). Group order creates one Kafka event so the restaurant receives a single consolidated order."
+  "How do you integrate with third-party delivery fleets (Dunzo, external logistics)?"
+  "Third-party fleet integration uses an adapter pattern: a FleetAdapter interface with assign(order) → assignment_id, track(assignment_id) → location, cancel(assignment_id). Each third-party fleet has a concrete adapter. The matching service treats external fleet partners as first-class candidates with one difference: their location data comes via webhook (push from fleet API) rather than direct Redis writes. ETA calculation uses their API's estimate, not OSRM."
+}}
