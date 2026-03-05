@@ -110,11 +110,12 @@ type Registry struct {
 	Patterns     []*Pattern
 	Concepts     []*ConceptCategory
 
-	problemsBySlug     map[string]*Problem
-	fundamentalsBySlug map[string]*Fundamental
-	algorithmsBySlug   map[string]*Algorithm
-	patternsBySlug     map[string]*Pattern
-	conceptsBySlug     map[string]*Concept
+	problemsBySlug       map[string]*Problem
+	fundamentalsBySlug   map[string]*Fundamental
+	fundamentalAncestors map[string][]*Fundamental
+	algorithmsBySlug     map[string]*Algorithm
+	patternsBySlug       map[string]*Pattern
+	conceptsBySlug       map[string]*Concept
 }
 
 // Load parses _registry.yaml and builds the knowledge graph with reverse links.
@@ -130,18 +131,19 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 	}
 
 	reg := &Registry{
-		problemsBySlug:     make(map[string]*Problem),
-		fundamentalsBySlug: make(map[string]*Fundamental),
-		algorithmsBySlug:   make(map[string]*Algorithm),
-		patternsBySlug:     make(map[string]*Pattern),
-		conceptsBySlug:     make(map[string]*Concept),
+		problemsBySlug:       make(map[string]*Problem),
+		fundamentalsBySlug:   make(map[string]*Fundamental),
+		fundamentalAncestors: make(map[string][]*Fundamental),
+		algorithmsBySlug:     make(map[string]*Algorithm),
+		patternsBySlug:       make(map[string]*Pattern),
+		conceptsBySlug:       make(map[string]*Concept),
 	}
 
 	// Index fundamentals (including children)
 	for i := range raw.Fundamentals {
 		f := &raw.Fundamentals[i]
 		reg.Fundamentals = append(reg.Fundamentals, f)
-		reg.indexFundamental(f)
+		reg.indexFundamental(f, nil)
 	}
 
 	// Index problems and build forward/reverse links
@@ -158,7 +160,14 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 				link.FundamentalRef = f
 				reverseLink := *link
 				reverseLink.ProblemRef = p
-				f.UsedBy = append(f.UsedBy, reverseLink)
+				appendUsedByUnique(f, reverseLink)
+
+				// If a problem links to a child fundamental (e.g. networking/cdn/cloudfront),
+				// also surface it on parent fundamentals (e.g. networking/cdn) so the
+				// reverse links stay complete at every level.
+				for _, ancestor := range reg.fundamentalAncestors[link.Fundamental] {
+					appendUsedByUnique(ancestor, reverseLink)
+				}
 			} else {
 				log.Printf("WARNING: problem %q references non-existent fundamental %q", p.Slug, link.Fundamental)
 			}
@@ -224,12 +233,26 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 	return reg, nil
 }
 
-func (r *Registry) indexFundamental(f *Fundamental) {
+func (r *Registry) indexFundamental(f *Fundamental, ancestors []*Fundamental) {
 	r.fundamentalsBySlug[f.Slug] = f
+	if len(ancestors) > 0 {
+		r.fundamentalAncestors[f.Slug] = append([]*Fundamental(nil), ancestors...)
+	}
+
+	nextAncestors := append(append([]*Fundamental(nil), ancestors...), f)
 	for i := range f.Children {
 		child := &f.Children[i]
-		r.indexFundamental(child)
+		r.indexFundamental(child, nextAncestors)
 	}
+}
+
+func appendUsedByUnique(f *Fundamental, link UsageLink) {
+	for _, existing := range f.UsedBy {
+		if existing.Problem == link.Problem {
+			return
+		}
+	}
+	f.UsedBy = append(f.UsedBy, link)
 }
 
 // GetProblem returns a problem by slug.
