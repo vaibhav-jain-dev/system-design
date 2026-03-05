@@ -232,3 +232,58 @@ resource "aws_lb_target_group" "api" {
   "Can ALB handle 1 million requests per second?"
   "ALB auto-scales, but it needs time to ramp up. For sudden spikes, pre-warm by contacting AWS support. For predictable high traffic, the ALB learns your traffic pattern and pre-scales. Sustained 1M RPS is served across multiple ALB nodes in multiple AZs."
 }}
+
+{{phase 7 "Monitoring & Troubleshooting" "4 min"}}
+
+{{say "ALB exposes critical metrics through CloudWatch. The three metrics you must monitor are HTTP 5XX count, target response time, and healthy host count. Access logs give you per-request detail when metrics alone are not enough."}}
+
+{{table "Key ALB CloudWatch Metrics" (rows
+  (row "Metric"                        "What It Tells You"                              "Alarm Threshold")
+  (row "HTTPCode_ELB_5XX_Count"        "ALB itself failed (capacity, config error)"      "> 0 sustained for 5 min")
+  (row "HTTPCode_Target_5XX_Count"     "Backend returned 5XX (app error)"                "> 1% of total requests")
+  (row "TargetResponseTime"            "Backend latency (p50, p99)"                      "p99 > 2x your SLA")
+  (row "HealthyHostCount"              "Targets passing health checks"                   "< desired count for 2 min")
+  (row "UnHealthyHostCount"            "Targets failing health checks"                   "> 0 for 5 min")
+  (row "ActiveConnectionCount"         "Current open connections"                        "Approaching account limit")
+  (row "RequestCount"                  "Total requests per period"                       "Baseline for anomaly detection")
+  (row "RejectedConnectionCount"       "Connections rejected (capacity)"                 "> 0 means ALB is overloaded")
+)}}
+
+{{think "My ALB is returning 5XX errors — how do I diagnose?"
+  (whyNot "Assuming 5XX always means backend failure" "HTTPCode_ELB_5XX means the ALB itself failed — usually capacity or misconfiguration. HTTPCode_Target_5XX means your app returned an error. Check the metric name carefully.")
+  (whatIf "TargetResponseTime spikes but no 5XX errors" "Your backend is slow but not failing. Check if the slow start window just opened, if a deployment is rolling, or if downstream dependencies (DB, cache) are degraded.")
+  (how "How do I use access logs for debugging?" "Enable ALB access logs to S3. Each log line includes: client IP, target IP, response time, status code, request URL. Filter by 5XX status to find which paths and targets are failing.")
+}}
+
+{{hint "ELB 5XX vs Target 5XX" "HTTPCode_ELB_5XX_Count means the ALB itself could not process the request — often a capacity issue or misconfigured listener. HTTPCode_Target_5XX_Count means your backend app returned an error. Always check both metrics separately."}}
+
+{{triggerQs "Monitoring Questions"
+  "Should I enable access logs?" "Yes, always for production ALBs. Access logs cost only S3 storage (~$0.023/GB). They provide per-request detail that CloudWatch metrics cannot: exact URL, client IP, response time, and status code for every single request."
+  "What is the difference between connection timeout and idle timeout?" "Connection timeout (default 10s) is how long ALB waits for the TCP handshake to the target. Idle timeout (default 60s) is how long ALB keeps an idle connection open. Increase idle timeout for long-polling or slow responses."
+}}
+
+{{phase 8 "Interview Summary" "2 min"}}
+
+{{say "ALB is the default choice for HTTP workloads on AWS. It provides Layer 7 routing, WAF integration, built-in authentication, and supports WebSocket and gRPC natively. The only reasons to skip ALB are static IP requirements, non-HTTP protocols, TLS passthrough, or sub-100 microsecond latency needs."}}
+
+{{qa
+  "Give me the 30-second ALB pitch for an interview."
+  "ALB operates at Layer 7 and is the default for any HTTP workload. It provides path-based and host-based routing so multiple microservices share one ALB at $16/mo base. WAF blocks SQL injection and XSS. Built-in Cognito auth means zero auth code in your app. It auto-scales but needs pre-warming for sudden spikes."
+  "What is the biggest ALB mistake you have seen?"
+  "One ALB per microservice. Ten services means ten ALBs at $164/mo in base fees alone. One ALB with path-based routing rules serves all ten for $16/mo base. Rule evaluation LCU cost is negligible compared to the base fee savings."
+}}
+
+{{hint "ALB in system design interviews" "When the interviewer asks about load balancing for a web application, start with ALB. Only switch to NLB if the interviewer introduces a constraint like static IP, non-HTTP protocol, or PrivateLink."}}
+
+{{checklist
+  "ALB = Layer 7, HTTP/HTTPS — default for all web workloads"
+  "Path-based routing: consolidate microservices behind one ALB"
+  "WAF + Cognito auth: security without application code changes"
+  "WebSocket and gRPC: native support, no special configuration"
+  "Cost: $16.43/mo base + LCU variable (highest dimension wins)"
+  "Monitor: ELB 5XX vs Target 5XX, TargetResponseTime, HealthyHostCount"
+  "Access logs to S3 for per-request debugging"
+  "Only skip ALB for: static IP, non-HTTP, TLS passthrough, sub-100us latency"
+}}
+
+{{key "ALB is the correct default for every HTTP workload on AWS. Use path-based routing to serve multiple services from one ALB, attach WAF and Cognito for security, and only reach for NLB when a specific constraint makes ALB impossible."}}

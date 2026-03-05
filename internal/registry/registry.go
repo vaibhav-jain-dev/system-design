@@ -3,6 +3,7 @@ package registry
 import (
 	"fmt"
 	"io/fs"
+	"log"
 	"sort"
 
 	"gopkg.in/yaml.v3"
@@ -158,6 +159,8 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 				reverseLink := *link
 				reverseLink.ProblemRef = p
 				f.UsedBy = append(f.UsedBy, reverseLink)
+			} else {
+				log.Printf("WARNING: problem %q references non-existent fundamental %q", p.Slug, link.Fundamental)
 			}
 		}
 	}
@@ -170,6 +173,8 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 		for _, problemSlug := range a.UsedIn {
 			if p, ok := reg.problemsBySlug[problemSlug]; ok {
 				a.UsedInProblems = append(a.UsedInProblems, p)
+			} else {
+				log.Printf("WARNING: algorithm %q references non-existent problem %q", a.Slug, problemSlug)
 			}
 		}
 	}

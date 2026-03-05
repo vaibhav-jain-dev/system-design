@@ -146,10 +146,9 @@
             else if (path.startsWith('/algo/')) activeType = 'algorithm';
             else if (path.startsWith('/pattern/')) activeType = 'pattern';
 
-            var sectionTypes = ['problem', 'fundamental', 'algorithm', 'pattern'];
-            document.querySelectorAll('.sidebar-section').forEach(function(section, i) {
-                if (i >= sectionTypes.length) return;
-                var type = sectionTypes[i];
+            document.querySelectorAll('.sidebar-section').forEach(function(section) {
+                var type = section.getAttribute('data-section-type');
+                if (!type) return;
                 if (activeType && type !== activeType) {
                     section.classList.add('collapsed');
                 } else {
@@ -339,12 +338,23 @@
                 if (welcome) {
                     var continueDiv = document.createElement('div');
                     continueDiv.className = 'continue-reading';
-                    continueDiv.innerHTML = '<a href="' + progress.lastPage + '" ' +
-                        'hx-get="' + progress.lastPage + '" ' +
-                        'hx-target="#detail" hx-swap="innerHTML" hx-push-url="true" ' +
-                        'class="btn btn-primary">Continue Reading →</a>' +
-                        '<span class="continue-hint">Last visited: ' +
-                        new Date(progress.lastVisited).toLocaleDateString() + '</span>';
+
+                    var link = document.createElement('a');
+                    link.setAttribute('href', progress.lastPage);
+                    link.setAttribute('hx-get', progress.lastPage);
+                    link.setAttribute('hx-target', '#detail');
+                    link.setAttribute('hx-swap', 'innerHTML');
+                    link.setAttribute('hx-push-url', 'true');
+                    link.className = 'btn btn-primary';
+                    link.textContent = 'Continue Reading \u2192';
+                    if (typeof htmx !== 'undefined') htmx.process(link);
+
+                    var hint = document.createElement('span');
+                    hint.className = 'continue-hint';
+                    hint.textContent = 'Last visited: ' + new Date(progress.lastVisited).toLocaleDateString();
+
+                    continueDiv.appendChild(link);
+                    continueDiv.appendChild(hint);
                     welcome.insertBefore(continueDiv, welcome.querySelector('.welcome-quick'));
                 }
             }
@@ -558,6 +568,17 @@
             if (d) {
                 d.addEventListener('wheel', function(e) {
                     if (!book.active) return;
+                    // Allow scrolling in overflow containers (code blocks, tables, diagrams)
+                    var t = e.target;
+                    while (t && t !== d) {
+                        if (t.scrollHeight > t.clientHeight || t.scrollWidth > t.clientWidth) {
+                            var style = window.getComputedStyle(t);
+                            if (style.overflow === 'auto' || style.overflow === 'scroll' ||
+                                style.overflowY === 'auto' || style.overflowY === 'scroll' ||
+                                style.overflowX === 'auto' || style.overflowX === 'scroll') return;
+                        }
+                        t = t.parentElement;
+                    }
                     e.preventDefault();
                     clearTimeout(wheelTimeout);
                     wheelTimeout = setTimeout(function() {

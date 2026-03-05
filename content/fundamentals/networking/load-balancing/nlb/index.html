@@ -220,3 +220,58 @@ resource "aws_vpc_endpoint_service" "main" {
   "How does NLB handle sudden traffic spikes?"
   "NLB scales instantly with no pre-warming needed. It is designed for millions of requests per second from the start. L4 forwarding is far simpler than L7 inspection — AWS pre-provisions NLB capacity at scale."
 }}
+
+{{phase 7 "Monitoring & Troubleshooting" "4 min"}}
+
+{{say "NLB monitoring differs from ALB because there are no HTTP-level metrics. You monitor at the TCP/UDP layer: active flows, processed bytes, TCP resets, and unhealthy targets."}}
+
+{{table "Key NLB CloudWatch Metrics" (rows
+  (row "Metric"                        "What It Tells You"                                "Alarm Threshold")
+  (row "ActiveFlowCount"               "Current TCP/UDP connections"                       "Approaching account limit")
+  (row "NewFlowCount"                  "New connections per second"                        "Baseline for anomaly detection")
+  (row "ProcessedBytes"                "Total bytes forwarded"                             "Sudden drop = target failure")
+  (row "TCP_Client_Reset_Count"        "Client initiated TCP RST"                          "> baseline means client-side issues")
+  (row "TCP_Target_Reset_Count"        "Backend initiated TCP RST"                         "> 0 sustained = backend crashing")
+  (row "TCP_ELB_Reset_Count"           "NLB initiated TCP RST"                             "> 0 means idle timeout or config issue")
+  (row "HealthyHostCount"              "Targets passing health checks"                     "< desired count for 2 min")
+  (row "UnHealthyHostCount"            "Targets failing health checks"                     "> 0 for 5 min")
+)}}
+
+{{think "My NLB targets keep going unhealthy — how do I debug?"
+  (whyNot "Assuming the health check is wrong" "NLB health checks are simple TCP or HTTP probes. If targets fail, the issue is usually security groups, NACLs, or the application not listening on the health check port.")
+  (whatIf "TCP_ELB_Reset_Count is increasing" "NLB sends a RST when the idle timeout expires (350 seconds). If your application expects long-lived connections, send TCP keepalives at intervals shorter than 350 seconds.")
+  (how "How do I get per-connection detail like ALB access logs?" "Enable VPC Flow Logs on the NLB ENIs. Flow logs capture source IP, destination IP, port, protocol, bytes, and accept/reject status for every connection. More granular than CloudWatch metrics.")
+}}
+
+{{hint "NLB idle timeout is fixed at 350 seconds" "Unlike ALB where you can configure idle timeout, NLB has a fixed 350-second idle timeout. Send TCP keepalives from your application at intervals less than 350 seconds to prevent unexpected connection resets."}}
+
+{{triggerQs "NLB Monitoring Questions"
+  "Does NLB have access logs like ALB?" "No. NLB does not support access logs. Use VPC Flow Logs on the NLB network interfaces instead. Flow logs capture Layer 3/4 metadata (IPs, ports, bytes, action) but not payload content."
+  "How do I detect if NLB is dropping connections?" "Monitor TCP_ELB_Reset_Count and UnHealthyHostCount. If both spike together, NLB is resetting connections because all targets in an AZ are unhealthy. Enable cross-zone LB as a mitigation."
+}}
+
+{{phase 8 "Interview Summary" "2 min"}}
+
+{{say "NLB is a deliberate choice for specific constraints: static IP, non-HTTP protocols, TLS passthrough, PrivateLink, or extreme connection rates. Default to ALB for HTTP workloads and only reach for NLB when a constraint makes ALB impossible."}}
+
+{{qa
+  "Give me the 30-second NLB pitch for an interview."
+  "NLB operates at Layer 4 — it forwards raw TCP/UDP without inspecting content. Use it when you need static Elastic IPs for firewall whitelisting, non-HTTP protocols like MQTT or custom TCP, TLS passthrough for mTLS compliance, or PrivateLink for cross-account private access. It adds under 100 microseconds of latency and handles millions of connections per second with no pre-warming."
+  "When would you chain NLB and ALB together?"
+  "When you need both static IPs and Layer 7 features. NLB provides the static Elastic IPs and PrivateLink capability. ALB behind it provides path routing, WAF, and authentication. The NLB forwards TCP to ALB. Extra cost is about $16/mo for the NLB base fee plus cross-LB data transfer."
+}}
+
+{{hint "NLB in system design interviews" "Only mention NLB when the problem has a specific constraint: static IP for partner integration, non-HTTP protocol, mTLS requirement, or PrivateLink for SaaS. If the interviewer just says 'load balancer for a web app,' start with ALB."}}
+
+{{checklist
+  "NLB = Layer 4, TCP/UDP — deliberate choice, not a default"
+  "Static IP: one Elastic IP per AZ, never changes"
+  "TLS passthrough: required for mTLS and end-to-end encryption compliance"
+  "PrivateLink: only works with NLB, not ALB"
+  "Cross-zone LB: off by default, enable if targets are unevenly distributed"
+  "Idle timeout: fixed 350 seconds, send keepalives to prevent RST"
+  "Monitoring: ActiveFlowCount, TCP reset counts, VPC Flow Logs (no access logs)"
+  "NLB + ALB chain: static IP + L7 routing when you need both"
+}}
+
+{{key "NLB is for specific constraints — static IP, non-HTTP protocols, TLS passthrough, and PrivateLink. Default to ALB for HTTP and only reach for NLB when a concrete requirement forces it."}}

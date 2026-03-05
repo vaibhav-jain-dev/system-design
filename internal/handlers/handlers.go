@@ -49,14 +49,34 @@ func isHTMX(r *http.Request) bool {
 	return r.Header.Get("HX-Request") == "true"
 }
 
+// countFundamentals recursively counts fundamentals including children.
+func countFundamentals(funds []*registry.Fundamental) int {
+	count := 0
+	for _, f := range funds {
+		count++
+		count += countChildFundamentals(f.Children)
+	}
+	return count
+}
+
+func countChildFundamentals(children []registry.Fundamental) int {
+	count := 0
+	for _, c := range children {
+		count++
+		count += countChildFundamentals(c.Children)
+	}
+	return count
+}
+
 // baseData returns common template data shared by all handlers.
 func (h *Handler) baseData() map[string]interface{} {
 	return map[string]interface{}{
-		"Problems":     h.reg.Problems,
-		"Fundamentals": h.reg.Fundamentals,
-		"Algorithms":   h.reg.Algorithms,
-		"Patterns":     h.reg.Patterns,
-		"Concepts":     h.reg.Concepts,
+		"Problems":          h.reg.Problems,
+		"Fundamentals":      h.reg.Fundamentals,
+		"Algorithms":        h.reg.Algorithms,
+		"Patterns":          h.reg.Patterns,
+		"Concepts":          h.reg.Concepts,
+		"TotalFundamentals": countFundamentals(h.reg.Fundamentals),
 	}
 }
 
@@ -171,7 +191,7 @@ func extractKeywords(config string) []string {
 	// Split on common separators and filter short/stop words
 	stop := map[string]bool{"with": true, "and": true, "for": true, "the": true, "per": true, "via": true, "a": true, "an": true, "in": true, "on": true, "to": true, "of": true, "is": true}
 	words := strings.FieldsFunc(config, func(r rune) bool {
-		return r == ' ' || r == ',' || r == '(' || r == ')' || r == '-'
+		return r == ' ' || r == ',' || r == '(' || r == ')'
 	})
 	var keywords []string
 	for _, w := range words {

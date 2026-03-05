@@ -251,9 +251,10 @@ func checklist(items ...string) template.HTML {
 
 // info renders an info tooltip for term definitions.
 func info(term, definition string) template.HTML {
+	escapedDef := template.HTMLEscapeString(definition)
 	return template.HTML(fmt.Sprintf(
 		`<span class="info-term">%s<span class="info-icon" title="%s">ℹ</span><span class="info-tooltip">%s</span></span>`,
-		term, definition, definition))
+		term, escapedDef, definition))
 }
 
 // Option types for compare macro
