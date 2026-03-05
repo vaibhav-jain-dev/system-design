@@ -40,6 +40,15 @@
         <aside class="sidebar" x-data="{ openCats: {} }">
             <div class="sidebar-header">
                 <h2>System Design Prep</h2>
+                <button class="sidebar-view-toggle" id="sidebar-view-btn"
+                        onclick="window.toggleBookMode && window.toggleBookMode()"
+                        title="Toggle between Book View and Normal View">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                    </svg>
+                    <span id="sidebar-view-label">Book View</span>
+                </button>
             </div>
 
             {{template "sidebar.html" .}}
@@ -413,6 +422,7 @@
             d.classList.add('book-active');
             book.active = true;
             book.page = 0;
+            syncViewBtn();
 
             // Calculate after layout settles
             requestAnimationFrame(function() {
@@ -436,52 +446,120 @@
             d.classList.remove('book-active');
             book.active = false;
             book.page = 0;
+            syncViewBtn();
         }
 
+        // ─────────────────────────────────────────────────────────────────────
+        // calcBook — accurate 3-phase column measurement
+        //
+        // The root cause of blank pages in CSS multi-column book mode:
+        //   If we pre-set inner.width = estimated value, then read scrollWidth,
+        //   scrollWidth returns the SET width (not content width). Any over-estimate
+        //   creates blank ghost pages; under-estimate clips content.
+        //
+        // Fix: set an unconstrained width (200000px) so all content flows into
+        // however many columns it needs, then use a sentinel element's visual
+        // position (via getBoundingClientRect) to pinpoint the last column.
+        // In CSS multi-column, getBoundingClientRect() is column-aware and returns
+        // the element's actual rendered position inside its column.
+        //
+        // Three phases:
+        //   Phase 1 — Apply unconstrained multi-column; two rAFs for full layout.
+        //   Phase 2 — Read sentinel.left − inner.left → derive exact column count.
+        //   Phase 3 — Verification rAF: confirm sentinel didn't overflow final width;
+        //             expand by one spread if it did (handles rounding edge cases).
+        // ─────────────────────────────────────────────────────────────────────
         function calcBook() {
             var inner = document.querySelector('.book-inner');
             if (!inner) return;
             var vp = inner.parentElement;
             var vpW = vp.clientWidth;
             var vpH = vp.clientHeight;
-            if (vpW <= 0 || vpH <= 0) return;
+
+            // If the viewport isn't laid out yet (e.g. mid-HTMX swap), defer
+            if (vpW <= 0 || vpH <= 0) { requestAnimationFrame(calcBook); return; }
 
             var gap = book.gap;
-            // Account for .book-viewport padding (48px left + 48px right = 96px)
+            // 48px left + 48px right padding on .book-viewport = 96px total
             var availableW = vpW - 96;
             var colW = Math.floor((availableW - gap) / 2);
+            if (colW <= 0) return;
             book.colW = colW;
 
-            // Step 1: Measure content height in single-column mode
-            inner.style.cssText = 'width:' + colW + 'px;height:auto;column-count:1;';
+            // Ensure sentinel exists at the end of inner's content flow.
+            // It must stay in normal flow so CSS multi-column positions it
+            // inside the last occupied column (not outside it).
+            var sentinel = inner.querySelector('.book-sentinel');
+            if (!sentinel) {
+                sentinel = document.createElement('div');
+                sentinel.className = 'book-sentinel';
+                inner.appendChild(sentinel);
+            }
 
+            // ── Phase 1: Unconstrained layout ────────────────────────────────
+            // 200 000px is far beyond any realistic content length.
+            // We clear transform and transition so getBoundingClientRect is clean.
+            inner.style.cssText =
+                'width:200000px;height:' + vpH + 'px;' +
+                'column-width:' + colW + 'px;column-fill:auto;' +
+                'column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);' +
+                'transform:none;transition:none;';
+
+            // Two nested rAFs: first schedules before paint, second fires after
+            // the browser has completed style recalc + layout for our changes.
             requestAnimationFrame(function() {
-                var singleH = inner.scrollHeight;
-
-                // Step 2: Estimate columns needed (with buffer for break-inside blocks)
-                var phases = inner.querySelectorAll('.phase-header').length;
-                var breakWaste = Math.max(0, phases - 1) * (vpH * 0.35);
-                var estCols = Math.ceil((singleH + breakWaste) / vpH);
-                estCols = Math.ceil(estCols * 2.5);
-                if (estCols % 2 !== 0) estCols++;
-                estCols = Math.max(2, estCols);
-
-                // Step 3: Apply multi-column layout
-                var estW = estCols * colW + (estCols - 1) * gap;
-                inner.style.cssText = 'width:' + estW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);';
-
-                // Step 4: Read actual rendered width and derive accurate page count
                 requestAnimationFrame(function() {
-                    var renderedW = Math.max(inner.scrollWidth, inner.getBoundingClientRect().width);
-                    var actualCols = Math.max(2, Math.ceil((renderedW + gap) / (colW + gap)));
+
+                    // ── Phase 2: Sentinel measurement ─────────────────────────
+                    // In CSS multi-column, getBoundingClientRect() returns the
+                    // element's visual column-aware position.
+                    // sentinel.left − inner.left  =  lastColumnIndex × (colW + gap)
+                    var innerRect    = inner.getBoundingClientRect();
+                    var sentinelRect = sentinel.getBoundingClientRect();
+                    var relLeft      = Math.max(0, sentinelRect.left - innerRect.left);
+
+                    // Math.round handles sub-pixel rendering differences
+                    var lastCol    = Math.round(relLeft / (colW + gap));
+                    var actualCols = lastCol + 1;
+
+                    // Round up to even: book spreads always show 2 columns at a time
                     if (actualCols % 2 !== 0) actualCols++;
+                    actualCols = Math.max(2, actualCols);
 
+                    // ── Apply exact final width (transition re-enabled) ───────
                     var finalW = actualCols * colW + (actualCols - 1) * gap;
-                    inner.style.cssText = 'width:' + finalW + 'px;height:' + vpH + 'px;column-width:' + colW + 'px;column-fill:auto;column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);transition:transform 0.45s cubic-bezier(0.16,1,0.3,1);';
+                    inner.style.cssText =
+                        'width:' + finalW + 'px;height:' + vpH + 'px;' +
+                        'column-width:' + colW + 'px;column-fill:auto;' +
+                        'column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);' +
+                        'transition:transform 0.45s cubic-bezier(0.16,1,0.3,1);';
 
-                    book.total = Math.max(1, actualCols / 2);
-                    updateBookUI();
-                    bookGo(Math.min(book.page, book.total - 1));
+                    // ── Phase 3: Verification ─────────────────────────────────
+                    // After clamping to finalW, confirm the sentinel hasn't been
+                    // pushed past the last allocated column (can happen with fractional
+                    // pixel rounding). If it has, add one more spread (2 columns).
+                    requestAnimationFrame(function() {
+                        var vInnerRect    = inner.getBoundingClientRect();
+                        var vSentinelRect = sentinel.getBoundingClientRect();
+                        var vRelLeft      = Math.max(0, vSentinelRect.left - vInnerRect.left);
+                        var vLastCol      = Math.round(vRelLeft / (colW + gap));
+
+                        if (vLastCol >= actualCols) {
+                            // Sentinel overflowed — extend by one spread
+                            actualCols = vLastCol + 1;
+                            if (actualCols % 2 !== 0) actualCols++;
+                            finalW = actualCols * colW + (actualCols - 1) * gap;
+                            inner.style.cssText =
+                                'width:' + finalW + 'px;height:' + vpH + 'px;' +
+                                'column-width:' + colW + 'px;column-fill:auto;' +
+                                'column-gap:' + gap + 'px;column-rule:1px solid var(--border-light);' +
+                                'transition:transform 0.45s cubic-bezier(0.16,1,0.3,1);';
+                        }
+
+                        book.total = Math.max(1, actualCols / 2);
+                        updateBookUI();
+                        bookGo(Math.min(book.page, book.total - 1));
+                    });
                 });
             });
         }
@@ -580,7 +658,21 @@
 
         
 
-        // Toggle book mode         window.toggleBookMode = function() {             if (book.active) destroyBook();             else initBook();         };          // Recalculate on resize
+        // Sync sidebar view-toggle button label
+        function syncViewBtn() {
+            var label = document.getElementById('sidebar-view-label');
+            var btn = document.getElementById('sidebar-view-btn');
+            if (label) label.textContent = book.active ? 'Normal View' : 'Book View';
+            if (btn) btn.classList.toggle('book-view-active', book.active);
+        }
+
+        // Toggle book mode
+        window.toggleBookMode = function() {
+            if (book.active) destroyBook();
+            else initBook();
+        };
+
+        // Recalculate on resize
         var resizeTimeout;
         window.addEventListener('resize', function() {
             clearTimeout(resizeTimeout);
