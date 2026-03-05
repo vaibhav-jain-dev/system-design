@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -14,10 +15,10 @@ import (
 )
 
 type Handler struct {
-	reg        *registry.Registry
-	templates  *template.Template
-	contentFS  fs.FS
-	funcMap    template.FuncMap
+	reg       *registry.Registry
+	templates *template.Template
+	contentFS fs.FS
+	funcMap   template.FuncMap
 }
 
 func New(reg *registry.Registry, templateFS, contentFS fs.FS, funcMap template.FuncMap) *Handler {
@@ -145,7 +146,7 @@ func (h *Handler) FundamentalDetail(w http.ResponseWriter, r *http.Request) {
 		fromProblemRef = h.reg.GetProblem(fromProblem)
 		if fromProblemRef != nil {
 			for _, use := range fromProblemRef.Uses {
-				if use.Fundamental == slug {
+				if use.Fundamental == slug || strings.HasPrefix(use.Fundamental, slug+"/") {
 					link := use
 					highlightContext = &link
 					break
@@ -171,6 +172,7 @@ func (h *Handler) FundamentalDetail(w http.ResponseWriter, r *http.Request) {
 	data["FromProblemRef"] = fromProblemRef
 	data["HighlightContext"] = highlightContext
 	data["HighlightKeywords"] = highlightKeywords
+	data["UsedBy"] = aggregateUsedByLinks(fund)
 
 	if isHTMX(r) {
 		if err := h.templates.ExecuteTemplate(w, "detail_fund.html", data); err != nil {
@@ -344,4 +346,41 @@ func (h *Handler) GenerateStatus(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ServePDF(w http.ResponseWriter, r *http.Request) {
 	filename := chi.URLParam(r, "filename")
 	http.ServeFile(w, r, path.Join("output", filename))
+}
+
+func aggregateUsedByLinks(fund *registry.Fundamental) []registry.UsageLink {
+	combined := make([]registry.UsageLink, 0, len(fund.UsedBy))
+	seen := make(map[string]bool)
+
+	add := func(link registry.UsageLink) {
+		if seen[link.Problem] {
+			return
+		}
+		seen[link.Problem] = true
+		combined = append(combined, link)
+	}
+
+	for _, link := range fund.UsedBy {
+		add(link)
+	}
+
+	var walk func(children []registry.Fundamental)
+	walk = func(children []registry.Fundamental) {
+		for _, child := range children {
+			for _, link := range child.UsedBy {
+				add(link)
+			}
+			walk(child.Children)
+		}
+	}
+	walk(fund.Children)
+
+	sort.Slice(combined, func(i, j int) bool {
+		if combined[i].ProblemRef != nil && combined[j].ProblemRef != nil {
+			return combined[i].ProblemRef.Title < combined[j].ProblemRef.Title
+		}
+		return combined[i].Problem < combined[j].Problem
+	})
+
+	return combined
 }
