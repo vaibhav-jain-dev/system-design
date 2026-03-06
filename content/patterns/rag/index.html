@@ -1,0 +1,723 @@
+{{phase 1 "What Is RAG & Why It Matters" "5 min"}}
+
+{{say "{{info \"Retrieval-Augmented Generation (RAG)\" \"RAG means you give the LLM extra documents when it answers. Instead of relying only on facts it learned during training, you grab relevant documents from a database and feed them into the prompt. This keeps answers factual and up-to-date.\"}} RAG is the core pattern for LLM applications that need to stay current. You retrieve relevant documents at query time and inject them into the prompt. This grounds the model's response in real, fresh facts."}}
+
+{{think "Why not just {{info \"fine-tuning\" \"Fine-tuning means retraining the model on your own data. This teaches the model new facts or changes how it behaves. But it costs thousands of dollars and takes days. Once you fine-tune, you can't easily remove or update specific facts without retraining again.\"}}? It bakes knowledge into model weights — expensive, slow to update, and impossible to audit. RAG keeps knowledge in a searchable database: update it instantly, trace every answer to its source, control access per user."
+  (whyNot "Fine-tuning" "Re-training costs thousands of dollars and takes days. Knowledge baked into weights cannot be selectively updated or revoked. You cannot say 'forget this document' after fine-tuning.")
+  (whatIf "knowledge changes daily" "RAG handles this naturally — update the index, done. Fine-tuning would require daily re-training at massive cost. Long-context stuffing would blow your {{info \"token\" \"1 token = roughly 4 characters of text. Longer context uses more tokens, which costs more and adds latency.\"}} budget and latency.")
+}}
+
+{{table "RAG vs Alternatives" (rows
+  (row "Approach"              "Latency"    "Cost to Update"    "Traceability"    "Best For")
+  (row "RAG"                   "Medium"     "Low (re-index)"    "High (citations)" "Dynamic knowledge, docs, support")
+  (row "Fine-tuning"           "Low"        "High (re-train)"   "None"            "Style/format adaptation")
+  (row "Long context window"   "High"       "None (runtime)"    "Medium"          "Small doc sets, ad-hoc queries")
+  (row "Prompt engineering"    "Low"        "None"              "None"            "Static rules, simple tasks")
+)}}
+
+{{key "RAG is the right pattern when your application needs access to private, frequently updated, or domain-specific knowledge that the base model does not have. It gives you citations, access control, and instant updates without retraining."}}
+
+{{triggerQs "Questions this phase could trigger"
+  "When would you choose RAG over fine-tuning?"
+  "Choose RAG when knowledge changes frequently, needs citations, or requires access control. Fine-tuning is for adapting model behavior and style — things like tone, output format, or domain-specific reasoning patterns — not for injecting facts. The two are not mutually exclusive: fine-tune for style, RAG for knowledge."
+  "Can RAG and fine-tuning be combined?"
+  "Yes. Fine-tune the model on your domain's style and terminology so it understands the vocabulary, then use RAG to supply the actual facts. This is the best-of-both approach for specialized domains like legal or medical applications."
+}}
+
+{{phase 2 "RAG Architecture Overview" "5 min"}}
+
+{{say "The RAG {{info \"pipeline\" \"Pipeline is a sequence of steps. Offline pipeline indexes documents once. Online pipeline answers each user question.\"}} has two phases: an offline indexing phase where you prepare your documents, and an online query phase where you retrieve and generate answers."}}
+
+{{diagram "pat-rag-pipeline"}}
+
+{{table "RAG Pipeline Steps" (rows
+  (row "Step"            "Input"                     "Output"                    "Key Decision")
+  (row "1. Chunk"        "Raw documents"             "Text chunks (200-800 tok)" "Chunk size and overlap strategy")
+  (row "2. Embed"        "Text chunks"               "Dense vectors (1536-dim)"  "Which embedding model to use")
+  (row "3. Index"        "Vectors + metadata"        "Searchable vector index"   "Which vector database")
+  (row "4. Query Embed"  "User question"             "Query vector"              "Same model as step 2")
+  (row "5. Retrieve"     "Query vector"              "Top-k similar chunks"      "k value, similarity threshold")
+  (row "6. Rerank"       "Query + candidate chunks"  "Reordered top-n chunks"    "Cross-encoder vs skip")
+  (row "7. Augment"      "Query + top chunks"        "Augmented prompt"          "Prompt template design")
+  (row "8. Generate"     "Augmented prompt"          "Answer with citations"     "Model selection, temperature")
+)}}
+
+{{hint "same model for embed and query" "You must embed queries with the exact same model used to embed documents. Every embedding model creates its own vector space. Query and document vectors from different models live in incompatible spaces and cannot be compared — {{info \"cosine similarity\" \"Cosine similarity is a way to measure if two pieces of text mean similar things. It looks at the angle between their vectors. Angle close to 0° = similar, angle close to 90° = different. Different embedding models have different angle meanings, so comparing vectors from different models gives garbage results.\"}} will return meaningless numbers."}}
+
+{{triggerQs "Questions this phase could trigger"
+  "How does the offline indexing phase differ from the online query phase?"
+  "Offline indexing runs once (or incrementally) and is latency-insensitive — you have seconds to minutes. Online query runs on every user request and must complete in under 500ms. This is why you pre-compute embeddings offline: embedding at query time only covers the user's question, not the entire corpus."
+  "What is the role of metadata in RAG?"
+  "Metadata enables filtering. Every chunk gets tagged with source, author, date, department, access level, etc. At query time you apply metadata filters to restrict retrieval to authorized or relevant subsets. Without metadata, you cannot implement access control, date-range filtering, or per-tenant isolation."
+}}
+
+{{phase 3 "Chunking Strategies" "8 min"}}
+
+{{say "Chunking is the most underrated part of RAG. Bad chunking leads to bad retrieval, which leads to bad answers. There are three main strategies, each with different trade-offs."}}
+
+{{table "Chunking Strategy Comparison" (rows
+  (row "Strategy"         "How It Works"                              "Pros"                  "Cons"                    "Best For")
+  (row "Fixed-size"       "Split every N tokens with overlap"         "Simple, predictable"   "Splits mid-sentence"     "Uniform docs like logs")
+  (row "Sentence-based"   "Split on sentence boundaries"             "Preserves meaning"     "Uneven chunk sizes"      "Articles, documentation")
+  (row "Semantic"         "Group sentences by embedding similarity"   "Best coherence"        "Expensive, complex"      "Mixed-topic documents")
+  (row "Recursive"        "Split by headers, paragraphs, sentences"  "Respects doc structure" "Needs structured docs"  "Markdown, HTML docs")
+  (row "Document-based"   "One chunk per logical document"            "Complete context"      "May exceed context limit" "Short docs like FAQs")
+)}}
+
+{{hint "chunk size 300-500 tokens" "Too small (under 100 {{info \"tokens\" \"1 token ≈ 4 characters. So 100 tokens = ~400 characters.\"}}): chunks lack enough context for meaningful retrieval — the embedding captures almost no semantic signal. Too large (over 1000 tokens): chunks cover multiple topics, reducing precision because a chunk about both pricing AND returns will score well for both query types. 300-500 tokens is the empirically validated sweet spot."}}
+
+{{code "python" `from typing import List
+import tiktoken
+
+def chunk_fixed_size(
+    text: str,
+    chunk_size: int = 512,
+    chunk_overlap: int = 50,
+    model: str = "cl100k_base"
+) -> List[str]:
+    """Fixed-size chunking with token-based splitting."""
+    encoder = tiktoken.get_encoding(model)
+    tokens = encoder.encode(text)
+    chunks = []
+
+    start = 0
+    while start < len(tokens):
+        end = start + chunk_size
+        chunk_tokens = tokens[start:end]
+        chunk_text = encoder.decode(chunk_tokens)
+        chunks.append(chunk_text)
+        start = end - chunk_overlap  # Overlap for context continuity
+
+    return chunks
+
+
+def chunk_by_sentence(
+    text: str,
+    max_chunk_tokens: int = 512,
+    model: str = "cl100k_base"
+) -> List[str]:
+    """Sentence-based chunking: never splits mid-sentence."""
+    import re
+    encoder = tiktoken.get_encoding(model)
+
+    # Split on sentence boundaries
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+
+    chunks = []
+    current_chunk = []
+    current_tokens = 0
+
+    for sentence in sentences:
+        sentence_tokens = len(encoder.encode(sentence))
+
+        if current_tokens + sentence_tokens > max_chunk_tokens:
+            if current_chunk:
+                chunks.append(" ".join(current_chunk))
+            current_chunk = [sentence]
+            current_tokens = sentence_tokens
+        else:
+            current_chunk.append(sentence)
+            current_tokens += sentence_tokens
+
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+
+    return chunks
+
+
+def chunk_recursive(
+    text: str,
+    max_chunk_tokens: int = 512,
+    separators: List[str] = None
+) -> List[str]:
+    """Recursive chunking: split by structure, then by size.
+    Tries headers first, then paragraphs, then sentences."""
+    if separators is None:
+        separators = ["\n## ", "\n### ", "\n\n", "\n", ". ", " "]
+
+    encoder = tiktoken.get_encoding("cl100k_base")
+
+    if len(encoder.encode(text)) <= max_chunk_tokens:
+        return [text]
+
+    # Try each separator, coarsest first
+    for sep in separators:
+        if sep in text:
+            parts = text.split(sep)
+            chunks = []
+            for part in parts:
+                part_text = part.strip()
+                if not part_text:
+                    continue
+                if len(encoder.encode(part_text)) <= max_chunk_tokens:
+                    chunks.append(part_text)
+                else:
+                    remaining_seps = separators[separators.index(sep)+1:]
+                    chunks.extend(
+                        chunk_recursive(part_text, max_chunk_tokens, remaining_seps)
+                    )
+            return chunks
+
+    # Fallback: hard split by tokens
+    return chunk_fixed_size(text, max_chunk_tokens, chunk_overlap=50)
+`}}
+
+{{key "Chunk size is a critical hyperparameter. Too small (under 100 tokens): chunks lack context. Too large (over 1000 tokens): chunks contain too many topics, reducing retrieval precision. Start with 300-500 tokens and tune based on retrieval quality metrics."}}
+
+{{avoid "Never chunk without overlap. When you split at a fixed boundary, you often break a sentence or idea in half. The first half lands in chunk N, the second in chunk N+1. If a user asks about that idea, neither chunk has the full context. Use 10-15 percent overlap to ensure continuity."}}
+
+{{triggerQs "Questions this phase could trigger"
+  "How do you choose chunk size for a specific document type?"
+  "Match chunk size to your query granularity. FAQ documents: one chunk per question-answer pair (usually 100-200 tokens). Technical docs with long explanations: 400-600 tokens to capture a complete concept. Legal contracts: sentence-based chunking to preserve clause integrity. Then measure retrieval recall on a test set and adjust."
+  "What is the overlap and why does it matter?"
+  "Overlap is the number of tokens repeated between consecutive chunks. A 50-token overlap means the last 50 tokens of chunk N are also the first 50 tokens of chunk N+1. This ensures concepts that span a chunk boundary are fully captured in at least one chunk. Without overlap, queries about boundary-spanning ideas return incomplete chunks."
+}}
+
+{{phase 4 "Embedding Models & Vector Storage" "8 min"}}
+
+{{say "Embeddings convert text into dense vectors that capture semantic meaning. Two pieces of text that mean similar things will have vectors close together in the embedding space. Choosing the right model and vector database is critical for RAG quality."}}
+
+{{table "Embedding Model Comparison" (rows
+  (row "Model"                           "Dimensions"  "{{info \"MTEB Score\" \"MTEB is a test that measures how good an embedding model is. Higher = better. Score of 62 = decent, 64 = excellent. A 2-point difference is meaningful.\"}} "  "Cost/1M tokens"  "Notes")
+  (row "OpenAI text-embedding-3-small"   "1536"        "62.3"        "$0.02"           "Best cost/quality ratio")
+  (row "OpenAI text-embedding-3-large"   "3072"        "64.6"        "$0.13"           "Highest quality, OpenAI")
+  (row "Cohere embed-english-v3.0"       "1024"        "64.5"        "$0.10"           "Strong multilingual")
+  (row "E5-large-v2 (open source)"       "1024"        "62.0"        "Free (self-host)" "No API dependency")
+  (row "BGE-large-en-v1.5 (open)"        "1024"        "63.5"        "Free (self-host)" "Best open-source option")
+)}}
+
+{{hint "text-embedding-3-small as default" "At $0.02 per million tokens, embedding a corpus of 1M documents costs roughly $10 total. The quality gap between small and large is only 2-3 points on MTEB — not worth 6.5x the cost unless you are in a high-stakes domain like legal or medical search where recall precision justifies the spend."}}
+
+{{compare "Vector Database Selection" (options
+  (best "{{info \"pgvector\" \"pgvector is an extension for PostgreSQL that adds vector search. If you already have Postgres, no new database to manage.\"}} (PostgreSQL)" "If you already run Postgres, pgvector adds vector search with zero new infrastructure. Supports {{info \"HNSW\" \"HNSW (Hierarchical Navigable Small World) is an index structure that finds similar vectors quickly. It's like having a map of the vector space that you can navigate fast.\"}} and {{info \"IVFFlat\" \"IVFFlat divides the vector space into regions, then searches the best region. Faster than brute-force but less accurate than HNSW.\"}} indexes. Good up to 10M vectors. Best for startups and teams that want simplicity.")
+  (alt "Pinecone" "Fully managed, serverless option. Best if you want zero ops. Scales automatically. Higher cost but no infrastructure to manage. Good for teams without infra engineers.")
+  (alt "Qdrant" "Open-source, Rust-based, very fast. Supports filtering with vector search natively. Self-host or cloud. Best for teams that need advanced filtering and high performance.")
+  (nofit "FAISS" "Library, not a database. No persistence, no replication, no filtering. Only use for prototyping or batch offline search. Not suitable for production serving.")
+)}}
+
+{{code "python" `import openai
+import psycopg2
+import psycopg2.extras
+from typing import List, Tuple
+
+# --- Embedding ---
+
+client = openai.OpenAI()
+
+def embed_texts(
+    texts: List[str],
+    model: str = "text-embedding-3-small"
+) -> List[List[float]]:
+    """Embed a batch of texts using OpenAI API."""
+    response = client.embeddings.create(input=texts, model=model)
+    return [item.embedding for item in response.data]
+
+
+def embed_query(
+    query: str,
+    model: str = "text-embedding-3-small"
+) -> List[float]:
+    """Embed a single query."""
+    return embed_texts([query], model)[0]
+
+
+# --- pgvector Setup ---
+
+def setup_pgvector(conn):
+    """Create the vector extension and chunks table."""
+    with conn.cursor() as cur:
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS chunks (
+                id SERIAL PRIMARY KEY,
+                content TEXT NOT NULL,
+                metadata JSONB DEFAULT '{}',
+                embedding vector(1536),
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        """)
+        # HNSW index for fast approximate nearest neighbor
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS chunks_embedding_idx
+            ON chunks USING hnsw (embedding vector_cosine_ops)
+            WITH (m = 16, ef_construction = 64);
+        """)
+        conn.commit()
+
+
+# --- Indexing (Offline) ---
+
+def index_chunks(
+    conn,
+    chunks: List[str],
+    metadata_list: List[dict],
+    batch_size: int = 100
+):
+    """Embed and store chunks in pgvector."""
+    for i in range(0, len(chunks), batch_size):
+        batch_chunks = chunks[i:i + batch_size]
+        batch_meta = metadata_list[i:i + batch_size]
+
+        embeddings = embed_texts(batch_chunks)
+
+        with conn.cursor() as cur:
+            for chunk, meta, emb in zip(batch_chunks, batch_meta, embeddings):
+                cur.execute(
+                    """INSERT INTO chunks (content, metadata, embedding)
+                       VALUES (%s, %s, %s::vector)""",
+                    (chunk, psycopg2.extras.Json(meta), emb)
+                )
+        conn.commit()
+        print("Indexed batch {}/{}".format(
+            i // batch_size + 1,
+            len(chunks) // batch_size + 1
+        ))
+
+
+# --- Retrieval (Online) ---
+
+def search_similar(
+    conn,
+    query: str,
+    top_k: int = 5,
+    similarity_threshold: float = 0.0
+) -> List[Tuple[str, float, dict]]:
+    """Search for similar chunks using cosine similarity."""
+    query_embedding = embed_query(query)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT content,
+                      1 - (embedding <=> %s::vector) AS similarity,
+                      metadata
+               FROM chunks
+               WHERE 1 - (embedding <=> %s::vector) >= %s
+               ORDER BY embedding <=> %s::vector
+               LIMIT %s""",
+            (query_embedding, query_embedding,
+             similarity_threshold, query_embedding, top_k)
+        )
+        results = cur.fetchall()
+
+    return [(row[0], float(row[1]), row[2]) for row in results]
+`}}
+
+{{phase 5 "Retrieval & Reranking" "10 min"}}
+
+{{say "Dense retrieval using embeddings is great for semantic similarity but struggles with exact keyword matches. Sparse retrieval like BM25 excels at keyword matching but misses paraphrases. Hybrid search combines both for the best of both worlds."}}
+
+{{table "Retrieval Strategy Comparison" (rows
+  (row "Strategy"        "How It Works"                     "Strengths"                          "Weaknesses"                    "Use When")
+  (row "Dense (vectors)" "Cosine similarity on embeddings"  "Semantic understanding, paraphrases" "Misses exact terms, acronyms" "Conceptual questions")
+  (row "Sparse ({{info \"BM25\" \"BM25 is a way to search using keywords. It's like asking 'which documents have the most important words from the query?' It's fast and great for exact matches, but doesn't understand meaning.\"}})"   "{{info \"BM25\" \"BM25 is probabilistic keyword matching.\"}} keyword matching (extends {{info \"TF-IDF\" \"TF-IDF measures how important a word is in a document. High TF-IDF = the word appears often in this document but rarely in others.\"}} with saturation and length normalization)"  "Exact keyword match, acronyms"      "No semantic understanding"     "Keyword-heavy domains")
+  (row "Hybrid"          "Combine dense + sparse with {{info \"RRF\" \"RRF (Reciprocal Rank Fusion) combines the results from multiple search methods into one ranked list. It doesn't need to normalize scores from different searchers.\"}} " "Best of both worlds"                 "More complex, slower"          "Production systems")
+)}}
+
+{{think "Start with alpha=0.7 (70% dense, 30% sparse) for hybrid search. Dense handles most natural language queries. Sparse catches product codes, error messages, and names that embeddings misrepresent."
+  (whyNot "dense-only in production" "Dense search fails on exact queries like 'error ERR_4032' or 'SKU-78812'. Users searching for specific IDs expect exact matches. BM25 handles this perfectly while embeddings often return thematically-related but wrong results.")
+  (whatIf "queries are highly technical with acronyms" "Increase sparse weight (alpha=0.5 or lower). Technical domains like medical (ICD codes) or legal (statute citations) rely heavily on exact terminology that embeddings from general-purpose models may conflate with similar-sounding terms.")
+  (how "tune the alpha parameter" "Build a test set of 100-200 queries. Tag each as semantic (conceptual) or keyword (exact match). Run retrieval at several alpha values (0.3, 0.5, 0.7, 0.9). Measure recall@5 separately for each category. Pick the alpha that maximizes the harmonic mean of both.")
+}}
+
+{{code "python" `from rank_bm25 import BM25Okapi
+from typing import List, Tuple
+import numpy as np
+
+class HybridRetriever:
+    """Combines dense (vector) and sparse (BM25) retrieval
+    using Reciprocal Rank Fusion (RRF)."""
+
+    def __init__(self, conn, chunks: List[str]):
+        self.conn = conn
+        self.chunks = chunks
+
+        # Build BM25 index for sparse retrieval
+        tokenized = [chunk.lower().split() for chunk in chunks]
+        self.bm25 = BM25Okapi(tokenized)
+
+    def sparse_search(
+        self, query: str, top_k: int = 20
+    ) -> List[Tuple[int, float]]:
+        """BM25 keyword search."""
+        tokenized_query = query.lower().split()
+        scores = self.bm25.get_scores(tokenized_query)
+        top_indices = np.argsort(scores)[::-1][:top_k]
+        return [(int(idx), float(scores[idx])) for idx in top_indices]
+
+    def dense_search(
+        self, query: str, top_k: int = 20
+    ) -> List[Tuple[int, float]]:
+        """Vector similarity search via pgvector."""
+        results = search_similar(self.conn, query, top_k=top_k)
+        indexed = []
+        for content, similarity, meta in results:
+            try:
+                idx = self.chunks.index(content)
+                indexed.append((idx, similarity))
+            except ValueError:
+                continue
+        return indexed
+
+    def hybrid_search(
+        self,
+        query: str,
+        top_k: int = 5,
+        alpha: float = 0.7,
+        rrf_k: int = 60
+    ) -> List[Tuple[str, float]]:
+        """Reciprocal Rank Fusion of dense + sparse results.
+
+        alpha: weight for dense (0.7 = 70% dense, 30% sparse)
+        rrf_k: RRF constant (higher = more uniform weighting)
+        """
+        dense_results = self.dense_search(query, top_k=20)
+        sparse_results = self.sparse_search(query, top_k=20)
+
+        # Compute RRF scores
+        rrf_scores = {}
+        for rank, (idx, _) in enumerate(dense_results):
+            rrf_scores[idx] = rrf_scores.get(idx, 0) + \
+                alpha * (1.0 / (rrf_k + rank + 1))
+
+        for rank, (idx, _) in enumerate(sparse_results):
+            rrf_scores[idx] = rrf_scores.get(idx, 0) + \
+                (1 - alpha) * (1.0 / (rrf_k + rank + 1))
+
+        sorted_results = sorted(
+            rrf_scores.items(), key=lambda x: x[1], reverse=True
+        )
+        return [
+            (self.chunks[idx], score)
+            for idx, score in sorted_results[:top_k]
+        ]
+`}}
+
+{{key "Hybrid search with Reciprocal Rank Fusion is the production standard. Dense retrieval handles semantic queries while BM25 catches exact keyword matches. The alpha parameter lets you tune the balance: start with 0.7 (70 percent dense) and adjust based on your query patterns."}}
+
+{{say "Initial retrieval uses {{info \"bi-encoders\" \"Bi-encoders embed the query and documents separately, then compare them with cosine similarity. Fast, but sometimes misses context.\"}} : query and document are embedded independently. This is fast but less accurate. {{info \"Cross-encoder\" \"Cross-encoder looks at query and document together to judge if they match. Slower but much more accurate. Ideal for final ranking of top results.\"}} reranking compares query and document together, which is slower but much more precise. The two-stage pipeline gives the best of both worlds."}}
+
+{{diagram "pat-two-stage-retrieval-reranking"}}
+
+{{code "python" `from sentence_transformers import CrossEncoder
+from typing import List, Tuple
+
+class Reranker:
+    """Cross-encoder reranker for improving retrieval precision."""
+
+    def __init__(
+        self,
+        model_name: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"
+    ):
+        self.model = CrossEncoder(model_name)
+
+    def rerank(
+        self,
+        query: str,
+        chunks: List[str],
+        top_k: int = 5
+    ) -> List[Tuple[str, float]]:
+        """Rerank chunks by cross-encoder relevance score."""
+        pairs = [(query, chunk) for chunk in chunks]
+        scores = self.model.predict(pairs)
+
+        scored = list(zip(chunks, scores))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:top_k]
+
+
+def retrieve_and_rerank(
+    query: str,
+    retriever: HybridRetriever,
+    reranker: Reranker,
+    top_k: int = 5
+):
+    """Two-stage retrieval: broad retrieve then precise rerank."""
+    # Stage 1: broad retrieval (fast, top-50)
+    candidates = retriever.hybrid_search(query, top_k=50)
+    candidate_texts = [text for text, _ in candidates]
+
+    # Stage 2: precise reranking (slower, top-5)
+    reranked = reranker.rerank(query, candidate_texts, top_k=top_k)
+    return reranked
+`}}
+
+{{think "Reranking is one of the highest-leverage improvements in RAG. Cross-encoders see both query and document together — they can judge relevance holistically rather than comparing independent vectors. The latency cost (~100ms for 50 candidates) is justified by 10-20% recall improvement."
+  (whyNot "reranking always" "Cross-encoders are O(n) with the number of candidates — each pair requires a separate inference pass. For 50 candidates and a 12-layer model, that is 50 forward passes. This adds 80-150ms latency. Skip reranking if your p99 latency target is under 300ms total and your retrieval precision is already high.")
+  (whatIf "reranker latency is too high" "Use a smaller cross-encoder model (MiniLM-L6 instead of L12) — roughly 2x faster with ~5% quality drop. Or reduce candidate count from 50 to 20. Or run the reranker asynchronously and stream the top bi-encoder results while reranking completes in the background.")
+}}
+
+{{phase 6 "Complete RAG Pipeline" "10 min"}}
+
+{{say "Here's how to bring everything together into a complete, production-ready RAG pipeline. This is the code you would actually deploy."}}
+
+{{code "python" `import openai
+from dataclasses import dataclass
+from typing import List, Optional
+
+@dataclass
+class RetrievedChunk:
+    content: str
+    score: float
+    metadata: dict
+    source: str
+
+@dataclass
+class RAGResponse:
+    answer: str
+    sources: List[RetrievedChunk]
+    model: str
+    tokens_used: int
+
+
+class RAGPipeline:
+    """Complete RAG pipeline: retrieve, rerank, generate."""
+
+    def __init__(
+        self,
+        conn,
+        llm_model: str = "gpt-4o",
+        embed_model: str = "text-embedding-3-small",
+        reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-12-v2",
+        top_k_retrieve: int = 20,
+        top_k_rerank: int = 5,
+        max_context_tokens: int = 4000,
+    ):
+        self.conn = conn
+        self.llm_model = llm_model
+        self.embed_model = embed_model
+        self.top_k_retrieve = top_k_retrieve
+        self.top_k_rerank = top_k_rerank
+        self.max_context_tokens = max_context_tokens
+        self.client = openai.OpenAI()
+        self.reranker = Reranker(reranker_model)
+
+    def retrieve(self, query: str) -> List[RetrievedChunk]:
+        """Stage 1: Retrieve candidate chunks."""
+        results = search_similar(
+            self.conn, query, top_k=self.top_k_retrieve
+        )
+        return [
+            RetrievedChunk(
+                content=content, score=score,
+                metadata=meta, source=meta.get("source", "unknown")
+            )
+            for content, score, meta in results
+        ]
+
+    def rerank_chunks(
+        self, query: str, chunks: List[RetrievedChunk]
+    ) -> List[RetrievedChunk]:
+        """Stage 2: Rerank with cross-encoder."""
+        texts = [c.content for c in chunks]
+        reranked = self.reranker.rerank(
+            query, texts, top_k=self.top_k_rerank
+        )
+        result = []
+        for text, score in reranked:
+            for chunk in chunks:
+                if chunk.content == text:
+                    chunk.score = float(score)
+                    result.append(chunk)
+                    break
+        return result
+
+    def build_prompt(
+        self, query: str, chunks: List[RetrievedChunk]
+    ) -> List[dict]:
+        """Build the augmented prompt with retrieved context."""
+        context_parts = []
+        for i, chunk in enumerate(chunks):
+            context_parts.append(
+                "[Source {idx}] ({source})\n{content}".format(
+                    idx=i + 1,
+                    source=chunk.source,
+                    content=chunk.content
+                )
+            )
+        context = "\n\n---\n\n".join(context_parts)
+
+        system_msg = (
+            "You are a helpful assistant. Answer the user's question "
+            "based ONLY on the provided context. If the context does "
+            "not contain enough information, say so explicitly. "
+            "Always cite your sources using [Source N] notation."
+        )
+        user_msg = (
+            "Context:\n{context}\n\n"
+            "Question: {query}\n\n"
+            "Answer based on the context above. Cite sources."
+        ).format(context=context, query=query)
+
+        return [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg}
+        ]
+
+    def generate(self, messages: List[dict]) -> dict:
+        """Call the LLM to generate a response."""
+        response = self.client.chat.completions.create(
+            model=self.llm_model,
+            messages=messages,
+            temperature=0.1,
+            max_tokens=1000,
+        )
+        return {
+            "content": response.choices[0].message.content,
+            "tokens": response.usage.total_tokens,
+        }
+
+    def query(self, user_query: str) -> RAGResponse:
+        """Full pipeline: retrieve -> rerank -> generate."""
+        candidates = self.retrieve(user_query)
+
+        if not candidates:
+            return RAGResponse(
+                answer="I could not find relevant information.",
+                sources=[], model=self.llm_model, tokens_used=0,
+            )
+
+        top_chunks = self.rerank_chunks(user_query, candidates)
+        messages = self.build_prompt(user_query, top_chunks)
+        result = self.generate(messages)
+
+        return RAGResponse(
+            answer=result["content"],
+            sources=top_chunks,
+            model=self.llm_model,
+            tokens_used=result["tokens"],
+        )
+
+
+# --- Usage ---
+# conn = psycopg2.connect("postgresql://localhost/ragdb")
+# rag = RAGPipeline(conn)
+# response = rag.query("How does rate limiting work?")
+# print(response.answer)
+# for src in response.sources:
+#     print("  Source:", src.source, "score:", src.score)
+`}}
+
+{{hint "temperature=0.1 for RAG" "{{info \"Temperature\" \"Temperature controls how random the model's answers are. 0.0 = always pick the most likely word (deterministic). 1.0 = pick randomly. RAG should be deterministic.\"}} Low temperature (0.0-0.2) keeps the model close to the retrieved facts and reduces hallucination. High temperature increases creativity but also increases the probability that the model deviates from the context and invents plausible-sounding but unsupported claims."}}
+
+{{phase 7 "Failure Modes & How to Fix Them" "5 min"}}
+
+{{say "RAG systems fail in predictable ways. Understanding these failure modes is essential for debugging and for interview discussions."}}
+
+{{table "RAG Failure Modes" (rows
+  (row "Failure Mode"                  "Symptom"                                       "Root Cause"                                   "Fix")
+  (row "Hallucination despite context" "Answer includes facts not in chunks"           "Model ignores context, uses training data"    "Stronger system prompt, lower temperature")
+  (row "Wrong chunks retrieved"        "Retrieved chunks are irrelevant"                "Poor chunking or embedding mismatch"          "Different chunk sizes, add reranking")
+  (row "Chunk boundary problem"        "Answer is incomplete, cuts off"                 "Info split across chunk boundary"             "Increase overlap, use semantic chunking")
+  (row "Stale index"                   "Answer uses outdated information"               "Docs updated but index not refreshed"         "Incremental re-indexing pipeline")
+  (row "Context window overflow"       "Too many chunks exceed token limit"             "Retrieved too many or too large chunks"        "Limit top-k, compress chunks")
+  (row "No relevant results"           "Low-similarity results returned"                "Query is out of domain or too vague"           "Set similarity threshold, return unknown")
+  (row "Embedding model drift"         "Quality degrades after model change"            "New model incompatible with old vectors"       "Re-embed entire corpus on model change")
+)}}
+
+{{avoid "Never mix embeddings from different models in the same vector index. If you upgrade from text-embedding-ada-002 to text-embedding-3-small, you must re-embed your entire corpus. Old and new vectors exist in different embedding spaces and cannot be meaningfully compared."}}
+
+{{code "python" `# Defensive RAG: handle failure modes gracefully
+
+import tiktoken
+
+SIMILARITY_THRESHOLD = 0.3
+
+def defensive_query(rag: RAGPipeline, query: str) -> RAGResponse:
+    """RAG query with failure mode handling."""
+
+    # Guard 1: filter out low-relevance chunks
+    candidates = rag.retrieve(query)
+    relevant = [c for c in candidates if c.score >= SIMILARITY_THRESHOLD]
+
+    if not relevant:
+        return RAGResponse(
+            answer=(
+                "I don't have enough information to answer that "
+                "question. The available documents don't seem to "
+                "cover this topic."
+            ),
+            sources=[], model=rag.llm_model, tokens_used=0,
+        )
+
+    # Guard 2: rerank for precision
+    top_chunks = rag.rerank_chunks(query, relevant)
+
+    # Guard 3: limit context size to prevent overflow
+    enc = tiktoken.get_encoding("cl100k_base")
+    total_tokens = 0
+    limited_chunks = []
+    for chunk in top_chunks:
+        chunk_tokens = len(enc.encode(chunk.content))
+        if total_tokens + chunk_tokens > rag.max_context_tokens:
+            break
+        limited_chunks.append(chunk)
+        total_tokens += chunk_tokens
+
+    if not limited_chunks:
+        limited_chunks = [top_chunks[0]]  # Always include at least one
+
+    messages = rag.build_prompt(query, limited_chunks)
+    result = rag.generate(messages)
+
+    return RAGResponse(
+        answer=result["content"],
+        sources=limited_chunks,
+        model=rag.llm_model,
+        tokens_used=result["tokens"],
+    )
+`}}
+
+{{phase 8 "Cost Analysis & Interview Q&A" "8 min"}}
+
+{{say "the real costs of running a RAG system in production and cover the most common interview questions. The three cost drivers are: embedding generation, vector storage, and LLM inference."}}
+
+{{table "RAG Cost Breakdown (1M document corpus)" (rows
+  (row "Component"                     "Calculation"                                      "One-time Cost"   "Monthly Cost")
+  (row "Embedding (indexing)"          "1M docs x 500 tok avg x $0.02/1M tok"             "$10"             "$0 (one-time)")
+  (row "Embedding (queries)"           "100K queries/mo x 50 tok x $0.02/1M tok"          "N/A"             "$0.10")
+  (row "pgvector (RDS)"               "1M vectors x 1536 dim x 4B = 6GB"                 "N/A"             "$50 (db.r6g.large)")
+  (row "Reranker (self-hosted)"       "GPU instance for cross-encoder"                    "N/A"             "$150 (g4dn.xlarge)")
+  (row "LLM inference (GPT-4o)"      "100K queries x 2K tok x $5/1M tok"                "N/A"             "$1,000")
+  (row "LLM inference (GPT-4o-mini)" "100K queries x 2K tok x $0.15/1M tok"             "N/A"             "$30")
+  (row "Total (GPT-4o)"              "Full pipeline with GPT-4o"                          "$10"             "~$1,200/mo")
+  (row "Total (GPT-4o-mini)"         "Full pipeline with GPT-4o-mini"                     "$10"             "~$230/mo")
+)}}
+
+{{think "LLM {{info \"inference\" \"Inference is when you run the model to generate text from a prompt. Each inference call to the LLM is the biggest cost in RAG.\"}} dominates RAG cost by 10x. Embeddings are a rounding error. The main levers: use a cheaper model for simple questions, reduce context size with fewer or smaller chunks, cache frequent queries. Caching identical queries can cut LLM costs by 30-50%."
+  (whyNot "always using GPT-4o-mini" "GPT-4o-mini produces noticeably worse answers for complex multi-hop questions that require synthesizing across multiple retrieved chunks. Run both models on your evaluation set and measure answer quality — then decide if the 5x cost difference is worth the quality gain for your use case.")
+  (how "implement {{info \"semantic caching\" \"Semantic caching stores answers to similar queries. New query comes in, you embed it and search the cache for very similar queries (cosine similarity > 0.95). If found, reuse the cached answer instead of calling the LLM again. Saves 30-50% of inference cost for repeated similar questions.\"}} " "Embed each incoming query. Before calling the LLM, search the cache for queries with cosine similarity above 0.95. If found, return the cached answer. Use a short TTL (1-24 hours) for time-sensitive domains. Redis with a vector similarity module or a simple in-memory dict with exact-match hashing work for most traffic patterns.")
+}}
+
+{{key "Embedding costs are negligible. LLM inference is 80+ percent of RAG cost. Optimize by: caching repeated queries, using smaller models for simple questions, and limiting context window size. A semantic cache that matches similar queries can further reduce costs."}}
+
+{{say "These are the most common RAG interview questions. Focus on concrete metrics, failure modes, and practical trade-offs."}}
+
+{{qa
+  "How would you evaluate RAG quality?"
+  "Three metrics: 1) Retrieval quality: recall@k and MRR on a labeled test set of query-to-relevant-chunk pairs. 2) Answer quality: LLM-as-judge scoring faithfulness (does the answer match the context?) and relevance (does it answer the question?). 3) End-to-end: human evaluation on 100-200 queries per week. Faithfulness and recall@k are the two most actionable — fix retrieval first, then answer quality."
+  "When would you NOT use RAG?"
+  "Skip RAG when: the knowledge fits in the system prompt (under 10K tokens), the task is creative generation not factual Q&A, latency must be under 200ms (retrieval adds 100-300ms), or the corpus changes every few minutes making index freshness impractical. A long-context model stuffed with a small document set is simpler and faster for ad-hoc queries."
+}}
+
+{{qa
+  "How do you handle multi-turn conversations in RAG?"
+  "Query rewriting: use the LLM to rewrite the latest message incorporating conversation history into a standalone query. 'What about its pricing?' becomes 'What is the pricing for Pinecone vector database?' before hitting the retriever. Include the last 2-3 turns in the rewrite context. Without this, pronoun references and implicit context cause retrievals to miss the intent entirely."
+  "How do you handle documents with tables and images?"
+  "Tables: convert to structured markdown before chunking — preserve the header row so each chunk is self-contained. Images: use a vision model to generate text descriptions, then embed those descriptions. Mixed-content documents need a preprocessing pipeline: extract text, describe images, linearize tables, then chunk the unified text. Never embed raw image bytes — no text embedding model understands them."
+}}
+
+{{followup "How would you implement access control in RAG?" "{{info \"Metadata filtering\" \"Metadata is data about data. In RAG, you tag each chunk with metadata: source, author, department, security level. At query time you filter the vector search by this metadata, so the user only gets chunks they're authorized to see.\"}} Every chunk gets tagged with access metadata: team, role, classification level. At query time the user's permissions are checked and passed as a metadata filter to the vector search. The vector database only returns chunks the user is authorized to see. This is non-negotiable for enterprise RAG where different teams should only access their own documents. Never rely on the LLM to enforce access control — enforce it at the retrieval layer."}}
+
+{{checklist
+  "Chunk size 300-500 tokens with 10-15 percent overlap"
+  "Use hybrid search (dense + BM25) with Reciprocal Rank Fusion"
+  "Add cross-encoder reranking for precision (retrieve 50, rerank to 5)"
+  "Set similarity threshold to reject irrelevant chunks"
+  "System prompt must instruct model to only use provided context"
+  "Never mix embeddings from different models in the same index"
+  "Re-embed entire corpus when changing embedding models"
+  "Cache repeated queries to reduce LLM inference cost"
+  "Track retrieval metrics: recall at k, MRR, and faithfulness"
+  "Implement metadata filtering for access control"
+  "Use incremental indexing to keep the vector store fresh"
+}}

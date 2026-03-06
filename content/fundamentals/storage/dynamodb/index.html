@@ -1,0 +1,355 @@
+{{phase 1 "What Is DynamoDB?" "3 min"}}
+
+{{say "DynamoDB is a fully managed {{info \"NoSQL\" \"NoSQL means 'Not Only SQL'. NoSQL databases don't use tables and SQL queries. DynamoDB uses key-value storage: you give it a key and it returns the value. Much simpler than SQL but less flexible for complex queries.\"}} key-value and document database. Single-digit millisecond latency at any scale. No servers to manage, no connection pools, no maintenance. It excels at known access patterns with single-key lookups."}}
+
+{{table "DynamoDB at a Glance" (rows
+  (row "Property"           "Detail")
+  (row "Type"               "Key-value and document store (NoSQL)")
+  (row "Latency"            "Single-digit ms reads/writes. {{info \"DAX\" \"DAX (DynamoDB Accelerator) is an in-memory cache for DynamoDB. Reduces latency from 10ms to microseconds.\"}} cache: microseconds.")
+  (row "Throughput"         "Virtually unlimited (auto-scales horizontally)")
+  (row "Max Item Size"      "400 KB per item")
+  (row "Consistency"        "{{info \"Eventually consistent\" \"Eventually consistent = you read data immediately after writing, but the read might not include the write yet. Changes reach all replicas within milliseconds.\"}} (default) or {{info \"strongly consistent\" \"Strongly consistent = every read sees the most recent write. Guarantees freshness but costs 2x more RCUs.\"}} reads")
+  (row "Transactions"       "{{info \"ACID\" \"ACID (Atomicity, Consistency, Isolation, Durability) = all-or-nothing operations. Either all 100 items succeed or all fail.\"}} transactions across up to 100 actions (2x cost)")
+  (row "Global Tables"      "{{info \"Multi-region\" \"Multi-region means data is replicated across AWS regions (us-east-1, eu-west-1, etc.). Local reads are fast, and if one region fails, others continue.\"}} active-active replication")
+  (row "Pricing"            "On-demand: $1.25/M writes, $0.25/M reads. Provisioned: cheaper at scale.")
+)}}
+
+{{triggerQs "Phase 1 Trigger Questions"
+  "When do you pick DynamoDB over Postgres?"
+  "Pick DynamoDB when access patterns are known and key-based (get user by ID, get orders by user), you need unlimited horizontal scale, or you want zero operational overhead. Pick Postgres when you need complex joins, your access patterns are unknown, or you need strong consistency by default."
+  "What is the single biggest DynamoDB mistake?"
+  "Designing the table around entities first instead of access patterns. DynamoDB has no ad-hoc query support. If you do not know your access patterns up front, use Postgres until you do."
+  "How does DynamoDB scale to any throughput?"
+  "It partitions data horizontally across many physical nodes using the partition key as a hash. Each partition handles a fixed throughput slice. Adding more items or provisioned capacity triggers automatic repartitioning behind the scenes."
+}}
+
+{{qa
+  "When should you use DynamoDB vs Postgres?"
+  "DynamoDB when: access patterns are known and key-based, you need unlimited horizontal scale, or you want zero operational overhead. Postgres when: you need complex queries with JOINs, access patterns are not yet known, or you need strong consistency by default."
+  "What is the biggest mistake teams make with DynamoDB?"
+  "Treating it like a relational database. No JOINs, no ad-hoc queries. Design your table around access patterns first. If you do not know your access patterns, use Postgres until you do."
+}}
+
+{{phase 2 "Data Modeling: Keys and Indexes" "5 min"}}
+
+{{say "DynamoDB data modeling is fundamentally different from relational. You start with access patterns, then design your keys. Not the other way around. The {{info \"partition key\" \"Partition key determines which shard stores the item. DynamoDB hashes the partition key to find the storage shard. All items with the same partition key live together.\"}} determines data distribution. The {{info \"sort key\" \"Sort key orders items within a partition. Items are stored sorted by this key, enabling efficient range queries like 'get all orders from Jan 1-31'.\"}} enables range queries within a partition."}}
+
+{{table "Key Types" (rows
+  (row "Key"               "Required"  "Purpose"                                    "Example")
+  (row "Partition Key (PK)" "Yes"      "Determines which partition stores the item"  "user_id = U123")
+  (row "Sort Key (SK)"      "No"       "Enables range queries within a partition"    "order_date = 2024-01-15")
+  (row "GSI Partition Key"  "No"       "Alternative access pattern"                 "email = user@example.com")
+  (row "GSI Sort Key"       "No"       "Range queries on GSI"                       "created_at = 2024-01-15")
+  (row "LSI Sort Key"       "No"       "Alternative sort within same partition"      "status = SHIPPED")
+)}}
+
+{{diagram "fund-dynamodb-key-structure"}}
+
+{{table "Single-Table Design Example: E-Commerce" (rows
+  (row "Entity"     "PK"              "SK"                     "Attributes"                    "Access Pattern")
+  (row "User"       "USER#U123"       "PROFILE"                "name, email, created_at"       "Get user profile")
+  (row "Order"      "USER#U123"       "ORDER#2024-01-15#O456"  "total, status, items"          "Get user orders (sorted by date)")
+  (row "Order Item" "ORDER#O456"      "ITEM#P789"              "product_id, qty, price"        "Get items in order")
+  (row "Product"    "PRODUCT#P789"    "DETAILS"                "name, price, category"         "Get product details")
+  (row "Review"     "PRODUCT#P789"    "REVIEW#U123"            "rating, text, date"            "Get product reviews")
+)}}
+
+{{diagram "fund-dynamodb-single-table"}}
+
+{{triggerQs "Phase 2 Trigger Questions"
+  "Why use a prefix like USER# in the partition key?"
+  "To prevent collisions between entity types in a single table. Without prefixes, a user ID of '123' and a product ID of '123' would be indistinguishable. Prefixes also make begins_with queries possible: begins_with(SK, 'ORDER#') fetches all orders within a user partition."
+  "When should you use a composite sort key (e.g., ORDER#2024-01-15#O456)?"
+  "When you need to sort items and also filter by prefix. Embedding the date in the sort key allows querying all orders for a user in a date range using BETWEEN, or getting the newest orders first using ScanIndexForward=False."
+  "What is the downside of single-table design?"
+  "Harder to understand and evolve. If a new access pattern does not fit the existing key schema, you may need a GSI or a table migration. It also makes it difficult for new team members to reason about the data model without documented access patterns."
+}}
+
+{{code "python" `import boto3
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('ECommerce')
+
+# Access Pattern 1: Get user profile
+response = table.get_item(Key={'PK': 'USER#U123', 'SK': 'PROFILE'})
+user = response['Item']
+
+# Access Pattern 2: Get user's recent orders (most recent first)
+response = table.query(
+    KeyConditionExpression='PK = :pk AND begins_with(SK, :sk)',
+    ExpressionAttributeValues={':pk': 'USER#U123', ':sk': 'ORDER#'},
+    ScanIndexForward=False,  # Descending order (newest first)
+    Limit=10
+)
+orders = response['Items']
+
+# Access Pattern 3: Get all items in an order
+response = table.query(
+    KeyConditionExpression='PK = :pk AND begins_with(SK, :sk)',
+    ExpressionAttributeValues={':pk': 'ORDER#O456', ':sk': 'ITEM#'}
+)
+items = response['Items']
+`}}
+
+{{think "The PK#value SK#value pattern (like USER#U123, ORDER#2024-01-15) is the standard DynamoDB convention"
+  (whyNot "using plain IDs as keys without prefixes" "Without prefixes a user ID of 123 and a product ID of 123 collide in a single table. Prefixes give each entity type its own namespace and enable begins_with queries to fetch all entities of a type within a partition.")
+  (whatIf "two different entities end up sharing the same PK" "Items coexist in the same partition, which is actually the point of single-table design. The sort key differentiates them. The concern is hot partitions if one entity gets enormous traffic — design the SK to spread that load or add a shard suffix.")
+}}
+
+{{phase 3 "Indexes: GSI and LSI" "5 min"}}
+
+{{say "{{info \"Global Secondary Indexes (GSIs)\" \"GSI is like a separate copy of your table but with different keys. Main table: PK=user_id. GSI: PK=email. Both are maintained automatically by DynamoDB.\"}} enable alternative access patterns. They are like separate tables that DynamoDB maintains for you, with their own partition and sort keys. {{info \"Local Secondary Indexes (LSIs)\" \"LSI uses the same partition key as the main table but different sort key. Must be created at table creation time. Limited to 10GB per partition key value.\"}} provide alternative sort keys within the same partition."}}
+
+{{table "GSI vs LSI" (rows
+  (row "Feature"              "GSI"                                   "LSI")
+  (row "Partition Key"        "Different from base table"             "Same as base table")
+  (row "Sort Key"             "Different from base table"             "Different from base table")
+  (row "Max per Table"        "20"                                    "5")
+  (row "Size Limit"           "None (separate storage)"               "10 GB per partition key")
+  (row "Consistency"          "Eventually consistent only"            "Eventually or strongly consistent")
+  (row "Throughput"           "Separate provisioned/on-demand"        "Shared with base table")
+  (row "When Created"         "Any time"                              "Table creation only")
+  (row "Write Cost"           "Additional WCU for each GSI"           "Uses base table WCU")
+)}}
+
+{{hint "GSI write cost multiplier" "Every write to the base table that touches an attribute projected into a GSI triggers an additional write on that GSI. A table with 3 GSIs effectively costs 4x the WCU for writes. Project only the attributes you query — use KEYS_ONLY or INCLUDE projections instead of ALL to minimize this overhead."}}
+
+{{code "python" `# GSI Example: Look up user by email (GSI1: PK=email, SK=entity_type)
+response = table.query(
+    IndexName='GSI1',
+    KeyConditionExpression='GSI1PK = :email AND GSI1SK = :type',
+    ExpressionAttributeValues={
+        ':email': 'user@example.com',
+        ':type': 'USER'
+    }
+)
+
+# GSI Example: Get orders by status across all users
+# GSI2: PK=status, SK=order_date
+response = table.query(
+    IndexName='GSI2',
+    KeyConditionExpression='GSI2PK = :status AND GSI2SK BETWEEN :start AND :end',
+    ExpressionAttributeValues={
+        ':status': 'PENDING',
+        ':start': '2024-01-01',
+        ':end': '2024-01-31'
+    }
+)
+`}}
+
+{{think "A GSI on a low-cardinality attribute like status (3 possible values) creates a hot partition by design"
+  (whyNot "using a plain status field as a GSI partition key" "All PENDING orders land on one GSI partition. That single partition absorbs all reads and writes for PENDING items, throttling while other partitions sit idle. Low cardinality defeats the purpose of horizontal distribution.")
+  (how "do you query by status without a hot GSI partition" "Add a shard suffix to the status: PENDING#0 through PENDING#9. Writes pick a random shard. Reads scatter-gather across all 10 shards and merge results client-side. Cache the merged result in Redis to avoid per-request scatter-gather.")
+}}
+
+{{avoid "Never create a GSI with a {{info \"low-cardinality\" \"Cardinality = how many distinct values exist. High cardinality: user_id (millions of values). Low cardinality: status (3 values: PENDING, SHIPPED, DELIVERED).\"}} partition key (like status with 3 values). All PENDING orders land on one partition, creating a {{info \"hot partition\" \"Hot partition is a shard that gets way more traffic than others. It becomes a bottleneck because one shard can't keep up.\"}} . Instead, add a shard suffix: PENDING#0, PENDING#1, ... PENDING#9 and {{info \"scatter-gather\" \"Scatter-gather: send the query to multiple shards in parallel, wait for all results, then merge them together.\"}} across 10 shards."}}
+
+{{phase 4 "Capacity Modes and Scaling" "5 min"}}
+
+{{say "DynamoDB offers two capacity modes. On-demand scales automatically but costs more per request. Provisioned is cheaper but you manage capacity. Most teams start on-demand and switch to provisioned once traffic patterns are predictable."}}
+
+{{table "On-Demand vs Provisioned" (rows
+  (row "Feature"              "On-Demand"                           "Provisioned")
+  (row "Pricing"              "$1.25/M writes, $0.25/M reads"       "$0.00065/{{info \"WCU\" \"WCU (Write Capacity Unit) = 1 write per second of 1 KB. 2 WCU = 2 writes/sec, or 1 write/sec of 2KB.\"}} -hr, $0.00013/{{info \"RCU\" \"RCU (Read Capacity Unit) = 1 strongly consistent read per second of 4KB. 2 RCU = 2 reads/sec of 4KB total.\"}} -hr")
+  (row "Scaling"              "Instant, no config needed"            "{{info \"Auto-scaling\" \"Auto-scaling automatically increases RCU/WCU when traffic goes up. Decreases after traffic drops. Controlled by target utilization (e.g., 70%).\"}} with target utilization")
+  (row "Burst"                "Up to 2x previous peak"              "{{info \"Burst pool\" \"Burst pool banks unused capacity. If you provision 100 WCU but only use 50, the extra 50 accumulates up to 300 seconds of capacity. A spike can use this burst instantly.\"}} of 300 seconds of unused capacity")
+  (row "Throttling"           "Rare (only on extreme spikes)"        "When you exceed provisioned + burst")
+  (row "Cost at 10K WPS"      "~$10,800/mo"                         "~$4,700/mo with auto-scaling")
+  (row "Best For"             "Unpredictable traffic, dev/staging"   "Steady traffic, production at scale")
+)}}
+
+{{hint "why on-demand?" "On-demand mode charges per request: $1.25/M writes, $0.25/M reads. Provisioned mode is cheaper at steady state but requires capacity planning. For bursty workloads (like viral content), on-demand auto-scales instantly. Provisioned would throttle until you manually increase capacity."}}
+
+{{hint "when to switch to provisioned" "After 2-4 weeks of stable traffic, compare your on-demand bill against the provisioned equivalent. At steady traffic, provisioned with auto-scaling (target 70% utilization) saves 50-60%. Switch using the AWS console with zero downtime — DynamoDB handles the transition."}}
+
+{{compare "Capacity Mode" (options
+  (best "Start On-Demand, switch to Provisioned" "On-demand for launch (unknown traffic patterns). After 2-4 weeks with stable traffic, switch to provisioned with auto-scaling. Target 70% utilization. Saves 50-60% at steady state.")
+  (alt "On-Demand always" "Simpler operations. Worth the premium for spiky workloads (flash sales, viral events). No throttling risk. Good when engineering time is more expensive than AWS bill.")
+  (nofit "Provisioned without auto-scaling" "Manual capacity management is error-prone. Under-provision = throttling. Over-provision = wasted money. Always enable auto-scaling with provisioned mode.")
+)}}
+
+{{triggerQs "Phase 4 Trigger Questions"
+  "DynamoDB auto-scaling takes 1-2 minutes. What happens during a sudden traffic spike?"
+  "You get throttled with ProvisionedThroughputExceededException until scaling kicks in. For predictable spikes (a noon marketing campaign), pre-warm by temporarily increasing provisioned capacity 30 minutes before. For unpredictable spikes, use on-demand mode instead."
+  "How does the provisioned burst pool work?"
+  "DynamoDB banks unused capacity up to 300 seconds worth. A table provisioned at 100 WCU that sits idle for 5 minutes accumulates 30,000 burst WCUs. A brief spike can consume that burst pool instantly. The pool refills as traffic drops back below provisioned levels."
+  "How do you switch capacity modes without downtime?"
+  "Change the billing mode in the AWS console or via the UpdateTable API. DynamoDB applies the change in the background while the table remains fully operational. You can switch between modes once per 24 hours."
+}}
+
+{{think "DynamoDB auto-scaling has a delay of 1-2 minutes"
+  (whatIf "a traffic spike arrives faster than auto-scaling responds" "You will be throttled until scaling completes. The burst pool (300 seconds of banked capacity) absorbs short spikes. For spikes that exhaust the burst pool, the application must retry with exponential backoff. Pre-warming for known events eliminates this risk.")
+  (how "do you pre-warm for a predictable spike" "Use UpdateTable 30 minutes before the spike to set provisioned capacity 2-3x your expected peak. After the event, scale back down. Alternatively, switch to on-demand mode before the event and back to provisioned after — on-demand handles any traffic shape instantly.")
+}}
+
+{{phase 5 "Advanced Features" "5 min"}}
+
+{{table "Advanced DynamoDB Features" (rows
+  (row "Feature"          "What It Does"                                    "Use Case"                              "Cost Impact")
+  (row "{{info \"TTL\" \"TTL (Time To Live) = a timestamp. DynamoDB automatically deletes items after this timestamp passes. Great for temporary data like session tokens.\""}} "Auto-delete items after expiry timestamp"         "Session tokens, temp data, event logs"  "Free (no WCU charge for TTL deletes)")
+  (row "{{info \"Streams\" \"Streams = ordered log of all changes to items. Every insert, update, delete is recorded. Can trigger Lambda functions on each change.\"}} "Ordered log of item changes (insert/update/delete)" "Event sourcing, materialized views, sync" "$0.02 per 100K reads")
+  (row "DAX"              "In-memory cache, microsecond reads"              "Read-heavy, same query repeated"       "From $0.269/hr (dax.t3.small)")
+  (row "Global Tables"    "Multi-region active-active replication"          "Global apps, disaster recovery"        "2x write cost + cross-region transfer")
+  (row "Transactions"     "ACID across up to 100 items"                     "Financial operations, inventory"       "2x read/write cost")
+  (row "{{info \"Point-in-Time Recovery\" \"PITR = AWS continuously backs up your table. You can restore to any second in the last 35 days without needing manual backups.\"}} " "Continuous backups, restore to any second" "Compliance, accidental deletes"        "$0.20/GB/month")
+  (row "Export to S3"     "Full table export without read capacity"         "Analytics, data lake, backup"          "$0.10/GB exported")
+)}}
+
+{{hint "TTL is free but eventually consistent" "TTL deletions are free — they do not consume WCUs. However, DynamoDB only guarantees deletion within 48 hours of the TTL timestamp. Items may be returned in reads after expiry until the background sweep deletes them. Filter expired items in your application if you need strict expiry."}}
+
+{{hint "when to use DAX vs ElastiCache" "DAX is purpose-built for DynamoDB: it caches at the item and query level and is API-compatible with the DynamoDB SDK. Use DAX when you need microsecond reads on repeated single-item lookups. Use ElastiCache when you need more flexible data structures, cross-service caching, or pub/sub. DAX starts at $0.269/hr even for the smallest node."}}
+
+{{code "python" `# TTL: Auto-expire session tokens
+import time
+
+table.put_item(Item={
+    'PK': 'SESSION#abc123',
+    'SK': 'DATA',
+    'user_id': 'U123',
+    'ttl': int(time.time()) + 3600  # Expires in 1 hour
+    # DynamoDB deletes this item automatically after TTL
+    # Deletion is eventually consistent (up to 48h delay)
+})
+
+# DynamoDB Streams + Lambda: Build materialized views
+# When an order is created, update the user's order count
+def lambda_handler(event, context):
+    for record in event['Records']:
+        if record['eventName'] == 'INSERT':
+            new_item = record['dynamodb']['NewImage']
+            pk = new_item['PK']['S']
+            if pk.startswith('ORDER#'):
+                user_id = new_item['user_id']['S']
+                # Atomically increment order count
+                table.update_item(
+                    Key={'PK': f'USER#{user_id}', 'SK': 'PROFILE'},
+                    UpdateExpression='ADD order_count :inc',
+                    ExpressionAttributeValues={':inc': 1}
+                )
+`}}
+
+{{phase 6 "Hot Partition Problem" "5 min"}}
+
+{{say "The hot partition problem is the number one DynamoDB scaling issue in interviews. When one partition key gets disproportionate traffic, that partition throttles while others sit idle. Classic example: celebrity user ID getting millions of likes."}}
+
+{{table "Hot Partition Scenarios" (rows
+  (row "Scenario"                      "Why It is Hot"                          "Solution")
+  (row "Celebrity post likes"          "Millions of writes to one PK"          "Write sharding: PK=POST#123#shard_N (N=0-9)")
+  (row "Status=PENDING index"          "Low cardinality, all pending items in one partition" "Shard the status: PENDING#0 through PENDING#9")
+  (row "Today's date as PK"            "All today's events on one partition"    "Add random suffix: 2024-01-15#A through 2024-01-15#Z")
+  (row "Popular product page views"    "One product gets 90% of traffic"       "DAX cache in front to absorb reads")
+)}}
+
+{{hint "choose shard count carefully" "Too few shards (e.g., 2) and a hot item still throttles. Too many shards (e.g., 100) and scatter-gather reads become expensive. A shard count of 10 is a common starting point: it distributes load across 10 partitions and only requires 10 parallel reads to aggregate. Tune based on your peak writes-per-second per item."}}
+
+{{diagram "fund-dynamodb-write-sharding"}}
+
+{{triggerQs "Phase 6 Trigger Questions"
+  "Write sharding distributes writes but complicates reads. What is the read strategy?"
+  "Scatter-gather: issue parallel GetItem requests to all N shards and sum the results client-side. This is O(N) reads per aggregate query. To avoid this on every read, cache the aggregated total in Redis and update it periodically (e.g., every 10 seconds) from a background job."
+  "How do you detect a hot partition before it causes throttling?"
+  "Monitor the ConsumedWriteCapacityUnits and ThrottledRequests metrics in CloudWatch broken down by partition key. AWS also publishes the Contributor Insights feature which shows the top partition keys by traffic. Set an alarm on ThrottledRequests > 0 for early warning."
+  "What if the hot item is read-heavy rather than write-heavy?"
+  "Write sharding does not help for reads. Instead, put DAX in front of DynamoDB. DAX caches item-level and query-level results in memory and serves microsecond reads. A single popular product page hitting DAX avoids hitting DynamoDB entirely for cached items."
+}}
+
+{{code "python" `import random
+
+# Write Sharding: Distribute writes across N shards
+SHARD_COUNT = 10
+
+def write_like(post_id, user_id):
+    shard = random.randint(0, SHARD_COUNT - 1)
+    table.update_item(
+        Key={
+            'PK': f'POST#{post_id}#LIKES#{shard}',
+            'SK': 'COUNT'
+        },
+        UpdateExpression='ADD like_count :inc',
+        ExpressionAttributeValues={':inc': 1}
+    )
+
+def get_total_likes(post_id):
+    total = 0
+    for shard in range(SHARD_COUNT):
+        response = table.get_item(
+            Key={
+                'PK': f'POST#{post_id}#LIKES#{shard}',
+                'SK': 'COUNT'
+            }
+        )
+        total += response.get('Item', {}).get('like_count', 0)
+    return total
+    # For read-heavy: cache total in Redis, update periodically
+`}}
+
+{{think "Write sharding trades write simplicity for read complexity"
+  (whyNot "just increasing provisioned capacity instead of sharding" "Each DynamoDB partition has a baseline allocation of 1,000 WCU and 3,000 RCU. Adaptive capacity (since 2019) can burst beyond these limits by borrowing from other partitions, but a sustained hot key will still throttle. A single hot key is bounded by per-partition limits, not table limits. More capacity does not help a single overloaded partition.")
+  (whatIf "the shard count is too low and the hot key still throttles" "Double the shard count. Use a consistent hash of the item ID to determine shard (rather than random) so reads can compute the correct shard without scatter-gather. Trade-off: consistent hashing fixes one item to one shard, losing load distribution if item traffic is extremely uneven.")
+}}
+
+{{key "Write sharding trades write simplicity for read complexity. Writes go to random shard (O(1)). Reads scatter-gather across all shards (O(N)). Cache the aggregated total in Redis to avoid scatter-gather on every read."}}
+
+{{phase 7 "Cost Estimates" "3 min"}}
+
+{{table "DynamoDB Monthly Cost Examples" (rows
+  (row "Workload"                    "Writes/sec"  "Reads/sec"  "Storage"     "On-Demand Cost"   "Provisioned Cost")
+  (row "MVP (small app)"             "10"          "100"        "1 GB"        "$35/mo"           "$15/mo")
+  (row "Medium (e-commerce)"         "500"         "5,000"      "50 GB"       "$1,700/mo"        "$750/mo")
+  (row "Large (social feed)"         "5,000"       "50,000"     "500 GB"      "$17,000/mo"       "$7,500/mo")
+  (row "Massive (URL shortener)"     "10,000"      "100,000"    "5 TB"        "$34,000/mo"       "$15,000/mo")
+)}}
+
+{{think "DynamoDB storage costs $0.25/GB/month — at 5 TB that is $1,250/month for storage alone"
+  (whyNot "storing large blobs (images, PDFs) directly in DynamoDB items" "The 400 KB item size limit prevents it for most large files, but even smaller files like 50 KB thumbnails add up fast. 1M items at 50 KB each = 50 GB = $12.50/month in storage plus the WCU cost to write them. S3 stores the same data for $1.15/month and is purpose-built for large object retrieval.")
+  (how "do you keep item sizes small" "Store only structured metadata and foreign keys in DynamoDB. Move any field larger than a few KB to S3 and store the S3 object key in the DynamoDB item. The 400 KB limit is a natural guardrail — if you are approaching it, restructure the item.")
+}}
+
+{{hint "eventually consistent reads halve your read cost" "Reads default to eventually consistent in DynamoDB. Each eventually consistent read costs 0.5 RCU per 4 KB. Strongly consistent reads cost 1.0 RCU per 4 KB — exactly double. If your application can tolerate reads that are up to 1 second stale (most can), you save 50% on all read costs. Only use strongly consistent reads where stale data causes correctness bugs."}}
+
+{{table "Cost Optimization" (rows
+  (row "Strategy"                         "Savings"       "How")
+  (row "Provisioned + auto-scaling"       "50-60%"        "Switch from on-demand after traffic stabilizes")
+  (row "Reserved capacity (1-year)"       "53-76%"        "Upfront payment for guaranteed baseline capacity")
+  (row "TTL for temp data"                "Variable"      "Auto-delete expired items, no WCU charge")
+  (row "Smaller items"                    "Proportional"  "1 WCU = 1KB write. Smaller items = fewer WCUs")
+  (row "Eventually consistent reads"      "50%"           "Default mode, 0.5 RCU per 4KB vs 1.0 for strong")
+  (row "DAX for read-heavy"               "Variable"      "Cache hits avoid RCU charges entirely")
+  (row "Export to S3 for analytics"       "90%+"          "Export does not consume RCU. Athena queries S3.")
+)}}
+
+{{phase 8 "Failure Scenarios & Interview Q&A" "5 min"}}
+
+{{say "DynamoDB is highly available by design, but throttling, conditional check failures, and stream lag are common operational issues. Let me also cover key interview questions around transactions, analytics, and evolving access patterns."}}
+
+{{table "DynamoDB Failure Modes" (rows
+  (row "Failure"                    "Impact"                                "Mitigation"                              "Recovery")
+  (row "Throttling (hot partition)" "ProvisionedThroughputExceededException" "Write sharding, DAX, auto-scaling"      "Reduce traffic or increase capacity")
+  (row "Conditional check failure"  "Write rejected (optimistic lock)"       "Retry with exponential backoff"         "Immediate")
+  (row "Region outage"              "Table unavailable in that region"       "Global Tables for multi-region failover" "Automatic (global tables)")
+  (row "Stream processing lag"      "Materialized views are stale"           "Monitor IteratorAge metric, alarm at 1min" "Scale Lambda consumers")
+  (row "Item too large (>400KB)"    "ValidationException on write"           "Compress data, move large fields to S3" "Re-architect item structure")
+  (row "GSI replication lag"         "GSI reads return stale data"            "Eventually consistent by design"        "Wait (typically <1 second)")
+)}}
+
+{{qa
+  "How do you handle transactions in DynamoDB?"
+  "Use TransactWriteItems for multi-item atomic writes (up to 100 items, 4 MB total). It costs 2x normal write. For simple conditional writes — like only decrement inventory if count > 0 — use ConditionExpression instead. It is cheaper (1x cost) and sufficient for most use cases."
+  "How do you do analytics on DynamoDB data?"
+  "Export to S3 using the built-in Export to S3 feature (does not consume RCU), then query with Athena. For real-time analytics, use DynamoDB Streams to feed Kinesis Data Firehose, which delivers to S3, where Athena queries it. Never scan the live table for analytics — it is slow, expensive, and adds read load."
+}}
+
+{{followup "What if you need to change your access patterns after launch?" "Add a GSI for the new pattern — this is the easiest path and you can create up to 20 GSIs at any time. If a new pattern does not fit any GSI, migrate to a new table with a redesigned key schema using DynamoDB Streams to replicate live data during the migration. If patterns become too ad-hoc or too numerous, consider moving to Postgres — DynamoDB is not the right fit once you need flexible querying."}}
+
+{{checklist
+  "Design table around access patterns first, not entities"
+  "Use PK#value SK#value convention for single-table design"
+  "GSI for every alternative access pattern (up to 20)"
+  "Start on-demand, switch to provisioned after traffic stabilizes"
+  "TTL for all temporary data (sessions, tokens, events)"
+  "Write sharding for hot partition keys (celebrity problem)"
+  "Cache aggregated counts in Redis to avoid scatter-gather reads"
+  "Export to S3 for analytics, never scan the table"
+  "400 KB item limit — large objects go in S3, key in DynamoDB"
+  "Monitor ConsumedReadCapacityUnits, ConsumedWriteCapacityUnits, ThrottledRequests"
+}}

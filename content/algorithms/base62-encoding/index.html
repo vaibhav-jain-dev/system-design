@@ -1,0 +1,277 @@
+{{phase 1 "What Is Base62 Encoding?" "3 min"}}
+
+{{say "Base62 encoding converts an integer into a compact string using 62 characters: a-z, A-Z, and 0-9. It is the backbone of URL shorteners and anywhere you need short, URL-safe identifiers from numeric IDs."}}
+
+{{table "Base62 Character Set" (rows
+  (row "Range"    "Characters"                    "Count"  "Index Range")
+  (row "a-z"      "abcdefghijklmnopqrstuvwxyz"    "26"     "0-25")
+  (row "A-Z"      "ABCDEFGHIJKLMNOPQRSTUVWXYZ"    "26"     "26-51")
+  (row "0-9"      "0123456789"                    "10"     "52-61")
+  (row "Total"    "62 unique URL-safe characters"  "62"    "Full alphabet")
+)}}
+
+{{think "Why 62 characters? These are exactly the URL-safe characters that need no percent-encoding. Base64 adds + and / which require escaping in URLs. Base62 gives clean, copy-pasteable strings that work in URLs, QR codes, and SMS."
+  (whyNot "Base64" "Adds + and / which need %2B and %2F escaping in URLs, breaking copy-paste and link previews.")
+  (whatIf "you used Base36 (lowercase + digits only)" "You get case-insensitive codes that work in case-folding systems, but a 7-char code only gives 36^7 = 78 billion combos — 45x less capacity than Base62.")
+}}
+
+{{hint "alphabet choice" "The alphabet order (lowercase first, then uppercase, then digits) sets which characters appear for low vs high numbers. Index 0 = 'a', index 61 = '9'. Padding uses 'a' (index 0) because it is the zero-character."}}
+
+{{table "Code Length vs Capacity" (rows
+  (row "Length"  "Combinations (62^n)"     "At 100M/day Lasts"  "Use Case")
+  (row "6"       "56.8 billion"            "~1.5 years"         "Small-scale demos")
+  (row "7"       "3.52 trillion"           "~96 years"          "Production URL shortener")
+  (row "8"       "218.3 trillion"          "~5,980 years"       "Overkill for most systems")
+  (row "9"       "13.5 quadrillion"        "~370K years"        "Massive distributed ID space")
+)}}
+
+{{key "7 characters of Base62 gives 3.52 trillion unique strings. At 100 million new URLs per day, that lasts 96 years. This is why every URL shortener uses 7-character codes."}}
+
+{{triggerQs "Questions this table triggers"
+  "Why 7 characters specifically?"
+  "62^7 = 3.52 trillion codes. At 100 million new URLs per day that is 96 years of capacity. 6 characters only lasts 1.5 years. 8 is overkill. 7 is the minimum safe choice for a production system."
+  "How do you calculate the right length for a given traffic rate?"
+  "Divide total combinations (62^n) by your daily write rate, then convert days to years. For 1 billion URLs per day you need 62^n > 365 billion, which means n=7 gives 3.52 trillion — still safe for 9 years."
+}}
+
+{{phase 2 "The Algorithm: Divide and Mod" "5 min"}}
+
+{{say "The encoding algorithm is identical to converting a decimal number to any other base. Repeatedly divide by 62 and map each remainder to a character."}}
+
+{{diagram "algo-base62-process"}}
+
+{{think "Divide-and-mod is the natural choice here because Base62 is positional notation in base 62, exactly like decimal is base 10. Each division strips the least-significant digit."
+  (how "do you handle the zero case?" "num=0 loops zero times, so chars is empty. Special-case it: return the padding character (ALPHABET[0]) repeated min_length times.")
+  (whatIf "the input integer is negative" "Negative numbers have no meaningful encoding in URL-safe Base62. Raise ValueError immediately — do not silently return garbage.")
+}}
+
+{{hint "reversed chars" "The divide-and-mod loop builds digits least-significant-first (because num % 62 gives the rightmost digit). Reversing at the end corrects the order to most-significant-first."}}
+
+{{table "Time and Space Complexity" (rows
+  (row "Operation"   "Time Complexity"    "Space Complexity"    "Explanation")
+  (row "Encode"      "O(log_62(n))"       "O(log_62(n))"        "Number of divisions equals output length")
+  (row "Decode"      "O(k)"               "O(1)"                "k = length of encoded string")
+  (row "Practical"   "O(7) for 7-char"    "O(7) = O(1)"         "Fixed output length makes both effectively constant")
+)}}
+
+{{triggerQs "Questions this phase triggers"
+  "What is the time complexity of encode?"
+  "O(log_62(n)), which equals the output length. For a 7-character code the loop runs exactly 7 times. In practice this is O(1) because the output length is fixed."
+  "Why do you reverse the character array at the end?"
+  "The mod operation produces digits least-significant-first. The first remainder is the rightmost character. Reversing corrects to the standard most-significant-first representation."
+}}
+
+{{phase 3 "Python Implementation" "5 min"}}
+
+{{say "full implementation with encode, decode, and padding to a fixed length."}}
+
+{{code "python" `import string
+
+ALPHABET = string.ascii_lowercase + string.ascii_uppercase + string.digits
+BASE = len(ALPHABET)  # 62
+
+def base62_encode(num: int, min_length: int = 7) -> str:
+    """Encode a non-negative integer to a Base62 string."""
+    if num < 0:
+        raise ValueError("Cannot encode negative numbers")
+    if num == 0:
+        return ALPHABET[0] * min_length
+
+    chars = []
+    while num > 0:
+        chars.append(ALPHABET[num % BASE])
+        num //= BASE
+
+    result = "".join(reversed(chars))
+    # Left-pad with 'a' (index 0) to reach min_length
+    if len(result) < min_length:
+        result = ALPHABET[0] * (min_length - len(result)) + result
+    return result
+
+def base62_decode(encoded: str) -> int:
+    """Decode a Base62 string back to an integer."""
+    num = 0
+    for char in encoded:
+        num = num * BASE + ALPHABET.index(char)
+    return num
+
+# --- Verification ---
+original_id = 123456789
+encoded = base62_encode(original_id)
+decoded = base62_decode(encoded)
+assert decoded == original_id
+print(f"Max 7-char value: {BASE ** 7 - 1:,}")  # 3,521,614,606,207
+`}}
+
+{{think "Left-padding with ALPHABET[0] ('a') ensures all codes are exactly min_length characters. This gives fixed-length URLs regardless of how small the counter ID is. Without padding, early codes would be 1-2 chars and expose that the system is new."
+  (whyNot "right-padding" "Right-padding changes the numeric value decoded from the string. Left-padding preserves the original integer: 'aaaaabc' decodes back to the same number as 'bc'.")
+  (whatIf "two IDs encode to the same string" "Impossible with counter-based IDs. The encode/decode pair is a bijection: every integer maps to exactly one string and back. Collisions only occur with hash-based generation.")
+}}
+
+{{phase 4 "Go Implementation" "5 min"}}
+
+{{say "same algorithm in Go, optimized with a stack-allocated buffer to avoid heap allocations."}}
+
+{{code "go" `package base62
+
+import ("errors"; "strings")
+
+const alphabet = "abcdefghijklmnopqrstuvwxyz" +
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+const base = 62
+
+func Encode(num uint64, minLen int) string {
+    if num == 0 {
+        return strings.Repeat(string(alphabet[0]), minLen)
+    }
+    var buf [12]byte
+    i := len(buf)
+    for num > 0 {
+        i--
+        buf[i] = alphabet[num%base]
+        num /= base
+    }
+    result := string(buf[i:])
+    if pad := minLen - len(result); pad > 0 {
+        result = strings.Repeat(string(alphabet[0]), pad) + result
+    }
+    return result
+}
+
+func Decode(encoded string) (uint64, error) {
+    var num uint64
+    for _, ch := range encoded {
+        idx := strings.IndexRune(alphabet, ch)
+        if idx < 0 {
+            return 0, errors.New("invalid Base62 character")
+        }
+        num = num*base + uint64(idx)
+    }
+    return num, nil
+}
+`}}
+
+{{hint "stack buffer" "The Go implementation uses a fixed [12]byte stack buffer instead of a slice. A uint64 Base62 encodes to at most 11 characters (62^11 > 2^64). No heap allocation needed — this is the zero-copy approach used in production ID services."}}
+
+{{phase 5 "Collision Handling Strategies" "5 min"}}
+
+{{say "If you use counter-based IDs, collisions are impossible by construction. But if you generate keys by hashing the input URL, you need a collision strategy."}}
+
+{{table "Collision Handling Approaches" (rows
+  (row "Strategy"              "How It Works"                                           "Latency"        "Complexity")
+  (row "Counter + Base62"      "Auto-increment guarantees uniqueness"                   "O(1) no retry"  "Simplest")
+  (row "Hash + DB check"       "Hash URL, check DB, retry on collision"                 "1-3 DB reads"   "Medium")
+  (row "Pre-generated keys"    "KGS generates keys offline, app fetches batch"          "O(1) no retry"  "Extra service")
+  (row "Bloom filter guard"    "Check bloom filter before DB to reduce lookups"         "O(1) filter"    "Medium")
+  (row "Range allocation"      "Each server gets ID range (1-1M, 1M-2M, ...)"          "O(1) no retry"  "Coordination needed")
+)}}
+
+{{think "Counter + Base62 is the correct default. Hash-based generation seems appealing because the same URL always produces the same code (useful for deduplication), but the birthday paradox collision rate becomes significant at scale."
+  (whyNot "hash-based generation" "At 1 billion existing URLs in a 3.52 trillion keyspace, birthday paradox collision probability is ~0.028% per insert — roughly 28,000 collisions per 100 million writes. Each needs a DB retry.")
+  (whatIf "you need deduplication (same URL → same code)" "Store a reverse index: long_url → short_code. On write, check this index first. If found, return the existing code. Use counter-based IDs for the code itself — do not hash.")
+  (how "does the KGS (Key Generation Service) work?" "A separate service pre-generates millions of Base62 codes and stores them in a 'used' and 'available' table. App servers fetch a batch of 1000 codes on startup. No collision possible because KGS marks codes as used before handing them out.")
+}}
+
+{{code "python" `import hashlib
+
+ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+def hash_based_encode(long_url: str, attempt: int = 0) -> str:
+    """Generate a short code by hashing the URL.
+    On collision, append attempt counter and rehash.
+    """
+    raw = long_url if attempt == 0 else f"{long_url}:{attempt}"
+    md5_hex = hashlib.md5(raw.encode()).hexdigest()
+
+    # Take first 44 bits of MD5 (enough for 7 Base62 chars)
+    num = int(md5_hex[:11], 16) % (62 ** 7)
+
+    chars = []
+    for _ in range(7):
+        chars.append(ALPHABET[num % 62])
+        num //= 62
+    return "".join(reversed(chars))
+
+
+def create_short_url(long_url: str, db) -> str:
+    """Create short URL with collision retry loop."""
+    for attempt in range(5):
+        code = hash_based_encode(long_url, attempt)
+        if not db.exists(code):
+            db.insert(code, long_url)
+            return code
+    raise Exception("Too many collisions, falling back to KGS")
+`}}
+
+{{avoid "Never rely on random generation without collision detection. At 1 billion existing URLs in a 3.52 trillion keyspace, the birthday paradox gives a collision rate of roughly 0.028% per insert — about 28,000 collisions per 100 million inserts."}}
+
+{{triggerQs "Questions this phase triggers"
+  "How do you prevent two servers from generating the same counter ID?"
+  "Three patterns: 1) Single auto-increment DB (bottleneck but simple). 2) Range allocation — server A owns 1–1M, server B owns 1M–2M. 3) Snowflake ID (timestamp + machine + sequence) then Base62-encode the result. Range allocation is the most common for URL shorteners."
+  "What is a KGS and when do you use it?"
+  "A Key Generation Service pre-generates Base62 codes offline and stores them in a database with 'available' and 'used' partitions. App servers fetch batches of ~1000 codes. Use KGS when you want zero-latency code generation with guaranteed uniqueness and no counter coordination complexity."
+}}
+
+{{phase 6 "Comparison: Encoding Schemes" "5 min"}}
+
+{{say "Let me compare Base62 against other encoding schemes to justify why it is the standard choice for URL shorteners."}}
+
+{{compare "Short ID Generation Strategy" (options
+  (best "Counter + Base62" "Zero collisions, O(1) generation, predictable length. Sequential IDs are guessable but can be scrambled with XOR cipher or format-preserving encryption.")
+  (alt "Base64url" "Uses 64 characters (adds - and _). Slightly more compact but those characters look odd in vanity URLs. Marginal benefit over Base62.")
+  (alt "MD5 + Truncate" "Deterministic: same input always gives same output. Useful for deduplication. But truncation raises collision probability significantly.")
+  (nofit "UUID v4" "128-bit random IDs are 36 characters with dashes. Far too long for URL shortening. No ordering. Overkill for this use case.")
+)}}
+
+{{table "Encoding Scheme Comparison" (rows
+  (row "Scheme"           "Characters Used"      "7-Char Capacity"        "URL Safe"   "Collision Risk")
+  (row "Base62"           "a-z A-Z 0-9"          "3.52 trillion"          "Yes"        "None with counter")
+  (row "Base64url"        "a-z A-Z 0-9 - _"      "4.40 trillion"          "Yes"        "None with counter")
+  (row "MD5 + truncate"   "0-9 a-f (hex)"        "268 million (7 hex)"    "Yes"        "High after truncation")
+  (row "UUID v4"          "0-9 a-f + dashes"     "N/A (36 chars fixed)"   "Yes"        "Near zero")
+  (row "Nanoid"           "Custom alphabet"       "Configurable"           "Yes"        "Configurable")
+)}}
+
+{{think "Base64url is technically superior to Base62 in capacity but Base62 wins in practice. The - and _ characters in Base64url look like typos in short URLs and some legacy systems treat - specially in path segments."
+  (whyNot "Base64url" "The - character is valid in URLs but looks like a word-break. Some SMS systems, Slack, and older email clients split links at hyphens. Base62 codes are visually unambiguous.")
+  (whatIf "you used Base58 (Bitcoin alphabet)" "Base58 removes 0, O, I, l to avoid visual ambiguity. Useful for codes humans must type (e.g., gift cards), but 7-char capacity drops to 58^7 = 2.21 trillion. Fine for URL shorteners but choose it consciously.")
+}}
+
+{{phase 7 "System Design Integration" "5 min"}}
+
+{{say "Base62 encoding appears in URL shortener interviews as the key generation mechanism. Here is how it fits into the full write and read paths."}}
+
+{{diagram "algo-base62-url-shortener"}}
+
+{{hint "read path is hot" "The read path (decode short URL → look up long URL → redirect) is 100-1000x more frequent than the write path. Cache aggressively: keep the short_code → long_url mapping in Redis with a 24h TTL. The Base62 decode itself is O(7) = effectively free."}}
+
+{{qa
+  "Why not just use the raw integer ID in the URL?"
+  "Integers are longer in decimal. ID 3,521,614,606,207 is 13 digits but only 7 characters in Base62. Shorter URLs share more easily, fit in tweets and SMS, and look professional."
+  "Can an attacker reverse Base62 to guess other URLs?"
+  "Yes. Sequential counters let attackers enumerate adjacent URLs by incrementing the decoded integer. Mitigate with: 1) XOR the counter with a secret before encoding. 2) Format-preserving encryption (FF1 mode AES). 3) Pre-generated random key service (KGS)."
+}}
+
+{{triggerQs "Questions this section triggers"
+  "How would you scale the write path to 100K URLs per second?"
+  "Use a distributed counter: each app server holds a pre-allocated ID range (e.g., 1M IDs at a time) from a central counter service or ZooKeeper. No coordination per write. Encode the counter with Base62. At 100K writes/sec, a 7-char Base62 space lasts decades."
+  "How do you handle custom aliases (user picks their own short code)?"
+  "Validate that the alias uses only Base62 characters and is 3-20 chars long. Check the alias against the short_code column with a unique index. On conflict, return HTTP 409 and prompt for a different alias. Store custom aliases in the same table as generated codes."
+}}
+
+{{followup "How do you make Base62 IDs non-sequential without losing uniqueness?" "Apply a bijective scramble function. XOR the counter with a fixed 43-bit secret key, or use a Feistel cipher with a 43-bit block size. The output is still unique because the mapping is one-to-one, but the sequence appears random to external observers. Decode by applying the inverse XOR or inverse Feistel rounds."}}
+
+{{phase 8 "Interview Checklist" "2 min"}}
+
+{{checklist
+  "Base62 uses a-z, A-Z, 0-9 = 62 URL-safe characters"
+  "7 chars = 62^7 = 3.52 trillion unique codes (96 years at 100M/day)"
+  "Algorithm: repeated divide-by-62, map remainder to character, then reverse"
+  "Time: O(log_62 n), practically O(1) for fixed-length output"
+  "Counter-based = zero collisions; hash-based = needs retry logic"
+  "Base62 beats Base64 for URLs: no special characters to escape"
+  "Scramble sequential IDs with XOR or Feistel cipher for security"
+  "Pre-generated key service (KGS) is best for production at scale"
+}}
+
+{{key "Base62 is a simple divide-and-mod algorithm, but the interview tests whether you understand the trade-offs: counter vs hash generation, collision handling, guessability mitigation, and how it integrates with the key generation service in a URL shortener design."}}

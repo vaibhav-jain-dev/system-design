@@ -1,0 +1,281 @@
+{{phase 1 "What Is the Saga Pattern?" "3 min"}}
+
+{{say "A Saga is a sequence of local transactions. Each step publishes an event — or sends a command — that triggers the next step. If any step fails, compensating transactions run in reverse to undo prior steps. No global lock, no 2PC coordinator."}}
+
+{{diagram "fund-saga-overview"}}
+
+{{think "Why not just use a distributed transaction?"
+  (whyNot "2PC (two-phase commit)" "2PC locks rows across services for the duration of the transaction. One slow or crashed service stalls every participant. In microservices across teams, you rarely control all participants.")
+  (how "Saga replaces atomic commit" "Each service commits its own local transaction immediately. Consistency is achieved eventually via compensations, not via a global lock.")
+}}
+
+{{hint "the key insight" "A Saga trades ACID isolation for availability. Two concurrent sagas can see each other's partial state. That's the core tradeoff — you must design your business logic around it."}}
+
+{{table "Saga vs Traditional Transaction" (rows
+  (row "Property" "ACID Transaction" "Saga")
+  (row "Scope" "Single DB, global lock" "Multiple services, local commits")
+  (row "Consistency" "Immediate, strong" "Eventually consistent")
+  (row "Failure handling" "Rollback" "Compensating transactions")
+  (row "Scalability" "Blocked by locks" "High — no distributed locks")
+  (row "Complexity" "Simple (DB handles it)" "High — you write compensations")
+)}}
+
+{{triggerQs "Phase 1 Trigger Questions"
+  "When would you choose a Saga over a regular database transaction?"
+  "When the operation spans multiple services that own separate databases. A single-DB monolith should just use a database transaction — Sagas add complexity with no benefit there."
+  "Is a Saga ACID?"
+  "No. Sagas are ACD without isolation. Atomicity is achieved via compensations, consistency is eventual, durability holds per service. The missing I — isolation — is the core gotcha."
+}}
+
+{{phase 2 "Choreography Saga" "5 min"}}
+
+{{say "In a choreography Saga, there is no central coordinator. Each service listens to domain events and reacts by performing its local step and emitting the next event. Services are fully decoupled — they don't call each other directly."}}
+
+{{diagram "fund-saga-choreography"}}
+
+{{think "Choreography is tempting because it's decoupled — but that decoupling creates its own problems."
+  (whyNot "choreography at scale" "With 7 services each reacting to events, tracing a single saga across all of them requires correlating log entries by saga_id across 7 different service logs. There is no single place that shows the current saga state.")
+  (whatIf "an event is published but no consumer is listening" "The saga silently stalls. No orchestrator notices. You need dead-letter queues and saga timeout monitoring to detect this case.")
+  (how "event correlation" "Every event carries a saga_id field. Services must propagate this ID through every step. Observability tooling (Jaeger, Datadog) traces by saga_id.")
+}}
+
+{{code "python" `# Choreography: Order Service publishes event
+# Payment Service listens and reacts
+
+# order_service.py
+def place_order(order: Order):
+    db.save(order)
+    event_bus.publish("order.created", {
+        "saga_id": order.id,
+        "customer_id": order.customer_id,
+        "amount": order.total,
+    })
+
+# payment_service.py
+@event_bus.subscribe("order.created")
+def handle_order_created(event):
+    charge_customer(event["customer_id"], event["amount"])
+    event_bus.publish("payment.charged", {
+        "saga_id": event["saga_id"],
+        "payment_id": new_payment_id(),
+    })
+
+# restaurant_service.py
+@event_bus.subscribe("payment.charged")
+def handle_payment_charged(event):
+    notify_restaurant(event["saga_id"])
+    event_bus.publish("restaurant.notified", {"saga_id": event["saga_id"]})
+`}}
+
+{{hint "when to use choreography" "Prefer choreography for simple, short sagas with 2-3 steps. For food delivery (6+ steps with multiple compensations), orchestration wins — you need a single place to see what went wrong."}}
+
+{{triggerQs "Choreography Questions"
+  "How do you debug a stalled choreography saga?"
+  "Query the event bus dead-letter queue for the saga_id. Check each service's event log in order. Without a central orchestrator, you're correlating logs — which is why saga_id propagation and structured logging are non-negotiable."
+  "What's the main operational risk of choreography?"
+  "Silent failure. If a service goes down after consuming an event but before publishing the next one, the saga stalls with no alert. You need a saga timeout monitor that queries all in-flight saga_ids older than N minutes."
+}}
+
+{{phase 3 "Orchestration Saga" "5 min"}}
+
+{{say "In an orchestration Saga, a central saga orchestrator — a dedicated service — tells each participant what to do via commands. Participants respond with success or failure. The orchestrator tracks the saga state and decides what to do next."}}
+
+{{diagram "fund-saga-orchestration"}}
+
+{{think "The orchestrator is the source of truth for saga state — that's its strength and its risk."
+  (whyNot "putting orchestration logic in the Order Service" "The Order Service becomes a fat orchestrator responsible for payment, restaurants, and delivery — violating SRP. Saga orchestration should live in a dedicated saga service or be handled by a workflow engine.")
+  (how "orchestrator state machine" "The orchestrator persists a saga_log table with (saga_id, step, status, timestamp). On each response, it transitions the state machine and issues the next command. On crash, it replays from the last committed step.")
+  (whatIf "the orchestrator crashes mid-saga" "On restart, it reads all PENDING sagas from the saga_log and continues from the last successful step. This is why each step must be idempotent — replaying a completed step must be safe.")
+}}
+
+{{compare "Choreography vs Orchestration" (options
+  (best "Orchestration" "Central state tracking, easy debugging, explicit retry logic. Preferred for complex sagas with 4+ steps and multiple compensation paths.")
+  (alt "Choreography" "Lower coupling between services, no orchestrator bottleneck. Good for 2-3 step sagas in teams that already have strong event-driven infrastructure.")
+  (nofit "Hybrid (mix per saga)" "Inconsistent mental model across teams. Pick one pattern per bounded context.")
+)}}
+
+{{triggerQs "Orchestration Questions"
+  "What happens if the orchestrator becomes a bottleneck?"
+  "Shard by saga_id. Each shard handles a subset of sagas. Use a stateless orchestrator with state persisted to a database — horizontal scaling then works. Uber Cadence and AWS Step Functions both shard internally."
+  "Is the orchestrator a single point of failure?"
+  "Only if stateful and single-instance. A stateless orchestrator with state in Postgres or DynamoDB survives crashes. Run 2+ orchestrator instances with leader election or idempotent workers."
+}}
+
+{{phase 4 "Compensating Transactions" "5 min"}}
+
+{{say "Every saga step must have a compensating transaction — the business-level undo. Compensations are not rollbacks: they run after the step committed. They must account for side effects that already happened in the real world."}}
+
+{{diagram "fund-saga-compensation"}}
+
+{{think "Compensations are harder than they look — they encode business rules, not just DB deletions."
+  (whyNot "DELETE FROM payments WHERE saga_id = X" "A customer's payment may have already settled with Stripe. You can't delete a Stripe charge — you issue a refund. Compensation is a new forward-moving action, not a DB undo.")
+  (whatIf "the compensation itself fails" "Retry the compensation with exponential backoff. If compensation repeatedly fails, page an on-call engineer — this is a stuck saga requiring manual intervention. Log it as a 'compensation failure alert' with full saga context.")
+  (how "compensation ordering" "Compensations run in reverse order of the forward steps. Step 3 compensation runs before step 2 compensation. Each compensation must be idempotent.")
+}}
+
+{{code "python" `# Food delivery saga: 6 forward steps, 6 compensating transactions
+
+SAGA_STEPS = [
+    {
+        "name": "charge_customer",
+        "action": lambda ctx: payment_svc.charge(ctx["customer_id"], ctx["amount"]),
+        "compensate": lambda ctx: payment_svc.refund(ctx["payment_id"]),
+    },
+    {
+        "name": "notify_restaurant",
+        "action": lambda ctx: restaurant_svc.notify(ctx["order_id"]),
+        "compensate": lambda ctx: restaurant_svc.cancel(ctx["order_id"]),
+    },
+    {
+        "name": "assign_partner",
+        "action": lambda ctx: delivery_svc.assign(ctx["order_id"]),
+        "compensate": lambda ctx: delivery_svc.unassign(ctx["order_id"]),
+    },
+    {
+        "name": "pickup_order",
+        "action": lambda ctx: delivery_svc.pickup(ctx["order_id"]),
+        "compensate": lambda ctx: delivery_svc.return_to_restaurant(ctx["order_id"]),
+    },
+    {
+        "name": "deliver_order",
+        "action": lambda ctx: delivery_svc.deliver(ctx["order_id"]),
+        "compensate": None,  # Delivered — no meaningful compensation
+    },
+    {
+        "name": "pay_partner",
+        "action": lambda ctx: payment_svc.pay_partner(ctx["partner_id"], ctx["fee"]),
+        "compensate": lambda ctx: payment_svc.claw_back(ctx["partner_id"], ctx["fee"]),
+    },
+]
+`}}
+
+{{hint "pivot transactions" "Some steps cannot be compensated after the fact — 'deliver_order' is an example. These are called pivot transactions. Design your saga so that once you pass the pivot, all remaining steps are retriable and not compensatable. Don't attempt to 'un-deliver' a physical package."}}
+
+{{triggerQs "Compensation Questions"
+  "A customer disputes a charge after the saga completed. Is that a saga concern?"
+  "No. Post-saga disputes are a separate business process (chargebacks, customer service). A saga handles in-flight consistency. Completed sagas are final — disputes go through a new process."
+  "What if compensation for 'notify restaurant' fails because the restaurant already started cooking?"
+  "This is where business logic must decide: maybe the compensation sends an apology + credit instead of a simple cancel. Compensations encode business rules, not just technical rollbacks. Design them with your product team."
+}}
+
+{{phase 5 "Idempotency in Sagas" "4 min"}}
+
+{{say "Every saga step must be idempotent. The orchestrator will retry failed steps. If the step executed but the response was lost, the retry must not double-charge or double-notify. Store (saga_id, step_name) before executing — if it already exists, return the prior result."}}
+
+{{code "python" `# Idempotency key pattern for saga steps
+
+def charge_customer_idempotent(saga_id: str, customer_id: str, amount: float):
+    idempotency_key = f"{saga_id}:charge_customer"
+
+    # Check if step already executed
+    existing = db.query(
+        "SELECT result FROM saga_step_log WHERE key = %s",
+        [idempotency_key]
+    )
+    if existing:
+        return existing["result"]  # Return prior result, don't charge again
+
+    # Execute the actual charge
+    payment_id = stripe.charge(customer_id, amount)
+
+    # Persist result atomically
+    db.execute(
+        "INSERT INTO saga_step_log (key, result, created_at) VALUES (%s, %s, NOW())",
+        [idempotency_key, {"payment_id": payment_id}]
+    )
+    return {"payment_id": payment_id}
+`}}
+
+{{think "Idempotency and 'at least once delivery' are inseparable in sagas."
+  (whyNot "relying on message deduplication at the broker layer" "Kafka and SQS guarantee at-least-once delivery. Message deduplication at the broker is optional and has a finite deduplication window (5 minutes in SQS). Application-level idempotency keys are the reliable guarantee.")
+  (how "idempotency key scoping" "Use (saga_id, step_name) as the composite key. Don't use just saga_id — a saga has multiple steps, each needing its own idempotency record.")
+}}
+
+{{hint "saga_step_log TTL" "Purge saga_step_log entries after saga completion + 7 days. Sagas rarely replay after completion. Keeping them forever inflates the table. A TTL index in Postgres or DynamoDB handles this automatically."}}
+
+{{phase 6 "Saga Failure Recovery" "4 min"}}
+
+{{say "On any failure — service crash, timeout, network partition — the saga orchestrator recovers by reading the saga_log from the database, finding the last successful step, and replaying forward. Because every step is idempotent, replaying a completed step is safe."}}
+
+{{diagram "fund-saga-recovery"}}
+
+{{think "Recovery correctness depends entirely on what 'last successful step' means."
+  (how "step success definition" "A step is successful only when both the action completed AND the saga_log record is committed. If the service crashed after the action but before the log write, the step replays — which is safe because it's idempotent.")
+  (whatIf "the saga_log database itself is unavailable" "The saga stalls. This is acceptable — the saga_log DB (typically Postgres or DynamoDB) should be the highest-availability store in the system. Use multi-AZ replicas. A saga with a lost log is better than a saga with a corrupt log.")
+))
+
+{{table "Saga Log Schema" (rows
+  (row "Column" "Type" "Purpose")
+  (row "saga_id" "UUID" "Unique saga identifier")
+  (row "step_name" "VARCHAR" "e.g., 'charge_customer'")
+  (row "status" "ENUM" "PENDING, COMPLETED, COMPENSATING, FAILED")
+  (row "result" "JSONB" "Step output (payment_id, etc.)")
+  (row "created_at" "TIMESTAMP" "For timeout detection")
+  (row "updated_at" "TIMESTAMP" "Last state transition")
+)}}
+
+{{triggerQs "Recovery Questions"
+  "How do you detect a saga that is stuck — no progress for 10 minutes?"
+  "A background job queries: SELECT * FROM saga_log WHERE status = 'PENDING' AND updated_at < NOW() - INTERVAL '10 minutes'. For each stuck saga, page on-call or trigger automatic retry. This is the saga watchdog — essential in production."
+  "What is the difference between a saga timeout and a saga failure?"
+  "A timeout means no response received within the deadline — the step may have succeeded or failed. Retry with idempotency key — the idempotent handler returns the prior result if it already ran. A saga failure means the step returned an explicit error — trigger compensations."
+}}
+
+{{phase 7 "Saga vs 2PC" "4 min"}}
+
+{{say "Two-phase commit (2PC) achieves distributed atomicity through a prepare/commit protocol with a coordinator. Every participant locks resources during the prepare phase. Saga achieves eventual consistency through local commits and compensations — no distributed locks, no coordinator."}}
+
+{{diagram "fund-saga-vs-2pc"}}
+
+{{table "2PC vs Saga" (rows
+  (row "Property" "2PC" "Saga")
+  (row "Isolation" "Full ACID isolation" "None — partial state visible")
+  (row "Distributed locks" "Yes — held during prepare" "None")
+  (row "Coordinator failure" "Blocks all participants" "Saga replays from log")
+  (row "Performance" "High latency (2 round trips + locks)" "Low — each step commits immediately")
+  (row "Complexity" "Protocol handled by DB driver" "You write compensations + recovery")
+  (row "Best for" "Same-DB multi-table operations" "Cross-service, cross-DB workflows")
+)}}
+
+{{think "2PC is not dead — it's misapplied when used across services."
+  (whyNot "2PC across microservices" "Each service may use a different DB. XA protocol (distributed 2PC) requires all DBs to support it, the coordinator to be perpetually available, and holds locks for seconds. In practice, XA is fragile and rarely used in modern microservices.")
+  (how "2PC still relevant" "Within a single service with multiple DB tables — or with databases that support distributed transactions natively (CockroachDB, Spanner) — 2PC is perfectly valid. Don't rewrite a monolith's transaction to a saga unnecessarily.")
+}}
+
+{{hint "the interviewer's 2PC trap" "If asked 'why not 2PC?', don't just say 'it doesn't scale.' Say: 2PC holds distributed locks for the duration of the prepare phase. In a microservices system where each service owns its DB, you'd need XA — which requires coordinator availability and lock duration across network calls. That's fragile. Saga trades isolation for availability."}}
+
+{{triggerQs "2PC vs Saga Questions"
+  "Can you use both 2PC and Saga in the same system?"
+  "Yes. Use 2PC within a service (local DB transaction across tables). Use Saga across services. These are complementary — local atomicity via 2PC, cross-service eventual consistency via Saga."
+  "What problem does 2PC have if the coordinator crashes after sending 'prepare' but before 'commit'?"
+  "All participants are blocked with locks held, waiting for the coordinator's commit decision. This is the in-doubt transaction problem. Recovery requires a new coordinator to query participants and resolve — but if the coordinator had only partial state written, resolution is ambiguous. Saga avoids this by having no cross-service commit phase."
+}}
+
+{{phase 8 "Interview Summary" "3 min"}}
+
+{{say "Saga is the standard pattern for long-running distributed workflows. Use orchestration for anything with 4+ steps or multiple compensation paths. Implement idempotency at every step with (saga_id, step_name) keys. Monitor stuck sagas with a watchdog. Never expect isolation — design business logic to tolerate temporary partial state."}}
+
+{{table "Real-World Saga Implementations" (rows
+  (row "System" "Use Case" "Notes")
+  (row "Uber Cadence" "Trip workflows, driver assignment" "Stateful workflow engine with built-in saga support")
+  (row "Netflix Conductor" "Content processing pipelines" "Open-source orchestration workflow engine")
+  (row "AWS Step Functions" "Multi-service order workflows" "Managed orchestration, built-in retry and error handling")
+  (row "Temporal.io" "Financial transactions, onboarding" "Cadence successor, popular in fintech")
+)}}
+
+{{avoid "Saying 'Saga provides isolation.' It does not. Two concurrent sagas can read each other's intermediate state. This is the most common interview mistake. The fix is semantic locks: mark a resource as 'pending' so other sagas skip it, or design business logic to tolerate temporary inconsistency."}}
+
+{{avoid "Conflating compensating transactions with database rollbacks. A compensation is a new, forward-moving business action (issue refund, cancel notification). It runs after the original step committed. It is not a DB ROLLBACK statement."}}
+
+{{checklist
+  "Saga = sequence of local transactions with compensating transactions for rollback"
+  "Choreography: event-driven, decoupled, hard to debug at scale"
+  "Orchestration: central state tracking, preferred for 4+ step sagas"
+  "Every step must be idempotent — use (saga_id, step_name) idempotency keys"
+  "Saga log persisted to DB; watchdog detects stuck sagas older than N minutes"
+  "Sagas have no isolation — use semantic locks or tolerate partial state"
+  "2PC holds distributed locks; Saga is eventually consistent with no locks"
+  "Pivot transactions cannot be compensated — design the saga around them"
+}}
+
+{{key "A Saga replaces a distributed transaction: each service commits locally, compensating transactions undo prior steps on failure, and the orchestrator's persisted saga_log enables crash recovery — all without a single distributed lock."}}

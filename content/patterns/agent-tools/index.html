@@ -1,0 +1,810 @@
+{{phase 1 "What Is the Agent Pattern?" "5 min"}}
+
+{{say "An LLM agent is a system where the model decides what actions to take, executes those actions via tools, observes the results, and iterates until the task is complete. Instead of a single prompt-response cycle, the agent runs an autonomous loop: reason about what to do, call a tool, observe the result, then decide the next step."}}
+
+{{think "The key insight: the LLM becomes a controller, not just a text generator. It reads the user's request, selects the right tool from a defined set, formats the tool call, interprets the result, and decides whether to call another tool or return a final answer. This is the foundation of Claude's tool use, OpenAI function calling, and every AI assistant that can browse the web or run code."
+  (whyNot "a single large prompt" "A single prompt cannot access real-time data, execute code, or query a database. The model's knowledge is frozen at training time. Tools break that limitation — the agent becomes a real-time actor, not a static text predictor.")
+  (whatIf "the task steps are predictable" "Use prompt chaining instead. Agents are for tasks where you cannot know the sequence of steps before seeing the input. If you can draw the flowchart before the user speaks, you do not need an agent — a deterministic chain is cheaper, faster, and easier to debug.")
+}}
+
+{{table "Agent Pattern vs Other LLM Patterns" (rows
+  (row "Pattern"           "LLM Calls"  "Control Flow"            "Use Case"                          "Example")
+  (row "Single prompt"     "1"          "User -> LLM -> Response" "Simple Q&A, summarization"         "Chatbot, classification")
+  (row "Prompt chaining"   "2-5"        "Predefined sequence"     "Multi-step with known steps"       "Extract -> Classify -> Generate")
+  (row "Agent with tools"  "3-20+"      "LLM decides next step"   "Open-ended tasks needing tools"    "Research assistant, code helper")
+  (row "Multi-agent"       "10-100+"    "Agents collaborate"      "Complex workflows with roles"      "Software team simulation")
+)}}
+
+{{key "Use the agent pattern when you cannot predict the sequence of steps needed to complete a task. If the steps are predictable, use prompt chaining instead. Agents shine when different user inputs require different tool combinations and orderings."}}
+
+{{triggerQs "Questions this phase could trigger"
+  "How do you decide between an agent and prompt chaining?"
+  "Prompt chaining when the steps are fixed — extract then classify then generate. Agent when steps depend on intermediate results. A research task might need 2 searches or 10 depending on the topic. If you can draw the flowchart before seeing the input, use chaining. If not, use an agent."
+  "What is the main operational risk of agents vs chains?"
+  "Unbounded cost. A chain makes exactly N LLM calls. An agent can loop indefinitely, each iteration burning tokens. Without hard limits on iterations, tokens, and wall time, a single adversarial prompt can trigger hundreds of LLM calls. Always set budgets before deploying any agent to production."
+}}
+
+{{phase 2 "Agent Architecture: The ReAct Loop" "8 min"}}
+
+{{say "The dominant agent architecture is ReAct: Reasoning plus Acting. The LLM alternates between thinking about what to do (Reason) and executing a tool call (Act). After each action, it observes the result and decides the next step."}}
+
+{{diagram "pat-react-agent-loop"}}
+
+{{table "ReAct Loop Components" (rows
+  (row "Component"    "What It Does"                                    "Implementation"                          "Key Consideration")
+  (row "Reason"       "LLM thinks about what to do next"                "System prompt + conversation history"    "Include clear reasoning instructions")
+  (row "Act"          "LLM selects and calls a tool"                    "Function calling / tool_use API"         "Validate tool inputs before execution")
+  (row "Observe"      "Tool result is added to conversation"            "Append tool result as assistant context" "Truncate large results to fit context")
+  (row "Terminate"    "LLM decides the task is complete"                "LLM returns text without tool call"      "Set max iterations to prevent loops")
+)}}
+
+{{hint "max_iterations = 10-20" "Most legitimate agent tasks complete in 3-7 iterations. Setting a hard cap at 10-20 catches infinite loops without frustrating users on complex tasks. If you see requests hitting the cap regularly, your task decomposition is wrong — the agent is stuck in a loop trying to recover from a bad tool call or unclear instructions."}}
+
+{{phase 3 "Tool Definition & Function Calling" "8 min"}}
+
+{{say "Tools are defined with a name, description, and a JSON schema for parameters. The LLM reads these definitions and decides which tool to call based on the user request. Good tool descriptions are critical — the LLM uses them to select the right tool."}}
+
+{{code "python" `# Tool definitions using JSON schema format
+# Works with both OpenAI and Anthropic APIs
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the web for current information. Use this "
+                "when you need up-to-date facts, prices, or data "
+                "that may have changed recently."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query"
+                    },
+                    "num_results": {
+                        "type": "integer",
+                        "description": "Number of results (1-10)",
+                        "default": 5
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_python",
+            "description": (
+                "Execute Python code in a sandboxed environment. "
+                "Use for calculations, data analysis, or generating "
+                "charts. Has access to pandas, numpy, matplotlib."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Python code to execute"
+                    }
+                },
+                "required": ["code"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_database",
+            "description": (
+                "Run a read-only SQL query against the application "
+                "database. Use for looking up user data, orders, "
+                "or product information."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": "SQL SELECT query to execute"
+                    }
+                },
+                "required": ["sql"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": (
+                "Send an email to a recipient. Only use when the "
+                "user explicitly asks to send an email."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient email address"
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Email subject line"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Email body (plain text)"
+                    }
+                },
+                "required": ["to", "subject", "body"]
+            }
+        }
+    }
+]
+`}}
+
+{{table "Common Agent Tools" (rows
+  (row "Tool"              "Use Case"                          "Risk"                                  "Mitigation")
+  (row "Web search"        "Current events, recent data"       "Unreliable sources"                    "Verify with multiple sources")
+  (row "SQL query"         "Analytics, data lookup"            "SQL injection, data leaks"             "Read-only replica, parameterized queries")
+  (row "Code execution"    "Math, data processing"             "Arbitrary code execution"              "Sandboxed environment (Docker)")
+  (row "API calls"         "External services (Stripe, etc)"   "Unintended actions, charges"           "Require user confirmation for mutations")
+  (row "File read/write"   "Document processing"               "Path traversal, sensitive files"       "Allowlist directories, read-only default")
+  (row "Database write"    "CRUD operations"                   "Data corruption, mass deletes"         "Transaction limits, approval workflow")
+)}}
+
+{{avoid "Vague tool descriptions cause the LLM to pick the wrong tool. Bad: 'Search for things.' Good: 'Search the web for current information. Use when you need up-to-date facts, prices, or data that may have changed recently.' The description is the LLM's only guide for tool selection — make it specific about when to use and when NOT to use each tool."}}
+
+{{triggerQs "Questions this phase could trigger"
+  "How do you prevent the agent from calling a dangerous tool by mistake?"
+  "Three layers: write descriptions that explicitly state when NOT to call the tool (e.g., 'Only use when user explicitly asks to send an email'). Validate inputs server-side regardless of what the LLM passes. For destructive operations, require a separate human-in-the-loop confirmation step before executing. Never trust the LLM's judgment alone on write or mutation operations."
+  "How many tools should an agent have?"
+  "3-7 tools is the practical limit before tool selection quality degrades. More tools means more context consumed by tool definitions and a higher probability of choosing the wrong one. If you need many tools, use a router pattern: a lightweight classifier selects the relevant subset of tools before the main agent loop begins."
+}}
+
+{{phase 4 "Agent Implementation & Tool Examples" "12 min"}}
+
+{{say "Here is a complete, working agent loop implementation. This handles the full ReAct cycle: reason, act, observe, repeat until done or max iterations reached."}}
+
+{{code "python" `import openai
+import json
+from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass, field
+
+@dataclass
+class ToolResult:
+    name: str
+    result: str
+    success: bool
+    error: Optional[str] = None
+
+@dataclass
+class AgentResponse:
+    answer: str
+    tool_calls: List[ToolResult]
+    total_tokens: int
+    iterations: int
+
+
+class Agent:
+    """ReAct agent with tool calling capabilities."""
+
+    def __init__(
+        self,
+        model: str = "gpt-4o",
+        tools: List[dict] = None,
+        tool_handlers: Dict[str, Callable] = None,
+        system_prompt: str = None,
+        max_iterations: int = 10,
+        max_tokens_per_call: int = 1000,
+    ):
+        self.client = openai.OpenAI()
+        self.model = model
+        self.tools = tools or TOOLS
+        self.tool_handlers = tool_handlers or {}
+        self.max_iterations = max_iterations
+        self.max_tokens_per_call = max_tokens_per_call
+
+        self.system_prompt = system_prompt or (
+            "You are a helpful assistant with access to tools. "
+            "Think step by step about what tool to use. "
+            "If you have enough information, respond directly "
+            "without calling a tool. Be concise and accurate."
+        )
+
+    def _execute_tool(
+        self, name: str, arguments: dict
+    ) -> ToolResult:
+        """Execute a tool and return the result."""
+        handler = self.tool_handlers.get(name)
+        if not handler:
+            return ToolResult(
+                name=name, result="",
+                success=False,
+                error="Unknown tool: {}".format(name),
+            )
+
+        try:
+            result = handler(**arguments)
+            result_str = str(result)
+            # Truncate large results to prevent context overflow
+            if len(result_str) > 5000:
+                result_str = result_str[:5000] + "\n...[truncated]"
+            return ToolResult(
+                name=name, result=result_str, success=True
+            )
+        except Exception as e:
+            return ToolResult(
+                name=name, result="",
+                success=False, error=str(e),
+            )
+
+    def run(self, user_message: str) -> AgentResponse:
+        """Run the agent loop until completion or max iterations."""
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+
+        all_tool_calls = []
+        total_tokens = 0
+
+        for iteration in range(self.max_iterations):
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=self.tools,
+                tool_choice="auto",
+                max_tokens=self.max_tokens_per_call,
+            )
+
+            total_tokens += response.usage.total_tokens
+            message = response.choices[0].message
+
+            # If no tool calls, the agent is done
+            if not message.tool_calls:
+                return AgentResponse(
+                    answer=message.content or "",
+                    tool_calls=all_tool_calls,
+                    total_tokens=total_tokens,
+                    iterations=iteration + 1,
+                )
+
+            # Process each tool call
+            messages.append(message)
+
+            for tool_call in message.tool_calls:
+                func_name = tool_call.function.name
+                func_args = json.loads(
+                    tool_call.function.arguments
+                )
+
+                result = self._execute_tool(func_name, func_args)
+                all_tool_calls.append(result)
+
+                content = result.result if result.success else (
+                    "Error: {}".format(result.error)
+                )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": content,
+                })
+
+        # Max iterations reached
+        return AgentResponse(
+            answer="Could not complete within {} steps.".format(
+                self.max_iterations
+            ),
+            tool_calls=all_tool_calls,
+            total_tokens=total_tokens,
+            iterations=self.max_iterations,
+        )
+`}}
+
+{{say "The agent is only as useful as its tools. Here are production-quality implementations for common tools: web search, code execution, and database queries."}}
+
+{{code "python" `import subprocess
+import requests
+import psycopg2
+import tempfile
+import os
+
+# --- Web Search Tool ---
+
+def web_search(query: str, num_results: int = 5) -> str:
+    """Search the web using SerpAPI."""
+    api_key = os.environ["SERPAPI_KEY"]
+    response = requests.get(
+        "https://serpapi.com/search",
+        params={
+            "q": query,
+            "api_key": api_key,
+            "num": num_results,
+        }
+    )
+    data = response.json()
+    results = []
+    for item in data.get("organic_results", [])[:num_results]:
+        results.append(
+            "Title: {title}\nURL: {link}\nSnippet: {snippet}".format(
+                title=item.get("title", ""),
+                link=item.get("link", ""),
+                snippet=item.get("snippet", ""),
+            )
+        )
+    return "\n\n".join(results) if results else "No results found."
+
+
+# --- Python Code Execution Tool ---
+
+def execute_python(code: str) -> str:
+    """Execute Python code in a sandboxed subprocess."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".py", delete=False
+    ) as f:
+        f.write(code)
+        tmp_path = f.name
+
+    try:
+        result = subprocess.run(
+            ["python3", tmp_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd="/tmp",
+        )
+        output = result.stdout
+        if result.stderr:
+            output += "\nSTDERR: " + result.stderr
+        return output if output else "(no output)"
+    except subprocess.TimeoutExpired:
+        return "Error: Code execution timed out (30s)."
+    finally:
+        os.unlink(tmp_path)
+
+
+# --- Database Query Tool ---
+
+def query_database(sql: str) -> str:
+    """Execute a read-only SQL query."""
+    normalized = sql.strip().upper()
+    if not normalized.startswith("SELECT"):
+        return "Error: Only SELECT queries are allowed."
+
+    forbidden = [
+        "DROP", "DELETE", "INSERT", "UPDATE", "ALTER", "CREATE"
+    ]
+    for keyword in forbidden:
+        if keyword in normalized:
+            return "Error: {} not allowed.".format(keyword)
+
+    # IMPORTANT: Production code should use parameterized queries and a read-only DB user
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchmany(100)
+
+            header = " | ".join(columns)
+            lines = [header, "-" * len(header)]
+            for row in rows:
+                lines.append(
+                    " | ".join(str(val) for val in row)
+                )
+            return "\n".join(lines)
+    except Exception as e:
+        return "Query error: {}".format(str(e))
+    finally:
+        conn.close()
+
+
+# --- Register all tool handlers ---
+
+TOOL_HANDLERS = {
+    "web_search": web_search,
+    "execute_python": execute_python,
+    "query_database": query_database,
+}
+`}}
+
+{{key "Every tool must have: 1) Input validation to prevent misuse. 2) Output truncation to prevent context overflow. 3) Timeout to prevent hanging. 4) Error handling that returns useful messages the LLM can reason about. Never let a tool silently fail."}}
+
+{{think "Tool error messages are part of the agent's context — they must be informative. A generic 'error occurred' forces the agent to guess what went wrong. A specific 'Error: Only SELECT queries are allowed' lets the agent correct its approach on the next iteration without wasting a full LLM call to diagnose."
+  (whatIf "a tool returns a very large result" "Truncate to 5000 characters and append '...[truncated]'. The agent receives a signal that there is more data without blowing up the context window. Design your tools to summarize or paginate large results rather than dumping everything into context.")
+  (how "test tool reliability" "Write unit tests for each tool with: valid input (happy path), invalid input (bad SQL, missing params), empty results, and timeout scenarios. The agent cannot be more reliable than its tools. Flaky tools cause the agent to loop trying to recover from transient failures.")
+}}
+
+{{phase 5 "Agent with Anthropic Claude" "5 min"}}
+
+{{say "Claude uses a slightly different API structure for tool calling. Here is how to adapt the agent for the Anthropic API."}}
+
+{{code "python" `import anthropic
+import json
+from typing import Dict, Callable, List
+
+class ClaudeAgent:
+    """Agent using Anthropic Claude tool_use API."""
+
+    def __init__(
+        self,
+        model: str = "claude-sonnet-4-20250514",
+        tool_handlers: Dict[str, Callable] = None,
+        max_iterations: int = 10,
+    ):
+        self.client = anthropic.Anthropic()
+        self.model = model
+        self.tool_handlers = tool_handlers or TOOL_HANDLERS
+        self.max_iterations = max_iterations
+
+        # Claude uses a different tool schema format
+        self.tools = [
+            {
+                "name": "web_search",
+                "description": (
+                    "Search the web for current information."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "execute_python",
+                "description": "Execute Python code.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "Python code"
+                        }
+                    },
+                    "required": ["code"]
+                }
+            },
+            {
+                "name": "query_database",
+                "description": "Run a read-only SQL query.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "sql": {
+                            "type": "string",
+                            "description": "SQL SELECT query"
+                        }
+                    },
+                    "required": ["sql"]
+                }
+            },
+        ]
+
+    def run(self, user_message: str) -> str:
+        """Run the Claude agent loop."""
+        messages = [{"role": "user", "content": user_message}]
+
+        for _ in range(self.max_iterations):
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=1024,
+                tools=self.tools,
+                messages=messages,
+            )
+
+            if response.stop_reason == "tool_use":
+                messages.append({
+                    "role": "assistant",
+                    "content": response.content,
+                })
+
+                tool_results = []
+                for block in response.content:
+                    if block.type == "tool_use":
+                        handler = self.tool_handlers.get(
+                            block.name
+                        )
+                        if handler:
+                            try:
+                                result = handler(**block.input)
+                            except Exception as e:
+                                result = "Error: {}".format(e)
+                        else:
+                            result = "Unknown tool"
+
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": str(result),
+                        })
+
+                messages.append({
+                    "role": "user",
+                    "content": tool_results,
+                })
+            else:
+                for block in response.content:
+                    if hasattr(block, "text"):
+                        return block.text
+                return "No response generated."
+
+        return "Max iterations reached."
+`}}
+
+{{phase 6 "Error Handling & Safety Controls" "8 min"}}
+
+{{say "Agents can fail in dangerous ways: infinite loops, runaway costs, tool misuse, and prompt injection via tool results. Production agents need robust safeguards."}}
+
+{{table "Agent Failure Modes" (rows
+  (row "Failure"                  "What Happens"                                  "Prevention"                                   "Detection")
+  (row "Infinite loop"            "Agent keeps calling tools without converging"   "Max iteration limit (10-20)"                  "Monitor iteration count per request")
+  (row "Cost explosion"           "Many tool calls with expensive models"          "Per-request token budget, cost tracking"      "Alert when request exceeds $0.50")
+  (row "Tool misuse"              "Agent calls destructive tool incorrectly"       "Input validation, read-only by default"       "Log all tool calls for audit")
+  (row "Prompt injection"         "Tool result contains instructions for LLM"      "Sanitize tool outputs, use delimiters"        "Classify tool outputs before injecting")
+  (row "Context overflow"         "Too many tool results exceed context window"    "Truncate outputs, summarize history"          "Track token count per iteration")
+  (row "Hallucinated tool call"   "Agent invents a tool that does not exist"       "Strict tool name validation"                  "Reject unknown tool names immediately")
+)}}
+
+{{code "python" `import time
+from dataclasses import dataclass
+
+@dataclass
+class AgentBudget:
+    max_iterations: int = 10
+    max_tokens: int = 50000
+    max_tool_calls: int = 20
+    max_wall_time_sec: float = 60.0
+    max_cost_usd: float = 0.50
+
+class SafeAgent(Agent):
+    """Agent with budget controls and safety guardrails."""
+
+    def __init__(self, budget: AgentBudget = None, **kwargs):
+        super().__init__(**kwargs)
+        self.budget = budget or AgentBudget()
+
+    def run(self, user_message: str) -> AgentResponse:
+        """Run agent with budget enforcement."""
+        start_time = time.time()
+        total_tokens = 0
+        total_tool_calls = 0
+
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+        all_tool_results = []
+
+        for iteration in range(self.budget.max_iterations):
+            # Check wall time budget
+            elapsed = time.time() - start_time
+            if elapsed > self.budget.max_wall_time_sec:
+                return AgentResponse(
+                    answer="Request timed out.",
+                    tool_calls=all_tool_results,
+                    total_tokens=total_tokens,
+                    iterations=iteration,
+                )
+
+            # Check token budget
+            if total_tokens > self.budget.max_tokens:
+                return AgentResponse(
+                    answer="Token budget exceeded.",
+                    tool_calls=all_tool_results,
+                    total_tokens=total_tokens,
+                    iterations=iteration,
+                )
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=self.tools,
+                tool_choice="auto",
+                max_tokens=self.max_tokens_per_call,
+            )
+            total_tokens += response.usage.total_tokens
+            message = response.choices[0].message
+
+            if not message.tool_calls:
+                return AgentResponse(
+                    answer=message.content or "",
+                    tool_calls=all_tool_results,
+                    total_tokens=total_tokens,
+                    iterations=iteration + 1,
+                )
+
+            messages.append(message)
+
+            for tool_call in message.tool_calls:
+                total_tool_calls += 1
+                if total_tool_calls > self.budget.max_tool_calls:
+                    return AgentResponse(
+                        answer="Tool call limit reached.",
+                        tool_calls=all_tool_results,
+                        total_tokens=total_tokens,
+                        iterations=iteration + 1,
+                    )
+
+                name = tool_call.function.name
+                args = json.loads(
+                    tool_call.function.arguments
+                )
+
+                result = self._execute_tool(name, args)
+                # Sanitize to prevent prompt injection
+                result.result = self._sanitize(result.result)
+                all_tool_results.append(result)
+
+                content = result.result if result.success else (
+                    "Error: {}".format(result.error)
+                )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": content,
+                })
+
+        return AgentResponse(
+            answer="Max iterations reached.",
+            tool_calls=all_tool_results,
+            total_tokens=total_tokens,
+            iterations=self.budget.max_iterations,
+        )
+
+    def _sanitize(self, text: str) -> str:
+        """Sanitize tool output to mitigate prompt injection."""
+        dangerous = [
+            "ignore previous instructions",
+            "disregard the above",
+            "you are now",
+            "new instructions:",
+            "system prompt:",
+        ]
+        lower = text.lower()
+        for pattern in dangerous:
+            if pattern in lower:
+                return "[FILTERED: potential injection detected]"
+        return text
+`}}
+
+{{avoid "Never give an agent unrestricted access to tools without budget controls. A single adversarial prompt can cause the agent to loop 100+ times, each calling an expensive model. Always set max_iterations, max_tokens, max_tool_calls, and wall_time limits. Log every tool call for audit."}}
+
+{{triggerQs "Questions this phase could trigger"
+  "How do you prevent prompt injection through tool results?"
+  "Three layers: sanitize tool outputs by stripping known injection patterns before they enter the conversation. Use XML or delimiter tags to clearly separate tool results from instructions — the model can visually distinguish data from instructions. Use a secondary classifier to flag suspicious tool outputs before injecting them into context. No single layer is sufficient."
+  "What budget limits should you set for a production agent?"
+  "Start conservative: max_iterations=10, max_tokens=30000, max_tool_calls=15, wall_time=45s. Then measure your p95 iteration count on real traffic and loosen limits to p95 + 50% headroom. The goal is catching pathological cases without breaking legitimate complex requests. Alert when requests approach 80% of any budget limit."
+}}
+
+{{phase 7 "Agent Observability" "5 min"}}
+
+{{say "Agents are hard to debug because the execution path is non-deterministic. The same input can produce different tool call sequences on different runs. You need structured logging and tracing."}}
+
+{{code "python" `import logging
+import uuid
+from datetime import datetime
+
+logger = logging.getLogger("agent")
+
+class TracedAgent(SafeAgent):
+    """Agent with structured tracing for observability."""
+
+    def run(self, user_message: str) -> AgentResponse:
+        trace_id = str(uuid.uuid4())[:8]
+        start = datetime.utcnow()
+
+        logger.info(
+            "agent_start trace={} query={}".format(
+                trace_id, user_message[:100]
+            )
+        )
+
+        # Wrap tool execution to log each call
+        original_execute = self._execute_tool
+
+        def traced_execute(name, arguments):
+            tool_start = datetime.utcnow()
+            result = original_execute(name, arguments)
+            tool_ms = (
+                datetime.utcnow() - tool_start
+            ).total_seconds() * 1000
+
+            logger.info(
+                "tool_call trace={} tool={} success={} "
+                "latency_ms={:.0f} result_len={}".format(
+                    trace_id, name, result.success,
+                    tool_ms, len(result.result)
+                )
+            )
+            return result
+
+        self._execute_tool = traced_execute
+
+        try:
+            response = super().run(user_message)
+            total_ms = (
+                datetime.utcnow() - start
+            ).total_seconds() * 1000
+
+            logger.info(
+                "agent_done trace={} iters={} tools={} "
+                "tokens={} ms={:.0f}".format(
+                    trace_id, response.iterations,
+                    len(response.tool_calls),
+                    response.total_tokens, total_ms
+                )
+            )
+            return response
+
+        except Exception as e:
+            logger.error(
+                "agent_error trace={} error={}".format(
+                    trace_id, str(e)
+                )
+            )
+            raise
+        finally:
+            self._execute_tool = original_execute
+`}}
+
+{{table "Key Agent Metrics to Monitor" (rows
+  (row "Metric"                      "What It Tells You"                        "Alert Threshold")
+  (row "Iterations per request"      "How complex the agent reasoning is"       "> 8 iterations average")
+  (row "Tool calls per request"      "How many tools the agent needs"           "> 15 calls per request")
+  (row "Tool error rate"             "Percentage of failed tool executions"     "> 10 percent failure rate")
+  (row "Tokens per request"          "Cost driver and context usage"            "> 30K tokens per request")
+  (row "Wall time per request"       "End-to-end latency"                       "> 30 seconds average")
+  (row "Max iteration exits"         "How often agent hits the cap"             "> 5 percent of requests")
+  (row "Cost per request"            "USD cost including all LLM calls"         "> $0.25 per request avg")
+)}}
+
+{{phase 8 "Architecture Patterns & Interview Q&A" "13 min"}}
+
+{{say "There are three main agent architectures. Start simple and only add complexity when a single agent with well-defined tools is not enough."}}
+
+{{diagram "pat-agent-architecture-patterns"}}
+
+{{compare "Agent Architecture" (options
+  (best "Simple Agent" "Start here. One agent with 3-5 well-defined tools covers 90 percent of use cases. Easy to debug, low cost, fast. Only add complexity when you hit clear limitations.")
+  (alt "Router Agent" "Use when you have many tools and the agent struggles to pick the right one. A router LLM classifies the request first, then delegates to a specialized sub-agent with fewer tools.")
+  (nofit "Multi-Agent" "Avoid unless you truly need parallel collaborative work. Multi-agent systems are hard to debug, expensive, and often slower than a well-designed single agent. Hype exceeds practical value for most use cases.")
+)}}
+
+{{think "Multi-agent is the right architecture for exactly one scenario: genuinely parallel subtasks that can run concurrently and whose results must be synthesized. Orchestrator assigns tasks to specialized workers, each running independently. For anything sequential or where one step's output feeds the next, a single agent or prompt chain is strictly better."
+  (whyNot "multi-agent by default" "Multi-agent adds message passing overhead, makes failures harder to diagnose (which agent failed?), and compounds cost — every agent call is a full LLM inference. A well-designed single agent with 5 focused tools is faster, cheaper, and easier to debug than two agents talking to each other.")
+  (whatIf "you need specialized expertise per subtask" "Use a router agent instead. A fast, cheap model classifies the request, then routes to a specialized single agent (legal agent, code agent, data agent) each with domain-specific tools and system prompts. Same cost as multi-agent but linearly debuggable.")
+}}
+
+{{say "These are the most common agent interview questions. Focus on cost, testing, and handling long-running tasks."}}
+
+{{qa
+  "What is the cost of running an agent in production?"
+  "An agent averages 3-5 LLM calls per request. With GPT-4o at roughly 2K tokens per call, that is 10K tokens per request or about $0.05-0.10. At 100K requests per month, expect $5K-10K in LLM costs alone. Use GPT-4o-mini for simpler tool selections to cut costs by 10x — only escalate to the expensive model for final answer synthesis."
+  "How do you test agents?"
+  "Three levels: unit tests for individual tools with mocked inputs and expected outputs. Integration tests with a small set of end-to-end scenarios and the expected tool call sequence (e.g., 'for this query, the agent should call web_search then execute_python'). Evaluation harness running 200+ test queries measuring task completion rate, tool selection accuracy, and cost per query. Record all tool call traces to replay deterministically in tests."
+}}
+
+{{followup "How would you handle long-running agent tasks?" "Async architecture. The agent request goes to a task queue (SQS or Celery). A worker picks it up and runs the agent loop. The user gets a task ID and polls for completion or receives a webhook callback. Store intermediate results so the agent can resume if the worker crashes. This also enables longer timeouts since the user is not waiting synchronously — the agent can run for minutes without a timeout error."}}
+
+{{checklist
+  "Define tools with clear descriptions telling the LLM when to use each"
+  "Set max_iterations (10-20), max_tokens, and wall_time limits"
+  "Validate all tool inputs before execution"
+  "Truncate tool outputs to prevent context window overflow"
+  "Sanitize tool outputs to prevent prompt injection"
+  "Log every tool call with trace IDs for debugging"
+  "Start with a simple single-agent architecture"
+  "Require human-in-the-loop for all write and mutation operations"
+  "Monitor: iterations per request, tool error rate, cost per request"
+  "Use cheaper models for tool routing, expensive models for final answers"
+}}

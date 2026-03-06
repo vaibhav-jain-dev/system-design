@@ -1,0 +1,682 @@
+# ─── Problems (System Design) ───
+problems:
+  - slug: url-shortener
+    title: "URL Shortener"
+    description: "Design TinyURL: hashing, base62, collision handling, analytics"
+    path: problems/url-shortener
+    uses:
+      - fundamental: networking/load-balancing
+        config: "ALB with round-robin"
+        why: "Stateless API, no sticky sessions needed"
+        not_this: "NLB — no HTTP path-based routing"
+        risk: "Single AZ deployment = SPOF"
+        caveats: "Cross-AZ charges $0.01/GB. Multi-AZ ALB adds ~$16/mo"
+      - fundamental: networking/cdn/cloudfront
+        config: "Edge caching for 301 redirects"
+        why: "Redirects are highly cacheable, 80%+ cache hit rate"
+        not_this: "Akamai — overkill for single-region MVP"
+        risk: "Stale cache on URL updates, need invalidation API"
+        caveats: "Invalidation limit: 3000/mo free, $0.005 each after"
+      - fundamental: storage/redis
+        config: "ElastiCache read-through, TTL 24h"
+        why: "Hot URLs (top 20%) account for 80% reads"
+        not_this: "Memcached — no persistence on node restart"
+        risk: "Thundering herd on cache miss for viral URLs"
+        caveats: "r6g.large = $0.126/hr = ~$92/mo. Monitor eviction rate."
+      - fundamental: storage/sharding
+        config: "Hash-based sharding on short_code; consistent hashing ring for DB nodes"
+        why: "Single MySQL at 100B URLs = ~20TB. Shard by short_code hash for even distribution"
+        not_this: "Range-based sharding — hot shards for popular URL prefixes"
+        risk: "Resharding requires migrating ~50% of keys when adding nodes"
+        caveats: "Use consistent hashing with 150 virtual nodes per DB. 6→12 shards is zero-downtime with CH."
+      - fundamental: distributed/consistent-hashing
+        config: "Virtual-node ring for URL DB shard assignment, 150 vnodes per physical node"
+        why: "Consistent hashing limits reshuffling to K/N keys on node add (vs full rehash)"
+        not_this: "Modulo hashing (key % N) — adding one node reshuffles (N-1)/N keys"
+        risk: "Uneven load if virtual node count is too low — monitor shard utilisation"
+        caveats: "Jump Consistent Hash or Rendezvous hashing also viable. CH most widely supported."
+
+  - slug: instagram
+    title: "Instagram"
+    description: "Design Instagram: photo/video feed, stories, likes, comments, explore, notifications"
+    path: problems/instagram
+    uses:
+      - fundamental: networking/cdn/cloudfront
+        config: "Edge caching for images/videos, S3 origin with OAC"
+        why: "Media-heavy app — 80%+ traffic is image/video serving, CDN cuts latency to <50ms globally"
+        not_this: "Self-hosted CDN — operational nightmare at Instagram scale"
+        risk: "Cache invalidation on image deletion (GDPR compliance)"
+        caveats: "CloudFront $0.085/GB first 10TB. At 1PB/mo = ~$40K/mo. Negotiate Enterprise Discount."
+      - fundamental: networking/load-balancing
+        config: "ALB with path-based routing: /api/* → app servers, /media/* → media service"
+        why: "Different services for API vs media — ALB routes by path at L7"
+        not_this: "NLB — need HTTP path routing for microservice split"
+        risk: "Uneven load if /feed endpoint is 10x heavier than /profile"
+        caveats: "ALB $0.0225/hr + $0.008/LCU-hr. At 50K RPS ~$200/mo."
+      - fundamental: storage/redis
+        config: "Feed cache per user (sorted set), session store, like counters"
+        why: "Feed generation is expensive (fan-out-on-read). Cache assembled feeds in Redis sorted sets."
+        not_this: "Memcached — need sorted sets for ranked feeds, persistence for sessions"
+        risk: "Celebrity post = millions of fan-out writes. Use hybrid fan-out."
+        caveats: "r6g.xlarge cluster = ~$370/mo. Feed cache TTL 5min. Eviction: allkeys-lru."
+      - fundamental: storage/dynamodb
+        config: "Posts table (PK=user_id, SK=timestamp), Likes counter (atomic increment)"
+        why: "Write-heavy for likes/comments. DynamoDB handles 10K+ WPS per partition."
+        not_this: "Postgres — write amplification at scale, connection pool exhaustion"
+        risk: "Hot partition on celebrity posts — use write sharding (user_id#shard)"
+        caveats: "On-demand $1.25/M writes, $0.25/M reads. At 100K WPS = ~$10K/mo."
+      - fundamental: storage/sharding
+        config: "user_id-based sharding for posts/followers; write sharding for celebrity user_ids"
+        why: "Instagram at 1B users = 500TB+ media metadata. Shard by user_id for data co-location"
+        not_this: "Media ID sharding — loses user locality, forces cross-shard fan-out for feeds"
+        risk: "Celebrity user_id = hot shard — add shard suffix (user_id#0 … user_id#7)"
+        caveats: "Add shard index column to avoid cross-shard scatter-gather reads."
+      - fundamental: messaging/message-queues
+        config: "Kafka for async notification fan-out; SQS for image processing pipeline"
+        why: "Fan-out to 100M followers is async — push to Kafka, workers deliver to notification service"
+        not_this: "Synchronous fan-out in post request — post API would timeout at Instagram scale"
+        risk: "Kafka consumer lag during viral post = delayed notifications"
+        caveats: "Partition by user_id for ordered delivery. At-least-once with idempotent consumers."
+
+  - slug: rate-limiter
+    title: "Rate Limiter"
+    description: "Design API rate limiting: token bucket, sliding window, distributed counters"
+    path: problems/rate-limiter
+    uses:
+      - fundamental: storage/redis
+        config: "Sorted set sliding window per user_id"
+        why: "O(1) atomic ZADD+ZCOUNT, sub-ms latency"
+        not_this: "DynamoDB — too slow for per-request check"
+        risk: "Redis down = open or closed? Choose fail-open with local fallback"
+        caveats: "ZRANGEBYSCORE cost: O(log N + M). Cleanup old entries with ZREMRANGEBYSCORE."
+      - fundamental: networking/load-balancing
+        config: "ALB with sticky sessions (rate state is per-node)"
+        why: "Local counter consistency before Redis sync"
+        not_this: "Round-robin — splits user requests across nodes, breaks local counters"
+        risk: "Sticky session + node failure = temporary over-limit"
+        caveats: "Sticky sessions via ALB cookie, not IP. Duration: 1 day."
+
+  - slug: ticket-booking
+    title: "BookMyShow Ticket Booking"
+    description: "Design movie/event ticket booking: seat locking, payment processing, QR codes, handling 100K users for 500 seats"
+    path: problems/ticket-booking
+    uses:
+      - fundamental: storage/redis
+        config: "Distributed lock for seat reservation with 10-min TTL"
+        why: "Sub-ms lock acquisition, automatic expiry on payment timeout"
+        not_this: "DynamoDB conditional writes — too slow for real-time seat map updates"
+        risk: "Redis failover during seat lock = potential double-booking"
+        caveats: "Redlock across 3 Redis nodes for safety. SET NX EX 600 for seat locks."
+      - fundamental: networking/load-balancing
+        config: "ALB with WebSocket support for real-time seat availability"
+        why: "Seat map updates need push to thousands of concurrent users"
+        not_this: "NLB — need L7 routing for /api vs /ws paths"
+        risk: "WebSocket connection storm on show opening"
+        caveats: "ALB WebSocket idle timeout: 4000s max. Keep-alive every 30s."
+      - fundamental: networking/websockets
+        config: "WebSocket push for real-time seat map updates to all concurrent viewers"
+        why: "100K users viewing same show's seat map need instant updates — polling adds 2-5s staleness"
+        not_this: "Long-polling — doubles server connections vs WebSocket, higher overhead"
+        risk: "WebSocket connection storm when popular show goes on sale"
+        caveats: "Throttle seat map broadcasts: batch updates every 500ms. Client debounces renders."
+      - fundamental: distributed/saga-pattern
+        config: "Choreography saga: seat-reserved → payment-processed → ticket-issued"
+        why: "Booking spans seat reservation + payment across microservices — saga coordinates rollback"
+        not_this: "Two-phase commit (2PC) — distributed lock held across services causes cascading timeouts"
+        risk: "Compensating transaction failure = inconsistent state (seat reserved but payment failed)"
+        caveats: "Idempotent compensating transactions required. Use outbox pattern for reliable event publishing."
+
+  - slug: food-delivery
+    title: "Swiggy/Zomato Food Delivery"
+    description: "Design food delivery: order matching, real-time tracking, ETA prediction, surge pricing, 100K+ concurrent orders"
+    path: problems/food-delivery
+    uses:
+      - fundamental: storage/redis
+        config: "Geospatial index (GEOADD/GEORADIUS) for nearby delivery partners"
+        why: "O(log N) geo queries for partner matching within radius"
+        not_this: "Postgres PostGIS — too slow for real-time matching at 100K orders/min"
+        risk: "Stale location data if partner app loses connectivity"
+        caveats: "GEORADIUS returns unsorted. Sort by distance client-side. TTL partner locations 60s."
+      - fundamental: networking/load-balancing
+        config: "ALB with path routing: /api → order service, /ws → tracking service"
+        why: "Separate scaling for HTTP API vs persistent WebSocket connections"
+        not_this: "Single endpoint — tracking WebSocket connections would exhaust API server capacity"
+        risk: "ALB connection limits during dinner rush (100K concurrent WebSockets)"
+        caveats: "ALB supports 100K concurrent connections per target. Scale target groups independently."
+      - fundamental: networking/cdn/cloudfront
+        config: "Edge caching for restaurant menus, images, static assets"
+        why: "Menu images are read-heavy (10K views per update), highly cacheable"
+        not_this: "Serving images from origin — 100K users loading restaurant photos = origin overload"
+        risk: "Stale menu prices after restaurant update"
+        caveats: "TTL 5min for menus, 24h for images. Invalidate on menu update."
+      - fundamental: storage/geospatial
+        config: "Geohash for restaurant geo-indexing; Redis GEOADD/GEORADIUS for delivery-partner tracking"
+        why: "Finding restaurants within 5 km requires spatial index — Geohash reduces search space to 9 cells"
+        not_this: "Full table scan with Haversine formula — O(N) at 100K+ restaurants"
+        risk: "Restaurant at geohash boundary can be missed — query self + 8 neighbours"
+        caveats: "Geohash precision 6 = ~1.2 km × 0.6 km cells. Redis GEO uses WGS84 encoding internally."
+      - fundamental: networking/websockets
+        config: "WebSocket for real-time order status updates and delivery-partner location tracking"
+        why: "Order tracking needs server push — polling adds 3-5s staleness on driver position"
+        not_this: "SSE (Server-Sent Events) — unidirectional, can't receive driver pings from client"
+        risk: "WebSocket disconnect during delivery = stale map. Auto-reconnect in 2s."
+        caveats: "NLB for WebSocket connections. ALB idle timeout max 4000s — use NLB for long-lived rides."
+
+  - slug: ride-hailing
+    title: "Ola/Uber Ride-Hailing"
+    description: "Design ride-hailing: geospatial matching, surge pricing, real-time tracking, ETA, 100K+ concurrent rides"
+    path: problems/ride-hailing
+    uses:
+      - fundamental: storage/redis
+        config: "GEOADD/GEORADIUS for driver location index, pub/sub for ride updates"
+        why: "Sub-ms geospatial queries for nearest driver matching"
+        not_this: "Postgres PostGIS — too slow for 1M driver location updates/min"
+        risk: "Stale driver locations lead to phantom drivers on map"
+        caveats: "Update driver location every 4s. TTL 30s to remove offline drivers."
+      - fundamental: networking/load-balancing
+        config: "NLB for driver location streaming, ALB for rider HTTP API"
+        why: "Driver app sends GPS updates every 4s — NLB handles high-throughput UDP/TCP"
+        not_this: "ALB for driver updates — L7 overhead unnecessary for location pings"
+        risk: "Connection draining during NLB health checks drops location updates"
+        caveats: "NLB cross-zone load balancing: $0.006/GB. Enable for even distribution."
+      - fundamental: storage/geospatial
+        config: "S2 cells for driver location index; GEORADIUS for nearest-driver matching within radius"
+        why: "Finding nearest N drivers requires O(log N) spatial query — geohash/S2 enables this vs O(N) scan"
+        not_this: "Lat/lon B-tree scan — O(N) full table scan across 1M active driver locations"
+        risk: "S2 cell boundary issue — drivers just outside query radius may be missed"
+        caveats: "Query cells at 2 ring levels around rider. Google S2 bindings for Java/C++; Redis GEO for simplicity."
+      - fundamental: networking/websockets
+        config: "WebSocket for real-time driver location push to rider app (every 4s)"
+        why: "Driver map must update in near-real-time — HTTP polling adds 4s+ staleness"
+        not_this: "HTTP polling from rider app — adds unnecessary load, stale positions on map"
+        risk: "WebSocket disconnect during ride = map freezes. Client must auto-reconnect within 1s."
+        caveats: "NLB for WebSocket connections (not ALB) to avoid L7 overhead on high-frequency location pings."
+
+  - slug: chat-system
+    title: "WhatsApp/Slack Messaging"
+    description: "Design real-time messaging: 1-to-1 chat, group chat (256 members), E2E encryption, offline queue, 2B users"
+    path: problems/chat-system
+    uses:
+      - fundamental: storage/redis
+        config: "Pub/Sub for real-time message delivery, presence tracking"
+        why: "Sub-ms publish to connected WebSocket sessions"
+        not_this: "Polling — adds 1-5 second latency to message delivery"
+        risk: "Redis Pub/Sub is fire-and-forget — message loss on disconnect"
+        caveats: "Pub/Sub does not persist. Use Kafka for message durability. Redis for delivery only."
+      - fundamental: networking/load-balancing
+        config: "NLB for persistent WebSocket connections, ALB for REST API"
+        why: "WebSocket connections are long-lived — NLB handles millions of concurrent TCP connections"
+        not_this: "ALB — WebSocket idle timeout (4000s) and L7 overhead add latency"
+        risk: "NLB target deregistration drops active WebSocket sessions"
+        caveats: "NLB connection draining: 300s. Client must auto-reconnect on disconnect."
+      - fundamental: storage/dynamodb
+        config: "Messages table (PK=conversation_id, SK=message_id), TTL for ephemeral messages"
+        why: "Write-heavy (billions of messages/day), auto-scales, single-digit-ms reads"
+        not_this: "Postgres — write throughput limit at B+ scale, sharding complexity"
+        risk: "Hot partition on group chats with 256 members"
+        caveats: "On-demand pricing at 2B users = significant cost. Use reserved capacity."
+      - fundamental: messaging/message-queues
+        config: "Kafka for message persistence and replay; partitioned by conversation_id"
+        why: "Redis Pub/Sub is fire-and-forget. Kafka guarantees persistence + replay for offline users"
+        not_this: "Redis Streams — works but lacks Kafka's partition-level ordering guarantees"
+        risk: "Kafka consumer lag during message storm = delayed delivery notifications"
+        caveats: "Partition by conversation_id for ordered delivery. Replication factor 3 for durability."
+      - fundamental: networking/websockets
+        config: "Persistent WebSocket connections per chat server; sticky sessions via NLB"
+        why: "Real-time bidirectional chat — HTTP polling adds 1-5 second latency per message"
+        not_this: "SSE — unidirectional only, cannot send messages from client to server"
+        risk: "100K concurrent connections per chat server = ~1 GB RAM minimum"
+        caveats: "Auto-reconnect with exponential backoff (1s, 2s, 4s, 8s). Preserve message order on reconnect."
+      - fundamental: distributed/cap-theorem
+        config: "AP system: messages delivered at-least-once; read-your-own-writes via local cache"
+        why: "Availability over consistency — a delayed message is better than a failed send"
+        not_this: "CP system — a network partition that blocks message sends is unacceptable for chat"
+        risk: "Eventual consistency means brief duplicate delivery on reconnect — deduplicate client-side"
+        caveats: "Use idempotency keys (message_id) for at-least-once deduplication."
+
+  - slug: search-autocomplete
+    title: "Search Autocomplete"
+    description: "Design typeahead: prefix matching, popularity ranking, fuzzy matching, <50ms response, trending updates"
+    path: problems/search-autocomplete
+    uses:
+      - fundamental: storage/redis
+        config: "Sorted sets for top-K suggestions per prefix, TTL for trending"
+        why: "ZRANGEBYSCORE returns top suggestions in O(log N + K), sub-ms latency"
+        not_this: "Elasticsearch — too slow for <50ms typeahead at every keystroke"
+        risk: "Memory explosion: all prefixes × top-K suggestions"
+        caveats: "Only store prefixes up to length 10. Longer prefixes fall through to ES."
+      - fundamental: networking/cdn/cloudfront
+        config: "Edge caching for popular prefix results (top 1000 prefixes)"
+        why: "80% of searches start with the same 1000 prefixes — cache at edge for <10ms"
+        not_this: "No CDN — every keystroke hits origin servers"
+        risk: "Stale suggestions for trending topics"
+        caveats: "TTL 60s for popular prefixes. Invalidate on trending spike."
+      - fundamental: storage/sharding
+        config: "Shard trie by first character of prefix; Redis cluster for in-memory prefix storage"
+        why: "Trie for all English prefixes across 10 length levels doesn't fit on one node"
+        not_this: "Single Redis node — trie for 100K+ prefix-suggestion pairs hits memory ceiling"
+        risk: "Letter 't' shard receives 10× traffic vs 'x' shard — monitor hot shards"
+        caveats: "Only store prefixes up to length 10. Longer strings fall through to Elasticsearch."
+
+  - slug: twitter-feed
+    title: "Twitter/X Feed"
+    description: "Design Twitter: tweet posting, fan-out feed, timeline caching, trending, 500M users, celebrity accounts"
+    path: problems/twitter-feed
+    uses:
+      - fundamental: storage/redis
+        config: "Sorted sets for home timeline cache, pub/sub for real-time updates"
+        why: "Pre-computed timelines in sorted sets — O(log N) insert, O(1) range read"
+        not_this: "Memcached — no sorted set support, need ordering for timeline"
+        risk: "Celebrity tweet fan-out to 100M followers melts Redis cluster"
+        caveats: "Hybrid fan-out: write for <50K followers, read for celebrities. Cap timeline at 800 tweets."
+      - fundamental: networking/cdn/cloudfront
+        config: "Edge caching for media (images, videos), trending topics API"
+        why: "Viral tweet media gets millions of views — CDN absorbs 95% of reads"
+        not_this: "Serving media from origin — viral tweet = origin DDoS"
+        risk: "DMCA takedown requires instant CDN invalidation"
+        caveats: "CloudFront invalidation: 1000 free/mo. Use wildcard paths for bulk purge."
+      - fundamental: storage/dynamodb
+        config: "Tweets table (PK=user_id, SK=tweet_id), Timeline table (PK=user_id, SK=score)"
+        why: "Write-heavy (500K tweets/min), auto-scales without manual sharding"
+        not_this: "Postgres — connection exhaustion at Twitter scale"
+        risk: "Hot partition on celebrity user_id"
+        caveats: "Write sharding for celebrities: PK=user_id#shard. Scatter-gather on read."
+      - fundamental: networking/load-balancing
+        config: "ALB with path routing: /api → tweet service, /stream → streaming API"
+        why: "Streaming API (SSE/WebSocket) needs separate scaling from REST API"
+        not_this: "Single ALB target — streaming connections exhaust REST capacity"
+        risk: "Streaming connection storm during major events"
+        caveats: "Rate limit streaming connections: 1 per user. Reconnect backoff: exponential."
+      - fundamental: messaging/message-queues
+        config: "Kafka for async tweet fan-out to follower timelines; partitioned by tweeter user_id"
+        why: "Fan-out to 100M followers must be async — synchronous fan-out would timeout in seconds"
+        not_this: "SQS — no partition-based ordering, harder to replay missed timeline events"
+        risk: "Consumer lag during viral tweet = delayed timeline updates for followers"
+        caveats: "Hybrid fan-out: write for <50K followers, read for celebrities (fan-out-on-read)."
+      - fundamental: storage/sharding
+        config: "user_id-based sharding for tweets and timelines; write sharding for celebrity accounts"
+        why: "500M users × avg 50 tweets each = 25B tweet rows. Must shard across DB nodes"
+        not_this: "Single DB — connection exhaustion and write bottleneck at Twitter scale"
+        risk: "Celebrity user_id = hot shard — use PK=user_id#shard for write distribution"
+        caveats: "Scatter-gather on celebrity reads: query all shards, merge results."
+
+  - slug: google-calendar
+    title: "Google Calendar"
+    description: "Design calendar: event CRUD, recurring events, invitations, conflict detection, reminders, timezone handling"
+    path: problems/google-calendar
+    uses:
+      - fundamental: storage/redis
+        config: "Cache for user calendar views, pub/sub for real-time event updates"
+        why: "Calendar day/week views are read-heavy — cache assembled view"
+        not_this: "No cache — every calendar open queries DB for recurring event expansion"
+        risk: "Cache invalidation on shared calendar event updates"
+        caveats: "TTL 5min for calendar views. Invalidate on event create/update/delete."
+      - fundamental: networking/load-balancing
+        config: "ALB with health checks for calendar API service"
+        why: "Stateless API, standard HTTP routing"
+        not_this: "NLB — need L7 for OAuth and path routing"
+        risk: "Morning login surge (9 AM across timezones) = predictable peak"
+        caveats: "Pre-warm ALB capacity before business hours. Target tracking scaling."
+      - fundamental: distributed/cap-theorem
+        config: "CP system for event creation (strong consistency), AP for read replicas"
+        why: "Calendar conflicts require consistent reads — AP with stale data could double-book a meeting"
+        not_this: "AP system globally — eventual consistency allows double-booking until sync resolves"
+        risk: "Multi-region: conflict detection requires linearizable writes (quorum or Spanner)"
+        caveats: "DynamoDB conditional writes for single-region. Spanner for global consistent calendar."
+
+# ─── Fundamentals (hierarchical) ───
+fundamentals:
+  - slug: networking/load-balancing
+    title: "Load Balancing"
+    description: "ALB vs NLB, routing algorithms, health checks, AZ distribution"
+    path: fundamentals/networking/load-balancing
+    children:
+      - slug: networking/load-balancing/alb
+        title: "Application Load Balancer (ALB)"
+        description: "Layer 7, path-based routing, WebSocket support, gRPC, WAF integration"
+        path: fundamentals/networking/load-balancing/alb
+      - slug: networking/load-balancing/nlb
+        title: "Network Load Balancer (NLB)"
+        description: "Layer 4, static IP, ultra-low latency, TCP/UDP passthrough"
+        path: fundamentals/networking/load-balancing/nlb
+
+  - slug: networking/cdn
+    title: "CDN"
+    description: "Edge caching, Points of Presence, invalidation strategies, origin shield"
+    path: fundamentals/networking/cdn
+    children:
+      - slug: networking/cdn/cloudfront
+        title: "CloudFront"
+        description: "AWS CDN: Lambda@Edge, Origin Access Identity, geo restrictions, signed URLs"
+        path: fundamentals/networking/cdn/cloudfront
+
+  - slug: storage/redis
+    title: "Redis / ElastiCache"
+    description: "Caching strategies, data structures, clustering, persistence, pub/sub"
+    path: fundamentals/storage/redis
+
+  - slug: storage/dynamodb
+    title: "DynamoDB"
+    description: "Single-table design, GSI/LSI, TTL, streams, on-demand vs provisioned"
+    path: fundamentals/storage/dynamodb
+
+  - slug: storage/sharding
+    title: "Database Sharding & Partitioning"
+    description: "Range vs hash vs directory-based sharding, hotspot mitigation, re-sharding with zero downtime"
+    path: fundamentals/storage/sharding
+
+  - slug: storage/geospatial
+    title: "Geospatial Indexing"
+    description: "S2 cells, GeoHash, H3, Redis GEO commands, PostGIS — choosing the right spatial index"
+    path: fundamentals/storage/geospatial
+
+  - slug: distributed/consistent-hashing
+    title: "Consistent Hashing"
+    description: "Ring-based node distribution, virtual nodes, rebalancing cost, hotspot mitigation"
+    path: fundamentals/distributed/consistent-hashing
+    related_algorithm: consistent-hashing
+
+  - slug: distributed/cap-theorem
+    title: "CAP Theorem & Consistency"
+    description: "Consistency vs Availability vs Partition tolerance trade-offs, CP vs AP systems, PACELC model"
+    path: fundamentals/distributed/cap-theorem
+
+  - slug: distributed/rate-limiting
+    title: "Rate Limiting"
+    description: "Token bucket, leaky bucket, fixed window, sliding window — distributed Redis Lua implementation"
+    path: fundamentals/distributed/rate-limiting
+    related_algorithm: token-bucket
+
+  - slug: distributed/saga-pattern
+    title: "Saga Pattern"
+    description: "Distributed transactions via choreography vs orchestration, compensating transactions"
+    path: fundamentals/distributed/saga-pattern
+
+  - slug: distributed/circuit-breaker
+    title: "Circuit Breaker"
+    description: "Closed/open/half-open state machine, failure isolation, integration with retry and fallback"
+    path: fundamentals/distributed/circuit-breaker
+
+  - slug: messaging/message-queues
+    title: "Message Queues & Pub/Sub"
+    description: "Kafka vs RabbitMQ vs SQS vs Redis Streams — ordering, replay, exactly-once, dead-letter queues"
+    path: fundamentals/messaging/message-queues
+
+  - slug: networking/websockets
+    title: "WebSockets"
+    description: "Full-duplex protocol, connection management, scaling with sticky sessions, Redis Pub/Sub fan-out"
+    path: fundamentals/networking/websockets
+
+# ─── Algorithms (with LLD implementations) ───
+algorithms:
+  - slug: base62-encoding
+    title: "Base62 Encoding"
+    description: "Convert numeric IDs to short alphanumeric strings (a-z, A-Z, 0-9)"
+    path: algorithms/base62-encoding
+    used_in: [url-shortener]
+
+  - slug: consistent-hashing
+    title: "Consistent Hashing"
+    description: "Distribute data across nodes with minimal reshuffling on add/remove"
+    path: algorithms/consistent-hashing
+    used_in: [url-shortener, instagram, ride-hailing, food-delivery]
+    related_fundamental: distributed/consistent-hashing
+
+  - slug: token-bucket
+    title: "Token Bucket"
+    description: "Rate limiting algorithm that allows bursts while enforcing average rate"
+    path: algorithms/token-bucket
+    used_in: [rate-limiter, ticket-booking, twitter-feed]
+    related_fundamental: distributed/rate-limiting
+
+  - slug: bloom-filter
+    title: "Bloom Filter"
+    description: "Space-efficient probabilistic set membership test (no false negatives)"
+    path: algorithms/bloom-filter
+    used_in: [url-shortener, instagram, chat-system, search-autocomplete]
+
+  - slug: snowflake-id
+    title: "Snowflake ID"
+    description: "Distributed unique ID generation — time-sorted, no coordination"
+    path: algorithms/snowflake-id
+    used_in: [url-shortener, instagram, ticket-booking, chat-system, twitter-feed]
+
+# ─── Design Patterns (for LLM) ───
+patterns:
+  - slug: rag
+    title: "RAG"
+    description: "Retrieval-Augmented Generation — ground LLM responses in retrieved documents"
+    path: patterns/rag
+
+  - slug: agent-tools
+    title: "Agent + Tool Use"
+    description: "LLM agents that call external tools/APIs to accomplish multi-step tasks"
+    path: patterns/agent-tools
+
+  - slug: prompt-chaining
+    title: "Prompt Chaining"
+    description: "Break complex tasks into sequential LLM calls, each building on the previous"
+    path: patterns/prompt-chaining
+
+  - slug: guardrails
+    title: "Guardrails"
+    description: "Input/output validation, content filtering, and safety layers for LLM apps"
+    path: patterns/guardrails
+
+  - slug: embeddings-vector-search
+    title: "Embeddings + Vector Search"
+    description: "Convert text to vectors for semantic similarity search and retrieval"
+    path: patterns/embeddings-vector-search
+
+# ─── Concepts (cross-cutting knowledge index) ───
+# Concepts are granular topics that appear across problems, fundamentals,
+# algorithms, and patterns. Each concept links to where it's discussed,
+# with section-level granularity.
+concepts:
+  - category: "Caching"
+    concepts:
+      - slug: multi-layer-caching
+        title: "Multi-Layer Caching"
+        description: "Browser → CDN → regional cache → database: stacking cache layers for compound hit rates"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Caching Deep Dive", phase: 6}
+          - {type: problem, slug: instagram, section: "Growing — Caching & Feed", phase: 5}
+          - {type: fundamental, slug: storage/redis, section: "Caching Strategies", phase: 2}
+          - {type: fundamental, slug: networking/cdn/cloudfront, section: "Edge Caching", phase: 2}
+
+      - slug: cache-invalidation
+        title: "Cache Invalidation"
+        description: "TTL expiry, event-driven purge, stale-while-revalidate, thundering herd prevention"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Caching Deep Dive", phase: 6}
+          - {type: problem, slug: instagram, section: "Growing — Caching & Feed", phase: 5}
+          - {type: fundamental, slug: networking/cdn, section: "Invalidation Strategies", phase: 4}
+          - {type: fundamental, slug: storage/redis, section: "Eviction Policies", phase: 4}
+
+      - slug: read-through-vs-write-through
+        title: "Read-Through vs Write-Through Cache"
+        description: "Populate cache on read miss vs populate on write — trade-offs for hot/cold data"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Caching Deep Dive", phase: 6}
+          - {type: fundamental, slug: storage/redis, section: "Caching Strategies", phase: 2}
+
+  - category: "Data Distribution"
+    concepts:
+      - slug: database-sharding
+        title: "Database Sharding"
+        description: "Range-based, hash-based, consistent hashing — partitioning data across nodes"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Scaling & Sharding", phase: 7}
+          - {type: problem, slug: instagram, section: "Sharding & Partitioning", phase: 8}
+          - {type: algorithm, slug: consistent-hashing, section: "Ring-Based Distribution", phase: 2}
+          - {type: fundamental, slug: storage/dynamodb, section: "Partition Key Design", phase: 3}
+
+      - slug: hot-partition
+        title: "Hot Partition / Hot Key"
+        description: "Single key receiving disproportionate traffic — detection and mitigation strategies"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Scaling & Sharding", phase: 7}
+          - {type: problem, slug: instagram, section: "Bottlenecks & Trade-offs", phase: 11}
+          - {type: fundamental, slug: storage/dynamodb, section: "Adaptive Capacity", phase: 4}
+          - {type: fundamental, slug: storage/redis, section: "Cluster Mode", phase: 5}
+
+      - slug: replication
+        title: "Replication"
+        description: "Leader-follower, multi-region, conflict resolution, replication lag"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Availability & Reliability", phase: 8}
+          - {type: problem, slug: instagram, section: "Multi-Region", phase: 8}
+          - {type: fundamental, slug: storage/dynamodb, section: "Global Tables", phase: 5}
+          - {type: fundamental, slug: storage/redis, section: "Replication", phase: 3}
+
+  - category: "Feed & Fanout"
+    concepts:
+      - slug: fanout-patterns
+        title: "Fan-out-on-Write vs Fan-out-on-Read"
+        description: "Pre-compute feeds on post vs assemble feeds on request — hybrid approach for celebrities"
+        appears_in:
+          - {type: problem, slug: instagram, section: "Growing — Caching & Feed", phase: 5}
+
+      - slug: feed-ranking
+        title: "Feed Ranking Algorithms"
+        description: "Chronological vs ML-ranked feeds, engagement scoring, diversity injection"
+        appears_in:
+          - {type: problem, slug: instagram, section: "Growing — Caching & Feed", phase: 5}
+
+      - slug: celebrity-problem
+        title: "Celebrity / Hot User Problem"
+        description: "Users with millions of followers cause write amplification — threshold-based hybrid fanout"
+        appears_in:
+          - {type: problem, slug: instagram, section: "Growing — Caching & Feed", phase: 5}
+          - {type: problem, slug: instagram, section: "Bottlenecks & Trade-offs", phase: 11}
+
+  - category: "Rate Limiting"
+    concepts:
+      - slug: rate-limit-algorithms
+        title: "Rate Limiting Algorithms"
+        description: "Token bucket, sliding window, fixed window, leaky bucket — when to use each"
+        appears_in:
+          - {type: problem, slug: rate-limiter, section: "Algorithm Deep Dive", phase: 4}
+          - {type: algorithm, slug: token-bucket, section: "Token Bucket Algorithm", phase: 1}
+
+      - slug: distributed-rate-limiting
+        title: "Distributed Rate Limiting"
+        description: "Shared state across nodes, Redis atomic operations, local + global counters"
+        appears_in:
+          - {type: problem, slug: rate-limiter, section: "Distributed Rate Limiting", phase: 5}
+          - {type: fundamental, slug: storage/redis, section: "Atomic Operations", phase: 3}
+
+      - slug: fail-open-vs-closed
+        title: "Fail-Open vs Fail-Closed"
+        description: "What happens when rate limiter infrastructure is down — availability vs safety trade-off"
+        appears_in:
+          - {type: problem, slug: rate-limiter, section: "Requirements & Problem Scope", phase: 1}
+
+  - category: "ID Generation"
+    concepts:
+      - slug: unique-id-generation
+        title: "Distributed Unique ID Generation"
+        description: "Snowflake, UUID, counter ranges, KGS — collision-free ID assignment"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Key Generation Deep Dive", phase: 4}
+          - {type: problem, slug: instagram, section: "MVP Data Model", phase: 3}
+          - {type: algorithm, slug: snowflake-id, section: "Snowflake ID", phase: 1}
+          - {type: algorithm, slug: base62-encoding, section: "Base62 Encoding", phase: 1}
+
+      - slug: collision-prevention
+        title: "Collision Prevention"
+        description: "Bloom filters, conditional writes, pre-generation — ensuring uniqueness at scale"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Key Generation Deep Dive", phase: 4}
+          - {type: algorithm, slug: bloom-filter, section: "Bloom Filter", phase: 1}
+          - {type: fundamental, slug: storage/dynamodb, section: "Conditional Writes", phase: 3}
+
+  - category: "Availability & Resilience"
+    concepts:
+      - slug: multi-az-deployment
+        title: "Multi-AZ Deployment"
+        description: "Spread across availability zones for 99.99% uptime, AZ-aware load balancing"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Availability & Reliability", phase: 8}
+          - {type: problem, slug: instagram, section: "Security & Content Moderation", phase: 9}
+          - {type: fundamental, slug: networking/load-balancing, section: "AZ Distribution", phase: 3}
+
+      - slug: circuit-breaker
+        title: "Circuit Breaker Pattern"
+        description: "Stop cascading failures by short-circuiting calls to degraded services"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Availability & Reliability", phase: 8}
+          - {type: problem, slug: rate-limiter, section: "Trade-offs & Edge Cases", phase: 8}
+
+      - slug: graceful-degradation
+        title: "Graceful Degradation"
+        description: "Reduce functionality under load — serve cached data, disable non-critical features"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Availability & Reliability", phase: 8}
+          - {type: problem, slug: instagram, section: "Peak Hours", phase: 7}
+          - {type: problem, slug: rate-limiter, section: "Trade-offs & Edge Cases", phase: 8}
+
+  - category: "CAP & Consistency"
+    concepts:
+      - slug: cap-analysis
+        title: "CAP Theorem Analysis"
+        description: "AP vs CP trade-off, partition tolerance, eventual consistency windows"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Monitoring, Observability & Cost", phase: 11}
+          - {type: problem, slug: instagram, section: "Multi-Region", phase: 8}
+
+      - slug: eventual-consistency
+        title: "Eventual Consistency"
+        description: "Last-writer-wins, conflict resolution, replication lag tolerance"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Monitoring, Observability & Cost", phase: 11}
+          - {type: problem, slug: instagram, section: "Multi-Region", phase: 8}
+          - {type: fundamental, slug: storage/dynamodb, section: "Global Tables", phase: 5}
+
+  - category: "Async Processing"
+    concepts:
+      - slug: async-pipelines
+        title: "Async Event Pipelines"
+        description: "Kinesis/Kafka/SQS for decoupling writes — batch processing, eventual delivery"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Analytics Deep Dive", phase: 10}
+          - {type: problem, slug: instagram, section: "Microservices Split", phase: 6}
+          - {type: problem, slug: rate-limiter, section: "Distributed Rate Limiting", phase: 5}
+
+      - slug: event-driven-architecture
+        title: "Event-Driven Architecture"
+        description: "Producers/consumers, fan-out via topics, exactly-once vs at-least-once delivery"
+        appears_in:
+          - {type: problem, slug: instagram, section: "Microservices Split", phase: 6}
+
+  - category: "Cost Optimization"
+    concepts:
+      - slug: cost-at-scale
+        title: "Cost Analysis at Scale"
+        description: "Per-component cost breakdown, managed vs self-hosted crossover points"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Monitoring, Observability & Cost", phase: 11}
+          - {type: problem, slug: instagram, section: "Analytics & Monitoring", phase: 10}
+          - {type: problem, slug: rate-limiter, section: "Cost Estimates", phase: 9}
+
+      - slug: cdn-cost-optimization
+        title: "CDN Cost Optimization"
+        description: "PriceClass selection, compression, cache-control tuning, origin shield"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Monitoring, Observability & Cost", phase: 11}
+          - {type: fundamental, slug: networking/cdn/cloudfront, section: "Cost Optimization", phase: 6}
+
+  - category: "Security"
+    concepts:
+      - slug: abuse-prevention
+        title: "Abuse Prevention"
+        description: "Rate limiting, URL scanning, blocklists, reputation scoring"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Enhanced Security & Abuse Prevention", phase: 9}
+          - {type: problem, slug: rate-limiter, section: "Requirements & Problem Scope", phase: 1}
+
+      - slug: open-redirect
+        title: "Open Redirect Vulnerability"
+        description: "Phishing via shortener domains — preview pages, Safe Browsing, reporting"
+        appears_in:
+          - {type: problem, slug: url-shortener, section: "Enhanced Security & Abuse Prevention", phase: 9}

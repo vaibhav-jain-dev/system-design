@@ -1,0 +1,559 @@
+{{stageNav "Requirements" 1 "APIs" 2 "Trie Structure" 3 "Architecture" 4 "Data Collection" 5 "Ranking" 6 "Trie Updates" 7 "Data Model" 8 "Personalization" 9 "Scaling" 10 "Failure Modes" 11 "Typeahead Flow" 12}}
+
+{{phase 1 "Requirements & Problem Scope" "5 min"}}
+
+{{say "I want to clarify scope before diving in. We're building the autocomplete service that powers the search box — returning the top 10 suggestions for each keystroke prefix. We're not building spell correction, semantic search, or query understanding. The core constraint is latency: sub-100ms p99, ideally 50ms on cache hit. Let me confirm scale: are we talking Google-scale, roughly 5 billion queries per day?"}}
+
+{{diagram "sa-requirements"}}
+
+{{table "Requirements" (rows
+  (row "Requirement" "Target" "Notes")
+  (row "Suggestions per prefix" "Top 10" "Ranked by score")
+  (row "p99 latency (warm)" "50ms" "Cache hit path")
+  (row "p99 latency (cold)" "100ms" "Trie lookup path")
+  (row "Daily queries" "5B" "58K avg QPS, 290K peak")
+  (row "Availability" "99.9%" "3 nines, ~8.7 hrs/yr downtime")
+  (row "Language/geo aware" "Yes" "Per-prefix per-language tries")
+  (row "Personalization" "Yes" "Blend global + user history")
+  (row "Out of scope" "Spell-check, semantic, NLU" "")
+)}}
+
+{{think "The key design tension is latency vs freshness. A pre-computed trie with top-K cached at every node gives O(1) lookup, but trie rebuilds lag by hours. Contrast with real-time Elasticsearch which is fresh but adds 20-40ms."
+  (whyNot "Elasticsearch for primary path" "Even at p50 Elasticsearch adds 15-20ms. At 290K QPS with network overhead, p99 blows past 100ms on cache miss. We use it only as fallback.")
+  (whatIf "viral query spikes — a celebrity tweet" "The 5-minute hot path update catches queries with >10K hits in a 5-min window and pushes them to Redis directly, bypassing the hourly rebuild.")
+}}
+
+{{hint "fail-fast vs degrade" "Autocomplete is non-critical. If trie service is down, degrade to empty suggestions rather than blocking the search box. Users can still search — they just lose autocomplete."}}}
+
+{{triggerQs "Requirements Questions"
+  "How do you define 'top 10' — top globally or top for this user?"
+  "Globally by default, blended with personal history. The global ranking uses a weighted score across popularity and recency. Personal blending shifts the score up to 30% based on that user's query history."
+  "What's the update latency requirement for new trending queries?"
+  "Hourly for the main trie rebuild. The hot-path updater catches viral queries in under 5 minutes by watching for query bursts in the Kafka stream and pushing directly to Redis."
+  "Do we support prefix search across all languages?"
+  "We maintain separate tries per language code (en, es, zh, etc.). The client sends Accept-Language or the user's stored preference. This keeps trie sizes manageable — a single global trie would need Unicode normalization for every prefix."
+}}
+
+{{phase 2 "API Design" "4 min"}}
+
+{{say "The autocomplete API is a read-heavy GET endpoint — cacheability is non-negotiable. Every keystroke fires a request, so we need CDN and reverse-proxy caching on the prefix+language combination. The write side is fire-and-forget: we log the final submitted query asynchronously."}}
+
+{{diagram "sa-api-design"}}
+
+{{code "http" `# Read: autocomplete suggestions
+GET /autocomplete?q=new+y&limit=10&lang=en&uid=u123
+Authorization: Bearer <token>   # uid used only for personalization
+
+HTTP 200 OK
+{
+  "suggestions": [
+    {"text": "new york", "score": 0.98, "type": "query"},
+    {"text": "new york times", "score": 0.91, "type": "query"},
+    {"text": "new york weather", "score": 0.87, "type": "query"}
+  ],
+  "latency_ms": 12,
+  "from_cache": true
+}
+
+# Write: log submitted query (fire-and-forget, async)
+POST /queries/log
+{"query": "new york flights", "lang": "en", "uid": "u123", "ts": 1709600000}`}}
+
+{{think "Why GET and not POST for autocomplete? GET is idempotent and cacheable — the same prefix+lang always returns the same global top-10 (personalization is additive, blended client-side or at the service layer). POST cannot be cached by CDN or browser."
+  (whyNot "POST for autocomplete" "POST responses are never cached by CDN. At 290K QPS, without CDN caching of popular prefixes we'd need 5x more service capacity.")
+  (how "uid in GET request" "We include uid as a query param so personalization can be applied at the service layer. The uid is authenticated via the session token — the autocomplete service validates it but never logs it in raw query logs.")
+}}
+
+{{hint "debounce on the client" "The client debounces keystrokes at 150ms. This reduces QPS by ~60% compared to firing on every keypress. At 290K peak QPS, without debounce we'd be looking at 700K QPS."}}
+
+{{triggerQs "API Design Questions"
+  "Why include latency_ms in the response?"
+  "It lets the client distinguish cache hits from cold lookups. If latency exceeds 80ms the client can show a spinner instead of a flash of stale content. It also feeds our p99 SLO dashboard without requiring distributed tracing on every request."
+  "How do you prevent prefix enumeration attacks?"
+  "Rate limit by IP at the CDN layer: 200 requests per minute per IP. The uid is validated via JWT — an invalid uid gets global suggestions, not an error, so we don't leak whether a uid exists."
+}}
+
+{{phase 3 "Trie Structure" "6 min"}}
+
+{{say "The trie is the core data structure. Every node stores its children and — critically — the top-K suggestions pre-computed at that prefix. This makes lookup O(1): we navigate to the prefix node and return the cached top-10, no traversal needed."}}
+
+{{diagram "sa-trie-structure"}}
+
+{{code "python" `class TrieNode:
+    def __init__(self):
+        self.children: dict[str, TrieNode] = {}
+        self.top_k: list[Suggestion] = []  # pre-computed top-10 at this prefix
+
+@dataclass
+class Suggestion:
+    text: str
+    score: float
+    type: str  # "query" | "entity" | "category"
+
+class Trie:
+    def __init__(self):
+        self.root = TrieNode()
+
+    def lookup(self, prefix: str) -> list[Suggestion]:
+        node = self.root
+        for ch in prefix.lower():
+            if ch not in node.children:
+                return []  # no suggestions for this prefix
+            node = node.children[ch]
+        return node.top_k  # O(prefix_length) navigation, O(1) result
+
+    def build(self, query_counts: dict[str, float]):
+        # Called during trie rebuild job (hourly)
+        for query, score in sorted(query_counts.items(), key=lambda x: -x[1]):
+            self._insert(query, score)
+
+    def _insert(self, query: str, score: float):
+        node = self.root
+        for i, ch in enumerate(query.lower()):
+            node = node.children.setdefault(ch, TrieNode())
+            # Maintain top-K at each prefix node
+            self._update_topk(node, Suggestion(query, score, "query"))
+
+    def _update_topk(self, node: TrieNode, s: Suggestion, k=10):
+        node.top_k.append(s)
+        node.top_k = sorted(node.top_k, key=lambda x: -x.score)[:k]`}}
+
+{{table "Storage Estimate" (rows
+  (row "Component" "Size" "Calculation")
+  (row "Prefix nodes" "~3M" "avg 6-char queries, 26^1+...+26^6 ≈ 3M unique prefixes")
+  (row "Top-10 per node" "500 bytes" "10 suggestions × 50 bytes each")
+  (row "Total trie RAM" "~1.5 GB" "3M nodes × 500 bytes")
+  (row "Per language" "~300 MB" "en trie is largest; es/zh are smaller")
+  (row "Trie servers (50 replicas)" "75 GB total" "1.5 GB × 50 replicas")
+)}}
+
+{{compare "Autocomplete Lookup" (options
+  (best "In-memory Trie with top-K at nodes" "O(prefix_len) traversal + O(1) result. 1.5GB RAM per language. 1-5ms lookup.")
+  (alt "Redis Sorted Sets per prefix" "ZREVRANGE is O(log N + K). Simpler ops, but 5-10ms per lookup. At 290K QPS, Redis becomes bottleneck.")
+  (nofit "Elasticsearch prefix query" "15-25ms per query. Fine for fallback, not for hot path at 290K QPS.")
+)}}
+
+{{think "Why store top-K at every prefix node instead of traversing at query time?"
+  (whyNot "traversal at query time" "A DFS subtree traversal for prefix 'a' touches millions of nodes. Even with pruning, 5-10ms — 10x worse than pre-cached top-K.")
+  (how "top-K maintenance during build" "During the hourly rebuild, we process queries sorted by score descending and maintain a bounded list at each node using a min-heap of size K. Insert is O(K log K) per query per prefix character.")
+}}
+
+{{hint "why not a hash map?" "A hash map of prefix → top-K would work but uses 2-3x more memory due to key storage overhead. The trie shares prefix structure — the path to a node IS the prefix."}}
+
+{{triggerQs "Trie Structure Questions"
+  "What happens if a query is longer than your trie depth?"
+  "We cap trie depth at 20 characters. Queries beyond that are truncated for indexing. In practice, 99.9% of autocomplete prefixes are under 15 chars — users rarely type full long queries before selecting."
+  "How do you handle Unicode and non-Latin characters?"
+  "We normalize to Unicode NFC form and build per-language tries. For Chinese (zh), we index on pinyin AND character sequences. The trie node children map uses full Unicode code points as keys, not just ASCII — the 26-child assumption is only for estimation."
+}}
+
+{{phase 4 "Architecture" "6 min"}}
+
+{{say "The request path is: client debounces at 150ms, hits CDN which caches top-prefix responses, then the autocomplete service which keeps the trie in memory. We maintain a Redis L1 cache in front of the trie for the top 10K most-queried prefixes. The trie is rebuilt hourly from aggregated query counts."}}
+
+{{diagram "sa-architecture"}}
+
+{{code "python" `# Autocomplete service request handler
+class AutocompleteHandler:
+    def __init__(self, trie: Trie, redis: Redis, es: Elasticsearch):
+        self.trie = trie
+        self.redis = redis
+        self.es = es
+
+    async def handle(self, prefix: str, lang: str, uid: str) -> list[Suggestion]:
+        cache_key = f"ac:{lang}:{prefix}"
+
+        # L1: Redis cache (top 10K prefixes, 60s TTL)
+        cached = await self.redis.get(cache_key)
+        if cached:
+            suggestions = deserialize(cached)
+        else:
+            # L2: In-memory trie (1.5GB per language, in-process)
+            suggestions = self.trie.lookup(prefix)
+            if not suggestions:
+                # L3: Elasticsearch fallback (rare, <5% of traffic)
+                suggestions = await self.es.autocomplete(prefix, lang)
+            await self.redis.setex(cache_key, 60, serialize(suggestions))
+
+        # Blend personalization if uid provided
+        if uid:
+            suggestions = blend_personal(suggestions, uid, self.redis)
+
+        return suggestions[:10]`}}
+
+{{think "Should we have one trie per language or one trie for all languages?"
+  (whyNot "single combined trie" "A combined trie for en+es+zh+... would be 8-10GB. It can't be kept hot in CPU cache. Per-language tries are 300MB-1.5GB each, fit in L3 cache, and allow independent update schedules.")
+  (whatIf "a language trie server crashes" "We have 50 replicas per language. Load balancer detects failure via health check in <10s and stops routing. The remaining 49 replicas absorb the load — each handles ~6K QPS, headroom is ~30%.")
+}}
+
+{{hint "CDN for autocomplete" "CloudFront caches GET /autocomplete?q=new+y&lang=en for 60 seconds. The top 10K prefixes represent ~90% of traffic. This cuts origin QPS from 290K to ~29K."}}
+
+{{triggerQs "Architecture Questions"
+  "How many trie service replicas do you need?"
+  "290K peak QPS. CDN absorbs 90%, leaving 29K QPS to origin. Each trie service handles ~6K QPS (benchmarked at 1.5GB RAM, 4-core). So we need 5 replicas with 2x headroom = 10 replicas per language. For 3 major language tries running on the same fleet: 30 replicas total."
+  "What's the read path latency breakdown?"
+  "CDN hit: 5ms. Redis hit: 8ms (2ms network + 6ms serialization). Trie lookup: 12ms (in-memory, L3 cache). Elasticsearch fallback: 40-60ms. Total p99 on trie path including personalization blend: 18-22ms."
+}}
+
+{{phase 5 "Data Collection" "5 min"}}
+
+{{say "We collect query signals from two sources: submitted queries (the user actually hits search) and displayed autocomplete clicks (the user selected a suggestion). Submitted queries are the stronger signal. We batch-log to Kafka, aggregate hourly, and feed the trie rebuild job."}}
+
+{{diagram "sa-data-collection"}}
+
+{{code "python" `# Query log event (published to Kafka topic: query-logs)
+{
+    "event_type": "query_submitted",  # or "suggestion_clicked"
+    "query": "new york flights",
+    "lang": "en",
+    "geo": "US",
+    "ts": 1709600000,
+    # uid is hashed before logging — we never log raw uid
+    "uid_hash": "sha256(uid + daily_salt)"
+}
+
+# Hourly aggregation job (Spark Streaming / Flink)
+def aggregate_hour(events: RDD) -> dict:
+    return (events
+        .filter(lambda e: e["event_type"] == "query_submitted")
+        .map(lambda e: (f"{e['query']}:{e['lang']}", 1))
+        .reduceByKey(lambda a, b: a + b)
+        .filter(lambda kv: kv[1] >= 10)  # min frequency threshold
+        .collectAsMap()
+    )
+
+# Trie rebuild (runs after aggregation completes)
+def rebuild_trie(hourly_counts, historical_counts):
+    merged = merge_with_decay(hourly_counts, historical_counts)
+    new_trie = Trie()
+    new_trie.build(merged)
+    return new_trie`}}
+
+{{think "Privacy: we must not log raw user IDs or PII in query logs, but we need uid for personalization."
+  (whyNot "logging raw uid" "GDPR Article 25 requires privacy by design. A raw uid + query combination is PII. Data breach would expose user search history.")
+  (how "daily salted hash" "uid_hash = SHA256(uid + date_salt). The salt rotates daily, making it impossible to link records across days. Personalization data lives separately in the user's Redis hash with explicit TTL.")
+}}
+
+{{hint "min frequency filter" "We drop queries with fewer than 10 submissions per hour. This eliminates ~99% of long-tail one-off queries, reducing trie size from 100M nodes to ~3M, and filters PII (unique queries like 'my ssn is 123')."}}
+
+{{triggerQs "Data Collection Questions"
+  "How do you handle the hot path for trending queries?"
+  "A separate Flink job watches 5-minute windows. Any query crossing 10K hits in 5 minutes is flagged as trending. The job writes directly to Redis with a 60-minute TTL, bypassing the hourly rebuild. Trie servers read trending scores from Redis and blend them into suggestions."
+  "What's your Kafka partition strategy?"
+  "Partition by lang+geo (e.g., 'en-US'). This ensures all English-US queries go to the same consumer group partition, making hourly aggregation a local reduce with no shuffle. We use 50 partitions per topic — handles 300K events/second at 10KB average batch."
+}}
+
+{{phase 6 "Ranking Algorithm" "5 min"}}
+
+{{say "The ranking score is a weighted blend of three signals: global popularity, recency boost for fresh queries, and personalization. Popularity dominates at 70% to ensure suggestions are broadly useful. Recency gets 20% to surface trending topics. Personalization gets 10% — meaningful but not enough to make suggestions feel filter-bubbled."}}
+
+{{diagram "sa-ranking-algorithm"}}
+
+{{code "python" `# Ranking score formula
+def compute_score(
+    query: str,
+    base_count: int,      # total historical submissions
+    days_since_peak: int, # days since highest traffic day
+    user_affinity: float, # 0.0-1.0 from user history (0 if no history)
+) -> float:
+    # Normalize base popularity to 0-1 range using log scale
+    popularity = min(1.0, math.log1p(base_count) / math.log1p(1_000_000))
+
+    # Recency boost: queries peak 7 days ago get 50% boost decay
+    recency_decay = 0.5 ** (days_since_peak / 7.0)
+    recency_boost = popularity * recency_decay
+
+    # Weighted blend
+    score = (
+        0.7 * popularity +
+        0.2 * recency_boost +
+        0.1 * user_affinity
+    )
+    return round(score, 4)
+
+# Example:
+# "new york" — 50M historical, peaked 2 days ago, user searched 3x recently
+# popularity = log(50M)/log(1M) = 1.0 (capped)
+# recency_boost = 1.0 × 0.5^(2/7) = 0.82
+# user_affinity = 0.6  (searched 3 of last 10 queries)
+# score = 0.7×1.0 + 0.2×0.82 + 0.1×0.6 = 0.764`}}
+
+{{think "Why use log scale for popularity rather than raw count?"
+  (whyNot "raw count normalization" "A query with 50M hits vs 1M hits shouldn't be 50x 'better'. The marginal value of additional popularity decreases. Log scale compresses the long tail — a 10M count query and a 50M count query are both 'very popular'.")
+  (whatIf "a new trending query has zero historical count" "The hot-path updater detects the burst, assigns a synthetic base_count equal to 1-hour submissions × 24 to estimate daily volume, and injects it directly into Redis. The trie picks it up on next poll (60s TTL).")
+}}
+
+{{hint "language-aware scoring" "Query counts are stored per language. 'El tiempo' in Spanish has a separate count from 'the time' in English. This prevents cross-language popularity bleeding."}}
+
+{{triggerQs "Ranking Questions"
+  "How do you prevent gaming — e.g., bots submitting fake queries?"
+  "Three layers: rate limiting at CDN (200 req/min per IP), uid validation at the log endpoint (only authenticated sessions are counted), and a frequency anomaly detector in the aggregation job that flags query counts 5-sigma above historical baseline for manual review."
+  "How do you handle seasonality — 'valentines day gifts' spikes every February?"
+  "We store a per-query seasonal baseline: the average count for that query in the same calendar week across prior years. The recency boost formula uses days_since_seasonal_baseline instead of absolute days. This means 'valentines day gifts' naturally resurfaces each year."
+}}
+
+{{phase 7 "Trie Updates" "5 min"}}
+
+{{say "Updating a live trie is dangerous — we can't mutate shared data structures while serving 290K QPS. We use a blue/green deployment pattern: build the new trie in a background process, verify it, then atomically swap the pointer. Traffic sees either the old or new trie, never a partial state."}}
+
+{{diagram "sa-trie-update"}}
+
+{{code "python" `# Blue/green trie swap (runs every hour in background thread)
+class TrieManager:
+    def __init__(self):
+        self._current: Trie = Trie()  # starts with empty trie
+        self._lock = threading.Lock()
+
+    def get_current(self) -> Trie:
+        return self._current  # lock-free read (atomic pointer)
+
+    def rebuild_and_swap(self, query_counts: dict):
+        # Step 1: Build new trie in background (takes 30-60s for 3M queries)
+        new_trie = Trie()
+        new_trie.build(query_counts)
+
+        # Step 2: Verify correctness
+        assert len(new_trie.lookup("new")) >= 5, "Sanity check failed"
+        assert new_trie.lookup("the")[0].text == "the", "Top query mismatch"
+
+        # Step 3: Atomic pointer swap (GIL ensures atomicity in CPython)
+        with self._lock:
+            old_trie = self._current
+            self._current = new_trie
+
+        # Step 4: Old trie is garbage collected after in-flight requests finish
+        # GC delay: wait 5s for in-flight requests to complete
+        time.sleep(5)
+        del old_trie
+        gc.collect()
+
+# Kubernetes: rolling update across 50 replicas
+# kubectl rollout: 5 replicas updated at a time, 30s between batches
+# Max unavailable: 0 (always 50 replicas serving)`}}
+
+{{think "Do we rebuild the full trie every hour or do incremental updates?"
+  (whyNot "incremental trie updates" "Incremental updates to a shared trie require fine-grained locking or a CRDT structure. Either adds 20-40% latency overhead on the read path. Full rebuild in 60s on a background goroutine is simpler and correctness is easier to verify.")
+  (whatIf "rebuild job fails mid-way" "The current trie keeps serving. The rebuild is in an isolated goroutine — a panic is caught, logged, and the next hourly job is scheduled. We alert on 2 consecutive failures and fall back to the previous snapshot stored in S3.")
+}}
+
+{{hint "memory pressure during rebuild" "During the 60s rebuild window, memory briefly holds both old and new trie — 3GB peak for a 1.5GB trie. Ensure nodes have at least 4GB RAM. The old trie is freed within 5s of the swap."}}
+
+{{phase 8 "Data Model" "4 min"}}
+
+{{say "We have three data stores: raw query logs in Kafka (7-day retention), aggregated counts in a columnar store like Redshift or BigQuery (permanent, for trend analysis), and user personalization data in Redis. The trie itself lives entirely in service memory — it is not persisted to a DB, it's rebuilt from the aggregated counts on startup."}}
+
+{{diagram "sa-data-model"}}
+
+{{table "Storage Choices" (rows
+  (row "Data" "Store" "Retention" "Size")
+  (row "Raw query logs" "Kafka topics" "7 days" "~5TB/day at 1KB/event × 5B events")
+  (row "Aggregated query counts" "Redshift / BigQuery" "5 years" "~10GB/day after deduplication")
+  (row "User query history" "Redis Hash per uid" "90 days TTL" "100 queries × 50B = 5KB/user")
+  (row "Trending queries (hot path)" "Redis Sorted Set" "60 min TTL" "~1MB for top 10K trending")
+  (row "Trie snapshots" "S3 (serialized)" "30 days" "~500MB compressed per language")
+)}}
+
+{{code "sql" `-- query_counts table (Redshift/BigQuery — offline analytics)
+CREATE TABLE query_counts (
+    query       VARCHAR(512)   NOT NULL,
+    lang        CHAR(2)        NOT NULL,   -- 'en', 'es', 'zh', etc.
+    hour_bucket TIMESTAMP      NOT NULL,   -- truncated to hour
+    count       BIGINT         NOT NULL,
+    PRIMARY KEY (query, lang, hour_bucket)
+) DISTKEY(lang) SORTKEY(hour_bucket);
+
+-- Index for trie rebuild job: get top-1M queries per language
+-- SELECT query, SUM(count) FROM query_counts
+-- WHERE lang='en' AND hour_bucket >= NOW() - INTERVAL '30 days'
+-- GROUP BY query ORDER BY SUM(count) DESC LIMIT 1000000`}}
+
+{{think "Why not store trie in a database and query it on demand?"
+  (whyNot "database-backed trie lookup" "Any database hop adds 5-15ms network latency. At 290K QPS that's 290K × 15ms = 4.35M ms of added latency budget per second. The whole point of the in-memory trie is zero network hops on the hot path.")
+  (how "trie persistence" "Serialize the trie to Protocol Buffers, gzip it (~500MB for English), upload to S3. On service restart, download from S3 (takes 90s) and deserialize. This is the cold start path — production restarts are rolling so most replicas stay warm.")
+}}
+
+{{hint "Redis Hash for user history" "We store uid → {query: click_count} as a Redis Hash. HGETALL takes <1ms for 100-entry hashes. We cap at 100 queries with a background LRU eviction job running every 15 minutes."}}
+
+{{phase 9 "Personalization" "4 min"}}
+
+{{say "Personalization blends each user's query history into the global top-10. We don't replace global results — we boost them. A query the user typed 5 times recently gets a 0.3 boost multiplier on the global score. This way suggestions stay broadly useful while surface personal favorites."}}
+
+{{diagram "sa-personalization"}}
+
+{{code "python" `# Personalization blend at query time
+def blend_personal(
+    global_suggestions: list[Suggestion],
+    uid: str,
+    redis: Redis,
+) -> list[Suggestion]:
+    # Fetch user history: {query: click_count} — max 100 entries
+    history = redis.hgetall(f"user:history:{uid}")  # <1ms
+
+    if not history:
+        return global_suggestions  # new user, no personalization
+
+    # Build affinity scores
+    max_count = max(history.values(), default=1)
+    affinities = {
+        q: count / max_count
+        for q, count in history.items()
+    }
+
+    # Re-score global suggestions with personal boost
+    blended = []
+    for s in global_suggestions:
+        personal = affinities.get(s.text, 0.0)
+        boosted_score = 0.7 * s.score + 0.3 * personal
+        blended.append(Suggestion(s.text, boosted_score, s.type))
+
+    # Add personal queries not in global top-10 (history recall)
+    seen = {s.text for s in global_suggestions}
+    for query, affinity in sorted(affinities.items(), key=lambda x: -x[1])[:5]:
+        if query not in seen:
+            blended.append(Suggestion(query, 0.3 * affinity, "personal"))
+
+    # Apply blocklist (user-muted or system-filtered queries)
+    blocklist_key = f"blocklist:{uid}"
+    blocked = redis.smembers(blocklist_key)
+    blended = [s for s in blended if s.text not in blocked]
+
+    return sorted(blended, key=lambda x: -x.score)[:10]`}}
+
+{{think "Should personalization happen at the CDN or at the service?"
+  (whyNot "personalization at CDN" "CDN caches are keyed by URL. Adding uid to the cache key defeats the purpose — we'd get a unique cache entry per user × prefix. At 100M users × 1K popular prefixes = 100B cache entries. Not viable.")
+  (how "CDN + service split" "CDN caches global top-10 (no uid in key). Service fetches from CDN, then blends personalization in <2ms using the user's Redis hash. Total: 5ms CDN + 8ms Redis = 13ms vs 8ms without personalization. Acceptable overhead.")
+}}
+
+{{hint "privacy: never log personal blend results" "The personalized suggestions shown to a user are computed ephemerally and never stored. We only store the user's query history (what they submitted), not what suggestions we showed them — avoids filter bubble feedback loops."}}
+
+{{triggerQs "Personalization Questions"
+  "What if a user searches from two devices — do histories merge?"
+  "Yes. The history key is uid-based, not device-based. Both devices read and write the same Redis Hash. We use HINCRBY for atomic increments — concurrent writes from two devices don't corrupt data, they just add up."
+  "How do you handle a user who wants to clear their search history?"
+  "DELETE /user/history triggers a Redis DEL on the user's history key and adds all their queries to the blocklist for 30 days (so suggestions they cleared don't immediately reappear). Takes effect within 60 seconds (next CDN TTL expiry)."
+}}
+
+{{phase 10 "Scaling" "5 min"}}
+
+{{say "290K peak QPS with <100ms p99 at global scale requires three layers of horizontal scaling: CDN absorbs the top-prefix traffic, stateless autocomplete service scales with standard replica counts, and the Kafka pipeline scales partition-count to handle ingestion. The memory constraint — 1.5GB trie per language — means we can't arbitrarily pack nodes onto small instances."}}
+
+{{diagram "sa-scaling"}}
+
+{{table "Capacity Planning" (rows
+  (row "Layer" "Capacity" "Replicas" "Notes")
+  (row "CDN (CloudFront)" "Unlimited" "Managed" "90% of 290K QPS = 261K QPS served from edge")
+  (row "Autocomplete service" "6K QPS/node" "50" "Remaining 29K QPS + 2x headroom")
+  (row "Redis (ElastiCache)" "100K QPS/node" "3" "r6g.large, 6.38GB RAM, ~3 nodes for HA")
+  (row "Kafka" "100K events/sec/partition" "50 partitions" "5B events/day = 57K/sec average")
+  (row "Trie rebuild (Flink)" "1M queries/min" "10 workers" "30 min to process 30-day window")
+)}}
+
+{{think "How do we handle multi-region distribution of the trie?"
+  (whyNot "single-region trie with global CDN" "CDN adds <10ms for cached prefixes but uncached requests from APAC to us-east-1 add 150ms round-trip. For cold trie lookups this blows the 100ms budget.")
+  (whatIf "trie is stale in a remote region" "We accept 1-2 hours of staleness. The trie rebuild is pushed to regional S3 buckets simultaneously. Each region's autocomplete service downloads and hot-swaps independently. Trending queries use Redis replication with ~100ms cross-region lag.")
+}}
+
+{{hint "instance sizing" "Use memory-optimized instances (r6g.2xlarge, 64GB RAM). Each trie service holds 1.5GB per language × 3 languages = 4.5GB for the trie, plus 2GB for OS/runtime. 64GB allows 13 language tries per instance if needed."}}
+
+{{checklist "Scaling checklist" "CDN caches top 10K prefixes with 60s TTL — verify cache hit ratio > 88%" "Each trie service replica handles 6K QPS — load test before production" "Redis cluster has 3 nodes for HA — no single point of failure" "Kafka partitions match consumer parallelism — 50 partitions, 50 Flink workers" "Trie rebuild job completes in <30 min — alert on >45 min runtimes" "Multi-region: push trie snapshots to regional S3 buckets within 5 min of rebuild"}}
+
+{{phase 11 "Failure Modes" "4 min"}}
+
+{{say "Autocomplete is non-critical — degraded suggestions are better than a broken search box. Our failure model is: always return something in under 200ms, even if it's stale, globally generic, or empty. We never let autocomplete block search."}}
+
+{{diagram "sa-failure-modes"}}
+
+{{table "Failure Scenarios" (rows
+  (row "Failure" "Symptom" "Mitigation" "SLO Impact")
+  (row "Trie service down (1 replica)" "QPS redistributed" "Load balancer removes in <10s" "None — 49 replicas absorb")
+  (row "Trie service down (all)" "No suggestions" "Fallback to Elasticsearch (50ms)" "Latency degrades to 80ms p99")
+  (row "Redis cache down" "No L1 cache" "Hit trie directly — 12ms instead of 8ms" "Minimal — 4ms additional latency")
+  (row "Kafka lag (>1 hour)" "Stale trie updates" "Accept stale — trie serves last good state" "Freshness SLO violated, not availability")
+  (row "Trie rebuild fails" "Outdated trie" "Serve previous snapshot from S3" "Suggestions up to 2h stale")
+  (row "CDN outage" "All traffic hits origin" "290K QPS to 50 replicas — 5.8K QPS each" "Marginal — within capacity headroom")
+)}}
+
+{{think "What's the blast radius if the hot-path trending updater writes bad data to Redis?"
+  (whyNot "no circuit breaker on trending writes" "A bug in the trending detector could inject garbage queries into suggestions for all users. Without a circuit breaker, this would propagate globally in 60 seconds.")
+  (how "circuit breaker" "The trending job validates: query length < 200 chars, no control characters, count < 10M (sanity bound). If validation fails, it logs and skips the write. The trie falls back to hourly rebuild data. Monitoring alerts on 'trending writes rejected > 100/min'.")
+}}
+
+{{hint "Elasticsearch fallback SLA" "Elasticsearch fallback handles cold-path misses and full trie outages. Size the ES cluster for 30K QPS (10% of total traffic). At that QPS, use 5 ES nodes with 16 vCPU each. Keep the autocomplete index warm with a background ping job."}}
+
+{{triggerQs "Failure Mode Questions"
+  "How do you detect trie corruption vs a legitimate trie that just has different results?"
+  "Three sanity checks after rebuild: (1) lookup 'the' returns at least 5 suggestions, (2) top-10 for 'google' includes 'google.com' or 'google maps', (3) total node count is within 20% of previous rebuild. If any check fails, we abort the swap and page the on-call."
+  "What if personalization data (Redis) is unavailable — do you serve 503?"
+  "No. We degrade gracefully: if Redis is unreachable, we skip personalization and return global top-10. The user gets slightly less tailored suggestions but doesn't see an error. This is a UX tradeoff we've explicitly chosen — availability > personalization freshness."
+}}
+
+{{phase 12 "Typeahead Flow" "10 min"}}
+
+{{say "Let me walk through the complete end-to-end flow — client to CDN to service to trie — and then cover the five most likely deep-dive questions."}}
+
+{{diagram "sa-typeahead-flow"}}
+
+{{deepQA "Critical Interview Questions" `
+<div class="dqa-item">
+  <div class="dqa-q">How does the trie achieve effectively O(1) lookup at query time?</div>
+  <div class="dqa-a">We pre-compute the top-K suggestions at <span class="dqa-key">every prefix node</span> during the hourly rebuild. At query time we simply traverse the trie character by character (O(prefix_length), typically 1-15 chars) and return the cached list at the final node — no subtree traversal needed.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">Why not just store a flat hash map of prefix → top-K?</div>
+    <div class="dqa-sub-a">A flat hash map works but uses 2-3x more memory because it stores the full prefix string as each key. The trie shares prefix structure — the path to a node is the key. For 3M prefix nodes, the trie uses ~1.5GB vs ~4GB for an equivalent hash map.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">What's the time complexity of building the trie with top-K at each node?</div>
+      <div class="dqa-deep-a">For Q unique queries each of average length L, inserting into the trie is O(Q × L × K log K) — each character position requires updating a bounded top-K heap. At Q=1M, L=8, K=10: ~80M heap operations. In practice, the rebuild completes in 30-60 seconds on 4 vCPU.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How do you handle viral/trending queries that appear mid-cycle before the hourly trie rebuild?</div>
+  <div class="dqa-a">A separate Flink job watches <span class="dqa-key">5-minute tumbling windows</span> on the Kafka query stream. Any query exceeding 10K submissions in a 5-minute window is classified as trending. The job computes a synthetic score and writes it directly to Redis with a 60-minute TTL. Autocomplete service polls Redis for trending overrides and blends them with trie results on every request.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">How do you prevent a bot attack from injecting garbage into trending?</div>
+    <div class="dqa-sub-a">Three mitigations: rate limit by IP at CDN (200/min), require valid authenticated uid for query logging (bots without sessions aren't counted), and validate trending candidates with a statistical anomaly check — count must be 3-sigma above the query's own 7-day baseline. A brand-new query spiking from 0 to 10K in 5 minutes fails the baseline check and gets flagged for human review before injection.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">What's the lag from a query going viral to appearing in autocomplete?</div>
+      <div class="dqa-deep-a">The Flink 5-minute window closes, the job runs in ~30 seconds, writes to Redis with a 60s TTL refresh cycle. End-to-end: 5 minutes 30 seconds worst case, 5 minutes best case. The CDN TTL for the affected prefix is 60 seconds, so the suggestion propagates globally within 6 minutes of the viral event.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How do you scale to 290K QPS with under 100ms p99?</div>
+  <div class="dqa-a">Three-layer caching reduces origin load by 90%. <span class="dqa-key">CDN</span> (CloudFront) caches the top 10K prefixes at the edge — these account for ~88% of traffic. <span class="dqa-key">Redis</span> L1 cache handles the next tier. The remaining ~29K QPS hits 50 stateless trie service replicas, each handling 6K QPS with a 1.5GB in-memory trie. Trie lookup is 1-5ms in-process.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What's the memory footprint across the entire fleet?</div>
+    <div class="dqa-sub-a">Each of the 50 trie replicas holds 1.5GB per language trie. For 3 language tries: 4.5GB per replica × 50 replicas = 225GB total fleet memory for trie data. We use r6g.2xlarge instances (64GB RAM) — 3 language tries fit comfortably with room for OS overhead.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you autoscale trie services when QPS spikes?</div>
+      <div class="dqa-deep-a">Kubernetes HPA on CPU utilization (target 60%). But trie services take 90 seconds to cold start (download 500MB trie snapshot from S3 + deserialize). We maintain a 30% over-provisioning buffer at all times and pre-scale before known traffic events (e.g., Super Bowl searches). For sudden spikes, the CDN and Redis layers absorb the burst while new replicas warm up.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How does personalization work without violating user privacy?</div>
+  <div class="dqa-a">We never log raw uid+query pairs in the shared query log. The query log contains a <span class="dqa-key">daily-salted SHA-256 hash</span> of the uid — this makes cross-day linkage impossible. Personal history lives in a per-uid Redis Hash with 90-day TTL, explicitly scoped to the user's account and deleted on history clear. Personalization blending is ephemeral — the blended results are never stored.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What about GDPR right-to-erasure requests?</div>
+    <div class="dqa-sub-a">A GDPR deletion request triggers: (1) DEL on user:history:{uid} in Redis — immediate, (2) a tombstone record in a deletions table that the Kafka consumer uses to filter out that uid's events from aggregation — effective within the next hourly job, (3) a scan of the S3 query log archives to remove salted-hash occurrences — async, completes within 30 days per GDPR Article 17.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">Could you infer a user's uid from their personalized autocomplete results?</div>
+      <div class="dqa-deep-a">No. The personalized suggestions are returned only to the authenticated session that made the request. The response is not cached at the CDN level (we strip uid from the CDN cache key). An attacker observing CDN-cached responses sees only global top-10. The personalized blend is computed at the origin and returned over TLS directly to the authenticated client.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How do you do zero-downtime trie updates — the blue/green swap?</div>
+  <div class="dqa-a">The trie rebuild runs in a <span class="dqa-key">background goroutine</span>, building a complete new trie from the aggregated counts into a separate memory region. After sanity checks pass (top queries for 'the', 'google', etc. look correct), we do an <span class="dqa-key">atomic pointer swap</span>. In Python, CPython's GIL makes the pointer assignment atomic. In-flight requests using the old trie complete normally — the old trie is reference-counted and freed ~5 seconds after swap.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What if the new trie fails sanity checks?</div>
+    <div class="dqa-sub-a">We abort the swap, keep the current trie serving, and alert on-call. The rebuild job is retried on the next hour. Meanwhile the previous trie snapshot from S3 is available if the current in-memory trie becomes corrupted (e.g., OOM kill forces a cold restart). Two consecutive failed rebuilds trigger a P2 incident.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you roll out a new trie to 50 replicas without a thundering herd on S3?</div>
+      <div class="dqa-deep-a">The rebuild job pushes the new trie snapshot to S3, then updates a Redis key trie:latest:{lang} with the new S3 path. Trie replicas poll this key every 5 minutes. When they see a new path, they stagger their S3 download using a random jitter of 0-300 seconds. This spreads 50 downloads over 5 minutes — S3 handles it trivially. No thundering herd.</div>
+    </div>
+  </div>
+</div>
+`}}
+
+{{key "Pre-compute top-K at every trie node for O(1) lookup, cache top prefixes at CDN for 90% hit rate, and always degrade gracefully — return global suggestions when personalization or freshness signals are unavailable."}}

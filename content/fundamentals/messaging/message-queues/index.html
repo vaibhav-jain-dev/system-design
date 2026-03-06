@@ -1,0 +1,272 @@
+{{phase 1 "What Are Message Queues?" "3 min"}}
+
+{{say "A message queue decouples producers from consumers. The producer writes a message and moves on — it doesn't wait for the consumer to process it. This gives you async processing, load buffering, and resilience when downstream services are slow or down."}}
+
+{{diagram "fund-message-queue-overview"}}
+
+{{think "The core value is temporal decoupling — producer and consumer don't need to be alive at the same time."
+  (whyNot "direct HTTP calls" "If the consumer is slow or restarts, the producer blocks or drops data. A queue absorbs the burst.")
+  (how "delivery semantics" "At-most-once (fire and forget), at-least-once (retry until ack), exactly-once (idempotent + transactions).")
+  (whatIf "the queue itself goes down" "Kafka replicates partitions across brokers. Losing one broker doesn't lose data if replication factor ≥ 2.")
+}}
+
+{{hint "why not just a database as a queue?" "Databases work at small scale but polling adds latency, rows-as-queue creates lock contention, and there's no built-in fan-out or replay. Kafka's log structure is purpose-built for this."}}
+
+{{table "Messaging Patterns" (rows
+  (row "Pattern" "Direction" "Consumers" "Use Case")
+  (row "Point-to-Point Queue" "1 producer → 1 consumer group" "Competing consumers" "Task queues, job workers")
+  (row "Pub/Sub" "1 producer → N subscriber groups" "Independent groups" "Event fan-out, notifications")
+  (row "Log (Kafka)" "Append-only, offset-tracked" "Any number, any speed" "Event sourcing, audit, replay")
+)}}
+
+{{triggerQs "Phase 1 Interview Questions"
+  "What's the difference between a queue and a log?"
+  "A queue destroys a message after it's consumed. A log (Kafka) retains messages by offset — consumers track their own position and can replay from any point. This makes Kafka ideal for event sourcing and multiple independent consumers reading at different speeds."
+  "When would you use a message queue vs a database?"
+  "Use a queue when you need async decoupling, fan-out to multiple consumers, or retry with backoff. Use a database when you need queryability, complex transactions, or long-term storage beyond retention windows. They're complementary, not alternatives."
+}}
+
+{{phase 2 "Kafka Architecture" "6 min"}}
+
+{{say "Kafka organizes messages into topics. Each topic is split into partitions — ordered, immutable logs. Producers write to partitions (key-hashed or round-robin). Consumers in the same group split partitions between them. Crucially, one partition is consumed by at most one consumer in a group at a time — that's how Kafka gives you ordering within a partition."}}
+
+{{diagram "fund-kafka-architecture"}}
+
+{{think "Partition count is the unit of parallelism. 10 partitions = max 10 parallel consumers per group."
+  (whyNot "one giant partition" "All writes serialize through one broker segment. Throughput bottlenecks at ~100MB/sec per partition.")
+  (how "consumer groups" "Each group has its own offset per partition. Group A can be at offset 1000, Group B at offset 500 — they don't interfere.")
+  (whatIf "a consumer crashes mid-batch" "Kafka tracks committed offsets. On restart, the consumer resumes from last committed offset. Messages between last commit and crash are reprocessed — at-least-once.")
+}}
+
+{{hint "what is log compaction?" "For key-value event streams (e.g., user profile updates), Kafka log compaction retains only the latest value per key. Tombstone records (value=null) delete a key. Compacted topics give you a changelog — the latest state, not every mutation."}}
+
+{{table "Kafka Concepts" (rows
+  (row "Concept" "Definition" "Interview Number")
+  (row "Partition" "Ordered, immutable log segment" "Max ~1M msgs/sec per partition")
+  (row "Offset" "Monotonically increasing message position" "64-bit integer, unique per partition")
+  (row "Consumer Group" "Set of consumers splitting partitions" "1 partition → 1 consumer max per group")
+  (row "Replication Factor" "Number of broker copies" "RF=3: survives 2 broker failures")
+  (row "ISR" "In-Sync Replicas — acks required" "acks=all requires all ISR to confirm write")
+  (row "Retention" "How long messages are kept" "Default 7 days; compacted = forever")
+)}}
+
+{{code "properties" `# Producer config — durability
+acks=all                    # Wait for all ISR
+enable.idempotence=true     # Exactly-once at producer layer
+retries=Integer.MAX_VALUE   # Retry forever until acks
+max.in.flight.requests.per.connection=5  # Safe with idempotence
+
+# Consumer config — at-least-once
+enable.auto.commit=false    # Manual commit after processing
+auto.offset.reset=earliest  # Start from beginning on new group`}}
+
+{{triggerQs "Phase 2 Interview Questions"
+  "How does Kafka guarantee ordering?"
+  "Ordering is guaranteed within a partition, not across partitions. If you need total ordering for a key (e.g., all events for user_id=123), hash the key to a partition — all writes for that key land on the same partition. Cross-partition ordering requires external coordination."
+  "What is the difference between acks=1 and acks=all?"
+  "acks=1 means the leader broker acknowledges the write. If the leader crashes before replication, the message is lost. acks=all waits for all in-sync replicas to confirm — durable but ~2-5ms higher latency. For financial or audit logs, always use acks=all."
+  "What replaced Zookeeper in Kafka?"
+  "KRaft (Kafka Raft) replaced Zookeeper as of Kafka 3.3 (stable). Kafka now manages its own metadata log internally using Raft consensus. This removes the operational burden of running a separate Zookeeper cluster and cuts leader election time from minutes to seconds."
+}}
+
+{{phase 3 "Kafka vs Alternatives" "5 min"}}
+
+{{say "The right queue depends on your ordering, replay, and throughput needs. Kafka is not always the answer — SQS is simpler for Lambda pipelines, RabbitMQ is better for complex routing, Redis Streams work for small-scale fan-out."}}
+
+{{compare "Message Queue Choice" (options
+  (best "Kafka" "Ordered replay, high throughput (1M+ msgs/sec), multi-consumer groups, log compaction. Best for event sourcing, audit logs, stream processing.")
+  (alt "SQS (AWS)" "Fully managed, zero ops, at-least-once delivery, 256KB max msg. Best for Lambda triggers, decoupling microservices without replay needs.")
+  (nofit "RabbitMQ" "Complex routing with exchanges/bindings, lower throughput (~50K msgs/sec). Not designed for replay — message deleted after ack. Avoid for high-throughput or event sourcing.")
+)}}
+
+{{table "Message System Comparison" (rows
+  (row "System" "Ordering" "Replay" "Throughput" "Max Msg Size" "Exactly-Once" "Managed?")
+  (row "Kafka" "Per partition" "Yes (offset)" "1M+ msgs/sec" "1MB default (configurable)" "Yes (transactions)" "MSK / Confluent")
+  (row "RabbitMQ" "Per queue" "No (deleted on ack)" "~50K msgs/sec" "128MB" "No" "Self-hosted")
+  (row "SQS Standard" "No guarantee" "No" "Unlimited" "256KB" "No" "Yes (AWS)")
+  (row "SQS FIFO" "Per group ID" "No" "3K msgs/sec" "256KB" "Yes" "Yes (AWS)")
+  (row "Redis Streams" "Per stream" "Yes (ID-based)" "~100K msgs/sec" "512MB" "No" "ElastiCache")
+  (row "Google Pub/Sub" "No" "Yes (ack deadline)" "~1M msgs/sec" "10MB" "No" "Yes (GCP)")
+)}}
+
+{{hint "when to pick SQS over Kafka?" "If you're on AWS and your consumers are Lambda functions or small services that don't need replay, SQS costs near-zero and requires zero ops. Kafka is overkill unless you need multi-consumer replay or >100K msgs/sec per topic."}}
+
+{{triggerQs "Phase 3 Interview Questions"
+  "Can RabbitMQ replay messages?"
+  "No. RabbitMQ deletes a message after it's acknowledged. There is no offset tracking. You can enable a dead-letter exchange for failures, but there is no built-in mechanism to re-read already-consumed messages. This makes RabbitMQ unsuitable for event sourcing or audit log use cases."
+  "Why does Kafka have higher throughput than RabbitMQ?"
+  "Kafka uses sequential disk writes (append-only log) and batches messages at the broker. Sequential I/O on SSDs reaches 500MB/sec+. RabbitMQ uses an in-memory queue with disk overflow, and routing decisions add CPU overhead per message. Kafka's design favors throughput over routing flexibility."
+}}
+
+{{phase 4 "Exactly-Once Semantics" "5 min"}}
+
+{{say "Exactly-once is the hardest delivery guarantee. At-most-once drops messages on failure. At-least-once reprocesses on failure — fine if your consumers are idempotent. True exactly-once requires idempotent producers, Kafka transactions, and idempotent consumers."}}
+
+{{diagram "fund-exactly-once-flow"}}
+
+{{think "End-to-end exactly-once needs THREE components working together — most engineers only mention the Kafka side."
+  (whyNot "just idempotent producers alone" "Idempotent producers prevent duplicate writes to Kafka. But if your consumer writes to a DB and crashes after writing but before committing offset, it reprocesses and writes again — duplicate in the DB.")
+  (how "full exactly-once stack" "1) enable.idempotence=true on producer. 2) Use Kafka transactions to atomically write output + commit offset. 3) Consumer writes to DB with upsert on a unique message ID — idempotent consumer.")
+  (whatIf "transaction coordinator broker crashes" "Kafka transactions use a coordinator. If it crashes, incomplete transactions are aborted on recovery. Producers retry with the same producer epoch — Kafka deduplicates by (producer_id, sequence_number).")
+}}
+
+{{code "java" `// Exactly-once producer — Kafka Streams pattern
+Properties props = new Properties();
+props.put("enable.idempotence", "true");
+props.put("transactional.id", "my-transactional-producer-1");
+props.put("acks", "all");
+
+KafkaProducer<String, String> producer = new KafkaProducer<>(props);
+producer.initTransactions();
+
+try {
+    producer.beginTransaction();
+    producer.send(new ProducerRecord<>("output-topic", key, value));
+    // Atomically commit: offset + output message
+    producer.sendOffsetsToTransaction(offsets, consumerGroupMetadata);
+    producer.commitTransaction();
+} catch (ProducerFencedException e) {
+    // Another instance with same transactional.id took over — abort
+    producer.close();
+}`}}
+
+{{hint "idempotent consumer pattern" "Store a processed_message_ids table (or use upsert ON CONFLICT DO NOTHING). When reprocessing a duplicate, the DB write is a no-op. This is the consumer-side contract for exactly-once."}}
+
+{{avoid "Don't claim Kafka gives you exactly-once out of the box. It gives you exactly-once at the Kafka layer (idempotent producer + transactions). End-to-end exactly-once requires your consumer storage writes to also be idempotent. State it clearly in the interview."}}
+
+{{triggerQs "Phase 4 Interview Questions"
+  "What is a producer epoch in Kafka?"
+  "Each transactional producer gets a (producer_id, epoch) pair. If a producer restarts and re-initializes with the same transactional.id, the epoch increments. Any in-flight messages from the old epoch are rejected by the broker — this prevents zombie producers from writing stale data. It's Kafka's mechanism for fencing old producer instances."
+  "How do Kafka Streams achieve exactly-once?"
+  "Kafka Streams sets processing.guarantee=exactly_once_v2 (EOS v2). It uses a per-task transaction: read from input partition, process, write to output topic, and commit the input offset — all in one atomic transaction. If the task crashes, the transaction aborts and the input is re-read from the last committed offset."
+}}
+
+{{phase 5 "Dead-Letter Queues" "4 min"}}
+
+{{say "A dead-letter queue (DLQ) is where messages go when they fail processing after N retries. Without a DLQ, a poison message blocks your consumer forever. With a DLQ, you park the bad message, alert on it, and let the consumer continue."}}
+
+{{think "DLQ depth is your primary alerting signal — if DLQ depth > 0, something is wrong in production right now."
+  (whyNot "just dropping failed messages" "You lose data. In financial or audit contexts, every message must be processed. Even in logging pipelines, silent drops mask bugs.")
+  (how "retry policy" "Retry with exponential backoff: attempt 1 immediately, attempt 2 after 1s, attempt 3 after 5s, attempt 4 after 30s. After attempt 4 (or N), move to DLQ.")
+  (whatIf "the DLQ itself fills up" "DLQ is just another Kafka topic with a longer retention (e.g., 30 days). Alert at depth >100. Implement a DLQ replay job that reprocesses after a fix is deployed.")
+}}
+
+{{table "DLQ Strategy" (rows
+  (row "Component" "Configuration" "Why")
+  (row "Retry count" "3-5 attempts" "Distinguish transient (network) vs poison (bad data)")
+  (row "Backoff" "Exponential: 1s, 5s, 30s" "Avoid hammering a recovering downstream")
+  (row "DLQ topic" "orders.dlq, payments.dlq" "Per-domain topics for targeted replay")
+  (row "Retention" "30 days" "Time to deploy fix and replay")
+  (row "Alert threshold" "DLQ depth > 0" "Any DLQ message = production incident")
+  (row "Replay mechanism" "Dedicated replay job" "Re-read DLQ topic, reprocess, re-route to original topic")
+)}}
+
+{{hint "poison message vs transient failure" "A poison message always fails regardless of retries — bad schema, null pointer, corrupt data. A transient failure eventually succeeds — network blip, downstream timeout. Track failure reason in DLQ message headers to distinguish them."}}
+
+{{triggerQs "Phase 5 Interview Questions"
+  "How do you replay DLQ messages after a bug fix?"
+  "Write a replay consumer that reads from the DLQ topic, applies any data transformation if needed, and re-publishes to the original input topic. Use a low-throughput rate (e.g., 100 msgs/sec) to avoid overwhelming the fixed service. Monitor the DLQ depth dropping to zero as confirmation."
+  "What metadata should you add to DLQ messages?"
+  "Original topic, partition, offset (for traceability), failure reason (exception class + message), retry count, first failure timestamp, last failure timestamp, and the original message payload. This metadata is stored in Kafka message headers, not the payload — keep the payload intact for replay."
+}}
+
+{{phase 6 "Back-Pressure Handling" "4 min"}}
+
+{{say "Back-pressure is what happens when producers write faster than consumers can process. Without handling it, your broker runs out of memory, your consumer lag grows unboundedly, and eventually the system falls over. You want consumers to signal their capacity constraints upstream."}}
+
+{{diagram "fund-backpressure-handling"}}
+
+{{think "Consumer lag is the leading indicator — watch it before the system falls over."
+  (whyNot "just scaling consumers indefinitely" "You can only add consumers up to the partition count. With 10 partitions, 11 consumers means one is idle. Pre-partition generously — you can't add partitions to an existing topic without disruption.")
+  (how "producer-side back-pressure" "producer.buffer.memory (default 32MB) is the in-memory buffer before blocking. When full, producer.max.block.ms (default 60s) controls how long the producer blocks before throwing an exception. Tune this to match your burst tolerance.")
+  (whatIf "consumer lag grows to 1M messages" "Spin up extra consumer pods (Kubernetes HPA on lag metric via KEDA). If lag is structural (not a burst), you need more partitions — plan for this at topic creation time.")
+}}
+
+{{code "yaml" `# Kubernetes HPA using KEDA (Kafka-based autoscaler)
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: kafka-consumer-scaler
+spec:
+  scaleTargetRef:
+    name: order-processor
+  minReplicaCount: 2
+  maxReplicaCount: 20       # Can't exceed partition count
+  triggers:
+  - type: kafka
+    metadata:
+      topic: orders
+      consumerGroup: order-processors
+      lagThreshold: "1000"  # Scale up when lag > 1000 msgs per partition`}}
+
+{{hint "KEDA for Kafka autoscaling" "KEDA (Kubernetes Event Driven Autoscaling) queries Kafka consumer group lag and adjusts replica count. It's the standard pattern for scaling Kafka consumers on Kubernetes. Set maxReplicaCount = partition count to avoid idle replicas."}}
+
+{{triggerQs "Phase 6 Interview Questions"
+  "What happens when producer.buffer.memory is full?"
+  "The producer call blocks for up to max.block.ms (default 60,000ms). If the buffer doesn't free in that time, a TimeoutException is thrown. This is the back-pressure signal propagating to the application layer. The app can then slow down ingestion, queue requests internally, or return 429 to the upstream caller."
+  "How do you prevent consumer lag from growing indefinitely?"
+  "Three levers: 1) Increase consumer parallelism (more pods, up to partition count). 2) Increase partition count at topic creation time. 3) Reduce per-message processing time (optimize the consumer logic, batch DB writes). Monitor lag via Kafka consumer group metrics in Prometheus — alert when lag growth rate > 0 for > 5 minutes."
+}}
+
+{{phase 7 "Sizing & Cost" "4 min"}}
+
+{{say "For a system design interview, you need to size the Kafka cluster from first principles. Start with throughput, derive storage, then pick instance types."}}
+
+{{table "Kafka Sizing Example — 100K msgs/sec" (rows
+  (row "Parameter" "Value" "Derivation")
+  (row "Message rate" "100K msgs/sec" "Given")
+  (row "Avg message size" "1KB" "Given")
+  (row "Raw throughput" "100MB/sec" "100K × 1KB")
+  (row "Replication factor" "3×" "RF=3 standard")
+  (row "Total write throughput" "300MB/sec" "100MB × 3 replicas")
+  (row "Retention" "7 days" "Standard")
+  (row "Raw storage" "~180TB" "300MB/sec × 7d × 86400")
+  (row "Brokers needed" "3× m5.4xlarge" "~600MB/sec network, 4TB gp3 EBS each")
+  (row "MSK cost" "~$8,400/month" "3× m5.4xlarge + EBS + data transfer")
+)}}
+
+{{hint "EBS vs local NVMe for Kafka" "AWS MSK uses EBS (gp3) by default — durable but limited to ~1GB/sec per volume. For >500MB/sec write throughput per broker, consider MSK with provisioned throughput or self-managed Kafka on i3en.xlarge instances (NVMe local storage at 2.5GB/sec)."}}
+
+{{think "Real companies run Kafka at a scale most engineers don't appreciate."
+  (how "LinkedIn's scale" "Kafka was created at LinkedIn. They run 7 trillion messages/day across thousands of brokers. That's ~80M msgs/sec sustained.")
+  (how "Uber's scale" "Uber uses Kafka for ride events (driver locations, trip state). ~1 trillion messages/day. They run 4000+ Kafka brokers across multiple data centers.")
+  (whyNot "one large cluster for everything" "Blast radius. A misconfigured producer can saturate a shared cluster. Isolate by domain: payments cluster, analytics cluster, logging cluster.")
+}}
+
+{{triggerQs "Phase 7 Interview Questions"
+  "How many partitions should a topic have?"
+  "Rule of thumb: target throughput ÷ per-partition throughput. If you need 200MB/sec and each partition handles 20MB/sec, you need 10 partitions. Add 2-3x headroom. More partitions = more parallelism but more file handles and leader elections. Start at 10-20 for most topics, 100+ for high-throughput analytics topics."
+  "What instance type would you choose for Kafka brokers?"
+  "For medium workloads (100MB/sec), m5.4xlarge with gp3 EBS (1GB/sec provisioned). For high throughput (500MB/sec+), i3en.xlarge or i3en.2xlarge with NVMe local storage — ~2.5GB/sec sequential write at lower cost per MB/sec than EBS. Always use dedicated instances, not burstable (T series) for Kafka."
+}}
+
+{{phase 8 "Interview Summary" "3 min"}}
+
+{{say "Message queues decouple producers from consumers. Kafka is the default choice for high-throughput, replayable, multi-consumer event streams. SQS for simple AWS Lambda pipelines. Size by throughput × replication factor, then pick instances. Always discuss exactly-once end-to-end — not just the Kafka layer."}}
+
+{{avoid "Don't say 'Kafka guarantees exactly-once' without qualification. Kafka's idempotent producer + transactions prevent broker-level duplicates. End-to-end exactly-once requires idempotent consumer writes too. State both halves or your answer is incomplete."}}
+
+{{avoid "Don't say RabbitMQ supports replay. It doesn't. Messages are deleted on ack. If the interviewer asks about replay for RabbitMQ, clarify that it's the wrong tool — use Kafka or Redis Streams."}}
+
+{{table "Real Company Usage" (rows
+  (row "Company" "System" "Scale")
+  (row "LinkedIn" "Kafka (created it)" "7 trillion msgs/day, audit + activity feeds")
+  (row "Uber" "Kafka" "Ride events, driver location, 4000+ brokers")
+  (row "Twitter/X" "Kafka" "Tweet fan-out, event sourcing")
+  (row "Netflix" "Kafka + Flink" "Playback events, stream processing")
+  (row "AWS" "SQS" "Lambda triggers, decoupled microservices")
+  (row "Slack" "Kafka" "Message persistence, notification fan-out")
+)}}
+
+{{checklist
+  "Kafka = topics + partitions + offsets + consumer groups. One partition → one consumer per group."
+  "acks=all + enable.idempotence=true + replication factor ≥ 3 for durable writes."
+  "Exactly-once: idempotent producer + Kafka transactions + idempotent consumer writes."
+  "DLQ: retry N times with backoff, park in .dlq topic, alert on depth > 0, replay after fix."
+  "Back-pressure: watch consumer lag, KEDA HPA on lag metric, max replicas = partition count."
+  "Sizing: raw throughput × RF = total write throughput. 100K msgs/sec × 1KB × 3 = 300MB/sec."
+  "MSK m5.4xlarge × 3 = ~$8,400/month for 100K msgs/sec workload."
+  "Kafka for replay/multi-consumer. SQS for managed simplicity. RabbitMQ for routing (not replay)."
+}}
+
+{{key "Kafka's core value is the durable, replayable log — every consumer group reads independently at its own pace, and you can replay from any offset. That's what separates it from queues."}}

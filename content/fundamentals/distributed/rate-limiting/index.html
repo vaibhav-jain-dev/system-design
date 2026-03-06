@@ -1,0 +1,521 @@
+{{phase 1 "What Is Rate Limiting?" "3 min"}}
+
+{{say "Rate limiting controls how many requests a client can make to a service within a time window. It protects downstream services from overload, prevents abuse, and enforces fair usage policies."}}
+
+{{table "Why Rate Limit?" (rows
+  (row "Goal"                  "Problem Solved"                              "Example")
+  (row "Prevent DDoS"          "A single client floods the server"           "Block IP sending 10K req/s")
+  (row "Enforce fair usage"    "One tenant degrades service for others"      "GitHub 5000 req/hour per token")
+  (row "Protect downstream"    "Your DB can only handle 500 writes/s"        "Limit writes from API layer")
+  (row "Monetize tiers"        "Free vs paid usage quotas"                   "Stripe: per-plan request caps")
+  (row "Prevent scraping"      "Bots extract your data faster than humans"   "Block 1K product pages/min")
+)}}
+
+{{think "Where in the stack should rate limiting live?"
+  (whyNot "only at the database layer" "By the time the request reaches the DB, the full request cost (network, auth, parse) is already paid. You need to reject at the API layer or edge, before compute is wasted.")
+  (how "At the API gateway?" "Yes — API Gateway is the earliest you can act on HTTP semantics (headers, user_id, endpoint). CDN-level rate limiting (CloudFront, Cloudflare) is even earlier but only works for IP-based limits.")
+  (whatIf "I rate limit at the app server instead of gateway" "Every app server instance has its own counter. If you have 10 instances, the effective limit is 10x what you intended. You need a shared store (Redis) to coordinate across instances.")
+}}
+
+{{hint "Rate limiting is a distributed coordination problem" "A single app server can track its own counters in memory. The hard part is synchronizing counters across a fleet of servers without creating a new bottleneck."}}
+
+{{compare "Rate Limiter Placement" (options
+  (best "API Gateway + Redis" "Centralized enforcement before compute cost. Redis atomics prevent race conditions. Single enforcement point for all services.")
+  (alt "In-process + sticky routing" "Works if requests for the same user always go to the same server (IP hash, consistent hashing). Avoids Redis network hop but requires sticky routing.")
+  (nofit "Database-only" "Too slow and too late. By the time you check the DB, request processing has already started. Never use the primary DB for rate limit counters.")
+)}}
+
+{{phase 2 "Token Bucket Algorithm" "5 min"}}
+
+{{say "Token Bucket is the most common rate limiting algorithm. Each user has a bucket that fills at a constant rate. Each request consumes one token. If the bucket is empty, the request is rejected."}}
+
+{{diagram "fund-rl-token-bucket"}}
+
+{{think "Why is token bucket the default choice?"
+  (how "Core mechanic" "tokens = min(capacity, tokens + rate × elapsed_seconds). This single formula handles both the burst allowance and the sustained rate.")
+  (whyNot "strict per-second counters" "A counter-based approach rejects all traffic the instant you hit N per second, even if the next second is empty. Token bucket allows accumulating unused capacity as burst credit.")
+  (whatIf "A user sends 1000 requests at startup" "If the bucket capacity is 100, only 100 get through immediately. The remaining 900 are rejected. The bucket refills at rate R per second going forward. Burst capacity is bounded by capacity, not infinite.")
+}}
+
+{{code "python" `import time
+import threading
+
+class TokenBucket:
+    """Thread-safe token bucket rate limiter."""
+
+    def __init__(self, capacity: int, refill_rate: float):
+        """
+        capacity: max tokens (burst allowance)
+        refill_rate: tokens added per second
+        """
+        self.capacity = capacity
+        self.refill_rate = refill_rate
+        self.tokens = capacity          # start full
+        self.last_refill = time.monotonic()
+        self._lock = threading.Lock()
+
+    def is_allowed(self, tokens_needed: int = 1) -> bool:
+        with self._lock:
+            self._refill()
+            if self.tokens >= tokens_needed:
+                self.tokens -= tokens_needed
+                return True
+            return False
+
+    def _refill(self):
+        now = time.monotonic()
+        elapsed = now - self.last_refill
+        # Add tokens proportional to elapsed time
+        added = elapsed * self.refill_rate
+        self.tokens = min(self.capacity, self.tokens + added)
+        self.last_refill = now
+
+# Redis-backed token bucket (for distributed use)
+def is_allowed_redis(redis_client, user_id: str, capacity: int, rate: float) -> bool:
+    """Atomic token bucket check using Redis + Lua script."""
+    lua_script = """
+    local key = KEYS[1]
+    local capacity = tonumber(ARGV[1])
+    local rate = tonumber(ARGV[2])
+    local now = tonumber(ARGV[3])
+    local requested = tonumber(ARGV[4])
+
+    local data = redis.call('HMGET', key, 'tokens', 'last_refill')
+    local tokens = tonumber(data[1]) or capacity
+    local last_refill = tonumber(data[2]) or now
+
+    -- Refill tokens based on elapsed time
+    local elapsed = now - last_refill
+    tokens = math.min(capacity, tokens + elapsed * rate)
+
+    if tokens >= requested then
+        tokens = tokens - requested
+        redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now)
+        redis.call('EXPIRE', key, math.ceil(capacity / rate) + 1)
+        return 1
+    else
+        redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now)
+        redis.call('EXPIRE', key, math.ceil(capacity / rate) + 1)
+        return 0
+    end
+    """
+    result = redis_client.eval(
+        lua_script, 1,
+        f"rate_limit:{user_id}",
+        capacity, rate, time.time(), 1
+    )
+    return bool(result)
+`}}
+
+{{table "Token Bucket Parameters" (rows
+  (row "Parameter"     "Meaning"                         "Typical Value")
+  (row "capacity"      "Max burst size (bucket depth)"   "10–100x sustained rate")
+  (row "refill_rate"   "Tokens added per second"         "= sustained requests/second target")
+  (row "initial_fill"  "Starting tokens"                 "capacity (start full)")
+)}}
+
+{{triggerQs "Token Bucket Interview Questions"
+  "What does capacity represent in token bucket?" "Burst allowance. A capacity of 100 with refill rate of 10/s means a user can send 100 requests immediately, then 10 per second sustained. Capacity bounds peak burst; rate bounds average throughput."
+  "Is token bucket precise or approximate?" "Precise for burst limiting. It tracks exact token count and exact elapsed time. The only imprecision comes from clock resolution, which is microseconds and irrelevant in practice."
+  "How much Redis memory does token bucket use per user?" "2 floats per user (tokens + last_refill). About 64 bytes with Redis hash overhead. For 1M users: ~64MB. Very efficient."
+}}
+
+{{hint "Token bucket allows controlled bursts" "This is why Stripe and AWS APIs use it. A bursty but well-behaved client gets natural burst credit. A sustained abuser hits the refill rate ceiling after draining the bucket."}}
+
+{{phase 3 "Sliding Window Algorithm" "5 min"}}
+
+{{say "Sliding window is more precise than fixed window and avoids the boundary burst attack. Two variants: sliding window log (exact, memory-heavy) and sliding window counter (approximate, O(1) space)."}}
+
+{{table "Sliding Window Variants" (rows
+  (row "Variant"              "Storage"                   "Accuracy"      "Memory"           "Use Case")
+  (row "Sliding Window Log"   "Timestamp per request"     "Exact"         "O(requests)"      "Low volume, high precision")
+  (row "Sliding Window Counter" "2 integers"              "~1% error"     "O(1)"             "High volume, acceptable approximation")
+)}}
+
+{{code "python" `import time
+import redis
+
+# ---- Sliding Window Log (exact, memory-heavy) ----
+def is_allowed_log(r: redis.Redis, user_id: str, limit: int, window_seconds: int) -> bool:
+    """
+    Exact sliding window using a sorted set.
+    Score = timestamp (float). Members = unique request IDs (uuid or timestamp).
+    O(log N) per request. Memory: O(requests in window).
+    """
+    key = f"rl:log:{user_id}"
+    now = time.time()
+    window_start = now - window_seconds
+
+    pipe = r.pipeline()
+    # Remove timestamps older than the window
+    pipe.zremrangebyscore(key, '-inf', window_start)
+    # Count requests in current window
+    pipe.zcard(key)
+    # Add current request (score = timestamp)
+    pipe.zadd(key, {str(now): now})
+    # Expire key to avoid memory leak
+    pipe.expire(key, window_seconds + 1)
+    results = pipe.execute()
+
+    request_count = results[1]  # count BEFORE adding current request
+    return request_count < limit
+
+
+# ---- Sliding Window Counter (approximate, O(1) space) ----
+def is_allowed_counter(r: redis.Redis, user_id: str, limit: int, window_seconds: int) -> bool:
+    """
+    Approximation: blend current + previous window counts.
+    Formula: effective_count = prev_count * (1 - elapsed_fraction) + curr_count
+    O(1) memory — only 2 counters per user.
+    Error rate: <1% in practice for uniform traffic.
+    """
+    now = time.time()
+    curr_window = int(now // window_seconds)  # current window bucket
+    prev_window = curr_window - 1
+    elapsed_fraction = (now % window_seconds) / window_seconds
+
+    curr_key = f"rl:cnt:{user_id}:{curr_window}"
+    prev_key = f"rl:cnt:{user_id}:{prev_window}"
+
+    pipe = r.pipeline()
+    pipe.get(prev_key)
+    pipe.get(curr_key)
+    results = pipe.execute()
+
+    prev_count = int(results[0] or 0)
+    curr_count = int(results[1] or 0)
+
+    # Weighted blend: previous window fades as we progress through current window
+    effective_count = prev_count * (1 - elapsed_fraction) + curr_count
+
+    if effective_count < limit:
+        r.incr(curr_key)
+        r.expire(curr_key, window_seconds * 2)
+        return True
+    return False
+`}}
+
+{{think "When to use log vs counter variant?"
+  (whyNot "sliding window log for high-volume APIs" "If you allow 1000 req/hour and a user sends 1000 requests, the sorted set holds 1000 members. For 1M users each at limit: 1 trillion entries. Sorted set is O(log N) but N is unbounded.")
+  (how "sliding window counter O(1) tradeoff" "Two integers per user regardless of request rate. The approximation error is at most the previous window's traffic × elapsed fraction. For bursty traffic, error is < 1%. For monotone traffic (constant rate), error is 0%.")
+  (whatIf "I need exact counts at high volume" "Use Redis sorted sets but cap entries: ZREMRANGEBYSCORE aggressively. Or use token bucket (O(1)) which gives exact burst semantics without storing timestamps.")
+}}
+
+{{triggerQs "Sliding Window Interview Questions"
+  "Why does sliding window fix the fixed window boundary attack?" "Fixed window resets at a hard boundary. An attacker sends N requests at 11:59:59 and N more at 12:00:01 — 2N requests in 2 seconds against a N/minute limit. Sliding window counts the last 60 seconds regardless of clock alignment, so 2N is detected."
+  "What is the memory cost of sliding window log for 1M users at 1000 req/hr?" "Each request stores ~20 bytes (timestamp float). 1M users × 1000 entries = 1B entries × 20 bytes = 20GB. Not feasible at scale. Use sliding window counter (2 integers per user = ~128MB for 1M users)."
+  "Can sliding window counter give false positives?" "Yes, in theory. If the previous window had 100% utilization at its end, the estimate overcounts slightly. In practice, traffic is not perfectly adversarial, and the error is under 1% for most workloads."
+}}
+
+{{hint "Sorted set is the canonical Redis pattern for sliding window" "ZADD O(log N), ZREMRANGEBYSCORE O(log N + M where M is removed), ZCARD O(1). All three in one pipeline = one round trip."}}
+
+{{phase 4 "Fixed & Leaky Window" "4 min"}}
+
+{{say "Fixed window and leaky bucket are two simpler algorithms. Fixed window is the easiest to implement but has a known vulnerability. Leaky bucket is ideal for smoothing bursty traffic."}}
+
+{{table "Algorithm Comparison" (rows
+  (row "Algorithm"          "Mechanism"                       "Allows Bursts?"  "Precise?"  "Memory"  "Best For")
+  (row "Fixed Window"       "Counter reset at hard boundary"  "Boundary only"   "No"        "O(1)"    "Simple, low-stakes limits")
+  (row "Sliding Window Log" "Sorted set of timestamps"        "No"              "Yes"       "O(N)"    "Low volume, strict precision")
+  (row "Sliding Window Ctr" "Two counters, weighted blend"    "No"              "~98%"      "O(1)"    "High volume, acceptable error")
+  (row "Token Bucket"       "Tokens refill over time"         "Yes (bounded)"   "Yes"       "O(1)"    "APIs with burst tolerance")
+  (row "Leaky Bucket"       "Queue + constant drain rate"     "Via queue depth" "Yes"       "O(queue)" "Traffic shaping, API gateways")
+)}}
+
+{{think "Fixed window: why does the boundary attack work?"
+  (how "The attack" "Limit is 100 req/minute. Window resets at :00 each minute. Attacker sends 100 requests at 11:59:30, then 100 more at 12:00:05. Both windows see exactly 100 requests — both pass. But in the 35-second span from 11:59:30 to 12:00:05, the attacker sent 200 requests.")
+  (whyNot "fixed window for security-critical limits" "The double-rate burst is predictable and scriptable. Any attacker who knows your window boundary (often guessable from retry-after headers) can exploit it reliably.")
+  (whatIf "I add jitter to window boundaries" "Helps slightly — attacker must probe to find the boundary. Still exploitable once discovered. Sliding window is the correct fix, not obfuscating boundaries.")
+}}
+
+{{code "python" `import queue
+import threading
+import time
+
+class LeakyBucket:
+    """
+    Leaky bucket: requests queue up, drain at constant rate.
+    Smooths traffic — no bursts reach downstream.
+    Good for API gateway traffic shaping.
+    """
+
+    def __init__(self, capacity: int, drain_rate: float):
+        """
+        capacity: max queue depth (pending requests)
+        drain_rate: requests processed per second
+        """
+        self.q = queue.Queue(maxsize=capacity)
+        self.drain_rate = drain_rate
+        self._start_drain_thread()
+
+    def submit(self, request) -> bool:
+        """Returns True if accepted (queued), False if bucket full."""
+        try:
+            self.q.put_nowait(request)
+            return True
+        except queue.Full:
+            return False  # drop request
+
+    def _start_drain_thread(self):
+        """Drain queue at constant rate."""
+        def drain():
+            interval = 1.0 / self.drain_rate
+            while True:
+                try:
+                    req = self.q.get(timeout=interval)
+                    self._process(req)
+                except queue.Empty:
+                    pass
+                time.sleep(interval)
+
+        t = threading.Thread(target=drain, daemon=True)
+        t.start()
+
+    def _process(self, request):
+        # Forward request to downstream service
+        pass
+`}}
+
+{{avoid "Always mention the fixed window boundary attack in interviews. If you propose fixed window and the interviewer asks 'any edge cases?', they are probing for this. A client can send 2x the limit in a 2-second window by straddling the boundary. Sliding window counter solves this with O(1) space."}}
+
+{{triggerQs "Fixed and Leaky Bucket Questions"
+  "When would you actually use a leaky bucket?" "API gateways where you want constant output rate regardless of input burstiness. Nginx's limit_req uses leaky bucket. Good when downstream services (databases, third-party APIs) need smooth traffic, not bursts."
+  "What is the tradeoff with leaky bucket over token bucket?" "Leaky bucket smooths traffic but adds latency (requests wait in queue). Token bucket lets bursts through immediately and rejects when capacity is exceeded. Token bucket is lower latency but sends bursty traffic downstream."
+}}
+
+{{phase 5 "Distributed Rate Limiter" "6 min"}}
+
+{{say "A single app server can track counters in memory. But with 10 app servers, each server only sees 1/10 of traffic. You need a shared counter store — Redis is the standard solution."}}
+
+{{diagram "fund-rl-distributed"}}
+
+{{code "python" `# Atomic sliding window log using Lua script (prevents race conditions)
+# One round trip to Redis — atomically removes old entries, counts, and adds new.
+
+SLIDING_WINDOW_LUA = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local request_id = ARGV[4]
+
+local window_start = now - window
+
+-- Step 1: Remove expired entries
+redis.call('ZREMRANGEBYSCORE', key, '-inf', window_start)
+
+-- Step 2: Count current entries
+local count = redis.call('ZCARD', key)
+
+-- Step 3: Check limit BEFORE adding (so the rejected request is not counted)
+if count >= limit then
+    return {0, count}  -- rejected
+end
+
+-- Step 4: Add current request
+redis.call('ZADD', key, now, request_id)
+redis.call('EXPIRE', key, math.ceil(window) + 1)
+
+return {1, count + 1}  -- allowed, new count
+"""
+
+def is_allowed_distributed(r, user_id: str, limit: int, window_seconds: int) -> bool:
+    """
+    Atomic rate limit check. One Lua script = one Redis round trip.
+    Prevents race: two servers cannot simultaneously read count=99
+    and both allow when limit is 100.
+    """
+    import uuid
+    key = f"rl:sw:{user_id}"
+    now = time.time()
+    request_id = str(uuid.uuid4())
+
+    result = r.eval(
+        SLIDING_WINDOW_LUA, 1,
+        key, now, window_seconds, limit, request_id
+    )
+    allowed, count = result
+    return bool(allowed)
+`}}
+
+{{think "Why does the distributed case need Lua scripts?"
+  (whyNot "WATCH/MULTI/EXEC (Redis transactions) instead of Lua" "WATCH-based optimistic locking retries on conflict. Under high contention (many servers checking the same key simultaneously), retry storms are possible. Lua is atomic — no retries needed.")
+  (how "How is Lua atomic in Redis?" "Redis is single-threaded for command execution. A Lua script runs to completion before any other command is processed. ZADD + ZCARD + ZREMRANGEBYSCORE in one Lua call = zero interleaving possible.")
+  (whatIf "Redis is unavailable" "Two options: fail-open (allow all traffic, accept risk) or fail-closed (block all traffic, accept outage). Fail-open with local in-memory fallback is correct for most use cases — a brief rate limit bypass is better than taking your service down.")
+}}
+
+{{table "Race Condition Analysis" (rows
+  (row "Approach"           "Race Safe?"  "Latency"     "Why")
+  (row "In-memory counter"  "No"          "~0ms"        "Multiple processes = split counters")
+  (row "Redis INCR/GET"     "No (TOCTOU)" "~1ms"        "Check then act = race window")
+  (row "Redis Lua script"   "Yes"         "~1ms"        "Atomic: check and act in one step")
+  (row "Redis MULTI/EXEC"   "Yes*"        "~2ms"        "*Retries on conflict under contention")
+)}}
+
+{{triggerQs "Distributed Rate Limiting Questions"
+  "Why is a naive Redis INCR+check not race-safe?" "Thread A reads count=99, Thread B reads count=99. Both see < 100. Both increment to 100. Both allowed. You served 101 requests against a limit of 100. The gap between the read and the write is the race window. Lua eliminates that gap."
+  "How do you handle Redis cluster sharding with rate limiters?" "Use the same shard for all keys belonging to one user by using hash tags: {user_id}:rl:key. Redis cluster routes all keys with the same hash tag to the same shard, keeping the user's counters co-located."
+  "What is the latency cost of Redis-based rate limiting?" "One Lua script round trip: ~0.5-1ms in the same region. For APIs with 10ms SLA, that is 5-10% overhead. For 100ms SLA APIs, it is negligible. At sub-1ms SLA (HFT), skip Redis and use in-process counters with sticky routing."
+}}
+
+{{hint "Redis hash tags keep user counters on one shard" "Key pattern {user_id}:rl:sliding guarantees all rate limit keys for one user land on the same Redis cluster shard. Without hash tags, Lua scripts that touch multiple keys fail if keys are on different shards."}}
+
+{{phase 6 "Strategy: Per User vs Per IP" "4 min"}}
+
+{{say "Rate limiting strategy defines what you identify as the rate-limited entity. Per-user, per-IP, per-endpoint, and per-tenant have different tradeoffs."}}
+
+{{table "Rate Limiting Strategies" (rows
+  (row "Strategy"      "Key"                           "Protects Against"           "Bypass Risk")
+  (row "Per IP"        "client IP address"             "Bot floods, scraping"       "Rotating IPs, VPNs, CGNAT")
+  (row "Per User"      "authenticated user_id"         "Account abuse, fairness"    "Creating many accounts")
+  (row "Per Endpoint"  "user_id + endpoint path"       "Expensive op overuse"       "Endpoint enumeration")
+  (row "Per Tenant"    "tenant_id (B2B SaaS)"          "Noisy neighbor problem"     "Tenant collusion (rare)")
+  (row "Per Token"     "API key or OAuth token"        "Token sharing/abuse"        "Credential stuffing")
+  (row "Global"        "service-level counter"         "Total capacity protection"  "Legitimate users pay for attackers")
+)}}
+
+{{think "Which strategy layer is correct?"
+  (how "Layer them" "Use multiple simultaneously: per-IP to stop bots before auth, per-user after auth for fairness, per-endpoint for expensive operations. Each layer rejects earlier with lower cost.")
+  (whyNot "per-IP only" "CGNAT (Carrier-Grade NAT) puts thousands of mobile users behind one IP. Blocking an IP during a DDoS also blocks legitimate users on the same mobile carrier. Per-IP limits must be generous enough for CGNAT or combined with per-user limits after authentication.")
+  (whatIf "user creates 1000 accounts to bypass per-user limits" "Layer fingerprinting (device ID, browser fingerprint) or rate limit account creation itself. This is the cat-and-mouse of abuse prevention — no perfect solution.")
+}}
+
+{{code "python" `# Multi-layer rate limiting: IP first (cheap), then user (expensive)
+def check_rate_limits(request, redis_client) -> tuple[bool, str]:
+    """
+    Returns (allowed, rejection_reason).
+    Cheapest checks first — IP-based requires no auth lookup.
+    """
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+
+    # Layer 1: IP-based (blocks bots before any auth processing)
+    if not is_allowed_redis(redis_client, f"ip:{client_ip}", capacity=100, rate=10):
+        return False, "ip_rate_limit"
+
+    # Layer 2: Global service limit (circuit breaker)
+    if not is_allowed_redis(redis_client, "global:api", capacity=50000, rate=5000):
+        return False, "service_capacity"
+
+    # Layer 3: Per-user (requires auth — only reached if IP check passes)
+    user_id = authenticate(request)
+    if user_id:
+        endpoint = request.path
+        # Different limits per endpoint based on cost
+        limits = {
+            '/api/search': (20, 2),     # expensive: 2/s sustained, 20 burst
+            '/api/export': (5, 0.1),    # very expensive: 1 per 10s
+            '/api/read':   (100, 20),   # cheap: 20/s sustained, 100 burst
+        }
+        capacity, rate = limits.get(endpoint, (50, 10))
+        if not is_allowed_redis(redis_client, f"user:{user_id}:{endpoint}", capacity, rate):
+            return False, "user_rate_limit"
+
+    return True, ""
+`}}
+
+{{triggerQs "Strategy Selection Questions"
+  "Stripe charges per-customer per-endpoint. Why per-endpoint?" "Different endpoints have different costs. A payment creation hits DB, fraud check, and external processor — maybe 500ms and $0.01 of compute. A balance read is a cache hit — 1ms. Limiting both at the same rate either wastes capacity on cheap ops or does not protect expensive ones."
+  "How does GitHub implement 5000 req/hour?" "Per OAuth token (not per user). This allows bots and CI systems to have separate limits from interactive users. It also means revoking a token immediately removes its quota without touching the user's limit."
+}}
+
+{{phase 7 "Failure & Bypass" "4 min"}}
+
+{{say "Rate limiters must be designed to fail safely. Redis going down should not take down your API. And rate limits must be hard to bypass at scale."}}
+
+{{think "Fail-open vs fail-closed when Redis is unavailable"
+  (whyNot "fail-closed (block all traffic)" "If Redis goes down for 30 seconds and you block all traffic, your entire API goes down with it. Redis is now a single point of failure for your rate limiter AND your service.")
+  (how "fail-open with local fallback" "Each app server maintains an in-memory token bucket as fallback. When Redis is unreachable, switch to local counters. Effective limit becomes N × per-server-limit where N is server count. Accept the elevated risk for the duration of the Redis outage.")
+  (whatIf "Redis is down for 5 minutes" "With fail-open and 10 servers each allowing 100 req/s, effective limit is 1000 req/s instead of 100 req/s. This is a 5-minute window of 10x rate limit bypass. For most APIs, this is acceptable vs a full outage.")
+}}
+
+{{code "python" `import threading
+from collections import defaultdict
+
+class RateLimiterWithFallback:
+    """
+    Primary: Redis (shared across all instances, precise).
+    Fallback: In-memory token bucket (per-instance, elevated limits during Redis outage).
+    """
+
+    def __init__(self, redis_client, capacity: int, rate: float):
+        self.redis = redis_client
+        self.capacity = capacity
+        self.rate = rate
+        # Local fallback: per-user token buckets (in-memory)
+        self._local_buckets: dict[str, TokenBucket] = {}
+        self._lock = threading.Lock()
+
+    def is_allowed(self, user_id: str) -> bool:
+        try:
+            # Try Redis first (precise, shared)
+            return is_allowed_redis(self.redis, user_id, self.capacity, self.rate)
+        except (ConnectionError, TimeoutError):
+            # Redis unavailable: fall back to local in-memory bucket
+            # Limit is more permissive (per-instance, not global)
+            return self._local_is_allowed(user_id)
+
+    def _local_is_allowed(self, user_id: str) -> bool:
+        with self._lock:
+            if user_id not in self._local_buckets:
+                # Per-instance limit: allow capacity/10 locally
+                # (assumes ~10 app servers sharing global limit)
+                local_capacity = max(1, self.capacity // 10)
+                self._local_buckets[user_id] = TokenBucket(local_capacity, self.rate / 10)
+            return self._local_buckets[user_id].is_allowed()
+`}}
+
+{{table "Bypass Mitigation" (rows
+  (row "Bypass Technique"        "Mitigation"                                             "Effectiveness")
+  (row "IP rotation"             "Per-user limits after auth; device fingerprinting"      "High — IP is not the identifier")
+  (row "Account farming"         "Rate limit account creation itself (per-IP, per-phone)" "Medium — raises cost of abuse")
+  (row "Distributed attack"      "Multiple rate limit layers (IP + user + global)"        "High — all layers must pass")
+  (row "Timing the window"       "Sliding window (not fixed) eliminates boundary bursts"  "High — no exploitable boundary")
+  (row "JWT token sharing"       "Bind JWT to device or IP; short expiry (15 min)"        "Medium — limits token lifetime")
+  (row "Header spoofing"         "Trust X-Forwarded-For only from known LB IPs"          "High — validate IP chain")
+)}}
+
+{{avoid "Never trust X-Forwarded-For blindly for rate limiting. If an attacker sends 'X-Forwarded-For: 1.2.3.4', and you rate limit on that value, they can rotate fake IPs to bypass per-IP limits entirely. Only trust X-Forwarded-For from your own load balancer's IP range."}}
+
+{{triggerQs "Failure and Bypass Questions"
+  "What HTTP status code do you return when rate limited?" "429 Too Many Requests. Include Retry-After header (seconds until the window resets or next token is available) and X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset headers. This lets well-behaved clients back off gracefully."
+  "How do you prevent a Redis rate limiter from becoming a single point of failure?" "Redis Sentinel or Redis Cluster for HA. Plus fail-open with local in-memory fallback. Plus circuit breaker: after N Redis timeouts, stop trying Redis for 30 seconds to avoid cascade delays on the hot path."
+}}
+
+{{phase 8 "Interview Summary" "3 min"}}
+
+{{say "To summarize rate limiting: choose the algorithm based on burst tolerance, precision needs, and memory constraints. Always use atomic operations in distributed systems. Design for Redis failure from day one."}}
+
+{{table "Algorithm Selection Guide" (rows
+  (row "Requirement"                  "Best Algorithm"           "Why")
+  (row "Allow controlled bursts"      "Token Bucket"             "Burst credit accumulates, bounded by capacity")
+  (row "Precise strict window"        "Sliding Window Log"       "Exact count, but O(N) memory")
+  (row "High volume, O(1) memory"     "Sliding Window Counter"   "~1% approximation error, constant space")
+  (row "Smooth output rate"           "Leaky Bucket"             "Queue drains at constant rate, no bursts downstream")
+  (row "Simplest possible"            "Fixed Window"             "Two integers, but vulnerable to boundary attack")
+)}}
+
+{{checklist
+  "Token bucket: tokens = min(capacity, tokens + rate × elapsed). Allows bounded bursts."
+  "Sliding window log: ZADD + ZREMRANGEBYSCORE + ZCARD. Exact, O(N) memory."
+  "Sliding window counter: blend of two fixed windows. ~1% error, O(1) memory."
+  "Fixed window: always mention the boundary double-rate attack when discussing it."
+  "Distributed: use Redis Lua scripts for atomicity — prevents race conditions."
+  "Fail-open with local in-memory fallback when Redis is unavailable."
+  "Layer limits: per-IP (before auth) + per-user (after auth) + per-endpoint (expensive ops)."
+  "Never trust X-Forwarded-For without validating it comes from your own load balancer."
+  "Return 429 with Retry-After header so clients can back off gracefully."
+  "Redis memory: ~64 bytes/user for token bucket, ~128 bytes/user for sliding window counter."
+}}
+
+{{avoid "Do not say 'fixed window is fine for most cases.' It is not — the boundary burst attack is well-known and trivially exploitable. If you propose fixed window, always pair it with 'and I would mitigate the boundary attack by using sliding window or adding jitter to reset times.'"}}
+
+{{table "Real-World Usage" (rows
+  (row "Company"    "Algorithm"            "Limit"                          "Key")
+  (row "Stripe"     "Token bucket"         "Per customer per endpoint"      "Different limits per API operation cost")
+  (row "GitHub"     "Fixed window"         "5000 req/hour per token"        "Per OAuth token, not per user")
+  (row "Twitter"    "Sliding window"       "Per token, per 15-min window"   "Listed in API docs per endpoint")
+  (row "AWS API GW" "Token bucket"         "Configurable per stage"         "Burst + steady-state rate separate params")
+  (row "Cloudflare" "Per-IP sliding win"   "Configurable rate rules"        "Edge enforcement before origin hit")
+)}}
+
+{{key "Token bucket is the interview default: O(1) memory, handles bursts, one Lua script for atomic distributed enforcement. Always mention fail-open + local fallback for Redis unavailability."}}
