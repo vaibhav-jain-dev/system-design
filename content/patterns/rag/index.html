@@ -1,10 +1,10 @@
 {{phase 1 "What Is RAG & Why It Matters" "5 min"}}
 
-{{say "{{info \"Retrieval-Augmented Generation (RAG)\" \"RAG means you give the LLM extra documents when it answers. Instead of relying only on facts it learned during training, you grab relevant documents from a database and feed them into the prompt. This keeps answers factual and up-to-date.\"}} RAG is the core pattern for LLM applications that need to stay current. You retrieve relevant documents at query time and inject them into the prompt. This grounds the model's response in real, fresh facts."}}
+{{say "<span class=\"hl-blue\">Retrieval-Augmented Generation (RAG)</span> is the core pattern for LLM applications that need to stay current. You retrieve relevant documents at query time and inject them into the prompt. This grounds the model's response in real, fresh facts."}}
 
-{{think "Why not just {{info \"fine-tuning\" \"Fine-tuning means retraining the model on your own data. This teaches the model new facts or changes how it behaves. But it costs thousands of dollars and takes days. Once you fine-tune, you can't easily remove or update specific facts without retraining again.\"}}? It bakes knowledge into model weights — expensive, slow to update, and impossible to audit. RAG keeps knowledge in a searchable database: update it instantly, trace every answer to its source, control access per user."
+{{think "Why not just fine-tune? It bakes knowledge into model weights — expensive, slow to update, and impossible to audit. RAG keeps knowledge in a searchable database: update it instantly, trace every answer to its source, control access per user."
   (whyNot "Fine-tuning" "Re-training costs thousands of dollars and takes days. Knowledge baked into weights cannot be selectively updated or revoked. You cannot say 'forget this document' after fine-tuning.")
-  (whatIf "knowledge changes daily" "RAG handles this naturally — update the index, done. Fine-tuning would require daily re-training at massive cost. Long-context stuffing would blow your {{info \"token\" \"1 token = roughly 4 characters of text. Longer context uses more tokens, which costs more and adds latency.\"}} budget and latency.")
+  (whatIf "knowledge changes daily" "RAG handles this naturally — update the index, done. Fine-tuning would require daily re-training at massive cost. Long-context stuffing would blow your token budget and latency.")
 }}
 
 {{table "RAG vs Alternatives" (rows
@@ -26,7 +26,7 @@
 
 {{phase 2 "RAG Architecture Overview" "5 min"}}
 
-{{say "The RAG {{info \"pipeline\" \"Pipeline is a sequence of steps. Offline pipeline indexes documents once. Online pipeline answers each user question.\"}} has two phases: an offline indexing phase where you prepare your documents, and an online query phase where you retrieve and generate answers."}}
+{{say "The RAG pipeline has two phases: an offline indexing phase where you prepare your documents, and an online query phase where you retrieve and generate answers."}}
 
 {{diagram "pat-rag-pipeline"}}
 
@@ -42,7 +42,7 @@
   (row "8. Generate"     "Augmented prompt"          "Answer with citations"     "Model selection, temperature")
 )}}
 
-{{hint "same model for embed and query" "You must embed queries with the exact same model used to embed documents. Every embedding model creates its own vector space. Query and document vectors from different models live in incompatible spaces and cannot be compared — {{info \"cosine similarity\" \"Cosine similarity is a way to measure if two pieces of text mean similar things. It looks at the angle between their vectors. Angle close to 0° = similar, angle close to 90° = different. Different embedding models have different angle meanings, so comparing vectors from different models gives garbage results.\"}} will return meaningless numbers."}}
+{{hint "same model for embed and query" "You must embed queries with the exact same model used to embed documents. Every embedding model creates its own vector space. Query and document vectors from different models live in incompatible spaces and cannot be compared — <span class=\"hl-blue\">cosine similarity</span> will return meaningless numbers."}}
 
 {{triggerQs "Questions this phase could trigger"
   "How does the offline indexing phase differ from the online query phase?"
@@ -64,7 +64,7 @@
   (row "Document-based"   "One chunk per logical document"            "Complete context"      "May exceed context limit" "Short docs like FAQs")
 )}}
 
-{{hint "chunk size 300-500 tokens" "Too small (under 100 {{info \"tokens\" \"1 token ≈ 4 characters. So 100 tokens = ~400 characters.\"}}): chunks lack enough context for meaningful retrieval — the embedding captures almost no semantic signal. Too large (over 1000 tokens): chunks cover multiple topics, reducing precision because a chunk about both pricing AND returns will score well for both query types. 300-500 tokens is the empirically validated sweet spot."}}
+{{hint "chunk size 300-500 tokens" "Too small (under 100 tokens): chunks lack enough context for meaningful retrieval — the embedding captures almost no semantic signal. Too large (over 1000 tokens): chunks cover multiple topics, reducing precision because a chunk about both pricing AND returns will score well for both query types. 300-500 tokens is the empirically validated sweet spot."}}
 
 {{code "python" `from typing import List
 import tiktoken
@@ -178,7 +178,7 @@ def chunk_recursive(
 {{say "Embeddings convert text into dense vectors that capture semantic meaning. Two pieces of text that mean similar things will have vectors close together in the embedding space. Choosing the right model and vector database is critical for RAG quality."}}
 
 {{table "Embedding Model Comparison" (rows
-  (row "Model"                           "Dimensions"  "{{info \"MTEB Score\" \"MTEB is a test that measures how good an embedding model is. Higher = better. Score of 62 = decent, 64 = excellent. A 2-point difference is meaningful.\"}} "  "Cost/1M tokens"  "Notes")
+  (row "Model"                           "Dimensions"  "{{info \"MTEB Score\" \"MTEB is a test that measures how good an embedding model is. Higher = better. Score of 62 = decent, 64 = excellent. A 2-point difference is meaningful.\"}}" "Cost/1M tokens"  "Notes")
   (row "OpenAI text-embedding-3-small"   "1536"        "62.3"        "$0.02"           "Best cost/quality ratio")
   (row "OpenAI text-embedding-3-large"   "3072"        "64.6"        "$0.13"           "Highest quality, OpenAI")
   (row "Cohere embed-english-v3.0"       "1024"        "64.5"        "$0.10"           "Strong multilingual")
@@ -189,7 +189,7 @@ def chunk_recursive(
 {{hint "text-embedding-3-small as default" "At $0.02 per million tokens, embedding a corpus of 1M documents costs roughly $10 total. The quality gap between small and large is only 2-3 points on MTEB — not worth 6.5x the cost unless you are in a high-stakes domain like legal or medical search where recall precision justifies the spend."}}
 
 {{compare "Vector Database Selection" (options
-  (best "{{info \"pgvector\" \"pgvector is an extension for PostgreSQL that adds vector search. If you already have Postgres, no new database to manage.\"}} (PostgreSQL)" "If you already run Postgres, pgvector adds vector search with zero new infrastructure. Supports {{info \"HNSW\" \"HNSW (Hierarchical Navigable Small World) is an index structure that finds similar vectors quickly. It's like having a map of the vector space that you can navigate fast.\"}} and {{info \"IVFFlat\" \"IVFFlat divides the vector space into regions, then searches the best region. Faster than brute-force but less accurate than HNSW.\"}} indexes. Good up to 10M vectors. Best for startups and teams that want simplicity.")
+  (best "pgvector (PostgreSQL)" "If you already run Postgres, pgvector adds vector search with zero new infrastructure. Supports HNSW and IVFFlat indexes. Good up to 10M vectors. Best for startups and teams that want simplicity.")
   (alt "Pinecone" "Fully managed, serverless option. Best if you want zero ops. Scales automatically. Higher cost but no infrastructure to manage. Good for teams without infra engineers.")
   (alt "Qdrant" "Open-source, Rust-based, very fast. Supports filtering with vector search natively. Self-host or cloud. Best for teams that need advanced filtering and high performance.")
   (nofit "FAISS" "Library, not a database. No persistence, no replication, no filtering. Only use for prototyping or batch offline search. Not suitable for production serving.")
@@ -309,8 +309,8 @@ def search_similar(
 {{table "Retrieval Strategy Comparison" (rows
   (row "Strategy"        "How It Works"                     "Strengths"                          "Weaknesses"                    "Use When")
   (row "Dense (vectors)" "Cosine similarity on embeddings"  "Semantic understanding, paraphrases" "Misses exact terms, acronyms" "Conceptual questions")
-  (row "Sparse ({{info \"BM25\" \"BM25 is a way to search using keywords. It's like asking 'which documents have the most important words from the query?' It's fast and great for exact matches, but doesn't understand meaning.\"}})"   "{{info \"BM25\" \"BM25 is probabilistic keyword matching.\"}} keyword matching (extends {{info \"TF-IDF\" \"TF-IDF measures how important a word is in a document. High TF-IDF = the word appears often in this document but rarely in others.\"}} with saturation and length normalization)"  "Exact keyword match, acronyms"      "No semantic understanding"     "Keyword-heavy domains")
-  (row "Hybrid"          "Combine dense + sparse with {{info \"RRF\" \"RRF (Reciprocal Rank Fusion) combines the results from multiple search methods into one ranked list. It doesn't need to normalize scores from different searchers.\"}} " "Best of both worlds"                 "More complex, slower"          "Production systems")
+  (row "Sparse (BM25)"   "BM25 keyword matching (extends TF-IDF with saturation and length normalization)"  "Exact keyword match, acronyms"      "No semantic understanding"     "Keyword-heavy domains")
+  (row "Hybrid"          "Combine dense + sparse with RRF" "Best of both worlds"                 "More complex, slower"          "Production systems")
 )}}
 
 {{think "Start with alpha=0.7 (70% dense, 30% sparse) for hybrid search. Dense handles most natural language queries. Sparse catches product codes, error messages, and names that embeddings misrepresent."
@@ -394,7 +394,7 @@ class HybridRetriever:
 
 {{key "Hybrid search with Reciprocal Rank Fusion is the production standard. Dense retrieval handles semantic queries while BM25 catches exact keyword matches. The alpha parameter lets you tune the balance: start with 0.7 (70 percent dense) and adjust based on your query patterns."}}
 
-{{say "Initial retrieval uses {{info \"bi-encoders\" \"Bi-encoders embed the query and documents separately, then compare them with cosine similarity. Fast, but sometimes misses context.\"}} : query and document are embedded independently. This is fast but less accurate. {{info \"Cross-encoder\" \"Cross-encoder looks at query and document together to judge if they match. Slower but much more accurate. Ideal for final ranking of top results.\"}} reranking compares query and document together, which is slower but much more precise. The two-stage pipeline gives the best of both worlds."}}
+{{say "Initial retrieval uses <span class=\"hl-blue\">bi-encoders</span>: query and document are embedded independently. This is fast but less accurate. <span class=\"hl-blue\">Cross-encoder</span> reranking compares query and document together, which is slower but much more precise. The two-stage pipeline gives the best of both worlds."}}
 
 {{diagram "pat-two-stage-retrieval-reranking"}}
 
@@ -597,7 +597,7 @@ class RAGPipeline:
 #     print("  Source:", src.source, "score:", src.score)
 `}}
 
-{{hint "temperature=0.1 for RAG" "{{info \"Temperature\" \"Temperature controls how random the model's answers are. 0.0 = always pick the most likely word (deterministic). 1.0 = pick randomly. RAG should be deterministic.\"}} Low temperature (0.0-0.2) keeps the model close to the retrieved facts and reduces hallucination. High temperature increases creativity but also increases the probability that the model deviates from the context and invents plausible-sounding but unsupported claims."}}
+{{hint "temperature=0.1 for RAG" "Low temperature (0.0-0.2) keeps the model close to the retrieved facts and reduces hallucination. High temperature increases creativity but also increases the probability that the model deviates from the context and invents plausible-sounding but unsupported claims."}}
 
 {{phase 7 "Failure Modes & How to Fix Them" "5 min"}}
 
@@ -683,9 +683,9 @@ def defensive_query(rag: RAGPipeline, query: str) -> RAGResponse:
   (row "Total (GPT-4o-mini)"         "Full pipeline with GPT-4o-mini"                     "$10"             "~$230/mo")
 )}}
 
-{{think "LLM {{info \"inference\" \"Inference is when you run the model to generate text from a prompt. Each inference call to the LLM is the biggest cost in RAG.\"}} dominates RAG cost by 10x. Embeddings are a rounding error. The main levers: use a cheaper model for simple questions, reduce context size with fewer or smaller chunks, cache frequent queries. Caching identical queries can cut LLM costs by 30-50%."
+{{think "LLM inference dominates RAG cost by 10x. Embeddings are a rounding error. The main levers: use a cheaper model for simple questions, reduce context size with fewer or smaller chunks, cache frequent queries. Caching identical queries can cut LLM costs by 30-50%."
   (whyNot "always using GPT-4o-mini" "GPT-4o-mini produces noticeably worse answers for complex multi-hop questions that require synthesizing across multiple retrieved chunks. Run both models on your evaluation set and measure answer quality — then decide if the 5x cost difference is worth the quality gain for your use case.")
-  (how "implement {{info \"semantic caching\" \"Semantic caching stores answers to similar queries. New query comes in, you embed it and search the cache for very similar queries (cosine similarity > 0.95). If found, reuse the cached answer instead of calling the LLM again. Saves 30-50% of inference cost for repeated similar questions.\"}} " "Embed each incoming query. Before calling the LLM, search the cache for queries with cosine similarity above 0.95. If found, return the cached answer. Use a short TTL (1-24 hours) for time-sensitive domains. Redis with a vector similarity module or a simple in-memory dict with exact-match hashing work for most traffic patterns.")
+  (how "implement semantic caching" "Embed each incoming query. Before calling the LLM, search the cache for queries with cosine similarity above 0.95. If found, return the cached answer. Use a short TTL (1-24 hours) for time-sensitive domains. Redis with a vector similarity module or a simple in-memory dict with exact-match hashing work for most traffic patterns.")
 }}
 
 {{key "Embedding costs are negligible. LLM inference is 80+ percent of RAG cost. Optimize by: caching repeated queries, using smaller models for simple questions, and limiting context window size. A semantic cache that matches similar queries can further reduce costs."}}
@@ -706,7 +706,7 @@ def defensive_query(rag: RAGPipeline, query: str) -> RAGResponse:
   "Tables: convert to structured markdown before chunking — preserve the header row so each chunk is self-contained. Images: use a vision model to generate text descriptions, then embed those descriptions. Mixed-content documents need a preprocessing pipeline: extract text, describe images, linearize tables, then chunk the unified text. Never embed raw image bytes — no text embedding model understands them."
 }}
 
-{{followup "How would you implement access control in RAG?" "{{info \"Metadata filtering\" \"Metadata is data about data. In RAG, you tag each chunk with metadata: source, author, department, security level. At query time you filter the vector search by this metadata, so the user only gets chunks they're authorized to see.\"}} Every chunk gets tagged with access metadata: team, role, classification level. At query time the user's permissions are checked and passed as a metadata filter to the vector search. The vector database only returns chunks the user is authorized to see. This is non-negotiable for enterprise RAG where different teams should only access their own documents. Never rely on the LLM to enforce access control — enforce it at the retrieval layer."}}
+{{followup "How would you implement access control in RAG?" "Metadata filtering: every chunk gets tagged with access metadata: team, role, classification level. At query time the user's permissions are checked and passed as a metadata filter to the vector search. The vector database only returns chunks the user is authorized to see. This is non-negotiable for enterprise RAG where different teams should only access their own documents. Never rely on the LLM to enforce access control — enforce it at the retrieval layer."}}
 
 {{checklist
   "Chunk size 300-500 tokens with 10-15 percent overlap"
