@@ -18,7 +18,7 @@
   (row "Direct Messages"    "Private messaging between users"                   "P2"        "WebSocket, message persistence, E2E encryption")
 )}}
 
-{{hint "why feed is the hardest P0?" "Upload is a straightforward pipeline (resize → S3 → CDN). Likes and comments are simple writes. But the feed requires reading posts from all followed users, ranking them, and serving within 200ms. For a user following 500 accounts who each post daily, that is 500 potential posts to rank per feed load. The {{info \"fan-out\" \"Fan-out means when a user posts, you push that post to many places. Fan-out-on-write: push to all followers' feed caches immediately when posted (fast reads). Fan-out-on-read: when showing feed, fetch from all followed users' posts (fast writes).\"}} strategy (write vs read) determines the entire system architecture."}}
+{{hint "why feed is the hardest P0?" "Upload is a straightforward pipeline (resize → S3 → CDN). Likes and comments are simple writes. But the feed requires reading posts from all followed users, ranking them, and serving within 200ms. For a user following 500 accounts who each post daily, that is 500 potential posts to rank per feed load. The <span class=\"hl-blue\">fan-out</span> strategy (write vs read) determines the entire system architecture."}}
 
 {{diagram "ig-nfr-estimates"}}
 
@@ -41,7 +41,7 @@
 
 {{phase 2 "API Design" "5 min"}}
 
-{{say "Now that requirements are scoped, let me define the core API contract. The API design reflects our priorities — P0 endpoints are the ones that handle the most traffic and need the most careful design."}}
+{{say "I'll define the core API contract now. The API design reflects our priorities — P0 endpoints handle the most traffic and need the most careful design."}}
 
 {{diagram "ig-api-design"}}
 
@@ -54,9 +54,9 @@
 }}
 
 {{triggerQs "Questions about API design"
-  "Why {{info \"cursor-based\" \"Cursor-based pagination passes an opaque token (cursor) that encodes the last item's position. Server decodes cursor and returns items after it. Unaffected by new insertions before cursor.\"}} pagination over {{info \"offset-based\" \"Offset-based pagination uses page number and limit. Requests ?page=5&limit=20 to get rows 100-119. But if new rows are inserted, row 100 shifts and user sees duplicates.\"}} ?"
+  "Why <span class=\"hl-blue\">cursor-based</span> pagination over <span class=\"hl-red\">offset-based</span>?"
   "Offset pagination (page=5&limit=20) breaks when new content is inserted. If 3 new posts appear while the user is on page 5, page 6 will repeat 3 posts from page 5. Cursor pagination uses a timestamp or ID marker — 'give me 20 posts older than this cursor.' New insertions above the cursor don't affect results below it. Every major social API uses cursor pagination."
-  "How do you handle the {{info \"presigned URL\" \"Presigned URL is a time-limited link to an S3 bucket that grants upload/download permission without AWS credentials. Client gets this URL from your server, uploads directly to S3. This saves bandwidth: data doesn't flow through your servers.\"}} pattern for media upload?"
+  "How do you handle the <span class=\"hl-blue\">presigned URL</span> pattern for media upload?"
   "Client calls POST /media/upload/init → server returns a presigned S3 PUT URL + upload_id. Client uploads directly to S3 using the presigned URL (never through your API server — saves bandwidth and latency). Client calls POST /media/upload/complete with upload_id → server validates the upload, triggers resize pipeline, returns media_id. This is how Instagram, Twitter, and Slack all handle media uploads."
   "Should likes be POST /posts/{id}/like or PUT /posts/{id}/like?"
   "POST. Like is creating a new resource (a like record), not updating the post. PUT implies idempotency — calling it twice should produce the same result. POST /like with a unique constraint (user_id, post_id) naturally handles double-like prevention at the database level. DELETE /posts/{id}/like for unlike."
@@ -67,13 +67,13 @@
 {{say "For MVP, I would build a monolith with Postgres, a single S3 bucket, and CloudFront. The goal is shipping fast with a clean data model we can shard later."}}
 
 {{compare "Why Postgres for MVP?" (options
-  (best "Postgres" "{{info \"ACID\" \"ACID (Atomicity, Consistency, Isolation, Durability) means database transactions are guaranteed. Either fully succeed or fully fail, no partial updates. Critical for likes to prevent double-likes.\"}} transactions for likes (no double-like), {{info \"JSONB\" \"JSONB is a Postgres data type that stores flexible JSON data while allowing indexing and querying. Lets you store metadata without rigid schema.\"}} for flexible metadata, mature ecosystem, free. Instagram itself ran on Postgres until 10M+ users. {{info \"B-tree\" \"B-tree is a tree data structure that Postgres uses for indexes. Supports equality lookups, range queries, and ordering efficiently.\"}} indexes handle our query patterns. Supports {{info \"partial indexes\" \"Partial index is an index on rows matching a WHERE condition. Example: index on (user_id) WHERE deleted_at IS NULL. Saves space and speed.\"}} , {{info \"covering indexes\" \"Covering index includes all columns needed to answer a query without reading the main table. Example: index on (post_id, created_at) 'covers' a query for post count.\"}} , and has a sophisticated query planner.")
-  (alt "MySQL" "Simpler replication setup, but lacks JSONB, partial indexes, and has weaker {{info \"MVCC\" \"MVCC (Multi-Version Concurrency Control) lets multiple transactions read/write simultaneously without blocking. Postgres's MVCC is more sophisticated than MySQL's, allowing better parallelism.\"}} . Postgres wins on features for a social app that needs complex queries (JOINs for feed) and flexible schema evolution.")
-  (nofit "DynamoDB at MVP" "Over-engineering. DynamoDB requires upfront access pattern design, has no JOINs (feed query becomes {{info \"N+1\" \"N+1 means you fetch a list in one query (N rows), then for each row fetch details in a separate query. With 20 posts, that's 21 total queries instead of 1 join. Slow.\"}} ), costs more at low scale ($1.25/M writes vs Postgres flat rate), and you lose SQL flexibility for ad-hoc analytics.")
-  (nofit "MongoDB" "Schema flexibility sounds appealing but social data is inherently relational (users follow users, users like posts). Mongo forces {{info \"denormalization\" \"Denormalization is copying data in multiple places to avoid joins. Example: store user avatar in every post instead of joining users table. Faster reads but creates update anomalies when avatar changes.\"}} , leading to update anomalies. Postgres JSONB gives flexibility where needed without sacrificing joins.")
+  (best "Postgres" "<span class=\"hl-blue\">ACID</span> transactions for likes (no double-like), <span class=\"hl-blue\">JSONB</span> for flexible metadata, mature ecosystem, free. Instagram itself ran on Postgres until 10M+ users. <span class=\"hl-blue\">B-tree</span> indexes handle our query patterns. Supports <span class=\"hl-blue\">partial indexes</span>, <span class=\"hl-blue\">covering indexes</span>, and has a sophisticated query planner.")
+  (alt "MySQL" "Simpler replication setup, but lacks JSONB, partial indexes, and has weaker <span class=\"hl-blue\">MVCC</span>. Postgres wins on features for a social app that needs complex queries (JOINs for feed) and flexible schema evolution.")
+  (nofit "DynamoDB at MVP" "Over-engineering. DynamoDB requires upfront access pattern design, has no JOINs (feed query becomes <span class=\"hl-red\">N+1</span>), costs more at low scale ($1.25/M writes vs Postgres flat rate), and you lose SQL flexibility for ad-hoc analytics.")
+  (nofit "MongoDB" "Schema flexibility sounds appealing but social data is inherently relational (users follow users, users like posts). Mongo forces <span class=\"hl-blue\">denormalization</span>, leading to update anomalies. Postgres JSONB gives flexibility where needed without sacrificing joins.")
 )}}
 
-{{hint "why Postgres over DynamoDB at MVP?" "Postgres handles 5K QPS on a single instance with ACID guarantees, JOINs for feed queries, and costs $200/month on RDS. DynamoDB requires upfront access pattern design, has no JOINs (forcing {{info \"N+1\" \"N+1 means querying once for a list, then once per item for details. With 20 posts, that's 21 queries instead of 1 join.\"}} queries for feed), and costs more at low scale. Instagram itself ran Postgres until 10M+ users. Switch to DynamoDB only when write throughput exceeds 10-15K WPS."}}
+{{hint "why Postgres over DynamoDB at MVP?" "Postgres handles 5K QPS on a single instance with ACID guarantees, JOINs for feed queries, and costs $200/month on RDS. DynamoDB requires upfront access pattern design, has no JOINs (forcing <span class=\"hl-red\">N+1</span> queries for feed), and costs more at low scale. Instagram itself ran Postgres until 10M+ users. Switch to DynamoDB only when write throughput exceeds 10-15K WPS."}}
 
 {{diagram "ig-mvp-architecture"}}
 
@@ -169,7 +169,7 @@ CREATE INDEX idx_likes_post ON likes(post_id);
 -- We use Elasticsearch for full-text search at scale instead.
 `}}
 
-{{hint "why {{info \"composite\" \"Composite means made of multiple parts. A composite primary key has 2+ columns. Example: (user_id, post_id) is composite because it combines user and post.\"}} PK on likes?" "PRIMARY KEY (user_id, post_id) on the likes table serves double duty: it prevents double-likes at the database level (unique constraint) and provides an efficient lookup for 'did this user like this post?' without a separate index. This is cheaper and more reliable than application-level deduplication."}}
+{{hint "why composite PK on likes?" "PRIMARY KEY (user_id, post_id) on the likes table serves double duty: it prevents double-likes at the database level (unique constraint) and provides an efficient lookup for 'did this user like this post?' without a separate index. This is cheaper and more reliable than application-level deduplication."}}
 
 {{key "MVP feed is pull-based: query follows table to get followee IDs, then query posts WHERE user_id IN (...) ORDER BY created_at DESC LIMIT 20. Simple, no infrastructure overhead."}}
 
@@ -207,7 +207,7 @@ LIMIT 20;
 
 {{phase 4 "Stage 1: Upload Flow (Hop-by-Hop)" "5 min"}}
 
-{{say "the upload flow hop by hop, showing each service, its purpose, failure modes, and cost."}}
+{{say "I'll walk through the upload flow hop by hop — each service, its purpose, failure modes, and cost."}}
 
 {{diagram "ig-upload-read-flow"}}
 
@@ -608,7 +608,7 @@ async def mark_viewed(story_id: str, user_id: int):
 
 {{phase 10 "Analytics & Monitoring" "5 min"}}
 
-{{say "At Instagram scale, observability is not optional. SLOs, analytics pipelines, and the monitoring stack."}}
+{{say "At Instagram scale, observability is not optional. I'll cover the SLOs, analytics pipelines, and monitoring stack."}}
 
 <h3>Explore & Search</h3>
 
@@ -706,7 +706,7 @@ async def mark_viewed(story_id: str, user_id: int):
   (row "CDN cache miss storm"        "Origin S3/ALB overloaded"        "TTL expiry causes all PoPs to refetch"          "Origin Shield (single regional cache) + stale-while-revalidate header")
 )}}
 
-{{say "Let me go deeper on two critical interview topics: distributed ID generation and counter collision prevention. These are follow-up questions that separate senior candidates."}}
+{{say "Two critical interview topics deserve a deeper dive: distributed ID generation and counter collision prevention. These are the follow-up questions that separate senior candidates."}}
 
 {{qa
   "How does the database generate IDs and ensure no collisions at scale?"
@@ -726,7 +726,7 @@ async def mark_viewed(story_id: str, user_id: int):
 
 {{diagram "ig-scaling-timeline"}}
 
-{{say "Let me paint the full distributed system picture. At 500M+ DAU, Instagram is not one system but a constellation of specialized systems communicating through event streams, each optimized for its specific access pattern."}}
+{{say "At 500M+ DAU, Instagram is not one system but a constellation of specialized systems communicating through event streams, each optimized for its specific access pattern."}}
 
 {{diagram "ig-distributed-system"}}
 
@@ -770,7 +770,7 @@ async def mark_viewed(story_id: str, user_id: int):
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 
-{{say "the critical questions an interviewer would ask about this design."}}
+{{say "Here are the critical questions an interviewer would ask about this design."}}
 
 {{deepQA "Critical Interview Questions" `
 <div class="dqa-item">
