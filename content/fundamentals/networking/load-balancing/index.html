@@ -10,21 +10,21 @@
 }}
 
 {{table "Load Balancer Layers" (rows
-  (row "Layer"   "{{info \"OSI Layer\" \"OSI (Open Systems Interconnection) is a 7-layer model: 1=Physical, 2=Data Link, 3=Network (IP), 4=Transport (TCP/UDP), 5=Session, 6=Presentation, 7=Application (HTTP). Higher layers know more about the data.\"}}" "Protocol Awareness"              "Example")
-  (row "{{info \"L4\" \"L4 (Layer 4, Transport layer) = TCP/UDP. LB sees only IP addresses and port numbers, not HTTP paths or hostnames.\"}}" "Transport"  "TCP/UDP only, no content inspection" "AWS NLB, HAProxy TCP mode")
-  (row "{{info \"L7\" \"L7 (Layer 7, Application layer) = HTTP, HTTPS, WebSocket, gRPC. LB can read HTTP headers, paths, hostnames to make routing decisions.\"}}" "Application" "HTTP headers, paths, cookies, gRPC" "AWS ALB, Nginx, Envoy")
+  (row "Layer"                           "OSI Layer"    "Protocol Awareness"              "Example")
+  (row "<span class='hl-blue'>L4</span> Transport"   "Layer 4"      "TCP/UDP only, no content inspection" "AWS NLB, HAProxy TCP mode")
+  (row "<span class='hl-blue'>L7</span> Application" "Layer 7"      "HTTP headers, paths, cookies, gRPC" "AWS ALB, Nginx, Envoy")
 )}}
 
 {{think "L4 vs L7: which do I choose?"
   (whyNot "L4 for web APIs" "You lose path-based routing, header inspection, WAF, and gRPC health checks. L4 just forwards TCP packets — it cannot distinguish /api from /static.")
   (whatIf "I need both static IPs and L7 routing" "Chain NLB (static IP) in front of ALB (L7 routing). NLB passes TCP to ALB. You get both features at the cost of ~$16/mo extra and slightly more latency.")
-  (how "When does L4 beat L7?" "Non-HTTP protocols (MQTT, FIX, custom TCP), latency under 100 microseconds, or {{info \"TLS passthrough\" \"TLS passthrough = LB forwards encrypted traffic without decrypting it. LB cannot read HTTP paths or make smart routing decisions. Used when client-LB encryption matters more than smart routing.\"}} where you cannot decrypt traffic at the LB.")
+  (how "When does L4 beat L7?" "Non-HTTP protocols (MQTT, FIX, custom TCP), latency under 100 microseconds, or <span class='hl-blue'>TLS passthrough</span> where you cannot decrypt traffic at the LB.")
 }}
 
 {{hint "L7 is the default for web services" "90% of web workloads use L7. L4 is a deliberate choice for specific constraints, not the starting point."}}
 
 {{compare "Load Balancer Types" (options
-  (best "ALB (Layer 7)" "HTTP-aware: path routing, host routing, WebSocket, gRPC, {{info \"WAF\" \"WAF (Web Application Firewall) = filters HTTP requests by rule (block bots, limit by country, SQL injection detection). Sits in front of ALB.\"}} integration. Best for web APIs and microservices.")
+  (best "ALB (Layer 7)" "HTTP-aware: path routing, host routing, WebSocket, gRPC, <span class='hl-blue'>WAF</span> integration. Best for web APIs and microservices.")
   (alt "NLB (Layer 4)" "TCP/UDP passthrough. Static IP. Ultra-low latency (<100us). Best for non-HTTP protocols, gaming, IoT.")
   (nofit "Classic LB" "Legacy AWS offering. AWS recommends migrating to ALB/NLB. No new features since 2016.")
 )}}
@@ -40,13 +40,13 @@
 }}
 
 {{table "Routing Algorithms" (rows
-  (row "Algorithm"            "How It Works"                                    "Best For"                              "Drawback")
-  (row "Round Robin"          "Requests go to servers 1, 2, 3, 1, 2, 3..."     "Stateless APIs, uniform servers"       "Ignores server load differences")
-  (row "{{info \"Weighted Round Robin\" \"Weighted Round Robin assigns each server a weight. Server A weight=3 gets 3x more traffic than Server B weight=1. Use for mixed instance sizes.\"}}" "Server A gets 3x traffic vs Server B"           "Mixed instance sizes (c5.large + c5.xlarge)" "Manual weight configuration")
-  (row "{{info \"Least Connections\" \"Least Connections counts active connections per server and routes to the server with fewest. Great for long-lived connections like WebSocket.\"}}" "Route to server with fewest active connections"  "Long-lived connections, WebSocket"     "Does not account for request complexity")
-  (row "{{info \"IP Hash\" \"IP Hash hashes the client's IP address to pick a server. Same client always goes to same server. Not cookie-based, works with any protocol.\"}}" "Hash client IP to always same server"            "Sticky sessions without cookies"       "Uneven distribution if IP range is skewed")
-  (row "{{info \"Consistent Hashing\" \"Consistent Hashing uses a hash ring. Adding/removing a server only redistributes 1/N keys instead of reshuffling everything. Used by Redis Cluster, DynamoDB.\"}}" "Hash ring, minimal redistribution on scale"     "Cache-aware routing, Redis cluster"    "More complex to implement")
-  (row "Random"               "Randomly pick a server"                          "Simple load tests"                     "No guarantee of even distribution")
+  (row "Algorithm"                                    "How It Works"                                    "Best For"                              "Drawback")
+  (row "Round Robin"                                  "Requests go to servers 1, 2, 3, 1, 2, 3..."     "Stateless APIs, uniform servers"       "Ignores server load differences")
+  (row "<span class='hl-blue'>Weighted Round Robin</span>" "Server A weight=3 gets 3x traffic vs Server B"  "Mixed instance sizes (c5.large + c5.xlarge)" "Manual weight configuration")
+  (row "<span class='hl-blue'>Least Connections</span>"    "Route to server with fewest active connections"  "Long-lived connections, WebSocket"     "Does not account for request complexity")
+  (row "<span class='hl-blue'>IP Hash</span>"              "Hash client IP to always same server"            "Sticky sessions without cookies"       "Uneven distribution if IP range is skewed")
+  (row "<span class='hl-blue'>Consistent Hashing</span>"   "Hash ring, minimal redistribution on scale"     "Cache-aware routing, Redis cluster"    "More complex to implement")
+  (row "Random"                                       "Randomly pick a server"                          "Simple load tests"                     "No guarantee of even distribution")
 )}}
 
 {{think "Should I switch from round-robin?"
@@ -114,8 +114,8 @@ class ConsistentHashRing:
   (row "Type"          "Checks"                          "Detection Time"          "Use Case")
   (row "TCP"           "Can establish TCP connection"     "~5s (3 failed x interval)" "Non-HTTP services, databases")
   (row "HTTP"          "GET /health returns 200"          "~15s (configurable)"     "Web services, APIs")
-  (row "{{info \"gRPC\" \"gRPC is a modern RPC (Remote Procedure Call) protocol over HTTP/2. Faster and more efficient than REST for service-to-service communication.\"}}" "gRPC health check protocol"       "~10s"                    "gRPC microservices")
-  (row "{{info \"Deep/Custom\" \"Deep health check queries downstream services (database, cache, external APIs). Should NOT be used on LB. Use only for monitoring alerts.\"}}" "/health/deep checks DB + cache"   "~30s (more comprehensive)" "Monitoring dashboards only")
+  (row "<span class='hl-blue'>gRPC</span>"                 "gRPC health check protocol"       "~10s"                    "gRPC microservices")
+  (row "<span class='hl-blue'>Deep/Custom</span>"          "/health/deep checks DB + cache"   "~30s (more comprehensive)" "Monitoring dashboards only")
 )}}
 
 {{think "Shallow vs deep health check — where does each belong?"
@@ -158,7 +158,12 @@ async def health_deep():
 
 {{phase 4 "AWS ALB vs NLB Comparison" "5 min"}}
 
-{{say "Let me compare ALB and NLB in detail. The answer depends on the workload."}}
+{{say "ALB vs NLB — the answer depends on the workload:
+<ul>
+  <li><strong>ALB</strong> is the default: path routing, WAF, Cognito auth, WebSocket/gRPC native support</li>
+  <li><strong>NLB</strong> when you need: static IPs, TLS passthrough, <span class='hl'>&lt;100µs</span> latency, or non-HTTP protocols</li>
+  <li><strong>NLB → ALB chain</strong> when you need both: adds ~<small>$16/mo</small> but gives you static IPs + L7 routing</li>
+</ul>"}}
 
 {{triggerQs "ALB vs NLB Decision"
   "What is the single clearest signal to use NLB?" "You need a static IP address for firewall whitelisting. ALB has dynamic IPs; you must use DNS. NLB gives you Elastic IPs that never change."
@@ -269,7 +274,7 @@ async def health_deep():
 
 {{phase 8 "Interview Q&A" "5 min"}}
 
-{{say "Let me address some common interview questions about load balancing, covering sticky sessions, connection draining, and traffic spikes."}}
+{{say "Common interview questions about load balancing — sticky sessions, connection draining, and traffic spikes:"}}
 
 {{qa
   "How does a load balancer handle sticky sessions?"
