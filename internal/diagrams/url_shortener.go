@@ -33,6 +33,11 @@ func registerURLShortener(r *Registry) {
       </div>
     </div>
   </div>
+</div>
+<div class="d-legend">
+  <div class="d-legend-item"><div class="d-legend-color green"></div>P0 must-have</div>
+  <div class="d-legend-item"><div class="d-legend-color blue"></div>P1 important</div>
+  <div class="d-legend-item"><div class="d-legend-color gray"></div>P2 nice-to-have</div>
 </div>`,
 	})
 
@@ -98,10 +103,11 @@ func registerURLShortener(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">NFR Targets</div>
       <div class="d-flow-v">
-        <div class="d-box green" data-tip="52 minutes downtime per year. Multi-AZ deployment, auto-scaling, health checks.">Availability: 99.99% <span class="d-metric throughput">52 min/yr</span></div>
-        <div class="d-box green" data-tip="p50 < 5ms (cache hit), p99 < 10ms (cache miss + DB). CDN hits are < 2ms.">Redirect latency: &lt; 10ms p99</div>
-        <div class="d-box blue" data-tip="DynamoDB 11 9's durability. Point-in-time recovery enabled. Cross-region replication for DR.">Durability: never lose a URL mapping</div>
-        <div class="d-box amber" data-tip="Cache TTL 1h means updates take up to 1h to propagate. Acceptable for URL shortener — URLs rarely change.">Consistency: eventual OK (cache + DB sync)</div>
+        <div class="d-box green" data-tip="52 minutes downtime per year. Multi-AZ deployment, auto-scaling, health checks."><span class="d-step">1</span>Availability: 99.99% <span class="d-metric throughput">52 min/yr</span> <div class="d-tag green">4 nines</div></div>
+        <div class="d-box green" data-tip="p50 < 5ms (cache hit), p99 < 10ms (cache miss + DB). CDN hits are < 2ms."><span class="d-step">2</span>Redirect latency: &lt;10ms p99 <span class="d-metric latency">&lt;10ms p99</span></div>
+        <div class="d-box blue" data-tip="DynamoDB 11 9's durability. Point-in-time recovery enabled. Cross-region replication for DR."><span class="d-step">3</span>Durability: never lose a URL mapping <div class="d-tag blue">11 nines</div></div>
+        <div class="d-box amber" data-tip="Cache TTL 1h means updates take up to 1h to propagate. Acceptable for URL shortener — URLs rarely change."><span class="d-step">4</span>Consistency: eventual OK (cache + DB sync)</div>
+        <div class="d-box red" data-tip="Fail-open: if Redis is down, serve from DynamoDB only. Redirects still work at higher latency. Never return 503 for existing URLs.">Fail-open: Redis down &#8594; serve from DB only <div class="d-tag red">discuss in interview</div></div>
       </div>
     </div>
   </div>
@@ -121,6 +127,13 @@ func registerURLShortener(r *Registry) {
       </div>
     </div>
   </div>
+</div>
+<div class="d-legend">
+  <div class="d-legend-item"><div class="d-legend-color green"></div>Availability / latency</div>
+  <div class="d-legend-item"><div class="d-legend-color blue"></div>Durability</div>
+  <div class="d-legend-item"><div class="d-legend-color amber"></div>Consistency trade-off</div>
+  <div class="d-legend-item"><div class="d-legend-color purple"></div>Scale math</div>
+  <div class="d-legend-item"><div class="d-legend-color red"></div>Key decision</div>
 </div>`,
 	})
 
@@ -577,14 +590,28 @@ func registerURLShortener(r *Registry) {
 		Description: "Sample redirect lookup results showing cache hits, misses, and error cases.",
 		ContentFile: "problems/url-shortener",
 		Type:        TypeHTML,
-		HTML: `<div class="d-query-result">
-  <table>
-    <tr><th>Operation</th><th>Key</th><th>Result</th><th>Latency</th><th>Source</th></tr>
-    <tr><td>GET /Ab3xK9</td><td>url:Ab3xK9</td><td>https://example.com/very/long/path?utm=...</td><td>0.3ms</td><td>ElastiCache HIT</td></tr>
-    <tr><td>GET /Xz9mQ2</td><td>url:Xz9mQ2</td><td>https://docs.google.com/spreadsheets/d/...</td><td>4.8ms</td><td>DynamoDB (cache miss)</td></tr>
-    <tr><td>GET /expired1</td><td>url:expired1</td><td>HTTP 410 Gone</td><td>5.1ms</td><td>DynamoDB (TTL expired)</td></tr>
-    <tr><td>GET /notfound</td><td>url:notfound</td><td>HTTP 404 Not Found</td><td>4.2ms</td><td>DynamoDB (no item)</td></tr>
-  </table>
+		HTML: `<div class="d-flow-v">
+  <div class="d-box green" data-tip="Cache key: url:Ab3xK9. Redis returns original_url in O(1). ECS issues 301 Location header immediately. No DynamoDB call.">
+    <span class="d-status active"></span><span class="d-step">1</span>GET /Ab3xK9 <span class="d-metric latency">0.3ms</span>
+    <div class="d-label">ElastiCache HIT &#8594; 301 to https://example.com/very/long/path?utm=...</div>
+  </div>
+  <div class="d-box amber" data-tip="Cache key url:Xz9mQ2 not found (cold or evicted). Falls through to DynamoDB GetItem. Writes result back to Redis with TTL 1h.">
+    <span class="d-step">2</span>GET /Xz9mQ2 <span class="d-metric latency">4.8ms</span>
+    <div class="d-label">Cache MISS &#8594; DynamoDB GetItem &#8594; 301 to https://docs.google.com/spreadsheets/d/...</div>
+  </div>
+  <div class="d-box red" data-tip="DynamoDB TTL scanner deleted the item. GetItem returns no item but expires_at was in the past. Serve 410 Gone (not 404) — signals permanent removal to crawlers.">
+    <span class="d-status error"></span><span class="d-step">3</span>GET /expired1 <span class="d-metric latency">5.1ms</span>
+    <div class="d-label">DynamoDB TTL expired &#8594; HTTP 410 Gone (permanent removal signal)</div>
+  </div>
+  <div class="d-box red" data-tip="GetItem returns no item and no TTL attribute — code was never issued. Return 404 Not Found. Do NOT reveal whether a code existed-then-expired vs never existed.">
+    <span class="d-status error"></span><span class="d-step">4</span>GET /notfound <span class="d-metric latency">4.2ms</span>
+    <div class="d-label">DynamoDB no item &#8594; HTTP 404 Not Found</div>
+  </div>
+</div>
+<div class="d-legend">
+  <div class="d-legend-item"><div class="d-legend-color green"></div>Cache HIT (&lt;1ms)</div>
+  <div class="d-legend-item"><div class="d-legend-color amber"></div>Cache MISS (~5ms)</div>
+  <div class="d-legend-item"><div class="d-legend-color red"></div>Error (410/404)</div>
 </div>`,
 	})
 
