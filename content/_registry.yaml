@@ -1049,71 +1049,151 @@ quick_categories:
       - number: 1
         question: "How do you prevent duplicate user accounts?"
         needed: "email/phone uniqueness constraint, verification step, idempotent signup endpoint"
+        answer: "Add a unique index on the email (or phone) column so the DB rejects duplicates at the constraint level. Require verification before the account is active — an unverified account can't log in, which also catches typos. Make the signup endpoint idempotent by returning the existing account if the email already exists and is unverified, rather than an error."
+        tradeoff: "Case-sensitive unique constraints miss 'User@Example.com' vs 'user@example.com' — normalize to lowercase before storing. Phone-number dedup works the same way but needs E.164 normalization first."
+        caveat: "Don't rely only on application-layer checks — a race between two concurrent signups will bypass them. The DB unique constraint is the only safe guard. Also, don't expose whether an email already exists in your error message — that leaks account enumeration."
+        watch: "Soft-deleted accounts still hold the unique constraint slot — a re-registration attempt silently fails unless you release the constraint on deletion or use a deleted_at suffix trick like appending the user ID."
         related_fundamentals: [storage/dynamodb]
       - number: 2
         question: "How do you handle millions of simultaneous logins?"
         needed: "load balancer, stateless auth servers, cached sessions in Redis"
+        answer: "Make auth servers stateless: validate credentials, issue a JWT or opaque token, store sessions in Redis. The load balancer then routes any login request to any auth server — no sticky sessions needed. Redis cluster handles ~1M ops/sec at sub-ms latency; a 10-node cluster can sustain millions of concurrent session lookups."
+        tradeoff: "Sticky sessions (server-side memory) avoids Redis but means one crashed auth server invalidates all its sessions. Stateless JWT avoids Redis entirely but makes revocation hard — you can't invalidate a JWT without a blacklist, which brings Redis back anyway."
+        caveat: "Don't put the session store on the same Redis cluster as your rate limiter or cache — a login spike exhausting connections will also kill rate limiting. Use separate Redis clusters per concern."
+        watch: "Login spikes are predictable (market open, sports event start) — pre-warm auth server instances 10 minutes ahead using scheduled auto-scaling policies, not reactive CPU-based scaling which is 3-5 minutes too slow."
         related_problems: [rate-limiter]
         related_fundamentals: [networking/load-balancing, storage/redis]
       - number: 3
         question: "How do you design secure password storage?"
         needed: "bcrypt or argon2 hashing, per-user salt, never plaintext — not MD5 or SHA1"
+        answer: "Use bcrypt (cost factor 12) or Argon2id. Both are intentionally slow — bcrypt does ~4,096 rounds of SHA; Argon2id adds memory-hardness (64MB by default). Each password gets a random 32-byte salt so identical passwords hash differently. Never use MD5, SHA1, or SHA256 — they're too fast; an attacker can try 10 billion SHA256 guesses/second on a GPU."
+        tradeoff: "Argon2id is stronger (memory-hard, resistant to GPU/ASIC cracking) but requires tuning memory/iterations. bcrypt is battle-tested and widely supported. PBKDF2 is acceptable for compliance but weaker than both against modern GPU attacks."
+        caveat: "Never hash without a salt — rainbow table attacks crack unsalted hashes instantly. Don't re-use the same salt for all users. Also never store the plain password even temporarily in logs or request traces."
+        watch: "Cost factor 12 means bcrypt takes ~250ms on modern hardware — that's intentional for login but too slow for high-throughput API auth; use JWT/sessions instead of re-hashing on every request."
       - number: 4
         question: "How do you prevent brute-force login attacks?"
         needed: "rate limiting per IP/account, exponential back-off, CAPTCHA after N failures"
+        answer: "Rate limit by both IP and account independently — 5 failures per account in 15 minutes triggers a lockout; 20 failures per IP in 1 minute triggers a challenge. Exponential back-off doubles the delay after each failure (1s, 2s, 4s, up to 30s). After 5 consecutive failures, require CAPTCHA to prove human. Store failure counts in Redis with TTL so they expire automatically."
+        tradeoff: "Account lockout stops brute force but enables denial-of-service (attacker locks out victim). Prefer progressive delay + CAPTCHA over hard lockout. IP-based limiting alone fails against distributed attacks from botnets using thousands of IPs."
+        caveat: "Don't alert users with 'account locked' — tell them 'too many attempts, try again later'. Revealing lockout status helps attackers confirm valid usernames. Also never send lockout emails immediately — that's a DoS vector via email flooding."
+        watch: "Credential stuffing (trying breach passwords) succeeds even at 1 attempt per account because it uses different IPs — detect it by monitoring the ratio of failed logins across accounts, not per account."
         related_problems: [rate-limiter]
       - number: 5
         question: "How do systems implement secure password reset?"
         needed: "short-lived signed token (15 min), delivered to verified email, single-use"
+        answer: "Generate a cryptographically random 32-byte token, store its hash (SHA-256) in the DB with a 15-minute expiry, and email the raw token to the verified address on file. On reset, hash the submitted token, look it up, verify it hasn't expired, then delete it and update the password. Delete all other active sessions on success."
+        tradeoff: "Magic-link login (token = login without password) is simpler but riskier — email compromise = full account access. Password reset tokens are scoped to one action. SMS OTP is an alternative delivery channel but SMS is vulnerable to SIM-swapping."
+        caveat: "Never put the token in a URL query param that gets logged by proxies and browser history. Store it as a path segment or POST body. Always invalidate all existing sessions after a successful password reset — otherwise a compromised session persists."
+        watch: "Store only the hash of the token in the DB, not the raw token — if your DB is compromised, stored tokens can't be replayed to reset accounts."
       - number: 6
         question: "How do you support login across multiple devices?"
         needed: "long-lived refresh tokens per device, short-lived access tokens, revocation list"
+        answer: "Issue one refresh token per device (stored in device-local secure storage), paired with a short-lived access token (15 min TTL). The refresh token is long-lived (90 days) but device-bound. Store all refresh tokens in Redis keyed by user_id, with the device ID as a sub-key. To revoke a specific device, delete that entry from Redis."
+        tradeoff: "Storing sessions server-side (Redis) enables instant revocation but adds a Redis lookup on every token refresh. Fully stateless JWTs avoid Redis but can't be revoked until expiry — a stolen token is valid for up to 15 minutes."
+        caveat: "Don't reuse the same refresh token across devices — if one device is compromised and you can't distinguish which one, you'd need to log out all devices. Device-bound tokens let you revoke surgically."
+        watch: "Implement refresh token rotation: each use of a refresh token returns a new one and invalidates the old. If an old token is reused, it signals theft — immediately revoke all tokens for that user."
         related_fundamentals: [storage/redis]
       - number: 7
         question: "How do you detect suspicious logins?"
         needed: "device fingerprinting, geo-location anomaly detection, ML risk scoring"
+        answer: "Fingerprint each login: IP geolocation, user-agent, timezone, screen resolution. On each login, compute a risk score based on: new device (never seen before for this user), new country, impossible travel (login from London then New York within 30 min), and time-of-day anomaly. Score above threshold triggers step-up auth (SMS OTP or email challenge)."
+        tradeoff: "ML-based risk scoring is more accurate but requires training data and a model serving pipeline. Rule-based heuristics (impossible travel, new country) are simpler, lower latency (~1ms vs ~50ms for ML), and interpretable — start with rules, layer ML later."
+        caveat: "Don't block on suspicion alone — that causes legitimate users to lose access. Require step-up authentication (MFA) instead. VPN and Tor users will always look 'foreign' — don't over-index on IP geolocation alone."
+        watch: "Impossible travel detection: if login A is in Tokyo and login B is in New York 2 hours later, the user can't have physically traveled — flag it, but check for VPN usage before triggering a lockout."
       - number: 8
         question: "How do you implement two-factor authentication?"
         needed: "TOTP (RFC 6238) for authenticator apps; SMS OTP as fallback; hardware key (WebAuthn) as best"
+        answer: "TOTP (RFC 6238) generates a 6-digit code from HMAC-SHA1 of the secret + current 30-second time window. The user scans a QR code encoding the base32 secret, then their app generates codes client-side. No network call needed at verify time — server recomputes the same HMAC and compares. Allow ±1 window for clock skew."
+        tradeoff: "SMS OTP is weaker — SIM swapping attacks, SS7 vulnerabilities, and delayed delivery make it a fallback, not a primary factor. WebAuthn (hardware keys, Face ID, Touch ID) is strongest — phishing-resistant because the credential is bound to the origin domain."
+        caveat: "Store the TOTP secret encrypted at rest — if your DB is compromised and secrets leak, attackers can generate valid codes. Also, never accept a TOTP code twice in the same window — replay the code within 30 seconds and it should be rejected."
+        watch: "TOTP codes are valid for 30 seconds but you should accept ±1 window (90-second effective window) to handle clock drift — without this, users with slightly fast clocks get locked out consistently."
       - number: 9
         question: "How do you handle session expiration?"
         needed: "access token TTL (15 min), refresh token rotation, silent refresh in background"
+        answer: "Access tokens expire in 15 minutes; the client silently refreshes them using a long-lived refresh token before expiry (e.g., refresh when 5 minutes remain). Refresh tokens rotate on each use — every refresh returns a new refresh token and invalidates the old one. Store refresh tokens in Redis with user_id → device_id → token mapping for revocation."
+        tradeoff: "Longer access token TTL (e.g., 24h) reduces Redis round trips but means a stolen token is usable until expiry with no revocation path. Shorter TTL (5 min) is safer but causes more refresh calls — find the balance based on your security requirements."
+        caveat: "Don't store JWTs in localStorage — XSS can steal them. Use HttpOnly cookies for refresh tokens and keep access tokens in memory (JS variable). The access token lives only in the running JS context, not persisted to disk."
+        watch: "Silent refresh needs to handle the case where the refresh token is also expired — if the user's device was offline for 90 days, the refresh fails and you must redirect to login. Build this fallback into your client auth layer."
         related_fundamentals: [storage/redis]
       - number: 10
         question: "How do you allow users to log out from all devices?"
         needed: "server-side session invalidation list keyed by user ID, or version counter in token"
+        answer: "The cleanest approach: store a session_version integer on the user record. Embed it in the JWT at issuance. On each request, verify the JWT's version matches the DB value. 'Log out all devices' increments session_version — all existing tokens immediately fail version check. This requires one DB lookup per request but is simple and instant."
+        tradeoff: "Redis blocklist (storing invalidated JWIs) avoids the DB lookup but requires storage proportional to active tokens — thousands of tokens per user at scale adds up. Version counter is a single integer per user, far cheaper."
+        caveat: "If you use the version counter approach, don't cache the user record too aggressively — a 5-minute cache means tokens remain valid for 5 minutes after logout. For 'log out all devices', users expect immediate effect."
+        watch: "The version counter approach gives you log-out-all-devices for free and also serves as a kill switch for compromised accounts — increment the version and every token in the wild stops working within seconds."
         related_fundamentals: [storage/redis]
       - number: 11
         question: "How do systems support social login (Google, GitHub, etc.)?"
         needed: "OAuth 2.0 + OIDC: redirect to provider, exchange code for tokens, upsert local user"
+        answer: "Use OAuth 2.0 Authorization Code flow with PKCE. User clicks 'Sign in with Google', you redirect them to Google's auth server with your client_id and a random state parameter. Google redirects back with an authorization code. You exchange the code for an ID token (OIDC) containing name, email, and provider user ID. Upsert a local user record on the email or provider_id, then issue your own session token."
+        tradeoff: "Linking on email (matching Google email to existing account) is convenient but risky — a compromised Google account takes over the local account. Linking on provider_id (sub claim) is safer but requires users to explicitly link accounts, not just match by email."
+        caveat: "Always verify the state parameter on callback to prevent CSRF. Also verify the ID token signature using Google's public JWKS endpoint — never trust the claims without signature verification. Don't accept the email claim as proof of email ownership if email_verified is false."
+        watch: "If a user's Google account email changes, your email-based link breaks — store the provider's stable user ID (sub claim) as the foreign key, not their email."
       - number: 12
         question: "How do you prevent session hijacking?"
         needed: "HTTPS only, HttpOnly + Secure cookies, SameSite=Strict, token rotation"
+        answer: "Use HttpOnly cookies (prevents JS access, blocks XSS theft), Secure flag (HTTPS-only transmission), and SameSite=Strict (blocks CSRF — cookie not sent on cross-site requests). Rotate session tokens on privilege escalation (login, password change). Bind sessions to the user-agent and IP as soft factors — flag but don't reject on mismatch."
+        tradeoff: "SameSite=Strict breaks OAuth flows where the redirect back from the IdP is a cross-site navigation — the session cookie won't be sent. Use SameSite=Lax for OAuth compatibility; it still prevents CSRF for state-changing requests."
+        caveat: "HttpOnly alone doesn't prevent session theft if the server itself is compromised or if the cookie is transmitted over HTTP before the Secure flag is enforced. Enforce HSTS (HTTP Strict Transport Security) so browsers always upgrade to HTTPS."
+        watch: "Token rotation after login (issue a new session token immediately after authentication) defeats session fixation attacks where an attacker plants a known session ID before the user authenticates."
       - number: 13
         question: "How do systems support single sign-on (SSO)?"
         needed: "SAML 2.0 or OIDC identity provider, token exchange, assertion validation"
+        answer: "OIDC is preferred for modern SSO: the Identity Provider (IdP) issues ID tokens after authentication. Service Providers (SPs) redirect users to the IdP, which authenticates them once and returns a signed token. Each SP validates the token signature using the IdP's public keys (JWKS endpoint). Session lifetime is governed by the IdP — logout at the IdP propagates to all SPs via back-channel logout."
+        tradeoff: "SAML 2.0 is XML-based, enterprise-standard, and widely supported by older IdPs (Okta, ADFS) but verbose and harder to implement. OIDC is JSON/JWT-based, simpler, and better for SPAs and mobile apps. If your enterprise customers use ADFS, you need SAML support."
+        caveat: "Back-channel logout in OIDC is often not implemented by SPs — when a user logs out at the IdP, sessions at individual SPs stay alive until expiry. This is a major SSO security gap. Implement back-channel logout webhooks."
+        watch: "SSO session duration is separate from SP session duration — an OIDC ID token might be valid for 1 hour but your SP session lasts 8 hours. Enforce re-authentication at the IdP for sensitive operations regardless of SP session status."
       - number: 14
         question: "How do systems detect fake accounts?"
         needed: "behavior analysis (typing speed, navigation patterns), email domain reputation, ML model"
+        answer: "Multi-signal approach: email domain reputation (disposable email services like mailinator.com are blocked), phone number validation (VoIP numbers flagged), typing pattern analysis (bots type at inhuman speed or perfectly consistent rhythm), and behavioral signals (no mouse movement before form submission). Run these through an ML risk model that scores the signup 0–100."
+        tradeoff: "Hard blocking on signals causes false positives — legitimate users with VoIP numbers or fast typing get rejected. Score and gate instead: low-risk signup proceeds, medium-risk requires phone verification, high-risk requires human review."
+        caveat: "Disposable email blocklists need constant updates — new domains appear daily. Email deliverability check (SMTP verification of the mailbox) is more reliable but adds 200–500ms latency per signup."
+        watch: "Bots that purchase high-quality residential proxies and use browser automation frameworks (Playwright) defeat IP and user-agent signals — behavioral biometrics (mouse micro-movements, keystroke dynamics) are harder to fake at scale."
       - number: 15
         question: "How do you prevent email verification abuse?"
         needed: "rate limiting on verification sends per IP/account, token expiry, resend throttle"
+        answer: "Rate limit verification email sends: max 3 sends per email address per hour, max 10 per IP per hour. Use exponential back-off on the resend button (1 min → 5 min → 15 min). Tokens expire after 15 minutes. Store send count in Redis with 1-hour TTL. Unverified accounts older than 24 hours are purged by a background job."
+        tradeoff: "Stricter rate limits reduce spam abuse but also hurt legitimate users on flaky email providers who need multiple resends. Per-account limits (not just per-IP) are critical since attackers often control valid email addresses."
+        caveat: "Don't expose the rate limit threshold in error messages — 'you've sent 3 emails in the last hour' tells attackers exactly how to stay under the limit. Return a generic 'try again later' message."
+        watch: "Verification email flooding is a DoS against users — an attacker enters a victim's email and repeatedly triggers verification sends, filling their inbox. The per-email-address rate limit (not just per-IP) is what stops this."
         related_problems: [rate-limiter]
       - number: 16
         question: "How do you manage user profile updates safely?"
         needed: "validation + server-side sanitization, optimistic locking for concurrent updates, audit log"
+        answer: "Validate all fields server-side (not just client-side): email format, name length limits, no script tags in display name. Use optimistic locking — include an updated_at or version field in the update request; reject if the DB version doesn't match (someone else updated concurrently). Write every change to an audit log with old_value, new_value, timestamp, and user_id."
+        tradeoff: "Pessimistic locking (row-level DB lock during update) prevents concurrent conflicts but serializes writes — terrible for high-concurrency profile update endpoints. Optimistic locking scales better; conflicts are rare in practice for profile updates."
+        caveat: "Never trust client-submitted user IDs — always derive the user being updated from the authenticated session, not from a request body parameter. A missing check here is a classic IDOR (Insecure Direct Object Reference) vulnerability."
+        watch: "Email changes are especially sensitive — require re-verification of the new email before activating it, and notify the old email address that a change was made, giving the real user a chance to recover."
       - number: 17
         question: "How do you ensure username uniqueness?"
         needed: "unique database constraint, case-insensitive comparison, reserve on intent before commit"
+        answer: "Store usernames normalized to lowercase (or use citext column in PostgreSQL) and add a unique index. For two-step signup flows, reserve the username in a pending_usernames table when the user picks it, then promote to the users table on completion. Set a 30-minute TTL on reservations so abandoned signups release the name."
+        tradeoff: "Case-insensitive unique constraints (citext) prevent 'admin' vs 'Admin' conflicts. Unicode normalization is also needed — 'café' and 'café' can look identical but have different byte sequences (precomposed vs decomposed accents)."
+        caveat: "Don't check uniqueness at application layer with SELECT then INSERT — concurrent requests both see the name as available and both attempt INSERT. Only the DB unique constraint is race-condition-safe."
+        watch: "Reserve a block of usernames that look like admin/system usernames ('support', 'admin', 'root', 'help') to prevent impersonation attacks before you enforce it via policy."
       - number: 18
         question: "How do you handle account deletion?"
         needed: "soft delete with retention window (30 days), async PII cleanup job, GDPR compliance"
+        answer: "Mark the account deleted_at instead of physically deleting the row — this retains the unique constraint on email/username, preserves foreign key integrity (posts, payments), and allows recovery within 30 days. After 30 days, an async job anonymizes PII: null out name/email, replace with a pseudonymous ID. For GDPR, respond to erasure requests within 30 days."
+        tradeoff: "Physical deletion is simpler but cascades across many tables (posts, comments, payments) and can break audit logs. Soft delete + anonymization preserves referential integrity and audit trails while still complying with right-to-erasure."
+        caveat: "Don't delete financial transaction records even on account deletion — regulatory compliance (SOX, PCI-DSS) requires retaining payment history for 7 years. Anonymize the PII in the record, but keep the transaction itself."
+        watch: "After soft deletion, the email is still 'taken' — a user who regrets deleting can't re-register with the same email until you release it. Either release the email immediately on deletion or on recovery expiry."
       - number: 19
         question: "How do systems restore deleted accounts?"
         needed: "soft delete flag + deletion timestamp, re-activation within retention period, audit trail"
+        answer: "During the 30-day retention window, reactivation is a single update: clear deleted_at, restore active status. The user must authenticate with their original credentials (or a verification email), confirming they own the account. Log the restoration event with timestamp and IP. After 30 days, PII has been purged — full restoration is impossible; only a fresh account creation is possible."
+        tradeoff: "Longer retention windows (90 days) are user-friendly but hold PII longer than needed. Shorter windows (7 days) reduce PII exposure but frustrate users who regret deletion after a week. 30 days is the GDPR-compliant balance."
+        caveat: "Reactivating an account must also restore all linked data (posts, follows, orders) that was soft-deleted in the same transaction. Partial restoration — where the account is active but posts are gone — is confusing and hard to debug."
+        watch: "If an account was deleted due to ToS violation, the restoration path must check with your trust-and-safety system before reactivating — don't let banned users restore accounts through the normal deletion-recovery flow."
       - number: 20
         question: "How do platforms block banned users from returning?"
         needed: "device fingerprinting, IP monitoring, email domain block, shadow-ban for detection"
+        answer: "Build a multi-signal ban evasion detection system: fingerprint devices (browser fingerprint, iOS IDFV, Android GAID), hash and store on ban. On new signups, check against the blocked fingerprint list. Block email domains that were associated with multiple banned accounts. IP monitoring flags new accounts from IPs used by banned users."
+        tradeoff: "Hard blocking on device fingerprint causes false positives (shared devices, factory reset reinstalls). Shadow banning (account appears functional to the user but content is hidden from others) is more effective — the banned user doesn't know they're banned and can't as easily identify what signal to evade."
+        caveat: "Device fingerprints are not stable — users clear cookies, factory reset phones, or change browsers. Never rely on a single signal; require multiple signals to match before flagging. Fingerprint matching should raise risk score, not auto-ban."
+        watch: "The most effective signal is behavioral — banned users who return often exhibit the same patterns (same posting rhythm, same content style, same targets) that got them banned. ML behavioral fingerprinting catches evasion that device signals miss."
 
   - slug: payments
     title: "Payments & Transactions"
