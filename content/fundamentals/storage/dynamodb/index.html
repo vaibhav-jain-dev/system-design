@@ -1,16 +1,21 @@
 {{phase 1 "What Is DynamoDB?" "3 min"}}
 
-{{say "DynamoDB is a fully managed <span class=\"hl-blue\">NoSQL</span> key-value and document database. Single-digit millisecond latency at any scale. No servers to manage, no connection pools, no maintenance. It excels at known access patterns with single-key lookups."}}
+{{say `DynamoDB is a fully managed <span class="hl-blue">NoSQL</span> key-value and document database:
+<ul>
+  <li><strong>Single-digit millisecond latency</strong> at any scale — no servers, no connection pools, no maintenance</li>
+  <li>Excels at <strong>known access patterns</strong> with single-key lookups — <span class="hl-red">not a replacement for SQL</span></li>
+  <li>Auto-scales horizontally by partitioning on the primary key — <span class="hl">virtually unlimited throughput</span></li>
+</ul>`}}
 
 {{table "DynamoDB at a Glance" (rows
   (row "Property"           "Detail")
   (row "Type"               "Key-value and document store (NoSQL)")
-  (row "Latency"            "Single-digit ms reads/writes. {{info \"DAX\" \"DAX (DynamoDB Accelerator) is an in-memory cache for DynamoDB. Reduces latency from 10ms to microseconds.\"}} cache: microseconds.")
+  (row "Latency"            "Single-digit ms reads/writes. <span class=\"hl-blue\">DAX</span> cache: microseconds.")
   (row "Throughput"         "Virtually unlimited (auto-scales horizontally)")
   (row "Max Item Size"      "400 KB per item")
-  (row "Consistency"        "{{info \"Eventually consistent\" \"Eventually consistent = you read data immediately after writing, but the read might not include the write yet. Changes reach all replicas within milliseconds.\"}} (default) or {{info \"strongly consistent\" \"Strongly consistent = every read sees the most recent write. Guarantees freshness but costs 2x more RCUs.\"}} reads")
-  (row "Transactions"       "{{info \"ACID\" \"ACID (Atomicity, Consistency, Isolation, Durability) = all-or-nothing operations. Either all 100 items succeed or all fail.\"}} transactions across up to 100 actions (2x cost)")
-  (row "Global Tables"      "{{info \"Multi-region\" \"Multi-region means data is replicated across AWS regions (us-east-1, eu-west-1, etc.). Local reads are fast, and if one region fails, others continue.\"}} active-active replication")
+  (row "Consistency"        "<span class=\"hl-blue\">Eventually consistent</span> (default) or <span class=\"hl-blue\">strongly consistent</span> reads <small>(2x RCU cost)</small>")
+  (row "Transactions"       "<span class=\"hl-blue\">ACID</span> transactions across up to 100 actions <small>(2x cost)</small>")
+  (row "Global Tables"      "<span class=\"hl-blue\">Multi-region</span> active-active replication")
   (row "Pricing"            "On-demand: $1.25/M writes, $0.25/M reads. Provisioned: cheaper at scale.")
 )}}
 
@@ -98,7 +103,7 @@ items = response['Items']
 
 {{phase 3 "Indexes: GSI and LSI" "5 min"}}
 
-{{say "<span class=\"hl-blue\">Global Secondary Indexes (GSIs)</span> enable alternative access patterns. They are like separate tables that DynamoDB maintains for you, with their own partition and sort keys. <span class=\"hl-blue\">Local Secondary Indexes (LSIs)</span> provide alternative sort keys within the same partition."}}
+{{say "<span class=\"hl-blue\">Global Secondary Indexes (GSIs)</span> enable alternative access patterns — like separate tables DynamoDB maintains for you, with their own partition and sort keys. <span class=\"hl-blue\">Local Secondary Indexes (LSIs)</span> provide alternative sort keys within the same partition. <small>LSIs must be defined at table creation; GSIs can be added any time.</small>"}}
 
 {{table "GSI vs LSI" (rows
   (row "Feature"              "GSI"                                   "LSI")
@@ -142,11 +147,16 @@ response = table.query(
   (how "do you query by status without a hot GSI partition" "Add a shard suffix to the status: PENDING#0 through PENDING#9. Writes pick a random shard. Reads scatter-gather across all 10 shards and merge results client-side. Cache the merged result in Redis to avoid per-request scatter-gather.")
 }}
 
-{{avoid "Never create a GSI with a {{info \"low-cardinality\" \"Cardinality = how many distinct values exist. High cardinality: user_id (millions of values). Low cardinality: status (3 values: PENDING, SHIPPED, DELIVERED).\"}} partition key (like status with 3 values). All PENDING orders land on one partition, creating a {{info \"hot partition\" \"Hot partition is a shard that gets way more traffic than others. It becomes a bottleneck because one shard can't keep up.\"}} . Instead, add a shard suffix: PENDING#0, PENDING#1, ... PENDING#9 and {{info \"scatter-gather\" \"Scatter-gather: send the query to multiple shards in parallel, wait for all results, then merge them together.\"}} across 10 shards."}}
+{{avoid "Never create a GSI with a <span class=\"hl-blue\">low-cardinality</span> partition key (like <code>status</code> with 3 values: PENDING, SHIPPED, DELIVERED). All PENDING orders land on one partition, creating a <span class=\"hl-red\">hot partition</span> — one shard absorbs all traffic while others sit idle. Instead, add a shard suffix: PENDING#0 through PENDING#9 and <span class=\"hl-blue\">scatter-gather</span> across 10 shards."}}
 
 {{phase 4 "Capacity Modes and Scaling" "5 min"}}
 
-{{say "DynamoDB offers two capacity modes. On-demand scales automatically but costs more per request. Provisioned is cheaper but you manage capacity. Most teams start on-demand and switch to provisioned once traffic patterns are predictable."}}
+{{say `DynamoDB offers two capacity modes:
+<ul>
+  <li><strong>On-demand</strong> — scales automatically, costs more per request <small>($1.25/M writes, $0.25/M reads)</small></li>
+  <li><strong>Provisioned</strong> — cheaper at steady state, but you manage capacity; enable auto-scaling to avoid throttling</li>
+</ul>
+Most teams start on-demand and switch to provisioned once traffic patterns are predictable — saves <span class="hl">50–60%</span>.`}}
 
 {{table "On-Demand vs Provisioned" (rows
   (row "Feature"              "On-Demand"                           "Provisioned")
@@ -186,12 +196,12 @@ response = table.query(
 
 {{table "Advanced DynamoDB Features" (rows
   (row "Feature"          "What It Does"                                    "Use Case"                              "Cost Impact")
-  (row "{{info \"TTL\" \"TTL (Time To Live) = a timestamp. DynamoDB automatically deletes items after this timestamp passes. Great for temporary data like session tokens.\"}}" "Auto-delete items after expiry timestamp"         "Session tokens, temp data, event logs"  "Free (no WCU charge for TTL deletes)")
-  (row "{{info \"Streams\" \"Streams = ordered log of all changes to items. Every insert, update, delete is recorded. Can trigger Lambda functions on each change.\"}}" "Ordered log of item changes (insert/update/delete)" "Event sourcing, materialized views, sync" "$0.02 per 100K reads")
+  (row "TTL" "Auto-delete items after expiry timestamp"         "Session tokens, temp data, event logs"  "Free (no WCU charge for TTL deletes)")
+  (row "Streams" "Ordered log of item changes (insert/update/delete)" "Event sourcing, materialized views, sync" "$0.02 per 100K reads")
   (row "DAX"              "In-memory cache, microsecond reads"              "Read-heavy, same query repeated"       "From $0.269/hr (dax.t3.small)")
   (row "Global Tables"    "Multi-region active-active replication"          "Global apps, disaster recovery"        "2x write cost + cross-region transfer")
   (row "Transactions"     "ACID across up to 100 items"                     "Financial operations, inventory"       "2x read/write cost")
-  (row "{{info \"Point-in-Time Recovery\" \"PITR = AWS continuously backs up your table. You can restore to any second in the last 35 days without needing manual backups.\"}}" "Continuous backups, restore to any second" "Compliance, accidental deletes"        "$0.20/GB/month")
+  (row "Point-in-Time Recovery (PITR)" "Continuous backups, restore to any second" "Compliance, accidental deletes"        "$0.20/GB/month")
   (row "Export to S3"     "Full table export without read capacity"         "Analytics, data lake, backup"          "$0.10/GB exported")
 )}}
 
@@ -230,7 +240,7 @@ def lambda_handler(event, context):
 
 {{phase 6 "Hot Partition Problem" "5 min"}}
 
-{{say "The hot partition problem is the number one DynamoDB scaling issue in interviews. When one partition key gets disproportionate traffic, that partition throttles while others sit idle. Classic example: celebrity user ID getting millions of likes."}}
+{{say "The <span class=\"hl-red\">hot partition problem</span> is the number one DynamoDB scaling issue in interviews. When one partition key gets disproportionate traffic, that partition throttles while others sit idle — classic example: celebrity user ID receiving <span class=\"hl\">millions of likes/second</span>."}}
 
 {{table "Hot Partition Scenarios" (rows
   (row "Scenario"                      "Why It is Hot"                          "Solution")
@@ -320,7 +330,7 @@ def get_total_likes(post_id):
 
 {{phase 8 "Failure Scenarios & Interview Q&A" "5 min"}}
 
-{{say "DynamoDB is highly available by design, but throttling, conditional check failures, and stream lag are common operational issues. Let me also cover key interview questions around transactions, analytics, and evolving access patterns."}}
+{{say "DynamoDB is highly available by design, but <strong>throttling</strong>, <strong>conditional check failures</strong>, and <strong>stream lag</strong> are common operational issues. Key interview questions: transactions, analytics, and evolving access patterns."}}
 
 {{table "DynamoDB Failure Modes" (rows
   (row "Failure"                    "Impact"                                "Mitigation"                              "Recovery")
