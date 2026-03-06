@@ -252,7 +252,7 @@ func (h *Handler) renderContent(contentPath string) template.HTML {
 	}
 
 	// Parse content as a Go template to process macros
-	tmpl, err := template.New("content").Funcs(h.funcMap).Parse(string(data))
+	tmpl, err := template.New("content").Funcs(h.funcMap).Parse(preprocessContent(string(data)))
 	if err != nil {
 		log.Printf("Content template parse error in %s: %v", filePath, err)
 		return template.HTML(`<div class="content-error">Template error: ` + template.HTMLEscapeString(err.Error()) + `</div>`)
@@ -448,4 +448,71 @@ func aggregateUsedByLinks(fund *registry.Fundamental) []registry.UsageLink {
 	})
 
 	return combined
+}
+
+
+// preprocessContent converts backtick-delimited strings inside Go template
+// actions to properly double-quoted strings. Go's html/template lexer does
+// not support backtick raw string literals inside {{ }} actions, but content
+// files use them for multi-line code blocks. This pre-pass scans the source,
+// extracts each backtick region inside an action, escapes the content, and
+// emits it as a regular double-quoted string.
+func preprocessContent(src string) string {
+	var out strings.Builder
+	inAction := false
+	inBacktick := false
+	var buf strings.Builder
+	runes := []rune(src)
+	n := len(runes)
+	for i := 0; i < n; {
+		ch := runes[i]
+		if !inAction && !inBacktick {
+			if i+1 < n && ch == '{' && runes[i+1] == '{' {
+				inAction = true
+				out.WriteRune('{')
+				out.WriteRune('{')
+				i += 2
+				continue
+			}
+			out.WriteRune(ch)
+			i++
+			continue
+		}
+		if inAction && !inBacktick {
+			if i+1 < n && ch == '}' && runes[i+1] == '}' {
+				inAction = false
+				out.WriteRune('}')
+				out.WriteRune('}')
+				i += 2
+				continue
+			}
+			if ch == 0x60 { // backtick
+				inBacktick = true
+				buf.Reset()
+				i++
+				continue
+			}
+			out.WriteRune(ch)
+			i++
+			continue
+		}
+		// inside backtick string within action
+		if ch == 0x60 { // closing backtick
+			esc := buf.String()
+			esc = strings.ReplaceAll(esc, `\`, `\\`)
+			esc = strings.ReplaceAll(esc, `"`, `\"`)
+			esc = strings.ReplaceAll(esc, "\n", `\n`)
+			esc = strings.ReplaceAll(esc, "\r", ``)
+			esc = strings.ReplaceAll(esc, "\t", `\t`)
+			out.WriteRune('"')
+			out.WriteString(esc)
+			out.WriteRune('"')
+			inBacktick = false
+			i++
+			continue
+		}
+		buf.WriteRune(ch)
+		i++
+	}
+	return out.String()
 }
