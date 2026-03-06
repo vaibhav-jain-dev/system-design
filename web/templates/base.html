@@ -40,19 +40,50 @@
         <aside class="sidebar" x-data="{ openCats: {} }">
             <div class="sidebar-header">
                 <h2>System Design Prep</h2>
-                <button class="sidebar-view-toggle" id="sidebar-view-btn"
-                        onclick="window.toggleBookMode && window.toggleBookMode()"
-                        title="Toggle between Book View and Normal View">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
-                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
-                    </svg>
-                    <span id="sidebar-view-label">Book View</span>
-                </button>
+                <div class="sidebar-header-actions">
+                    <button class="sidebar-pin-btn" id="sidebar-pin-btn"
+                            onclick="window.toggleSidebarPin && window.toggleSidebarPin()"
+                            title="Pin sidebar open">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>
+                        </svg>
+                    </button>
+                    <button class="sidebar-view-toggle" id="sidebar-view-btn"
+                            onclick="window.toggleBookMode && window.toggleBookMode()"
+                            title="Toggle between Book View and Normal View">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                        </svg>
+                        <span id="sidebar-view-label">Book View</span>
+                    </button>
+                </div>
             </div>
 
             {{template "sidebar.html" .}}
         </aside>
+
+        <!-- Floating nav for book mode (replaces header when book-active) -->
+        <div id="book-float-nav" style="display:none">
+            <button class="book-float-btn" id="book-float-menu"
+                    onclick="document.querySelector('.app').classList.toggle('sidebar-open')"
+                    title="Navigation menu">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="3" y1="5"  x2="21" y2="5"/>
+                    <line x1="3" y1="9"  x2="21" y2="9"/>
+                    <line x1="3" y1="13" x2="21" y2="13"/>
+                    <line x1="3" y1="17" x2="21" y2="17"/>
+                </svg>
+            </button>
+            <button class="book-float-btn" id="book-float-exit"
+                    onclick="window.toggleBookMode && window.toggleBookMode()"
+                    title="Exit Book View">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                </svg>
+            </button>
+        </div>
 
         <!-- Overlay for mobile sidebar -->
         <div class="sidebar-overlay" onclick="document.querySelector('.app').classList.remove('sidebar-open')"></div>
@@ -337,6 +368,11 @@
         // ── HTMX swap handler ─────────────────────
         document.addEventListener('htmx:afterSwap', function(e) {
             if (e.detail.target.id === 'detail') {
+                // Close sidebar after navigation unless pinned
+                if (localStorage.getItem(SIDEBAR_PIN_KEY) !== '1') {
+                    document.querySelector('.app').classList.remove('sidebar-open');
+                }
+
                 // HTMX replaced #detail's innerHTML with new page content.
                 // The old book-reader / srcNodes are gone. Reset state completely
                 // then re-init book mode if the user's preference is book mode.
@@ -420,8 +456,9 @@
             pages:        [],   // pages[i] = array of original elements for page i
             srcNodes:     []    // saved childNodes for destroyBook restore
         };
-        var BOOK_MIN_WIDTH = 1024;
-        var BOOK_PREF_KEY  = 'sd-book-mode';
+        var BOOK_MIN_WIDTH  = 1024;
+        var BOOK_PREF_KEY   = 'sd-book-mode';
+        var SIDEBAR_PIN_KEY = 'sd-sidebar-pinned';
 
         // ── Layout constants ────────────────────────────────────────────────
         var BOOK_V_PAD  = 48;   // total top+bottom padding inside the spread area
@@ -439,15 +476,13 @@
             if (window.innerWidth < BOOK_MIN_WIDTH || d.querySelector('.welcome')) return;
 
             // ── Compute page geometry ──────────────────────────────────────
-            var headerEl  = document.querySelector('.app-header');
-            var sidebarEl = document.querySelector('.sidebar');
-            var headerH   = headerEl  ? headerEl.offsetHeight  : 54;
-            var sidebarW  = sidebarEl ? sidebarEl.offsetWidth  : 280;
+            // Sidebar is a fixed overlay — it does NOT consume layout width.
+            // Header is hidden in book mode → full vh available for reading.
             var vw = window.innerWidth;
             var vh = window.innerHeight;
 
-            var pageH = vh - headerH - BOOK_CTRL_H - BOOK_V_PAD;
-            var pageW = Math.floor((vw - sidebarW - BOOK_GAP - BOOK_H_PAD * 4) / 2);
+            var pageH = vh - BOOK_CTRL_H - BOOK_V_PAD;
+            var pageW = Math.floor((vw - BOOK_GAP - BOOK_H_PAD * 4) / 2);
             if (pageH < 150 || pageW < 150) return;
 
             // ── Collect elements ───────────────────────────────────────────
@@ -527,12 +562,10 @@
             var leftEl = document.createElement('div');
             leftEl.className  = 'book-page book-page-left';
             leftEl.id         = 'book-left';
-            leftEl.style.height = pageH + 'px';
 
             var rightEl = document.createElement('div');
             rightEl.className = 'book-page book-page-right';
             rightEl.id        = 'book-right';
-            rightEl.style.height = pageH + 'px';
 
             readerEl.appendChild(leftEl);
             readerEl.appendChild(rightEl);
@@ -552,6 +585,12 @@
 
             document.getElementById('book-prev').onclick = function() { bookGoSpread(book.spread - 1); };
             document.getElementById('book-next').onclick = function() { bookGoSpread(book.spread + 1); };
+
+            // Hide app header, show floating nav
+            var appHdr = document.querySelector('.app-header');
+            if (appHdr) appHdr.classList.add('book-hidden');
+            var floatNav = document.getElementById('book-float-nav');
+            if (floatNav) floatNav.style.display = 'flex';
 
             d.classList.add('book-active');
             book.active = true;
@@ -624,6 +663,12 @@
             book.spread       = 0;
             book.totalSpreads = 0;
 
+            // Restore header, hide floating nav
+            var appHdr = document.querySelector('.app-header');
+            if (appHdr) appHdr.classList.remove('book-hidden');
+            var floatNav = document.getElementById('book-float-nav');
+            if (floatNav) floatNav.style.display = 'none';
+
             syncViewBtn();
             localStorage.setItem(BOOK_PREF_KEY, '0');
         }
@@ -643,6 +688,21 @@
             if (book.active) destroyBook();
             else initBook();
         };
+
+        // ── Sidebar pin/lock ─────────────────────────────────────────────────
+        function syncPinBtn() {
+            var pinned = localStorage.getItem(SIDEBAR_PIN_KEY) === '1';
+            var btn = document.getElementById('sidebar-pin-btn');
+            if (btn) btn.classList.toggle('pinned', pinned);
+        }
+
+        window.toggleSidebarPin = function() {
+            var pinned = localStorage.getItem(SIDEBAR_PIN_KEY) === '1';
+            localStorage.setItem(SIDEBAR_PIN_KEY, pinned ? '0' : '1');
+            syncPinBtn();
+        };
+
+        syncPinBtn();
 
         // ── Keyboard navigation ──────────────────────────────────────────────
         document.addEventListener('keydown', function(e) {
