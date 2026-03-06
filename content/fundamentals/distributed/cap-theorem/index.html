@@ -1,6 +1,12 @@
 {{phase 1 "What Is CAP Theorem?" "3 min"}}
 
-{{say "CAP Theorem says a distributed system can guarantee at most two of three properties: Consistency, Availability, and Partition Tolerance. In practice, you always choose P, so the real decision is CP versus AP."}}
+{{say "CAP Theorem says a distributed system can guarantee at most two of three properties:
+<ul>
+  <li><strong>Consistency</strong> — every read returns the most recent write or an error</li>
+  <li><strong>Availability</strong> — every request gets a non-error response</li>
+  <li><strong>Partition Tolerance</strong> — the system continues operating despite network splits</li>
+</ul>
+In practice, <span class='hl-blue'>partition tolerance</span> is non-negotiable — so the real decision is <strong>CP vs AP</strong>."}}
 
 {{diagram "fund-cap-overview"}}
 
@@ -16,18 +22,23 @@
   (row "Partition Tolerance" "System continues operating despite network splits" "Full outage when nodes cannot communicate")
 )}}
 
-{{hint "what consistency means in CAP" "CAP consistency is linearizability — every operation appears to take effect atomically at a single point in time. This is stronger than SQL ACID consistency, which is about transaction isolation."}}
+{{hint "what consistency means in CAP" "<span class='hl-blue'>CAP consistency</span> is <strong>linearizability</strong> — every operation appears to take effect atomically at a single point in time. This is stronger than SQL ACID consistency, which is about transaction isolation."}}
 
 {{triggerQs "Phase 1 Interview Questions"
   "Can you ever have all three — CA?"
-  "No. CA systems exist only in single-node deployments. The moment you add a second node, you have a distributed system and partitions can occur. PostgreSQL on a single machine is CA, but it stops being distributed."
+  "No. CA systems exist only in single-node deployments. The moment you add a second node, you have a distributed system and partitions can occur. <strong>PostgreSQL on a single machine</strong> is CA, but it stops being distributed."
   "What is a network partition exactly?"
-  "A partition is when nodes in a cluster cannot communicate with each other — a dropped router, a severed cable, a VM that stops responding. The nodes are still running, but they cannot exchange messages."
+  "A partition is when nodes in a cluster cannot communicate — a dropped router, a severed cable, a VM that stops responding. The nodes are still running, but they cannot exchange messages."
 }}
 
 {{phase 2 "Consistency vs Availability" "5 min"}}
 
-{{say "When a partition occurs, you have two choices: reject writes to stay consistent, or accept writes on both sides to stay available. This is the CP vs AP decision, and it is driven by your business requirements."}}
+{{say "When a partition occurs, you have two choices:
+<ul>
+  <li><strong>Reject writes</strong> to stay consistent — <span class='hl-blue'>CP</span></li>
+  <li><strong>Accept writes on both sides</strong> to stay available — <span class='hl-blue'>AP</span></li>
+</ul>
+This decision is driven by your business requirements — specifically, the cost of inconsistency in your domain."}}
 
 {{think "The decision between CP and AP maps directly to the cost of inconsistency in your domain. For money, inconsistency means fraud or regulatory violation. For a social feed, inconsistency means a user sees a post a few seconds late."
   (whyNot "defaulting to eventual consistency everywhere" "Some operations are non-idempotent. Charging a credit card twice, transferring money to the wrong account, or decrementing inventory below zero are all catastrophic inconsistency failures.")
@@ -40,7 +51,7 @@
   (nofit "AP for anything with unique constraints" "Distributed unique enforcement requires consensus. AP systems cannot guarantee globally unique usernames or order IDs without coordination.")
 )}}
 
-{{hint "why banks use CP" "A bank account balance is a shared mutable state with financial and legal consequences. Every read must see the latest write. An AP bank would allow double-spends during partitions."}}
+{{hint "why banks use CP" "A bank account balance is <strong>shared mutable state</strong> with financial and legal consequences. Every read must see the latest write. An AP bank would allow <span class='hl-red'>double-spends during partitions</span>."}}
 
 {{table "Real System Classification" (rows
   (row "System" "Type" "Tradeoff Made")
@@ -54,21 +65,21 @@
 
 {{triggerQs "Phase 2 Interview Questions"
   "Is DynamoDB CP or AP?"
-  "It is configurable. By default, DynamoDB reads are eventually consistent — AP. But you can request strongly consistent reads, which are CP. Conditional writes with condition expressions give you optimistic concurrency for specific items."
+  "It is configurable. By default, DynamoDB reads are eventually consistent — AP. But you can request <strong>strongly consistent reads</strong>, which are CP. Conditional writes with condition expressions give you optimistic concurrency for specific items."
   "What does 'eventually consistent' actually guarantee?"
-  "If no new writes occur, all replicas will converge to the same value. It gives no bound on how long convergence takes — in practice, Cassandra converges in milliseconds to seconds under normal load."
+  "If no new writes occur, all replicas will converge to the same value. It gives no bound on how long convergence takes — in practice, Cassandra converges in <span class='hl'>milliseconds to seconds</span> under normal load."
 }}
 
 {{phase 3 "Partition Tolerance Reality" "4 min"}}
 
-{{say "Partitions are not rare events. Google's Chubby paper reported they experienced partitions affecting multiple datacenters every month. You must design for partitions as a first-class concern."}}
+{{say "Partitions are not rare events. Google's Chubby paper reported they experienced partitions affecting multiple datacenters <span class='hl'>every month</span>. Design for partitions as a first-class concern — not an edge case."}}
 
 {{think "The decision is not 'will we get partitions' — it is 'what is our behavior when we do.' Ignoring this means your system has undefined behavior during the most critical failure scenarios."
   (whatIf "a partition lasts 60 seconds" "CP: 60 seconds of rejected requests. Users see errors. AP: 60 seconds of potential divergence. After healing, a reconciliation process runs. Which is worse depends on domain.")
   (how "quorum-based systems handle partitions" "A cluster of 5 nodes requires 3 (quorum) to agree on a write. If 2 nodes are partitioned away, the majority partition (3 nodes) continues serving. The minority partition (2 nodes) rejects requests — it cannot confirm it has the latest data.")
 }}
 
-{{hint "quorum math" "For N replicas, quorum is floor(N/2) + 1. A 3-node cluster needs 2. A 5-node cluster needs 3. Odd numbers are preferred — a 4-node cluster still needs 3, same as a 3-node cluster, but costs more."}}
+{{hint "quorum math" "For <strong>N replicas</strong>, quorum is <span class='hl'>floor(N/2) + 1</span>. A 3-node cluster needs 2. A 5-node cluster needs 3. <strong>Odd numbers are preferred</strong> — a 4-node cluster still needs 3, same as a 3-node cluster, but costs more."}}
 
 {{table "Partition Duration vs Impact" (rows
   (row "Duration" "CP Impact" "AP Impact")
@@ -80,12 +91,17 @@
 
 {{triggerQs "Phase 3 Interview Questions"
   "How does a system detect a partition vs a slow node?"
-  "It cannot perfectly distinguish them. Systems use heartbeat timeouts — if node B does not respond within 500ms, node A assumes B is unreachable. This is a fundamental limit: timeouts are heuristic, not certain. A slow GC pause looks the same as a network partition."
+  "It cannot perfectly distinguish them. Systems use <strong>heartbeat timeouts</strong> — if node B does not respond within <span class='hl'>500ms</span>, node A assumes B is unreachable. This is a fundamental limit: timeouts are heuristic, not certain. A slow GC pause looks the same as a network partition."
 }}
 
 {{phase 4 "CP Systems" "4 min"}}
 
-{{say "CP systems prioritize consistency. When a partition happens, they reject requests on the minority partition rather than risk serving stale data. ZooKeeper and etcd are the canonical examples — they are used for distributed coordination precisely because they are correct."}}
+{{say "CP systems prioritize consistency. When a partition happens, they reject requests on the minority partition rather than risk serving stale data.
+<ul>
+  <li><strong>ZooKeeper</strong> and <strong>etcd</strong> are the canonical examples — used for distributed coordination precisely because they are correct</li>
+  <li>'Unavailability' in CP means a clear error — a timeout or 503; the client <em>knows</em> something is wrong</li>
+  <li>AP unavailability is <span class='hl-red'>invisible</span> — the client gets a response, but it is wrong</li>
+</ul>"}}
 
 {{think "CP systems are correct but not always available. The key insight is that 'unavailability' in CP means a clear error — a timeout or a 503. The client knows something is wrong. AP unavailability is invisible — the client gets a response, but it is wrong."
   (whyNot "CP for everything" "CP systems are unavailable during partitions. If your system can tolerate brief inconsistency and high availability matters more, CP adds unnecessary latency and complexity.")
@@ -111,20 +127,25 @@ def watch_leader(data, stat):
         become_leader()
 `}}
 
-{{hint "when to use ZooKeeper vs etcd" "Both are CP. ZooKeeper is mature, battle-tested, powers Kafka and HBase. etcd is simpler, REST API, powers Kubernetes. For new systems, prefer etcd — simpler ops, better tooling."}}
+{{hint "when to use ZooKeeper vs etcd" "Both are CP. <strong>ZooKeeper</strong> is mature, battle-tested, powers Kafka and HBase. <strong>etcd</strong> is simpler, REST API, powers Kubernetes. For new systems, prefer etcd — simpler ops, better tooling."}}
 
 {{triggerQs "Phase 4 Interview Questions"
   "Why does Spanner claim to be both consistent and highly available?"
-  "Spanner uses TrueTime — GPS and atomic clocks in every datacenter to bound clock skew to plus or minus 4ms. This lets it commit transactions with external consistency without blocking. It is 99.999% available with strong consistency. The CAP theorem still applies, but Spanner minimizes partition duration through redundant fiber paths and fast failure detection."
+  "Spanner uses <strong>TrueTime</strong> — GPS and atomic clocks in every datacenter to bound clock skew to <span class='hl'>±4ms</span>. This lets it commit transactions with external consistency without blocking. It is <span class='hl'>99.999%</span> available with strong consistency. CAP still applies, but Spanner minimizes partition duration through redundant fiber paths and fast failure detection."
 }}
 
 {{phase 5 "AP Systems" "4 min"}}
 
-{{say "AP systems prioritize availability. Every request gets a response, even during a partition. The tradeoff: that response might contain stale data. Cassandra and DynamoDB are the canonical AP systems — they scale to massive throughput by giving up global consistency."}}
+{{say "AP systems prioritize availability. Every request gets a response, even during a partition — but that response might contain stale data.
+<ul>
+  <li><strong>Cassandra</strong> and <strong>DynamoDB</strong> are the canonical AP systems</li>
+  <li>They scale to massive throughput by giving up global consistency</li>
+  <li>After a partition heals, a reconciliation process resolves divergent writes</li>
+</ul>"}}
 
 {{think "AP systems use conflict resolution strategies to handle divergent writes after a partition heals. Last-write-wins is the simplest — but dangerous. CRDTs are elegant but limited to certain data types. Application-level merge is powerful but complex."
-  (whyNot "last-write-wins everywhere" "LWW uses wall clock timestamps. Clocks in distributed systems are not synchronized — NTP has plus or minus 100ms drift. LWW can silently discard newer writes. Cassandra's LWW has dropped writes in production at multiple companies.")
-  (whatIf "two users update the same Cassandra row during a partition" "Both writes succeed locally with different timestamps. After healing, Cassandra picks the higher timestamp. The other write is silently discarded — no error, no conflict notification.")
+  (whyNot "last-write-wins everywhere" "LWW uses wall clock timestamps. Clocks in distributed systems are not synchronized — NTP has <span class='hl'>±100ms drift</span>. LWW can silently discard newer writes. Cassandra's LWW has dropped writes in production at multiple companies.")
+  (whatIf "two users update the same Cassandra row during a partition" "Both writes succeed locally with different timestamps. After healing, Cassandra picks the higher timestamp. The other write is <span class='hl-red'>silently discarded</span> — no error, no conflict notification.")
 }}
 
 {{code "python" `# Cassandra: AP with tunable consistency
@@ -150,22 +171,27 @@ session.execute(
 )
 `}}
 
-{{hint "tunable consistency in Cassandra" "Cassandra lets you choose consistency per query: ONE, QUORUM, ALL. ONE = AP (fastest, stalest). ALL = CP (slowest, consistent). QUORUM = middle ground. Most production systems use LOCAL_QUORUM — quorum within one datacenter, async replication to others."}}
+{{hint "tunable consistency in Cassandra" "Cassandra lets you choose consistency per query: <strong>ONE</strong>, <strong>QUORUM</strong>, <strong>ALL</strong>. ONE = AP (fastest, stalest). ALL = CP (slowest, consistent). QUORUM = middle ground. Most production systems use <strong>LOCAL_QUORUM</strong> — quorum within one datacenter, async replication to others."}}
 
 {{triggerQs "Phase 5 Interview Questions"
   "How does DynamoDB handle conflicts?"
-  "DynamoDB uses last-write-wins based on a server-side timestamp. For optimistic concurrency, use conditional expressions — ConditionExpression='attribute_not_exists(id)' for inserts, or version attribute checking. DynamoDB Streams lets you build custom conflict resolution on top."
+  "DynamoDB uses <strong>last-write-wins</strong> based on a server-side timestamp. For optimistic concurrency, use conditional expressions — <code>ConditionExpression='attribute_not_exists(id)'</code> for inserts, or version attribute checking. DynamoDB Streams lets you build custom conflict resolution on top."
   "What is a CRDT and when do you use it?"
-  "A Conflict-free Replicated Data Type is a data structure where concurrent updates can always be merged without conflicts. Counters, sets with add-only semantics, and Last-Write-Wins registers are CRDTs. Use them when you need AP with automatic convergence — real-time collaborative editing, distributed counters, shopping cart merges."
+  "A <strong>Conflict-free Replicated Data Type</strong> is a data structure where concurrent updates can always be merged without conflicts. Counters, sets with add-only semantics, and Last-Write-Wins registers are CRDTs. Use them when you need AP with automatic convergence — real-time collaborative editing, distributed counters, shopping cart merges."
 }}
 
 {{phase 6 "PACELC Model" "4 min"}}
 
-{{say "PACELC extends CAP to cover normal operation, not just partition scenarios. It says: during a Partition, choose between Availability and Consistency. Else — during normal operation — choose between Latency and Consistency."}}
+{{say "PACELC extends CAP to cover normal operation, not just partition scenarios:
+<ul>
+  <li>During a <strong>P</strong>artition → choose between <strong>A</strong>vailability and <strong>C</strong>onsistency</li>
+  <li><strong>E</strong>lse, during normal operation → choose between <strong>L</strong>atency and <strong>C</strong>onsistency</li>
+</ul>
+CAP ignores the everyday latency-consistency tradeoff — PACELC captures it."}}
 
 {{think "PACELC captures a real tradeoff that CAP ignores. Even without partitions, synchronous replication to all replicas adds latency — you wait for the slowest node. Async replication is faster but means replicas may lag."
-  (whyNot "ignoring the ELC part of PACELC" "Most of the time, your system is NOT experiencing a partition. The latency-consistency tradeoff during normal operation determines your everyday performance. A system that adds 50ms of synchronous replication latency to every write is a real cost.")
-  (how "async replication reduces latency" "Write to primary, return success immediately, replicate to secondaries in background. Reads from secondaries may be 10-100ms stale. Write to primary and replicate synchronously adds a full network RTT latency on every write.")
+  (whyNot "ignoring the ELC part of PACELC" "Most of the time, your system is NOT experiencing a partition. The latency-consistency tradeoff during normal operation determines your everyday performance. A system that adds <span class='hl'>50ms</span> of synchronous replication latency to every write is a real cost.")
+  (how "async replication reduces latency" "Write to primary, return success immediately, replicate to secondaries in background. Reads from secondaries may be <span class='hl'>10-100ms</span> stale. Write to primary and replicate synchronously adds a full network RTT latency on every write.")
 }}
 
 {{table "PACELC Classification" (rows
@@ -178,16 +204,21 @@ session.execute(
   (row "CockroachDB" "PC" "EC" "Distributed SQL, serializable isolation")
 )}}
 
-{{hint "ELC tradeoff in practice" "Spanner achieves EC (consistent during normal operation) through TrueTime, adding ~7ms to every transaction to wait out clock uncertainty. DynamoDB achieves EL (low latency) through async replication — a read from a non-primary replica may be slightly stale."}}
+{{hint "ELC tradeoff in practice" "Spanner achieves EC (consistent during normal operation) through TrueTime, adding <span class='hl'>~7ms</span> to every transaction to wait out clock uncertainty. DynamoDB achieves EL (low latency) through async replication — a read from a non-primary replica may be slightly stale."}}
 
 {{triggerQs "Phase 6 Interview Questions"
   "Why do we need PACELC if we have CAP?"
-  "CAP only describes behavior during partitions, which are rare. PACELC describes the everyday tradeoff between latency and consistency, which affects every request. A system optimized purely by CAP analysis might still have unacceptable latency because of synchronous replication costs."
+  "CAP only describes behavior during partitions, which are rare. PACELC describes the everyday tradeoff between latency and consistency, which affects <strong>every request</strong>. A system optimized purely by CAP analysis might still have unacceptable latency because of synchronous replication costs."
 }}
 
 {{phase 7 "Consistency Levels" "5 min"}}
 
-{{say "Distributed systems offer a spectrum of consistency guarantees from strong to weak. Strong consistency is safe but slow. Eventual consistency is fast but requires application-level conflict handling. Most production systems pick a level in between."}}
+{{say "Distributed systems offer a spectrum of consistency guarantees from strong to weak:
+<ul>
+  <li><strong>Strong consistency</strong> is safe but slow — requires quorum on every operation</li>
+  <li><strong>Eventual consistency</strong> is fast but requires application-level conflict handling</li>
+  <li>Most production systems pick a level in between based on domain requirements</li>
+</ul>"}}
 
 {{table "Consistency Spectrum" (rows
   (row "Level" "Guarantee" "Cost" "Example")
@@ -201,10 +232,10 @@ session.execute(
 
 {{think "Choosing a consistency level is domain-specific. User registration needs read-your-writes — after signing up, the user must be able to log in immediately. A leaderboard needs eventual — approximate ranking is fine. Inventory needs linearizable — no overselling."
   (how "read-your-writes works" "After a write, the client tracks a version number or timestamp. Reads are routed to a replica that has advanced past that version. DynamoDB does this with strongly consistent reads targeting the primary node.")
-  (whatIf "you use eventual consistency for a session token" "User logs in, session token is written to replica A. Request 2 goes to replica B — B has not received the token yet. User gets a 401 Unauthorized despite having just logged in. This is a real bug that has hit production systems.")
+  (whatIf "you use eventual consistency for a session token" "User logs in, session token is written to replica A. Request 2 goes to replica B — B has not received the token yet. User gets a <span class='hl-red'>401 Unauthorized</span> despite having just logged in. This is a real bug that has hit production systems.")
 }}
 
-{{hint "monotonic reads in practice" "Implement monotonic reads by having each client track the highest version it has seen and only read from replicas at or above that version. Or use sticky sessions — always route a client to the same replica. Sticky sessions are simpler but create hot spots."}}
+{{hint "monotonic reads in practice" "Implement monotonic reads by having each client track the highest version it has seen and only read from replicas at or above that version. Or use <strong>sticky sessions</strong> — always route a client to the same replica. Sticky sessions are simpler but create hot spots."}}
 
 {{code "python" `# Read-your-writes with DynamoDB strongly consistent reads
 import boto3
@@ -232,14 +263,18 @@ def get_user_after_create(user_id):
 
 {{triggerQs "Phase 7 Interview Questions"
   "What consistency level should a social media feed use?"
-  "Eventual consistency is fine for feeds. A user seeing a post 2 seconds late is not a business problem. The throughput gain from async replication at Instagram's scale (100M+ posts/day) far outweighs the cost of slightly stale feeds."
+  "Eventual consistency is fine for feeds. A user seeing a post <span class='hl'>2 seconds late</span> is not a business problem. The throughput gain from async replication at Instagram's scale (<span class='hl'>100M+ posts/day</span>) far outweighs the cost of slightly stale feeds."
   "What consistency does a payment system need?"
-  "Linearizable for balance reads and writes. You need to know the exact current balance before authorizing a transaction. Anything weaker risks overdraft. Stripe and most payment processors use single-leader replication with synchronous writes — CP, slightly higher latency, always correct."
+  "<strong>Linearizable</strong> for balance reads and writes. You need to know the exact current balance before authorizing a transaction. Anything weaker risks overdraft. Stripe and most payment processors use single-leader replication with synchronous writes — CP, slightly higher latency, always correct."
 }}
 
 {{phase 8 "Interview Summary" "3 min"}}
 
-{{say "In any system design interview, when you choose a database or replication strategy, explicitly call out your CAP tradeoff. Say: 'I am choosing Cassandra here because this is AP — we can tolerate eventual consistency on the feed, and we need the write throughput.' That signals senior-level thinking."}}
+{{say "In any system design interview, when you choose a database or replication strategy, explicitly call out your CAP tradeoff:
+<ul>
+  <li><em>'I am choosing Cassandra here because this is AP — we can tolerate eventual consistency on the feed, and we need the write throughput.'</em></li>
+  <li>That signals senior-level thinking — you've tied the technical choice to the business requirement</li>
+</ul>"}}
 
 {{avoid "saying MongoDB is always CP — it is configurable. MongoDB with write concern 'majority' and read concern 'linearizable' is CP. With default settings it is AP. Know the knobs."}}
 
@@ -263,7 +298,7 @@ def get_user_after_create(user_id):
   "Name one system that changed its CAP classification over time."
   "MongoDB. Early versions had a bug where network partitions could cause data loss even with write concern 'majority.' It was classified as AP in practice despite claiming CP. Post-3.6, with proper configuration, it is genuinely CP. This is a real answer that shows you know the history."
   "What does CockroachDB do differently from traditional CP databases?"
-  "CockroachDB distributes data across ranges using Raft consensus per range. It provides serializable isolation with horizontal scalability — traditional CP systems like PostgreSQL scale vertically. CockroachDB sacrifices some latency for geographic distribution but maintains strong consistency across shards."
+  "CockroachDB distributes data across ranges using <strong>Raft consensus per range</strong>. It provides serializable isolation with horizontal scalability — traditional CP systems like PostgreSQL scale vertically. CockroachDB sacrifices some latency for geographic distribution but maintains strong consistency across shards."
 }}
 
 {{checklist "CAP requires choosing between CP and AP — P is not optional" "CP systems reject requests during partitions rather than serve stale data" "AP systems always respond but may return stale or conflicting data" "PACELC adds the latency-consistency tradeoff during normal operation" "Consistency levels range from linearizable (strongest) to eventual (weakest)" "DynamoDB, Cassandra, MongoDB are all tunable — know the default and the knobs" "Business domain drives the choice: money needs CP, feeds can use AP"}}
