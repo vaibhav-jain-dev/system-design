@@ -2,9 +2,19 @@
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
-{{say "the scope. We're designing a real-time messaging system like WhatsApp — 1-to-1 chat, group chat up to 256 members, end-to-end encryption, offline message queuing, and multi-device sync. Target scale is 2 billion total users with 500 million daily active."}}
+{{say `Let me clarify the scope:
+<ul>
+  <li>Designing a <strong>real-time messaging system</strong> like WhatsApp — <strong>1-to-1 chat</strong>, <strong>group chat</strong> up to 256 members, end-to-end encryption, offline message queuing, and multi-device sync</li>
+  <li>Target scale: <span class="hl">2 billion</span> total users with <span class="hl">500 million</span> daily active</li>
+  <li>Mobile-first: battery and bandwidth constraints matter more than in a desktop app</li>
+</ul>`}}
 
-{{hint "why WhatsApp over Slack?" "WhatsApp is a harder design because of E2E encryption (server never sees plaintext), massive scale (2B users vs Slack's 30M), and mobile-first constraints (battery, bandwidth). Slack is easier because it stores everything server-side in plaintext and operates at enterprise scale."}}
+{{hint "why WhatsApp over Slack?" "WhatsApp is a harder design for three reasons:
+<ul>
+  <li><strong>E2E encryption</strong> — server never sees plaintext; Slack stores everything server-side for search</li>
+  <li><strong>Scale</strong> — <span class='hl'>2B users</span> vs Slack's 30M, <span class='hl'>100B msgs/day</span> vs 1B</li>
+  <li><strong>Push model</strong> — WhatsApp pushes every message to all devices; Slack loads messages when you open a channel</li>
+</ul>"}}
 
 {{table "Functional Requirements" (rows
   (row "Requirement" "Description" "Priority" "Drives")
@@ -18,7 +28,12 @@
   (row "Presence" "Online/offline/last-seen indicators" "P2" "Redis, heartbeat, privacy settings")
 )}}
 
-{{hint "why limit groups to 256?" "256 is WhatsApp's real limit. It bounds the fan-out cost: 256 writes per message is manageable. Slack channels can have 10K+ members, but they use a pull model (client fetches on open) instead of push. Push at 10K members per message would be 10K WebSocket writes — that changes the architecture entirely."}}
+{{hint "why limit groups to 256?" "<span class='hl'>256</span> is WhatsApp's real limit — it bounds fan-out cost:
+<ul>
+  <li><strong>256 writes per message</strong> is manageable with fan-out-on-write</li>
+  <li>Slack channels can have 10K+ members but use a <strong>pull model</strong> — client fetches on open</li>
+  <li>Push at <span class='hl-red'>10K members per message</span> = 10K WebSocket writes — that changes the architecture entirely</li>
+</ul>"}}
 
 {{diagram "cs-requirements"}}
 
@@ -37,7 +52,12 @@
 
 {{phase 2 "Capacity Estimation" "3 min"}}
 
-{{say "Let me work through the numbers. 500M DAU, each user sends about 40 messages per day on average. That gives us the throughput we need to design for."}}
+{{say `500M DAU, each user sends about <strong>40 messages per day</strong> on average — here are the numbers that shape the architecture:
+<ul>
+  <li><span class="hl">230K msgs/sec</span> average, <span class="hl">700K msgs/sec</span> at peak (3× evening spike)</li>
+  <li><span class="hl">200M concurrent WebSocket connections</span> at peak — the dominant scaling constraint</li>
+  <li><span class="hl">2 TB/day</span> text storage, <span class="hl">~1 PB/day</span> if 10% of messages carry media at 500KB avg</li>
+</ul>`}}
 
 {{table "Scale Estimates" (rows
   (row "Metric" "Calculation" "Result")
@@ -50,7 +70,7 @@
   (row "Bandwidth" "700K msgs/sec × 100 bytes" "70 MB/sec (text only)")
 )}}
 
-{{hint "why 40 msgs/user?" "WhatsApp's reported number is ~65 messages/day for active users, but that includes inactive DAU who open the app but don't send. 40 is a conservative average. The peak matters more than the average — New Year's Eve sees 10-20x spikes."}}
+{{hint "why 40 msgs/user?" "WhatsApp's reported number is ~65 messages/day for active users, but that includes inactive DAU who open the app but don't send. <strong>40 is a conservative average.</strong> The peak matters more — New Year's Eve sees <span class='hl'>10-20×</span> spikes."}}
 
 {{think "200M concurrent WebSocket connections is the real scaling challenge. Each connection consumes ~40KB of memory on the server."
   (how "server count" "200M connections × 40KB = 8 TB total memory. At 64GB per server, that's 125,000 servers. With 100K connections per server and overhead, plan for ~5,000 WebSocket servers across all regions.")
@@ -59,7 +79,12 @@
 
 {{phase 3 "API Design" "5 min"}}
 
-{{say "The API has two layers: REST for CRUD operations and WebSocket for real-time events. Messages are sent over WebSocket for lowest latency, but the REST API provides history, group management, and media upload."}}
+{{say `Two-layer API:
+<ul>
+  <li><strong>WebSocket</strong> for real-time events — messages, receipts, typing, presence</li>
+  <li><strong>REST</strong> for CRUD — history, group management, media upload</li>
+</ul>
+Messages are sent over WebSocket for lowest latency; REST provides durability and idempotent retries.`}}
 
 {{diagram "cs-api-design"}}
 
@@ -85,7 +110,7 @@ type Receipt struct {
     Status    string // "delivered", "read"
 }`}}
 
-{{hint "why client-generated message ID?" "The client generates a UUID before sending. If the WebSocket drops during send, the client retries with the same ID. The server uses this ID for deduplication — if it sees the same ID twice, it ACKs without storing again. Without this, a network hiccup could cause duplicate messages."}}
+{{hint "why client-generated message ID?" "The client generates a UUID before sending. If the WebSocket drops during send, the client retries with the same ID. The server uses this ID for <strong>deduplication</strong> — if it sees the same ID twice, it ACKs without storing again. Without this, a network hiccup causes duplicate messages."}}
 
 {{think "REST vs WebSocket for sending messages — WebSocket wins on latency but REST is simpler for reliability."
   (whyNot "REST-only for sending" "REST requires a new HTTP connection per message. At 700K msgs/sec, that's 700K TCP handshakes/sec. WebSocket reuses one persistent connection per user — orders of magnitude less overhead.")
@@ -101,11 +126,22 @@ type Receipt struct {
 
 {{phase 4 "Core Architecture" "8 min"}}
 
-{{say "The architecture has four layers: connection layer (WebSocket servers behind NLB), routing layer (Chat Service + Kafka), storage layer (DynamoDB + S3), and supporting services (presence, push, groups)."}}
+{{say `Four layers:
+<ul>
+  <li><strong>Connection layer</strong> — WebSocket servers behind NLB; each server holds up to <span class="hl">100K persistent connections</span></li>
+  <li><strong>Routing layer</strong> — Chat Service + Kafka; stateless, handles message fan-out logic</li>
+  <li><strong>Storage layer</strong> — DynamoDB for messages, S3 for media</li>
+  <li><strong>Supporting services</strong> — Presence (Redis), Push (APNs/FCM), Groups</li>
+</ul>`}}
 
 {{diagram "cs-architecture"}}
 
-{{hint "why NLB not ALB?" "WebSocket connections are long-lived TCP connections. ALB operates at Layer 7 and has a 4000-second idle timeout — after which it silently drops the connection. NLB operates at Layer 4, passes TCP through directly, and supports millions of concurrent connections with no idle timeout issues. For persistent connections, NLB is the only option."}}
+{{hint "why NLB not ALB?" "<span class='hl-blue'>NLB</span> operates at Layer 4 and passes TCP through directly — no idle timeout issues for long-lived connections:
+<ul>
+  <li><span class='hl-red'>ALB has a 4000-second idle timeout</span> — after which it silently drops the WebSocket connection</li>
+  <li>NLB supports millions of concurrent connections with no timeout</li>
+  <li>For persistent connections, NLB is the only viable option</li>
+</ul>"}}
 
 {{think "The critical insight is separating connection management from message routing. WebSocket servers handle connections; Chat Service handles routing logic."
   (whyNot "monolithic server that handles both" "If the routing logic crashes (bug in group fan-out), it takes down all WebSocket connections on that server. Separating them means a Chat Service crash doesn't drop any connections — the WebSocket server just routes to a healthy Chat Service instance.")
@@ -121,11 +157,16 @@ type Receipt struct {
 
 {{phase 5 "Message Delivery Flow" "8 min"}}
 
-{{say "the full lifecycle of a message — from the sender tapping send to the receiver seeing it appear, including the offline path."}}
+{{say `Full lifecycle of a message — from sender tapping Send to receiver seeing it appear:
+<ul>
+  <li><strong>Online path:</strong> sender → WebSocket server → Chat Service → Kafka → consumer → recipient's WebSocket server → recipient</li>
+  <li><strong>Offline path:</strong> same up to consumer → offline queue (DynamoDB) + APNs/FCM push notification</li>
+  <li><strong>Sync on reconnect:</strong> client sends last known message_id cursor; server streams everything after it</li>
+</ul>`}}
 
 {{diagram "cs-message-flow"}}
 
-{{hint "why Kafka between Chat Server and delivery?" "Direct routing (Chat Server → WebSocket Server) would be faster but unreliable. If the target WebSocket server is restarting, the message is lost. Kafka provides durability — the message is persisted before any delivery attempt. Consumers can retry delivery independently."}}
+{{hint "why Kafka between Chat Server and delivery?" "<strong>Direct routing</strong> (Chat Server → WebSocket Server) is faster but unreliable — if the target WebSocket server is restarting, the message is lost. Kafka provides durability: the message is <strong>persisted before any delivery attempt</strong>. Consumers can retry delivery independently."}}
 
 {{code "go" `// Message delivery pipeline (simplified)
 func (s *ChatService) HandleMessage(ctx context.Context, msg *Message) error {
@@ -177,11 +218,22 @@ func (s *ChatService) DeliverMessage(ctx context.Context, msg *Message) {
 
 {{phase 6 "Data Model & Storage" "8 min"}}
 
-{{say "DynamoDB is the primary store. The partition key is conversation_id and the sort key is message_id (Snowflake). This gives us ordered messages per conversation with single-digit-ms reads."}}
+{{say `<strong>DynamoDB</strong> is the primary store:
+<ul>
+  <li>Partition key: <strong>conversation_id</strong> — all messages in a conversation land on the same shard</li>
+  <li>Sort key: <strong>message_id</strong> (Snowflake) — gives ordered messages per conversation with single-digit-ms reads</li>
+  <li>TTL on messages — ephemeral messages auto-delete without a background job</li>
+</ul>`}}
 
 {{diagram "cs-data-model"}}
 
-{{hint "why DynamoDB over Cassandra?" "Both handle write-heavy workloads at scale. DynamoDB wins for this use case because: (1) managed — no operational overhead for 20B writes/day, (2) on-demand capacity auto-scales without pre-provisioning, (3) DynamoDB Streams feeds into Lambda for async processing. Cassandra requires a dedicated ops team at this scale."}}
+{{hint "why DynamoDB over Cassandra?" "Both handle write-heavy workloads at scale. DynamoDB wins here because:
+<ul>
+  <li><strong>Managed</strong> — no operational overhead for <span class='hl'>20B writes/day</span></li>
+  <li><strong>On-demand capacity</strong> — auto-scales without pre-provisioning</li>
+  <li><strong>DynamoDB Streams</strong> — feeds into Lambda for async processing</li>
+  <li><span class='hl-red'>Cassandra requires a dedicated ops team</span> at this scale</li>
+</ul>"}}
 
 {{table "DynamoDB Access Patterns" (rows
   (row "Access Pattern" "Partition Key" "Sort Key / Index" "Query")
@@ -225,11 +277,20 @@ response = dynamodb.query(
 
 {{phase 7 "Group Chat & Fan-out" "5 min"}}
 
-{{say "Group chat uses fan-out-on-write. When a message is sent to a group, we look up all members and deliver to each one individually. The 256-member cap makes this bounded and fast."}}
+{{say `Group chat uses <strong>fan-out-on-write</strong>:
+<ul>
+  <li>When a message is sent to a group, look up all members and deliver to each individually</li>
+  <li>The <span class="hl">256-member cap</span> makes this bounded — <strong>256 WebSocket pushes</strong> per message is manageable</li>
+  <li>Partial failures are independent — if delivery fails for 3 members, the other 253 are unaffected</li>
+</ul>`}}
 
 {{diagram "cs-group-chat"}}
 
-{{hint "why fan-out-on-write and not fan-out-on-read?" "Fan-out-on-read means each member queries for new messages when they open the group. With 256 members opening the group at different times, that's 256 DynamoDB queries. Fan-out-on-write does 256 WebSocket pushes once — much cheaper. The key constraint is the 256-member cap. If groups could have 100K members (like Slack channels), fan-out-on-write would be too expensive and we'd switch to fan-out-on-read."}}
+{{hint "why fan-out-on-write and not fan-out-on-read?" "<strong>Fan-out-on-read</strong> means each member queries for new messages when they open the group — 256 DynamoDB queries per viewer. <strong>Fan-out-on-write</strong> does 256 WebSocket pushes once — much cheaper overall.
+<ul>
+  <li>The <span class='hl'>256-member cap</span> is the key constraint that makes fan-out-on-write viable</li>
+  <li>If groups could have <span class='hl-red'>100K members</span> (like Slack channels), fan-out-on-write would be too expensive → switch to fan-out-on-read</li>
+</ul>"}}
 
 {{think "Group message delivery must handle partial failures gracefully."
   (whatIf "delivery fails for 3 out of 256 members" "Those 3 members get queued in the offline queue. The other 253 already received the message. We do NOT retry the entire fan-out — each member's delivery is independent. The offline queue picks up the 3 failures, and those members get the message when they reconnect.")
@@ -243,11 +304,17 @@ response = dynamodb.query(
 
 {{phase 8 "End-to-End Encryption" "5 min"}}
 
-{{say "We use the Signal Protocol for E2E encryption. The server acts as a dumb pipe — it routes encrypted bytes without ever seeing the plaintext. This is the key differentiator from Slack or Discord."}}
+{{say `Using the <strong>Signal Protocol</strong> for E2E encryption:
+<ul>
+  <li>The server acts as a <strong>dumb pipe</strong> — it routes encrypted bytes without ever seeing plaintext</li>
+  <li><span class="hl-blue">Forward secrecy</span>: a compromised key cannot decrypt past messages</li>
+  <li><span class="hl-blue">Future secrecy</span>: a compromised key is healed on the next ratchet step</li>
+  <li>This is the key differentiator from Slack or Discord, both of which store plaintext server-side</li>
+</ul>`}}
 
 {{diagram "cs-e2e-encryption"}}
 
-{{hint "why Signal Protocol?" "Signal Protocol is battle-tested by WhatsApp (2B users), Signal, and Facebook Messenger. It provides forward secrecy (compromised key doesn't decrypt past messages) and future secrecy (compromised key is healed on next ratchet step). Rolling your own crypto is the fastest way to a security breach."}}
+{{hint "why Signal Protocol?" "<span class='hl-blue'>Signal Protocol</span> is battle-tested by WhatsApp (<span class='hl'>2B users</span>), Signal, and Facebook Messenger. It provides forward secrecy and future secrecy out of the box. <span class='hl-red'>Rolling your own crypto is the fastest way to a security breach.</span>"}}
 
 {{think "E2E encryption introduces unique engineering challenges that affect every layer of the system."
   (whyNot "TLS-only encryption" "TLS encrypts in transit but the server sees plaintext. A compromised server, a rogue employee, or a government subpoena can access all messages. E2E means even WhatsApp's own engineers cannot read messages.")
@@ -257,11 +324,17 @@ response = dynamodb.query(
 
 {{phase 9 "Media Sharing" "5 min"}}
 
-{{say "Media messages have a separate upload pipeline. The client encrypts the file locally with a random AES-256 key, uploads to S3 via the media service, then sends the S3 URL and encryption key in the message. The server never sees unencrypted media."}}
+{{say `Media messages follow a separate upload pipeline:
+<ul>
+  <li>Client encrypts the file locally with a random <strong>AES-256 key</strong></li>
+  <li>Uploads the ciphertext to S3 via the media service</li>
+  <li>Sends the S3 URL and encryption key <em>inside</em> the E2E-encrypted message</li>
+  <li>The server stores a blob it cannot decrypt — E2E guarantee extends to media</li>
+</ul>`}}
 
 {{diagram "cs-media-sharing"}}
 
-{{hint "why client-side encryption for media?" "If the server encrypts, it sees the plaintext media — breaking E2E. The client generates a random AES-256 key, encrypts the file, uploads the ciphertext. The AES key is sent inside the E2E-encrypted message. The server stores a blob it cannot decrypt."}}
+{{hint "why client-side encryption for media?" "If the server encrypts, it sees the plaintext media — breaking E2E. The client generates a random <strong>AES-256 key</strong>, encrypts the file, uploads the ciphertext. The AES key is sent inside the E2E-encrypted message. <span class='hl-red'>Server stores a blob it cannot decrypt.</span>"}}
 
 {{compare "Media Storage" (options
   (best "S3 + CloudFront CDN" "Unlimited scale, 11 nines durability, CDN for low-latency global downloads. Cost: $0.023/GB storage + $0.085/GB transfer")
@@ -276,11 +349,16 @@ response = dynamodb.query(
 
 {{phase 10 "Scaling & Reliability" "8 min"}}
 
-{{say "The main scaling challenges are 200M concurrent WebSocket connections, 700K messages per second at peak, and multi-region deployment for global latency."}}
+{{say `Three main scaling challenges:
+<ul>
+  <li><span class="hl">200M concurrent WebSocket connections</span> — <span class="hl">~5,000 servers</span> at 100K connections each</li>
+  <li><span class="hl">700K messages/sec</span> at peak — Kafka absorbs bursts, stateless Chat Service scales horizontally</li>
+  <li><strong>Multi-region deployment</strong> — sub-200ms delivery globally requires regional infrastructure</li>
+</ul>`}}
 
 {{diagram "cs-scaling"}}
 
-{{hint "why consistent hashing for WebSocket servers?" "When a WebSocket server is added or removed, we want to redistribute minimum connections. Random assignment means a rolling deploy reconnects everyone. Consistent hashing means only 1/N connections need to move when one server changes. With virtual nodes, the load stays balanced."}}
+{{hint "why consistent hashing for WebSocket servers?" "When a WebSocket server is added or removed, we want to redistribute minimum connections. <span class='hl-red'>Random assignment means a rolling deploy reconnects everyone.</span> <span class='hl-blue'>Consistent hashing</span> means only <span class='hl'>1/N connections</span> need to move when one server changes. With virtual nodes, load stays balanced."}}
 
 {{table "Scaling by Component" (rows
   (row "Component" "Strategy" "Numbers")
@@ -302,11 +380,16 @@ response = dynamodb.query(
 
 {{phase 11 "Read Receipts & Presence" "5 min"}}
 
-{{say "Read receipts and presence are high-frequency, low-value signals. They need different treatment than messages — we optimize for low latency and accept some loss."}}
+{{say `Read receipts and presence are <strong>high-frequency, low-value signals</strong> — they need different treatment than messages:
+<ul>
+  <li>Optimize for <strong>low latency</strong>, accept some loss — a typing indicator 3 seconds late is useless</li>
+  <li>Use <span class="hl-blue">Redis pub/sub</span> for typing indicators (fire-and-forget is fine)</li>
+  <li>Use <strong>Redis TTL heartbeat</strong> for presence — no writes to DynamoDB at heartbeat frequency</li>
+</ul>`}}
 
 {{diagram "cs-read-receipts"}}
 
-{{hint "why fire-and-forget for typing indicators?" "A typing indicator that arrives 3 seconds late is useless. If the WebSocket drops a typing event, the worst case is the other person doesn't see 'typing...' for 3 seconds. Compare this to a message — losing a message is unacceptable. Different reliability requirements mean different delivery paths."}}
+{{hint "why fire-and-forget for typing indicators?" "A typing indicator that arrives 3 seconds late is useless. If the WebSocket drops a typing event, the worst case is the other person doesn't see 'typing...' for 3 seconds. Compare this to a message — <span class='hl-red'>losing a message is unacceptable</span>. Different reliability requirements mean different delivery paths."}}
 
 {{compare "Presence Architecture" (options
   (best "Redis with heartbeat TTL" "Set user:presence with TTL=60s. Client sends KEEPALIVE every 30s to refresh. If 2 heartbeats missed, key expires → user is offline. O(1) presence check, sub-ms latency")
