@@ -39,6 +39,14 @@ type ProblemNFR struct {
 	Color string `yaml:"-"`
 }
 
+// FunctionalRequirement is a problem-specific feature that can be selected
+// to filter content to phases that implement it.
+type FunctionalRequirement struct {
+	Slug   string `yaml:"slug"`
+	Title  string `yaml:"title"`
+	Phases []int  `yaml:"phases"`
+}
+
 // UsageLink represents a bidirectional link between a Problem and a Fundamental.
 type UsageLink struct {
 	// Forward: which fundamental is used
@@ -66,13 +74,14 @@ type DocMeta struct {
 }
 
 type Problem struct {
-	Slug        string       `yaml:"slug"`
-	Title       string       `yaml:"title"`
-	Description string       `yaml:"description"`
-	Path        string       `yaml:"path"`
-	Docs        []DocMeta    `yaml:"docs"`
-	NFRs        []ProblemNFR `yaml:"nfrs"`
-	Uses        []UsageLink  `yaml:"uses"`
+	Slug        string                  `yaml:"slug"`
+	Title       string                  `yaml:"title"`
+	Description string                  `yaml:"description"`
+	Path        string                  `yaml:"path"`
+	Docs        []DocMeta               `yaml:"docs"`
+	NFRs        []ProblemNFR            `yaml:"nfrs"`
+	FRs         []FunctionalRequirement `yaml:"functional_requirements"`
+	Uses        []UsageLink             `yaml:"uses"`
 
 	// Algorithms used in this problem (auto-derived from Algorithm.UsedIn reverse)
 	Algorithms []*Algorithm `yaml:"-"`

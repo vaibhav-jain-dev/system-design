@@ -652,9 +652,18 @@ To add a new NFR type, add it to `var StandardNFRs` in `internal/registry/regist
 
 ### YAML Format for Problems
 
+The filter panel has two rows — **Function** (what feature) and **Quality** (what NFR). Selecting a combination shows phases that satisfy **both** simultaneously. Numbers/stats in matching phases are highlighted in amber so the relevant data stands out.
+
 ```yaml
 problems:
   - slug: my-problem
+    functional_requirements:          # 4-7 problem-specific features
+      - slug: feature-a
+        title: "Feature A"            # shown on chip and phase header tag
+        phases: [2, 3]                # phases that primarily IMPLEMENT this feature
+      - slug: feature-b
+        title: "Feature B"
+        phases: [5, 6, 7]
     nfrs:
       - slug: scalability       # must match a key in StandardNFRs
         phases: [3, 5, 7]       # ONLY phases whose PRIMARY content is about this NFR
@@ -668,6 +677,15 @@ problems:
         config: "..."
         ...
 ```
+
+#### FR (Functional Requirement) Rules
+
+- **4–7 FRs per problem** — map the key features the system must perform
+- FR `slug` is free-form (no global registry); `title` is what appears on the chip
+- FR `phases` = the 2–3 phases that *implement* that feature (not just mention it)
+- A phase header shows small teal FR tags always; they dim/highlight during filtering
+- Selecting FR A + NFR B shows only phases tagged with A **and** tagged with B
+- Numbers/stats in matching phases get amber highlight automatically (no authoring needed)
 
 ### NFR Phase Tagging Rules (CRITICAL — read before tagging)
 
