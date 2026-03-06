@@ -639,14 +639,14 @@ Each problem page shows an interactive NFR selector panel. All NFRs are selected
 
 | Slug | Display Title | Color | What it covers |
 |------|--------------|-------|---------------|
-| `scalability` | Scalability | Indigo | Horizontal scaling, sharding, capacity |
-| `performance` | Performance | Blue | Latency, throughput, caching, CDN |
-| `availability` | Availability | Green | Fault tolerance, multi-AZ, failover |
-| `consistency` | Consistency | Amber | CAP tradeoffs, strong/eventual consistency |
-| `durability` | Durability | Purple | Data persistence, backup, WAL |
-| `security` | Security | Red | Auth, encryption, abuse prevention |
-| `cost` | Cost | Gray | Cost analysis, managed vs self-hosted |
-| `observability` | Observability | Cyan | Monitoring, tracing, logging, metrics |
+| `scalability` | Scalability | Indigo | Horizontal scaling, sharding, capacity, throughput at scale |
+| `performance` | Performance | Blue | Latency, throughput, caching, CDN, hot-path optimisation |
+| `availability` | Availability | Green | Fault tolerance, multi-AZ, failover, fail-open/closed |
+| `consistency` | Consistency | Amber | CAP tradeoffs, strong/eventual consistency, conflict detection |
+| `durability` | Durability | Purple | Data persistence, backup, replication, WAL, recovery |
+| `security` | Security | Red | Auth, encryption, abuse prevention, permissions |
+| `cost` | Cost | Gray | Cost analysis, managed vs self-hosted, capacity planning |
+| `observability` | Observability | Cyan | Monitoring, tracing, logging, metrics, alerting |
 
 To add a new NFR type, add it to `var StandardNFRs` in `internal/registry/registry.go`.
 
@@ -657,17 +657,73 @@ problems:
   - slug: my-problem
     nfrs:
       - slug: scalability       # must match a key in StandardNFRs
-        phases: [1, 3, 5, 7]   # phase numbers that address this NFR
+        phases: [3, 5, 7]       # ONLY phases whose PRIMARY content is about this NFR
       - slug: performance
-        phases: [1, 2, 4, 5, 6]
+        phases: [2, 4, 5, 6]
       - slug: availability
-        phases: [1, 5, 8]
+        phases: [5, 8]
     uses:
       - fundamental: storage/redis
-        nfrs: [performance, availability]  # which NFRs this use addresses
+        nfrs: [performance, availability]  # which NFRs this use primarily addresses (max 2)
         config: "..."
         ...
 ```
+
+### NFR Phase Tagging Rules (CRITICAL — read before tagging)
+
+**The single most important rule**: Tag a phase with an NFR **only if that phase's primary content is about that NFR**. Do NOT tag a phase just because it mentions an NFR in passing.
+
+#### Phase 1 (Requirements) — almost never tagged
+Phase 1 is requirements gathering. It briefly mentions all NFRs in the constraints list. **Do not tag phase 1** with any NFR unless the problem is uniquely driven by it as the single most important constraint (example: rate-limiter phase 1 → security, because abuse prevention IS the reason the system exists).
+
+**Wrong**: `scalability: phases: [1, 3, 5, 7]` — phase 1 just lists requirements, it doesn't teach scalability
+**Right**: `scalability: phases: [3, 5, 7]` — data model, architecture, sharding are where you actually learn it
+
+#### Per-NFR Tagging Guide
+
+| NFR | Tag a phase IF it primarily covers… | Never tag for… |
+|-----|-------------------------------------|----------------|
+| `scalability` | Sharding, partitioning, horizontal scale-out, capacity estimation, consistent hashing, fan-out at scale | API design, requirements, monitoring |
+| `performance` | Caching strategy, latency-critical algorithms, hot-path design, CDN/edge delivery, sub-ms data structures | General architecture, requirements |
+| `availability` | Multi-AZ, failover, fail-open/closed decision, circuit breakers, health checks, redundancy | Data model, API design |
+| `consistency` | CAP theorem application, strong vs eventual choice, conflict detection, transaction boundaries, ordering guarantees | Requirements, general architecture |
+| `durability` | Persistence guarantees, replication factor, backup strategy, WAL, data recovery | Caching (which is ephemeral by design) |
+| `security` | Auth/authz mechanisms, encryption, abuse prevention, rate limiting as security measure, permissions model | General requirements (unless security IS the core problem) |
+| `cost` | Explicit cost estimates, build vs buy decisions, capacity cost calculation, storage cost tradeoffs | Requirements, API design |
+| `observability` | Monitoring setup, metrics/alerts definition, tracing, logging strategy, SLO/SLA definition | General architecture phases |
+
+#### Context Card (uses) NFR Tagging
+
+Each `uses:` entry in a problem should have `nfrs:` listing **which NFRs this specific use of the fundamental addresses** (maximum 2, pick the most dominant):
+
+```yaml
+uses:
+  - fundamental: storage/redis
+    config: "Sorted set sliding window per user_id"
+    nfrs: [performance, availability]   # Redis is chosen for sub-ms latency (perf) + fail-open fallback (avail)
+    # NOT [scalability] — Redis here is a single cluster, not a scaling solution
+```
+
+**Examples of correct tagging:**
+- Redis as cache → `[performance]` or `[performance, availability]`
+- Redis as geo-index → `[performance, scalability]`
+- Redis as distributed lock → `[consistency, availability]`
+- DynamoDB → `[scalability, durability]` (auto-sharding + managed replication)
+- Kafka → `[scalability, durability]` (partitioned fan-out + at-least-once delivery)
+- ALB → `[availability, scalability]` (health checks + horizontal routing)
+- CDN/CloudFront → `[performance, cost]` (edge latency + origin offload)
+- Consistent hashing → `[scalability]` only
+
+#### Validation Checklist (run before committing new problem)
+
+Before adding a new problem to `_registry.yaml`, verify:
+
+1. **Phase 1 exclusion**: Is phase 1 tagged? If yes, can you defend why the requirements phase (not a later phase) is the primary source of content for that NFR? If not, remove it.
+2. **Coverage spread**: Are at least 5-8 phases tagged across all NFRs? If fewer than 5 distinct phase numbers appear in total, the mappings are too sparse.
+3. **Phase 12 exclusion**: Phase 12 is "Interview Deep-Dive Q&A" and is **never tagged** (it covers everything). Leave it out of all NFR mappings.
+4. **No NFR tags every phase**: If any single NFR is mapped to 7+ phases, reconsider — it likely means you're tagging phases that just mention the NFR rather than teach it.
+5. **Consistency alone**: If you tag `consistency`, that phase must have a CAP theorem decision, a specific consistency model choice, or a conflict resolution mechanism. Not just "we use a database".
+6. **Security alone**: Only tag `security` when the phase is specifically about auth, encryption, or abuse defense mechanisms. Requirements phase only gets security if the problem is fundamentally a security problem (e.g., rate limiting).
 
 ### How It Works
 
@@ -683,6 +739,8 @@ problems:
 - **Context cards**: The "Uses Fundamentals" cards at the bottom get dimmed when their `UsageLink.NFRs` don't match.
 - **Untagged phases** (no NFRs in YAML): Always visible regardless of selection.
 - **All selected**: Nothing dimmed — normal view.
+- **Colored dots** appear on phase headers (always visible) showing which NFRs that phase covers.
+- **Colored pills** appear on context cards (always visible) showing which NFRs that fundamental use addresses.
 
 ---
 
