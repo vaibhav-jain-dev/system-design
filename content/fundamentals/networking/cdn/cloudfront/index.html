@@ -1,6 +1,6 @@
 {{phase 1 "What Is CloudFront?" "3 min"}}
 
-{{say "CloudFront is AWS's CDN. 400+ edge locations worldwide. It caches your content at edge PoPs, so users get sub-20ms latency instead of 200ms+ round-trip to origin. It integrates natively with S3, ALB, API Gateway, and Lambda@Edge."}}
+{{say "<strong>CloudFront</strong> is AWS's CDN — <span class=\"hl\">400+</span> edge locations worldwide. It caches your content at edge PoPs so users get <span class=\"hl\">&lt;20ms</span> latency instead of <span class=\"hl\">200ms+</span> round-trip to origin. Integrates natively with <span class=\"hl-blue\">S3</span>, <span class=\"hl-blue\">ALB</span>, <span class=\"hl-blue\">API Gateway</span>, and <span class=\"hl-blue\">Lambda@Edge</span>."}}
 
 {{table "CloudFront at a Glance" (rows
   (row "Property"           "Detail")
@@ -31,7 +31,12 @@
 
 {{phase 2 "Architecture: Origins and Behaviors" "5 min"}}
 
-{{say "CloudFront sits in front of your origin servers. You configure distributions with one or more origins, and behaviors that define which URL paths route to which origin and how caching works."}}
+{{say "CloudFront sits in front of your origin servers. You configure <strong>distributions</strong> with one or more origins and <strong>behaviors</strong> that define:
+<ul>
+  <li>Which URL paths route to which origin</li>
+  <li>How caching works per path (TTL, cache key, compression)</li>
+  <li>What gets forwarded to origin on a miss (headers, cookies, query strings)</li>
+</ul>"}}
 
 {{triggerQs "Origin and Behavior Configuration"
   "How many origins can one CloudFront distribution have?" "Up to 25 origins per distribution. One distribution handles your S3 static assets, ALB API, and MediaStore video origin with path-based behavior routing."
@@ -121,7 +126,12 @@ resource "aws_cloudfront_distribution" "main" {
 
 {{phase 3 "Lambda@Edge vs CloudFront Functions" "5 min"}}
 
-{{say "CloudFront has two edge compute options. Lambda@Edge for heavy logic (up to 30 seconds, 10MB body, network access). CloudFront Functions for lightweight transformations (sub-millisecond, 2MB limit, no network access). Most use cases only need CloudFront Functions."}}
+{{say "CloudFront has two edge compute options:
+<ul>
+  <li><strong>Lambda@Edge</strong> — heavy logic: up to <span class=\"hl\">30s</span> execution, <span class=\"hl\">10 MB</span> body, network access to external services</li>
+  <li><strong>CloudFront Functions</strong> — lightweight transformations: <span class=\"hl\">&lt;1ms</span> execution, <span class=\"hl\">2 MB</span> limit, no network access</li>
+</ul>
+<span class=\"hl-red\">Most use cases only need CloudFront Functions</span> — URL rewrites, header manipulation, simple auth."}}
 
 {{triggerQs "Edge Compute Selection"
   "What is the most common CloudFront Function use case?" "URL rewriting for SPAs: rewrite /dashboard, /profile, /settings to /index.html so the SPA router handles navigation. No cold start, runs at all 218+ edge locations, costs $0.10/1M invocations."
@@ -213,7 +223,12 @@ def handler(event, context):
 
 {{phase 4 "Security: OAC, Signed URLs, WAF" "5 min"}}
 
-{{say "CloudFront security has three layers. OAC locks down S3 origins so only CloudFront can access them. Signed URLs and cookies restrict access to premium content. WAF blocks malicious requests at the edge."}}
+{{say "CloudFront security has three layers:
+<ul>
+  <li><strong>OAC</strong> — locks down S3 origins so <span class=\"hl-red\">only CloudFront can access them</span> (private bucket, no direct S3 URL bypass)</li>
+  <li><strong>Signed URLs / Cookies</strong> — time-limited access for premium or restricted content</li>
+  <li><strong>WAF</strong> — blocks malicious requests at the edge before they reach your origin region</li>
+</ul>"}}
 
 {{triggerQs "CloudFront Security Configuration"
   "Why use OAC over a public S3 bucket?" "A public bucket exposes your origin — anyone who discovers the S3 URL bypasses CloudFront, WAF, and signed URL protection. OAC makes the bucket private and only CloudFront can read it via IAM."
@@ -264,7 +279,12 @@ url = cf_signer.generate_presigned_url(
 
 {{phase 5 "Origin Shield and Request Collapsing" "3 min"}}
 
-{{say "Origin Shield is an additional caching layer between edge PoPs and your origin. Without it, a cache miss from 400+ PoPs creates 400+ requests to origin. With Origin Shield, all misses go through one regional cache first."}}
+{{say "<strong>Origin Shield</strong> is an additional caching layer between edge PoPs and your origin:
+<ul>
+  <li><span class=\"hl-red\">Without it</span> — a cache miss from <span class=\"hl\">400+ PoPs</span> creates <span class=\"hl\">400+ simultaneous</span> requests to your origin</li>
+  <li><strong>With it</strong> — all misses route through one regional cache first; only uncached objects hit your origin</li>
+</ul>
+Enables <strong>request collapsing</strong>: concurrent misses for the same object become a single origin request."}}
 
 {{triggerQs "Origin Shield Design"
   "Which region should I enable Origin Shield in?" "The region closest to your origin. If your S3 bucket and ALB are in us-east-1, enable Origin Shield in us-east-1. This minimizes the latency between Origin Shield and your origin on cache misses."
@@ -293,7 +313,7 @@ url = cf_signer.generate_presigned_url(
 
 {{phase 6 "Cost Optimization" "3 min"}}
 
-{{say "CloudFront pricing is tiered by volume, and there are several strategies to reduce costs significantly. The biggest savings come from choosing S3 over EC2 as your origin."}}
+{{say "CloudFront pricing is tiered by volume. The biggest savings come from choosing <strong>S3 over EC2</strong> as your origin — S3-to-CloudFront transfer is <span class=\"hl\">free</span>, while EC2-to-CloudFront costs <span class=\"hl\">$0.09/GB</span>."}}
 
 {{table "CloudFront Pricing (US/EU)" (rows
   (row "Tier"          "Data Transfer/GB"    "HTTPS Requests/10K"  "Monthly Estimate (10TB, 100M req)")
@@ -325,7 +345,7 @@ url = cf_signer.generate_presigned_url(
 
 {{phase 7 "Failure Scenarios" "3 min"}}
 
-{{say "CloudFront is highly available by design, but origin failures and misconfigurations still happen. Custom error pages and stale-if-error headers are your safety net."}}
+{{say "CloudFront is highly available by design, but origin failures and misconfigurations still happen. <strong>Custom error pages</strong> and <strong>stale-if-error</strong> cache headers are your safety net — configure them before you need them."}}
 
 {{table "CloudFront Failure Modes" (rows
   (row "Failure"                   "What Happens"                           "Mitigation"                                    "Recovery")
@@ -357,7 +377,7 @@ resource "aws_cloudfront_distribution" "main" {
 
 {{phase 8 "Interview Q&A" "3 min"}}
 
-{{say "Let me address the most common CloudFront interview questions around multi-origin setup, cache invalidation, and multi-region failover."}}
+{{say "Three CloudFront topics that come up consistently in interviews: <strong>multi-origin setup</strong>, <strong>cache invalidation strategy</strong>, and <strong>multi-region failover</strong>."}}
 
 {{qa
   "How would you set up CloudFront for a microservices architecture?"
