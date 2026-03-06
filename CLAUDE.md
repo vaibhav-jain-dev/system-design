@@ -762,6 +762,188 @@ Before adding a new problem to `_registry.yaml`, verify:
 
 ---
 
+## Language Guidelines for Content Authors
+
+### Who You're Writing For
+
+Reader has **~2 years of engineering experience**. They understand code, databases, and distributed systems at a working level — but may not have studied this topic deeply. Goal: dense, scannable, and direct. Not a textbook. Not for beginners.
+
+---
+
+### Core Rules
+
+**1. Break long text into bullet points with sub-bullets**
+
+Every paragraph with 3+ connected ideas becomes a bullet list. Sub-bullets add detail without bloating the parent.
+
+❌ Wrong:
+```
+Rate limiting enforces a hard cap — requests above the limit are rejected with 429. Throttling slows requests down, adding artificial delay to stay within a rate without rejecting. Rate limiting is better for API protection; throttling is better for smoothing bursty batch workloads.
+```
+
+✅ Right:
+```html
+<ul>
+  <li><strong>Rate limiting</strong> — enforces a hard cap; requests over the limit are rejected with <span class="hl">429</span>
+    <ul><li>Connection ends immediately — no resources held</li></ul>
+  </li>
+  <li><strong>Throttling</strong> — adds artificial delay instead of rejecting; the connection stays open
+    <ul><li>Better for batch workloads where a short wait is acceptable</li></ul>
+  </li>
+</ul>
+```
+
+---
+
+**2. Sentences inside bullets are natural, not telegraphic**
+
+Each bullet is a short, readable sentence — not a fragment or label.
+
+❌ Too telegraphic: `hard cap, reject 429`
+✅ Natural: `enforces a hard cap; requests over the limit are rejected with 429`
+
+---
+
+**3. Bold key terms and important numbers with `<strong>`**
+
+Use `<strong>` for technical terms on first use and for numbers that matter.
+
+```html
+<strong>Token bucket</strong> refills at a constant rate — up to <strong>100 tokens/sec</strong>.
+```
+
+---
+
+**4. Highlight critical facts with `.hl`, `.hl-blue`, `.hl-red`**
+
+| Class | Colour | Use for |
+|-------|--------|---------|
+| `<span class="hl">` | Amber | Key numbers, thresholds, capacities |
+| `<span class="hl-blue">` | Blue | Concepts, technical terms, named algorithms |
+| `<span class="hl-red">` | Red | Warnings, anti-patterns, failure modes |
+
+```html
+At <strong>500K req/s</strong>, even a <span class="hl">5ms</span> Redis call costs
+<span class="hl">2,500 CPU-seconds/s</span> across the fleet.
+
+<span class="hl-blue">Consistent hashing</span> means adding a node only remaps <span class="hl">1/N keys</span>.
+
+<span class="hl-red">Never use modulo hashing</span> — adding a node remaps <span class="hl">~99% of keys</span>.
+```
+
+---
+
+**5. Use `<small>` for caveats, cost notes, and side details**
+
+```html
+<li>ElastiCache r6g.large handles ~100K ops/s <small>($92/mo, us-east-1)</small></li>
+<li>Sorted set ZADD is O(log N) <small>(~20 comparisons for 1M members)</small></li>
+```
+
+---
+
+**6. `{{info}}` sparingly — max 1–2 per section, never stacked**
+
+Introduce a term once with `{{info}}`. After that, use it freely by name.
+
+❌ Four tooltips in one sentence:
+```
+needs {{info "ZREMRANGEBYSCORE" "..."}} , {{info "ZCARD" "..."}} , {{info "ZADD" "..."}} via a {{info "Lua script" "..."}}
+```
+
+✅ Introduce up front, reference after:
+```html
+Sliding window needs three Redis calls — <span class="hl-blue">ZREMRANGEBYSCORE</span>,
+<span class="hl-blue">ZCARD</span>, and <span class="hl-blue">ZADD</span>{{info "Lua atomicity" "Redis executes a Lua script as a single atomic operation — no other command can interleave."}} — all run atomically via Lua.
+```
+
+---
+
+**7. Q&A answers: fact or number first, justification second**
+
+❌ Buries the answer:
+```
+"This depends on your use case. In practice, most teams prefer API key because..."
+```
+
+✅ Opens with the answer, then explains:
+```html
+<ul>
+  <li>Use <strong>API key</strong> for authenticated traffic — it ties to a billable account and survives IP changes</li>
+  <li>Use <strong>IP address</strong> for unauthenticated traffic — it's the only identifier available</li>
+  <li><span class="hl-red">IP-only limits are weak</span> — attackers rotate IPs; use them only as a last resort</li>
+</ul>
+```
+
+---
+
+**8. `{{say}}` blocks: break long ones into bullets too**
+
+`{{say}}` represents interview speech. Short ones can stay as sentences. If it's 4+ sentences, break into bullet points so the speaker can scan and deliver naturally.
+
+❌ Wall of text:
+```
+{{say "Let me clarify the scope. Are we designing a rate limiter for a single service, or a distributed rate limiting platform? I'll assume we're building a distributed rate limiter that can protect multiple services at scale. Here are the functional and non-functional requirements."}}
+```
+
+✅ Scannable speech:
+```
+{{say "Let me clarify scope before diving in:
+<ul>
+  <li>Designing a <strong>distributed</strong> rate limiter — one shared counter across all services</li>
+  <li>Not a single-node problem; the hard part is agreement between multiple app servers</li>
+  <li>I'll walk through functional requirements first, then non-functional</li>
+</ul>"}}
+```
+
+---
+
+**9. `{{hint}}` max 2–3 sentences; structured if longer**
+
+If a hint needs more than 3 sentences, use `{{think}}` instead or add a mini bullet list inside the hint body.
+
+✅ Hint with inline bullets:
+```
+{{hint "why Lua reduces round trips?" "Sliding window needs three Redis calls:
+<ul>
+  <li><strong>ZREMRANGEBYSCORE</strong> — removes entries outside the time window</li>
+  <li><strong>ZCARD</strong> — counts current entries to check the limit</li>
+  <li><strong>ZADD</strong> — records the new request timestamp</li>
+</ul>
+Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</span></strong> per request.
+Lua runs all three atomically in one trip — at <strong>500K req/s</strong> that saves <span class='hl'>~150ms/s</span>."}}
+```
+
+---
+
+**10. No subjective ratings — replace with numbers**
+
+❌ `"fair"`, `"terrible"`, `"excellent"`
+✅ `"~10% std dev"`, `"99% of keys remap"`, `"< 15% acceptable"`
+
+---
+
+**11. No filler transitions**
+
+❌ `"There are four main algorithms."` / `"Let me now explain..."`
+✅ Start directly: `"Four algorithms — each trades accuracy for memory differently."`
+
+---
+
+### Summary Cheat Sheet
+
+```
+<strong>term</strong>         → bold for key terms and numbers
+<span class="hl">N</span>     → amber highlight for critical numbers/thresholds
+<span class="hl-blue">X</span> → blue for concept names, algorithm names
+<span class="hl-red">Y</span>  → red for warnings, anti-patterns
+<small>(note)</small>          → muted small text for caveats, costs
+<ul><li>...</li></ul>          → bullet list for 3+ related ideas
+nested <ul> inside <li>        → sub-bullet for supporting detail
+```
+
+---
+
 ## Common Tasks
 
 ### Add a new problem
