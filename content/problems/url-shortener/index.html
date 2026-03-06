@@ -62,34 +62,135 @@
 
 {{diagram "url-api-design"}}
 
-{{code "text" `POST /api/v1/urls
-Request:  { "long_url": "https://example.com/very/long/path", "custom_alias": "my-link", "ttl_days": 365 }
-Response: { "short_url": "https://short.ly/Ab3xK9", "short_code": "Ab3xK9", "expires_at": "2027-01-01T00:00:00Z" }
-Status: 201 Created
-Headers: Location: https://short.ly/Ab3xK9
+<div class="api-doc">
 
-GET /{short_code}
-Response: 301 Redirect with Location header
-Headers: Location: https://example.com/very/long/path
-         Cache-Control: max-age=86400
+  {{/* POST /api/v1/urls — Create short URL */}}
+  <div class="api-endpoint">
+    <div class="api-endpoint-header">
+      <span class="api-method post">POST</span>
+      <span class="api-path">/api/v1/urls</span>
+      <span class="api-status-badge s2xx">201 Created</span>
+    </div>
+    <div class="api-endpoint-body">
+      <div>
+        <div class="api-section-label">Request Body</div>
+        <div class="api-json"><span class="jp">{</span>
+  <span class="jk">"long_url"</span><span class="jp">:</span>      <span class="jv">"https://example.com/very/long/path"</span><span class="jp">,</span>
+  <span class="jk">"custom_alias"</span><span class="jp">:</span> <span class="jv">"my-link"</span><span class="jp">,</span>           <span class="jc">// optional</span>
+  <span class="jk">"ttl_days"</span><span class="jp">:</span>     <span class="jn">365</span>                          <span class="jc">// optional, default never</span>
+<span class="jp">}</span></div>
+      </div>
+      <div>
+        <div class="api-section-label">Response Body</div>
+        <div class="api-json"><span class="jp">{</span>
+  <span class="jk">"short_url"</span><span class="jp">:</span>   <span class="jv">"https://short.ly/Ab3xK9"</span><span class="jp">,</span>
+  <span class="jk">"short_code"</span><span class="jp">:</span>  <span class="jv">"Ab3xK9"</span><span class="jp">,</span>
+  <span class="jk">"expires_at"</span><span class="jp">:</span>  <span class="jv">"2027-01-01T00:00:00Z"</span>
+<span class="jp">}</span></div>
+      </div>
+      <div>
+        <div class="api-section-label">Response Headers</div>
+        <div class="api-headers">
+          <div class="api-header-row">
+            <span class="api-header-name">Location:</span>
+            <span class="api-header-value">https://short.ly/Ab3xK9</span>
+            <span class="api-header-note">— HATEOAS: clients can verify the redirect immediately</span>
+          </div>
+          <div class="api-header-row">
+            <span class="api-header-name">Idempotency-Key:</span>
+            <span class="api-header-value">&lt;uuid&gt;</span>
+            <span class="api-header-note">— optional request header; 24h TTL dedup window</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
-DELETE /api/v1/urls/{short_code}
-Response: 204 No Content
-Auth: API key required (owner only)
+  {{/* GET /{short_code} — Redirect */}}
+  <div class="api-endpoint">
+    <div class="api-endpoint-header">
+      <span class="api-method get">GET</span>
+      <span class="api-path">/<span class="path-param">{short_code}</span></span>
+      <span class="api-status-badge s3xx">301 Redirect</span>
+    </div>
+    <div class="api-endpoint-body">
+      <div>
+        <div class="api-section-label">Response Headers</div>
+        <div class="api-headers">
+          <div class="api-header-row">
+            <span class="api-header-name">Location:</span>
+            <span class="api-header-value">https://example.com/very/long/path</span>
+          </div>
+          <div class="api-header-row">
+            <span class="api-header-name">Cache-Control:</span>
+            <span class="api-header-value">max-age=86400</span>
+            <span class="api-header-note">— 24 h browser cache; prevents repeat origin hits</span>
+          </div>
+        </div>
+      </div>
+      <div class="api-note">Versionless path — shared in tweets, emails, QR codes. Must never change.</div>
+    </div>
+  </div>
 
-GET /api/v1/urls/{short_code}/stats
-Response: { "short_code": "Ab3xK9", "long_url": "...", "clicks": 15420, "created_at": "...", "expires_at": "..." }
-Status: 200 OK
+  {{/* DELETE /api/v1/urls/{short_code} */}}
+  <div class="api-endpoint">
+    <div class="api-endpoint-header">
+      <span class="api-method delete">DELETE</span>
+      <span class="api-path">/api/v1/urls/<span class="path-param">{short_code}</span></span>
+      <span class="api-status-badge s2xx">204 No Content</span>
+      <span class="api-auth-badge">🔑 API key (owner only)</span>
+    </div>
+    <div class="api-endpoint-body">
+      <div class="api-note">No body returned. Idempotent — deleting a non-existent code returns 204, not 404.</div>
+    </div>
+  </div>
 
-GET /preview/{short_code}
-Response: HTML page showing destination URL before redirecting (anti-phishing)
-Status: 200 OK
+  {{/* GET stats */}}
+  <div class="api-endpoint">
+    <div class="api-endpoint-header">
+      <span class="api-method get">GET</span>
+      <span class="api-path">/api/v1/urls/<span class="path-param">{short_code}</span>/stats</span>
+      <span class="api-status-badge s2xx">200 OK</span>
+    </div>
+    <div class="api-endpoint-body">
+      <div>
+        <div class="api-section-label">Response Body</div>
+        <div class="api-json"><span class="jp">{</span>
+  <span class="jk">"short_code"</span><span class="jp">:</span>  <span class="jv">"Ab3xK9"</span><span class="jp">,</span>
+  <span class="jk">"long_url"</span><span class="jp">:</span>    <span class="jv">"https://example.com/very/long/path"</span><span class="jp">,</span>
+  <span class="jk">"clicks"</span><span class="jp">:</span>      <span class="jn">15420</span><span class="jp">,</span>
+  <span class="jk">"created_at"</span><span class="jp">:</span>  <span class="jv">"2026-01-01T00:00:00Z"</span><span class="jp">,</span>
+  <span class="jk">"expires_at"</span><span class="jp">:</span>  <span class="jv">"2027-01-01T00:00:00Z"</span>
+<span class="jp">}</span></div>
+      </div>
+    </div>
+  </div>
 
-GET /api/v1/urls/{short_code}/qr?size=300&format=png
-Response: QR code image (PNG/SVG) encoding the short URL
-Sizes: 150px, 300px, 600px | Formats: PNG, SVG
-Status: 200 OK
-`}}
+  {{/* GET preview */}}
+  <div class="api-endpoint">
+    <div class="api-endpoint-header">
+      <span class="api-method get">GET</span>
+      <span class="api-path">/preview/<span class="path-param">{short_code}</span></span>
+      <span class="api-status-badge s2xx">200 OK</span>
+    </div>
+    <div class="api-endpoint-body">
+      <div class="api-note">Returns an HTML page showing the destination URL before redirecting — anti-phishing safety valve.</div>
+    </div>
+  </div>
+
+  {{/* GET QR code */}}
+  <div class="api-endpoint">
+    <div class="api-endpoint-header">
+      <span class="api-method get">GET</span>
+      <span class="api-path">/api/v1/urls/<span class="path-param">{short_code}</span>/qr<span class="path-query">?size=300&amp;format=png</span></span>
+      <span class="api-status-badge s2xx">200 OK</span>
+    </div>
+    <div class="api-endpoint-body">
+      <div class="api-note">Returns a QR code image encoding the short URL. Sizes: <strong>150 / 300 / 600 px</strong>. Formats: <strong>PNG</strong>, <strong>SVG</strong>.</div>
+    </div>
+  </div>
+
+</div>
 
 {{hint "why versioned API paths (/api/v1/) but not on redirect?" "The redirect endpoint GET /{code} is the public-facing URL that gets shared everywhere — tweets, emails, printed QR codes. Adding /api/v1/ to it would make URLs longer and ugly. API endpoints are consumed by developers who can handle version changes. The redirect path is consumed by end users who cannot."}}
 
