@@ -1,6 +1,11 @@
 {{phase 1 "What Is Prompt Chaining?" "5 min"}}
 
-{{say "Prompt chaining breaks a complex task into a sequence of focused LLM calls, where each step's output feeds into the next step's input. Instead of asking one massive prompt to do everything, you decompose the task into smaller, well-defined steps that are easier to debug, validate, and optimize individually."}}
+{{say "<span class=\"hl-blue\">Prompt chaining</span> breaks a complex task into a sequence of focused LLM calls, where each step's output feeds into the next:
+<ul>
+  <li>Instead of one massive prompt doing everything, each step has a <strong>single responsibility</strong>: extract, classify, generate, or validate</li>
+  <li>Individual steps are easier to debug — when something goes wrong, you know exactly which step failed</li>
+  <li>You can retry, tune, and optimize each step independently without rerunning the whole pipeline</li>
+</ul>"}}
 
 {{think "Why not a single prompt? A single prompt handling multiple subtasks often produces lower quality results because the model has to juggle too many instructions at once. Chaining gives each step a focused prompt with clear instructions. You can also validate intermediate outputs and retry individual steps without repeating the entire pipeline."
   (whyNot "single large prompt" "Models under high instruction load make more errors on each individual task. A prompt that says 'extract, classify, summarize, then write a response' is forcing the model to context-switch. Each chained step can be independently retried, tuned, and tested — a monolithic prompt cannot.")
@@ -28,7 +33,13 @@
 
 {{phase 2 "Core Chaining Patterns" "8 min"}}
 
-{{say "There are four foundational chaining patterns. Most production LLM pipelines are combinations of these."}}
+{{say "Four foundational chaining patterns — most production LLM pipelines are combinations of these:
+<ul>
+  <li><strong>Sequential</strong>: each step depends on the previous — the standard pipeline</li>
+  <li><strong>Parallel + Merge</strong>: independent subtasks run simultaneously, results combined — cuts latency</li>
+  <li><strong>Conditional</strong>: classify first, then route to different downstream chains — powerful for multi-domain inputs</li>
+  <li><strong>Gate (quality)</strong>: validate between steps, retry if output fails — the reliability multiplier</li>
+</ul>"}}
 
 {{table "Chaining Pattern Types" (rows
   (row "Pattern"           "Structure"                     "Example"                                   "Key Benefit")
@@ -42,7 +53,14 @@
 
 {{phase 3 "Chaining Framework Implementation" "10 min"}}
 
-{{say "Here is a reusable chaining framework you can use in production. It handles sequential execution, output parsing, validation gates, retries, and per-step model selection."}}
+{{say "A reusable chaining framework needs to handle five concerns:
+<ul>
+  <li><strong>Sequential execution</strong> with context passing between steps</li>
+  <li><strong>Output parsers</strong> to extract structured data before the next step</li>
+  <li><strong>Validation gates</strong> to catch bad output before it propagates</li>
+  <li><strong>Retries</strong> with format feedback on failure</li>
+  <li><strong>Per-step model selection</strong> — cheap models for extraction, expensive for generation</li>
+</ul>"}}
 
 {{code "python" `from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass
@@ -214,7 +232,13 @@ class LLMChain:
 
 {{phase 4 "Example: Customer Email Processing" "8 min"}}
 
-{{say "Here is a complete, practical example: processing incoming customer emails. The chain extracts key information, classifies urgency, generates a response, and validates quality before sending."}}
+{{say "Complete practical example: processing incoming customer emails through a <span class=\"hl\">4-step chain</span>:
+<ul>
+  <li><strong>Step 1: Extract</strong> — pull customer name, issue type, sentiment <small>(cheap model, structured output)</small></li>
+  <li><strong>Step 2: Classify</strong> — determine urgency, department, requires-human flag <small>(cheap model)</small></li>
+  <li><strong>Step 3: Generate</strong> — write a professional response <small>(expensive model for quality)</small></li>
+  <li><strong>Step 4: Validate</strong> — check length, no placeholders, professional tone <small>(rule-based or LLM judge)</small></li>
+</ul>"}}
 
 {{code "python" `import json
 
@@ -329,7 +353,12 @@ print("Total latency: {:.0f}ms".format(result.total_latency_ms))
 
 {{phase 5 "The Gate Pattern: Quality Control" "5 min"}}
 
-{{say "The gate pattern adds a validation step between chain stages. An LLM or rule-based checker evaluates the intermediate output. If it fails, the step retries with feedback about what went wrong. This is how you get reliable outputs from unreliable models."}}
+{{say "The <span class=\"hl-blue\">gate pattern</span> adds a validation step between chain stages:
+<ul>
+  <li>An LLM or rule-based checker evaluates intermediate output before it passes downstream</li>
+  <li>If it fails, the prior step retries with feedback about <em>exactly what went wrong</em></li>
+  <li>This is how you get <strong>reliable outputs from unreliable models</strong> — errors caught at the source, not propagated</li>
+</ul>"}}
 
 {{diagram "pat-gate-pattern-flow"}}
 
@@ -399,7 +428,12 @@ chain.add_step(
 
 {{phase 6 "Parallel Chains" "5 min"}}
 
-{{say "When subtasks are independent, run them in parallel to reduce latency. Then merge the results in a final step."}}
+{{say "When subtasks are independent — each step does not need another step's output to begin — run them in parallel:
+<ul>
+  <li>Total latency = <code>max(step1, step2, step3)</code> instead of <code>step1 + step2 + step3</code></li>
+  <li>Token cost is identical — you only save <strong>wall-clock latency</strong></li>
+  <li>A final merge step synthesizes parallel results into a single coherent output</li>
+</ul>"}}
 
 {{code "python" `import asyncio
 import openai
@@ -473,7 +507,12 @@ async def parallel_chain(
 
 {{phase 7 "Decision Guide & Cost-Quality Tradeoff" "10 min"}}
 
-{{say "Choosing between a single prompt, a chain, and an agent depends on task predictability, latency budget, and quality requirements."}}
+{{say "Pattern selection depends on three factors: <strong>task predictability</strong>, <strong>latency budget</strong>, and <strong>quality requirements</strong>:
+<ul>
+  <li>Can you draw the full flowchart before the user's input arrives? → <span class=\"hl-blue\">Prompt chain</span></li>
+  <li>Is it truly one discrete step? → <span class=\"hl-blue\">Single prompt</span></li>
+  <li>Do steps depend on real-time data or dynamic tool use? → <span class=\"hl-blue\">Agent</span></li>
+</ul>"}}
 
 {{table "Decision Guide" (rows
   (row "Criteria"                    "Single Prompt"             "Prompt Chain"               "Agent")
@@ -493,7 +532,12 @@ async def parallel_chain(
   (nofit "Fine-tuned Model" "Avoid if your task changes frequently or needs multiple steps. Fine-tuning is for static, high-volume, single-step tasks like classification at massive scale.")
 )}}
 
-{{say "Every additional chain step adds cost and latency but improves quality. Here is how to think about the tradeoff and optimize."}}
+{{say "Every additional chain step adds cost and latency but improves quality — the optimization is in <strong>where</strong> you spend:
+<ul>
+  <li>Use <span class=\"hl\">GPT-4o-mini</span> for extraction and classification: <strong>~15x cheaper</strong> than GPT-4o, quality difference negligible</li>
+  <li>Reserve <span class=\"hl\">GPT-4o</span> for the final generation step: quality difference is real and user-visible</li>
+  <li>This split cuts cost <strong>50-70%</strong> while maintaining output quality where it matters</li>
+</ul>"}}
 
 {{table "Cost-Quality Analysis (per request)" (rows
   (row "Pipeline"                                  "Steps"  "Model"       "Tokens"   "Cost"     "Quality")
@@ -553,7 +597,12 @@ chain.add_step(
 
 {{phase 8 "Error Handling & Interview Q&A" "10 min"}}
 
-{{say "Chains fail in predictable ways. Understanding these failure modes lets you build reliable pipelines."}}
+{{say "Chains fail in predictable, diagnosable ways — each failure mode has a specific fix:
+<ul>
+  <li><span class=\"hl-red\">Never pass raw LLM output to the next step without parsing</span> — chatty text poisons structured inputs</li>
+  <li>Gate validators between steps prevent error propagation; without them, one bad extraction corrupts everything downstream</li>
+  <li>Log every step's input, output, and latency — isolate failures to the exact step</li>
+</ul>"}}
 
 {{table "Chain Failure Modes" (rows
   (row "Failure"                  "Cause"                                 "Impact"                             "Fix")
@@ -576,7 +625,7 @@ chain.add_step(
   (row "Translate-Verify"     "Translate text, back-translate to verify"   "High-quality translation")
 )}}
 
-{{say "These are the most common prompt chaining interview questions. Focus on debugging, latency, and partial failure handling."}}
+{{say "The most common prompt chaining interview questions probe debugging, latency, and partial failure handling — interviewers want to know you have operated chains in production."}}
 
 {{qa
   "How do you debug a failing prompt chain?"
