@@ -1678,76 +1678,156 @@ quick_categories:
       - number: 81
         question: "How do platforms store billions of images?"
         needed: "object storage (S3): flat namespace, 11 nines durability, lifecycle rules for cold tiers"
+        answer: "S3 (or GCS) is the standard: it provides 11 nines of durability (replicated across 3+ AZs), virtually unlimited capacity, and a flat key namespace. Structure keys by date and content hash: images/{year}/{month}/{user_id}/{content_hash}.webp. Enable S3 Intelligent-Tiering to automatically move infrequently accessed images to cheaper storage classes after 30 days. S3 at $0.023/GB for the first 50 TB."
+        tradeoff: "Self-hosted distributed file systems (Ceph, Hadoop HDFS) give you more control but require significant ops investment and can't match S3's durability guarantees without extensive engineering. Facebook's Haystack is a notable exception but was built before S3 existed — start with S3."
+        caveat: "Don't use sequential S3 keys (image_00001, image_00002) — S3 internally partitions by key prefix and sequential keys create hotspots on a single partition. Use content hashes or random prefixes to distribute load across S3 partitions."
+        watch: "S3 LIST operations are expensive (O(N) scan) and don't support filtering — if you need to find images by user or date, store that metadata in a database. Never use S3 as a database — it's a blob store."
         related_problems: [instagram]
       - number: 82
         question: "How do platforms serve images globally with low latency?"
         needed: "CDN in front of S3: edge PoPs serve cached objects, origin fetch on miss"
+        answer: "Place CloudFront (or Fastly/Akamai) in front of S3. Configure CloudFront with a long cache TTL (7 days for immutable images identified by content hash in the URL). Edge PoPs cache the image after the first request from each region — subsequent requests for the same image in that region are served from memory at <5ms. S3 is only hit on cold requests (first user in each region to view an image)."
+        tradeoff: "CDN cache TTL tradeoff: longer TTL = higher cache hit rate = lower origin load and latency. But longer TTL means image updates/deletions propagate slowly. For immutable images (content hash in URL), use 365-day TTL. For mutable profile photos, use shorter TTL (1 hour) or versioned URLs."
+        caveat: "Don't serve images directly from S3 to clients — S3 bandwidth is $0.09/GB, CloudFront is $0.0085/GB (10x cheaper) and much faster. Also, direct S3 URLs expose your bucket structure; CDN provides a stable URL regardless of backend."
+        watch: "Use separate CloudFront distributions for user-generated content and static assets — this allows independent cache invalidation and origin configuration. Invalidating the wrong distribution for a security incident (compromised user images) is a costly mistake."
         related_fundamentals: [networking/cdn, networking/cdn/cloudfront]
         related_problems: [instagram]
       - number: 83
         question: "How do systems compress images automatically?"
         needed: "image processing pipeline on upload: resize to standard sizes, convert to WebP, quality 80"
+        answer: "On upload, trigger an async image processing job: decode the original, resize to standard variants (thumbnail 150x150, medium 600x600, large 1200x1200), convert to WebP (25–35% smaller than JPEG at equal quality), and compress at quality 80. Store all variants in S3 with paths encoding the variant: /images/{hash}/600x600.webp. The original is retained separately for future re-processing."
+        tradeoff: "Processing on upload (eager) generates all variants immediately — serving is fast but wastes compute and storage for variants never requested. Processing on demand (lazy, via imgproxy or Cloudflare Image Resizing) generates variants on first request — saves storage but adds latency on cold requests and requires an image transform proxy in front of S3."
+        caveat: "Don't use a single 'max quality' WebP for all use cases — a mobile thumbnail at 150x150 doesn't benefit from quality 85; quality 65 is indistinguishable at that size and saves 40% more. Tune quality separately per variant size."
+        watch: "AVIF (successor to WebP) offers another 25–30% size reduction over WebP at equal quality but has limited browser support (no Safari until 2023). Use WebP as baseline with AVIF served via Content Negotiation (Accept: image/avif) to browsers that support it."
         related_problems: [instagram]
       - number: 84
         question: "How do platforms detect duplicate images?"
         needed: "perceptual hashing (pHash): similar images have Hamming distance < threshold; index hashes"
+        answer: "Compute a perceptual hash (pHash or dHash) from the image: resize to 8x8 grayscale, compute DCT, encode as a 64-bit integer. Two visually similar images (cropped, resized, slightly edited) will have Hamming distance < 10 out of 64 bits. Store all pHashes in a database with a BK-tree or VP-tree index for efficient nearest-neighbor search. Flag pairs with Hamming distance < 5 as duplicates."
+        tradeoff: "Cryptographic hash (MD5/SHA256) detects byte-identical duplicates — any pixel change produces a completely different hash. Perceptual hash detects visually similar images even after minor edits. Use SHA256 for exact dedup and pHash for near-duplicate detection — they serve different purposes."
+        caveat: "pHash collision rate increases with image complexity — an image of a white wall and another white wall may hash identically even if they're different images. Supplement pHash with a secondary check (compare color histograms or a CNN embedding) before hard-blocking as duplicates."
+        watch: "BK-trees enable O(log N) nearest-neighbor search over Hamming distance, making duplicate detection feasible even over billions of pHashes. A brute-force linear scan over 1B hashes takes ~1 second; a BK-tree reduces it to milliseconds."
       - number: 85
         question: "How do systems moderate harmful content?"
         needed: "async ML classifier (nudity, violence) on upload; human review queue for borderline cases"
+        answer: "On content submission, emit a ContentSubmitted event to Kafka. A moderation consumer passes the content to a multi-label ML classifier (nudity, graphic violence, hate symbols, CSAM). High-confidence violations (>95%) trigger automated removal and sender action. Medium-confidence (60–95%) adds the content to a human review queue. Low-confidence (<60%) allows publication. CSAM uses PhotoDNA hash matching — synchronous and pre-publish."
+        tradeoff: "Synchronous pre-publish moderation eliminates harmful content but adds 500ms–2s latency to every upload and requires high availability of the ML service. Async post-publish moderation is faster for users but means harmful content is briefly live. Synchronous is required only for CSAM; async is acceptable for most other categories."
+        caveat: "ML models have demographic bias — nudity classifiers often over-flag non-Western traditional dress and art. Build a bias audit into your review queue: track false positive rates by content category and demographics. Uncorrected bias causes disproportionate harm to specific communities."
+        watch: "User reporting is your most effective moderation signal at scale — your users see far more content than your ML does. Build a report button on every piece of content, route reports to human reviewers, and feed confirmed violations back into ML training data."
       - number: 86
         question: "How do platforms support video streaming?"
         needed: "HLS or DASH adaptive bitrate: transcode to multiple resolutions, serve via CDN"
+        answer: "Transcode uploaded video into multiple quality levels: 360p, 480p, 720p, 1080p, 4K. Generate HLS (HTTP Live Streaming) playlist files (.m3u8) that list the segments for each quality level. The video player (HLS.js, AVPlayer) fetches the master playlist, measures network speed, and selects the appropriate quality level, switching dynamically as bandwidth changes. Serve all segments from CDN."
+        tradeoff: "HLS is Apple's standard, universally supported, but 6–10 second latency due to segment size. DASH (Dynamic Adaptive Streaming over HTTP) is the MPEG standard, more flexible, but requires an MSE-capable browser (no Safari without Media Source Extensions). HLS for broadest compatibility; DASH for lower latency in controlled environments."
+        caveat: "Segment size is the latency/efficiency tradeoff: 10-second segments have lower overhead but 10 seconds of buffering to switch quality. 2-second segments enable faster adaptation but create 5x more HTTP requests. Standard for VoD: 6-second segments. For live: 2-second segments."
+        watch: "Adaptive bitrate logic must avoid quality oscillation — rapidly switching between 720p and 360p every few seconds creates a bad UX. Use a bandwidth smoothing window (exponential moving average over 10 seconds) before making quality switch decisions."
       - number: 87
         question: "How do platforms transcode videos after upload?"
         needed: "transcoding pipeline: upload → queue → workers transcode to 360p/720p/1080p → S3 output"
+        answer: "Upload triggers a TranscodeJob event to Kafka with video S3 key, resolution targets, and output paths. Transcoding workers (GPU-accelerated, e.g., using FFmpeg with NVENC) consume from the queue, download the source video, transcode to each resolution, generate HLS segments and playlist, and upload outputs to S3. On completion, update the video metadata DB record with available resolutions and set status to 'available'."
+        tradeoff: "Managed transcoding (AWS Elastic Transcoder, MediaConvert) costs more per minute (~$0.015/min vs $0.003/min self-managed) but eliminates ops burden. Self-managed FFmpeg on GPU instances is 5x cheaper at scale (>1M minutes/month) but requires significant infrastructure work."
+        caveat: "Don't block the upload response on transcoding completion — transcoding a 1-hour 4K video takes 20+ minutes. Return immediately after upload, poll transcoding status, and use webhooks or WebSockets to notify the user when processing completes."
+        watch: "Prioritize transcoding queue by video age — a video uploaded 10 minutes ago should be transcoded before one uploaded 10 seconds ago, because the new upload's user is still on the platform and waiting. FIFO queuing delays older users indefinitely during spikes."
         related_fundamentals: [messaging/kafka]
       - number: 88
         question: "How do systems deliver low-latency live streaming?"
         needed: "RTMP ingest → HLS chunked (2s segments) → edge CDN; LL-HLS for sub-3s latency"
+        answer: "Broadcaster pushes video via RTMP or WebRTC to an ingest server. The ingest server transcodes in real time to multiple bitrates and creates 2-second HLS segments. Segments are pushed to CDN edge nodes as they're created (push-based, not pull). LL-HLS (Low Latency HLS) uses HTTP/2 push and partial segment serving to reduce glass-to-glass latency below 3 seconds — compared to 6–10s for standard HLS."
+        tradeoff: "RTMP ingest is widely supported by streaming software (OBS, XSplit) but is TCP-based — buffering on packet loss adds latency. WebRTC is lower latency (sub-second) and UDP-based but requires a WHIP/WHEP server and is less universally supported by stream software."
+        caveat: "CDN push-based segment distribution adds coordination complexity — the CDN must be notified of new segments before viewers request them. Alternative: CDN pulls from origin on miss, but this adds one segment duration (~2s) of latency on cold starts at new PoPs."
+        watch: "Live stream latency compounds: RTMP ingest buffer (1–2s) + transcoding (1–2s) + segment creation (2s) + CDN propagation (0.5s) + player buffer (3–5s) = 7–12s total. LL-HLS and WebRTC attack each stage independently to get below 3 seconds."
         related_fundamentals: [networking/cdn]
       - number: 89
         question: "How do systems store large video libraries?"
         needed: "tiered storage: hot (S3 Standard) → warm (S3-IA after 30d) → cold (Glacier after 1yr)"
+        answer: "Use S3 Intelligent-Tiering or explicit lifecycle rules: videos accessed in the last 30 days stay on S3 Standard ($0.023/GB). Videos inactive for 30–365 days move to S3 Standard-IA ($0.0125/GB, 2x cheaper). Videos inactive for 1+ year move to Glacier Instant Retrieval ($0.004/GB, 6x cheaper than Standard). The total video library costs ~$0.004–0.023/GB/month depending on access pattern."
+        tradeoff: "S3 Intelligent-Tiering automatically optimizes costs with no retrieval fees and no performance difference for Standard vs. Standard-IA. Manual lifecycle rules are simpler to reason about but require tuning the transition thresholds. For video platforms with highly skewed access (new videos get 95% of views), manual rules work well."
+        caveat: "Glacier retrieval has a minimum storage duration of 90 days and retrieval latency of milliseconds to hours depending on retrieval class. Don't put videos in Glacier if users might want to rewatch them — use Glacier only for archival content you're legally required to retain but don't expect users to access."
+        watch: "Video encoding formats become obsolete — H.264 content encoded 5 years ago may need re-encoding to HEVC or AV1 for newer devices. Plan for periodic re-transcoding of your archive. Store original source files in Glacier — you'll need them for future re-transcodes."
       - number: 90
         question: "How do platforms handle viral traffic spikes?"
         needed: "CDN absorbs 95%+ of reads; origin protected by CDN shield; auto-scale origin for cache misses"
+        answer: "CDN absorbs 95%+ of read traffic for viral content — a viral video viewed 10M times costs 10M CDN hits, not 10M origin hits. Enable CDN Shield (CloudFront Origin Shield): a single regional origin shield node aggregates all CDN PoP cache misses into a single request to the origin, reducing origin load from thousands of cache misses to a handful. Auto-scale origin servers for the remaining cache-miss traffic."
+        tradeoff: "Content that changes frequently (live view counts, comments count) can't be cached long-term. Use separate API endpoints for dynamic data (fetched client-side from origin) and static media (cached aggressively at CDN). Never render dynamic data server-side into the cached HTML."
+        caveat: "CDN cache warmup is not instantaneous — a video that goes viral in seconds will have cold caches at all PoPs simultaneously. The first request from each PoP is a cache miss that hits origin. For 400 CloudFront PoPs × 1 cache miss each = 400 origin requests in the first few seconds. Auto-scale to handle this."
+        watch: "The thundering herd at viral moment: if 100K users click a link simultaneously and 400 CDN PoPs each have a cache miss at the same millisecond, origin gets 400 concurrent requests. CloudFront Origin Shield reduces this to 25 shield nodes × 1 miss each = 25 origin requests."
         related_fundamentals: [networking/cdn/cloudfront]
       - number: 91
         question: "How do systems generate thumbnails for videos?"
         needed: "extract frame at 10% mark post-transcode, resize to standard sizes, store alongside video"
+        answer: "After transcoding, trigger a thumbnail generation job: use FFmpeg to extract frames at 10%, 50%, and 90% of the video duration. Resize each to multiple standard sizes (640x360, 320x180, 160x90). Convert to WebP at quality 80. Pick the best frame using a visual quality heuristic (avoid black frames, blurry frames). Upload all thumbnail variants to S3. Also generate a 3-second animated preview (WebP or MP4 low quality) for hover preview."
+        tradeoff: "YouTube-style multi-thumbnail selection (show 3 options for the creator to choose) requires generating 3+ frames and storing them all — more storage cost but higher-quality thumbnails since creators pick the best one. Auto-selection is simpler but often picks a sub-optimal frame."
+        caveat: "The 10% rule (use frame at 10% into the video) often hits intro cards or loading screens on professional content. Implement a 'non-blank frame' detector: skip frames that are all-black or close to all-white and use the first qualifying frame instead."
+        watch: "Animated thumbnail previews (the GIF-like preview on hover) dramatically improve click-through rates but are expensive: a 5-frame animated preview at 2fps covers 2.5 seconds and weighs ~100–200KB. Generate them only for videos above a view threshold (e.g., 1K views) to avoid wasted compute."
       - number: 92
         question: "How do systems track video view counts accurately?"
         needed: "Redis HyperLogLog for unique viewers + counter for total views; async flush to DB"
+        answer: "Two separate counters: total views (simple Redis INCR — every play event increments) and unique viewers (Redis HyperLogLog — PFADD with user_id, PFCOUNT gives cardinality estimate with 0.81% standard error). HyperLogLog uses only 12KB of memory regardless of cardinality — tracking unique viewers for 100M videos would take only 12KB × 100M = 1.2TB, vs. tens of TB for exact sets. Flush to DB every 60 seconds."
+        tradeoff: "Exact unique viewer count (using a Redis SET per video) requires O(N) memory proportional to viewers — at 100M unique viewers per viral video, that's hundreds of MB per video. HyperLogLog gives 99.19% accuracy in 12KB. For display purposes, that accuracy is more than sufficient."
+        caveat: "A view from an unauthenticated user (no user_id) can't be deduplicated by user_id. Use session_id or device fingerprint as a fallback identifier. Anonymous views are harder to deduplicate — add a 30-minute cooldown per (anonymous_id, video_id) instead."
+        watch: "Count a 'view' only after 30 seconds of playback (YouTube's threshold) or 3 seconds (TikTok's threshold) — not on play button click. This prevents view inflation from accidental plays, page preloading, and short autoplay interactions."
         related_fundamentals: [storage/redis]
       - number: 93
         question: "How do systems prevent view count fraud?"
         needed: "deduplicate views per (user, video) within 24h window; rate limit anonymous view events"
+        answer: "Deduplication: a user can increment the view count once per video per 24-hour window. Store this in Redis: SET viewed:user:1234:video:5678 1 EX 86400 (NX flag). If the key already exists, don't increment. Rate limit anonymous viewers by IP: max 5 unique video views per minute per IP. ML model detects bot patterns: perfect click timing, views without seeking behavior, sequential video ID access."
+        tradeoff: "24-hour dedup is coarse — a legitimate user who watches a video three times genuinely should count 3 times on YouTube. 24h dedup prevents the most common fraud (refresh-loop views) while still counting legitimate repeat views over days."
+        caveat: "View farms use rotating residential IPs and real mobile devices — IP and device rate limiting alone doesn't catch them. Behavioral signals (watch time distribution, no seek/pause events, identical device fingerprints across accounts) are better fraud indicators."
+        watch: "Coordinated view fraud is detectable by temporal patterns: 10K views in 5 minutes on a newly uploaded video with no external referrers, all from the same country, with identical user-agents. Build anomaly detection on these cluster signals, not individual request signals."
         related_problems: [rate-limiter]
         related_fundamentals: [storage/redis]
       - number: 94
         question: "How do platforms recommend videos to users?"
         needed: "two-stage: candidate generation (collaborative filtering, embedding similarity) → ranking model"
+        answer: "Two-stage pipeline: candidate generation retrieves ~500 candidates from billions of videos in <100ms using approximate nearest neighbor (ANN) search over video embeddings. Embeddings are computed from video content (audio + visual features via CNN) plus metadata. The ranking model then scores all 500 candidates using user personalization signals (watch history, likes, dwell time) and context (current time, device) to produce the final ordered list of 20–50 results."
+        tradeoff: "Collaborative filtering (users who watched X also watched Y) is powerful but has cold-start problem for new videos and users. Content-based filtering (recommend videos similar to what you've watched) works for cold-start but misses serendipitous discovery. Hybrid approaches outperform either alone."
+        caveat: "Recommendation systems optimize for clicks and watch time, which can lead to filter bubbles and radicalization via engagement optimization. Build diversity constraints into the ranking model: limit consecutive videos from the same creator or topic cluster."
+        watch: "YouTube's research showed that users who watch recommended videos to completion provide a stronger training signal than users who click then skip. Optimize for completion rate and positive interactions (likes, shares), not raw click-through rate — this produces better long-term recommendations."
       - number: 95
         question: "How do systems support comments at scale?"
         needed: "sharded comment table by post_id; cursor-based pagination; Redis for hot post comment counts"
+        answer: "Shard the comments table by post_id — all comments for a post land on the same shard, enabling efficient range queries without cross-shard joins. Use cursor-based pagination: the client sends the last seen comment_id, the server queries WHERE comment_id < cursor AND post_id = X ORDER BY comment_id DESC LIMIT 50. Cache comment count per post in Redis (INCR on insert, DECR on delete) to avoid COUNT(*) queries."
+        tradeoff: "Nested comments (Reddit-style threads) require storing parent_comment_id and an adjacency list or materialized path. This adds complexity — a simple flat comment list (top-level only, Instagram style) is far easier to implement and scale. Add threading only if your UX requires it."
+        caveat: "Sharding by post_id creates hot shards for viral posts — a post with 1M comments per hour hits one shard. Use a hash of post_id to distribute to one of N comment shards rather than a direct modulo — or use a dedicated comments DB for hot posts identified by a monitor."
+        watch: "Sorting comments by 'top' (likes minus dislikes) requires re-sorting on every new vote — expensive at scale. Pre-compute top comments periodically (every 60 seconds for active posts, every hour for older posts) and cache the sorted list in Redis."
         related_fundamentals: [storage/redis, storage/sharding]
       - number: 96
         question: "How do platforms moderate comments?"
         needed: "async ML classifier post-insert; keyword blocklist for real-time; human review queue"
+        answer: "Three-tier approach: real-time keyword blocklist (500–1000 exact-match toxic terms) checked synchronously before insert — rejects or soft-blocks instantly in <1ms. Post-insert ML classifier (transformer model for context-aware toxicity detection) runs asynchronously within 500ms. Borderline scores (40–80% confidence) route to a human review queue. Community reporting (flag button) supplements ML — high-report-rate comments are auto-collapsed pending review."
+        tradeoff: "Synchronous ML classification before insert adds 200–500ms to every comment submission. For user-generated content at scale (thousands of comments per second), this is too slow. Post-insert async classification is standard — the comment is briefly visible, then removed or flagged."
+        caveat: "Keyword blocklists have high false positive rates — the word 'kill it' in a sports context is perfectly fine but flags a violent keyword list. Context-aware ML reduces false positives dramatically compared to keyword matching alone."
+        watch: "Creator tools for comment management (pinning, blocking specific users, keyword filters per channel) reduce moderation load significantly. Offload 60–70% of community management to content creators with tooling — they know their audience context better than ML does."
       - number: 97
         question: "How do systems show trending videos?"
         needed: "sliding window view count in Redis sorted set, re-scored every 5 min, top-K exposed via API"
+        answer: "Maintain a Redis sorted set where each video is a member and the score is a time-decayed view count: score = views_in_last_1h × decay_factor, where decay_factor decreases with age. Every 5 minutes, a job: 1) increments scores from new view events, 2) applies decay to all scores (multiply by 0.95 or subtract a fixed amount), 3) ZREMRANGEBYSCORE removes videos below threshold. The API serves the top-K (ZREVRANGE 0 49) in sub-ms."
+        tradeoff: "Real-time trending (update score on every view event) is more accurate but Redis ZADD for every view event at 100K views/second is expensive. Batch trending (aggregate views in Redis counters, flush to sorted set every 5 minutes) reduces Redis ops significantly at the cost of 5-minute freshness lag."
+        caveat: "Pure view count trending favors established channels — a new creator's video that gets 10K views in an hour (huge for them) is buried behind established creators with millions of views. Weight by relative growth rate (current views / historical average views) to surface breakout content."
+        watch: "Trending must be filtered per region, language, and category — a Hindi-language video trending globally isn't relevant to English-speaking users. Maintain separate sorted sets per (region, language, category) combination. This multiplies Redis memory usage — use approximation (Bloom filter pre-filter + top-K sorted set) for long-tail combinations."
         related_fundamentals: [storage/redis]
       - number: 98
         question: "How do systems handle live streaming ingestion?"
         needed: "RTMP/WebRTC ingest servers, transcode to HLS in real time, publish to CDN edge"
+        answer: "Ingest servers receive RTMP streams from broadcasters. Each ingest server runs FFmpeg for real-time transcoding to multiple quality levels (1080p, 720p, 480p, 360p) simultaneously. As segments are generated (every 2 seconds), they're uploaded to S3 and pushed to CDN edge locations. The .m3u8 playlist is updated to include new segments. Viewers fetch the live playlist every 2 seconds to discover new segments."
+        tradeoff: "RTMP is TCP-based and stable on wired connections but adds latency on packet loss (TCP retransmission). SRT (Secure Reliable Transport) is a modern alternative that works better over lossy networks (mobile streaming). RTMP remains the most widely supported by streaming software."
+        caveat: "Ingest server capacity is hard to predict — a popular creator going live can attract thousands of viewers in seconds. Ingest servers need to transcode in real time regardless of viewer count (transcoding is on the ingest side, not per-viewer). Over-provision ingest servers — they're cheaper than dropping a live stream."
+        watch: "Live stream interruption (broadcaster loses connection) should show a 'stream interrupted, trying to reconnect' state to viewers rather than ending the stream. Buffer the last 30 seconds of segments; if the broadcaster reconnects within 60 seconds, resume seamlessly."
         related_fundamentals: [networking/cdn]
       - number: 99
         question: "How do systems record live streams for replay?"
         needed: "concatenate HLS segments into full video on stream end, store in S3, trigger transcode job"
+        answer: "During live streaming, all HLS segments are already stored in S3. On stream end (stream end signal or timeout after 60 seconds of no new segments), trigger a post-processing job: concatenate all segments into a single MP4 file using FFmpeg, generate a thumbnail from the first few minutes, update the video metadata record from 'live' status to 'vod' status with the VOD URL."
+        tradeoff: "Storing segments as-is (without concatenation) works for replay but creates thousands of HTTP requests for a 2-hour stream (3600 segments). Concatenation into a single MP4 enables seeking and better CDN caching. Concatenation takes 5–15 minutes of compute for a 2-hour stream."
+        caveat: "Some streamers want clips to be available immediately during the live stream (Twitch Clips). This requires a separate clip extraction service that can seek into the current live segment buffer and extract 60-second clips without waiting for stream end."
+        watch: "Live-to-VOD conversion timing is a UX decision: Twitch makes VOD available immediately after stream ends; YouTube Live takes 1–2 hours for processing. Immediate availability (segment concatenation only) is faster but produces lower quality than re-transcoding from source."
       - number: 100
         question: "How do systems store and query video metadata efficiently?"
         needed: "indexed relational table (PostgreSQL) for structured queries; Elasticsearch for full-text search"
+        answer: "Use PostgreSQL for structured video metadata: video_id, user_id, title, description, upload_at, duration, status, privacy_setting, view_count, like_count. Index by (user_id, upload_at) for 'my videos' queries and by status for moderation queues. Sync to Elasticsearch (via Debezium CDC) for full-text search on title and description. Cache hot metadata (trending videos' title, thumbnail URL) in Redis."
+        tradeoff: "MongoDB (document store) is sometimes used for video metadata because the schema is flexible — videos can have arbitrary tag structures, subtitles, chapters. PostgreSQL with JSONB column for flexible fields gives you the same flexibility with better query performance and transaction safety."
+        caveat: "Don't store view_count as a column in the videos table and UPDATE it on every view — at 100K views/second on a viral video, this is 100K UPDATE statements/second on a single row, causing lock contention. Store view count separately in Redis and sync to PostgreSQL in batches."
+        watch: "PostgreSQL can handle 100M video records comfortably with proper indexing (partial indexes on status, GIN index on tags). At 1B+ records, partition the table by upload_at (monthly partitions) to keep each partition under 100M rows for maintainable index sizes."
 
   - slug: search
     title: "Search & Recommendations"
