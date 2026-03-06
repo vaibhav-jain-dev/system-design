@@ -9,12 +9,12 @@
   <li>Mobile-first: battery and bandwidth constraints matter more than in a desktop app</li>
 </ul>`}}
 
-{{hint "why WhatsApp over Slack?" "WhatsApp is a harder design for three reasons:
+{{hint "why WhatsApp over Slack?" `WhatsApp is a harder design for three reasons:
 <ul>
   <li><strong>E2E encryption</strong> — server never sees plaintext; Slack stores everything server-side for search</li>
   <li><strong>Scale</strong> — <span class='hl'>2B users</span> vs Slack's 30M, <span class='hl'>100B msgs/day</span> vs 1B</li>
   <li><strong>Push model</strong> — WhatsApp pushes every message to all devices; Slack loads messages when you open a channel</li>
-</ul>"}}
+</ul>`}}
 
 {{table "Functional Requirements" (rows
   (row "Requirement" "Description" "Priority" "Drives")
@@ -28,12 +28,12 @@
   (row "Presence" "Online/offline/last-seen indicators" "P2" "Redis, heartbeat, privacy settings")
 )}}
 
-{{hint "why limit groups to 256?" "<span class='hl'>256</span> is WhatsApp's real limit — it bounds fan-out cost:
+{{hint "why limit groups to 256?" `<span class='hl'>256</span> is WhatsApp's real limit — it bounds fan-out cost:
 <ul>
   <li><strong>256 writes per message</strong> is manageable with fan-out-on-write</li>
   <li>Slack channels can have 10K+ members but use a <strong>pull model</strong> — client fetches on open</li>
   <li>Push at <span class='hl-red'>10K members per message</span> = 10K WebSocket writes — that changes the architecture entirely</li>
-</ul>"}}
+</ul>`}}
 
 {{diagram "cs-requirements"}}
 
@@ -136,12 +136,12 @@ type Receipt struct {
 
 {{diagram "cs-architecture"}}
 
-{{hint "why NLB not ALB?" "<span class='hl-blue'>NLB</span> operates at Layer 4 and passes TCP through directly — no idle timeout issues for long-lived connections:
+{{hint "why NLB not ALB?" `<span class='hl-blue'>NLB</span> operates at Layer 4 and passes TCP through directly — no idle timeout issues for long-lived connections:
 <ul>
   <li><span class='hl-red'>ALB has a 4000-second idle timeout</span> — after which it silently drops the WebSocket connection</li>
   <li>NLB supports millions of concurrent connections with no timeout</li>
   <li>For persistent connections, NLB is the only viable option</li>
-</ul>"}}
+</ul>`}}
 
 {{think "The critical insight is separating connection management from message routing. WebSocket servers handle connections; Chat Service handles routing logic."
   (whyNot "monolithic server that handles both" "If the routing logic crashes (bug in group fan-out), it takes down all WebSocket connections on that server. Separating them means a Chat Service crash doesn't drop any connections — the WebSocket server just routes to a healthy Chat Service instance.")
@@ -227,13 +227,13 @@ func (s *ChatService) DeliverMessage(ctx context.Context, msg *Message) {
 
 {{diagram "cs-data-model"}}
 
-{{hint "why DynamoDB over Cassandra?" "Both handle write-heavy workloads at scale. DynamoDB wins here because:
+{{hint "why DynamoDB over Cassandra?" `Both handle write-heavy workloads at scale. DynamoDB wins here because:
 <ul>
   <li><strong>Managed</strong> — no operational overhead for <span class='hl'>20B writes/day</span></li>
   <li><strong>On-demand capacity</strong> — auto-scales without pre-provisioning</li>
   <li><strong>DynamoDB Streams</strong> — feeds into Lambda for async processing</li>
   <li><span class='hl-red'>Cassandra requires a dedicated ops team</span> at this scale</li>
-</ul>"}}
+</ul>`}}
 
 {{table "DynamoDB Access Patterns" (rows
   (row "Access Pattern" "Partition Key" "Sort Key / Index" "Query")
@@ -286,11 +286,11 @@ response = dynamodb.query(
 
 {{diagram "cs-group-chat"}}
 
-{{hint "why fan-out-on-write and not fan-out-on-read?" "<strong>Fan-out-on-read</strong> means each member queries for new messages when they open the group — 256 DynamoDB queries per viewer. <strong>Fan-out-on-write</strong> does 256 WebSocket pushes once — much cheaper overall.
+{{hint "why fan-out-on-write and not fan-out-on-read?" `<strong>Fan-out-on-read</strong> means each member queries for new messages when they open the group — 256 DynamoDB queries per viewer. <strong>Fan-out-on-write</strong> does 256 WebSocket pushes once — much cheaper overall.
 <ul>
   <li>The <span class='hl'>256-member cap</span> is the key constraint that makes fan-out-on-write viable</li>
   <li>If groups could have <span class='hl-red'>100K members</span> (like Slack channels), fan-out-on-write would be too expensive → switch to fan-out-on-read</li>
-</ul>"}}
+</ul>`}}
 
 {{think "Group message delivery must handle partial failures gracefully."
   (whatIf "delivery fails for 3 out of 256 members" "Those 3 members get queued in the offline queue. The other 253 already received the message. We do NOT retry the entire fan-out — each member's delivery is independent. The offline queue picks up the 3 failures, and those members get the message when they reconnect.")
