@@ -2,7 +2,13 @@
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
-{{say "I want to design a food delivery platform like Swiggy or Zomato. scope: we need order placement, delivery partner matching, real-time tracking, ETA estimation, and surge pricing. Out of scope: restaurant onboarding, menu management, payments internals. Scale: India-level, top 50 cities, tens of millions of daily orders. Does that align with your intent?"}}
+{{say `Designing a food delivery platform like Swiggy or Zomato:
+<ul>
+  <li><strong>In scope:</strong> order placement, delivery partner matching, real-time tracking, ETA estimation, surge pricing</li>
+  <li><strong>Out of scope:</strong> restaurant onboarding, menu management, payments internals</li>
+  <li><strong>Scale:</strong> India-level, top <span class="hl">50 cities</span>, tens of millions of daily orders</li>
+</ul>
+Does that align with your intent?`}}
 
 {{diagram "fd-requirements"}}
 
@@ -11,7 +17,12 @@
   (whatIf "we skip geospatial indexing and just query all online partners" "At 50K concurrent partners per city, a full table scan is 50K rows per order. At 10K orders/min that's 500M row evaluations/min — PostgreSQL falls over instantly.")
 }}
 
-{{hint "functional vs non-functional split" "Spend 90 seconds here. Functional: place order, track partner, cancel order. Non-functional: matching latency < 2s, tracking freshness < 5s, ETA accuracy ± 3 min. These drive all architectural decisions later."}}
+{{hint "functional vs non-functional split" "Spend <strong>90 seconds</strong> here:
+<ul>
+  <li><strong>Functional:</strong> place order, track partner, cancel order</li>
+  <li><strong>Non-functional:</strong> matching latency <span class='hl'>&lt; 2s</span>, tracking freshness <span class='hl'>&lt; 5s</span>, ETA accuracy <span class='hl'>± 3 min</span></li>
+</ul>
+These three non-functional targets drive every architectural decision that follows."}}
 
 {{table "Requirements Summary" (rows
   (row "Requirement" "Target")
@@ -34,7 +45,12 @@
 
 {{phase 2 "Capacity Estimation" "3 min"}}
 
-{{say "Let me size the system. India: 10M daily orders, peak at 1pm and 8pm, roughly 3x average. Average order is 200KB of data. Location updates arrive every 4 seconds from each active delivery partner."}}
+{{say `Sizing the system — India, <span class="hl">10M daily orders</span>, peak at 1pm and 8pm (roughly <span class="hl">3× average</span>):
+<ul>
+  <li>Location updates arrive every <strong>4 seconds</strong> from each active delivery partner — the dominant write load</li>
+  <li>Average order record: ~200KB of data including items, addresses, and status history</li>
+  <li>Design for <span class="hl">5× sustained peak</span> — weekends and festivals spike well beyond 3×</li>
+</ul>`}}
 
 {{think "Always calculate the write load from driver location updates first — it's the dominant traffic source and the biggest scaling surprise for interviewers."
   (whyNot "designing for average load" "2x peak headroom is not enough. Food delivery has 4–5x spikes on weekends and festivals. Design for 5x sustained peak.")
@@ -52,11 +68,21 @@
   (row "Order storage/day" "~20 GB" "10M × 2 KB")
 )}}
 
-{{hint "location update math" "125K writes/sec is the single biggest design driver. This is why Redis (not Postgres) handles live partner locations. Cassandra handles the append-only location history."}}
+{{hint "location update math" "<span class='hl'>125K writes/sec</span> is the single biggest design driver:
+<ul>
+  <li><strong>Redis</strong> (not PostgreSQL) handles live partner locations — sub-ms geospatial writes</li>
+  <li><strong>Cassandra</strong> handles append-only location history — LSM-tree absorbs the write rate without MVCC overhead</li>
+</ul>"}}
+
 
 {{phase 3 "API Design" "5 min"}}
 
-{{say "I'll define three API groups: customer-facing order APIs, delivery partner APIs, and internal matching/tracking APIs. All customer APIs are REST over HTTPS. Partner location updates use WebSocket for bidirectional push."}}
+{{say `Three API groups:
+<ul>
+  <li><strong>Customer APIs</strong> — REST over HTTPS: place order, get status, cancel, tracking stream (SSE)</li>
+  <li><strong>Delivery partner APIs</strong> — WebSocket for bidirectional push: location updates, assignment acceptance, status changes</li>
+  <li><strong>Internal APIs</strong> — service-to-service gRPC: partner matching, geospatial query, ETA calculation, surge pricing</li>
+</ul>`}}
 
 {{diagram "fd-api-design"}}
 
@@ -95,7 +121,12 @@ POST   /internal/pricing/surge             # Get surge multiplier`}}
 
 {{phase 4 "Order Lifecycle" "8 min"}}
 
-{{say "The order has six states. Each transition is an event on Kafka. The state machine is owned by the order service, and all transitions are idempotent writes to PostgreSQL inside a transaction."}}
+{{say `Six order states — each transition is a <strong>Kafka event</strong> + an idempotent write to PostgreSQL:
+<ul>
+  <li><strong>PLACED → ACCEPTED</strong> (partner found) or <strong>CANCELLED</strong> (no partner in 10 min)</li>
+  <li><strong>ACCEPTED → PREPARING → READY → PICKED_UP → DELIVERED</strong> — the happy path</li>
+  <li>State machine owned by the order service; <span class="hl-blue">Kafka consumers are idempotent</span> — replaying a transition on an already-transitioned order is a no-op</li>
+</ul>`}}
 
 {{diagram "fd-order-lifecycle"}}
 
@@ -177,7 +208,15 @@ class OrderSagaOrchestrator:
 
 {{phase 5 "System Architecture" "8 min"}}
 
-{{say "The system has five core services: Order Service, Matching Service, Location Service, ETA Service, and Notification Service. Kafka is the event backbone. Redis handles geospatial state. PostgreSQL owns transactional order data."}}
+{{say `Five core services:
+<ul>
+  <li><strong>Order Service</strong> — owns the state machine, ACID writes to PostgreSQL</li>
+  <li><strong>Matching Service</strong> — greedy GEORADIUS + constraint filter, runs at <span class="hl">~350/sec</span></li>
+  <li><strong>Location Service</strong> — ingests <span class="hl">125K GPS pings/sec</span>, writes to Redis + Cassandra + Kafka</li>
+  <li><strong>ETA Service</strong> — stateless compute: Haversine + tortuosity + traffic multiplier</li>
+  <li><strong>Notification Service</strong> — Kafka consumer, fans out to APNs/FCM/SSE streams</li>
+</ul>
+<strong>Kafka</strong> is the event backbone. <strong>Redis</strong> handles geospatial state. <strong>PostgreSQL</strong> owns transactional order data.`}}
 
 {{diagram "fd-architecture"}}
 
@@ -186,9 +225,15 @@ class OrderSagaOrchestrator:
   (whatIf "Kafka goes down" "Order service writes to PostgreSQL synchronously. Notification service polls the order table via change data capture (Debezium) as a fallback. We accept delayed notifications rather than blocking order writes.")
 }}
 
-{{hint "why Kafka not SQS" "Kafka provides ordered partitioned streams keyed on order_id. We can replay from offset for exactly-once processing. SQS provides at-least-once with no ordering guarantees — acceptable for notifications, not for state machine transitions."}}
+{{hint "why Kafka not SQS" "<span class='hl-blue'>Kafka</span> provides ordered partitioned streams keyed on order_id — we can replay from offset for exactly-once processing. <span class='hl-red'>SQS provides at-least-once with no ordering guarantees</span> — acceptable for notifications, but state machine transitions must be ordered."}}
 
-{{hint "data store choices" "PostgreSQL for orders (ACID, relational joins for reporting). Redis for live driver locations (geospatial, TTL, sub-ms read). Cassandra for location history (append-only, time-series, no joins). Elasticsearch for restaurant search by name/cuisine/distance."}}
+{{hint "data store choices" "Each store is chosen for its access pattern:
+<ul>
+  <li><strong>PostgreSQL</strong> — orders: ACID, relational joins for reporting</li>
+  <li><strong>Redis</strong> — live driver locations: geospatial GEORADIUS, TTL auto-expiry, sub-ms reads</li>
+  <li><strong>Cassandra</strong> — location history: append-only, time-series, no joins needed</li>
+  <li><strong>Elasticsearch</strong> — restaurant search: full-text by name/cuisine/distance</li>
+</ul>"}}
 
 {{triggerQs "Architecture questions"
   "How do services discover each other?"
@@ -199,7 +244,12 @@ class OrderSagaOrchestrator:
 
 {{phase 6 "Partner Matching Algorithm" "10 min"}}
 
-{{say "This is the most technically interesting part. When an order is placed, we have roughly 2 seconds to find and assign a delivery partner before the customer perceives a delay. The algorithm is greedy with constraint filtering, not exhaustive search."}}
+{{say `Partner matching is the most technically interesting part:
+<ul>
+  <li><span class="hl">2 seconds</span> to find and assign a delivery partner before the customer perceives a delay</li>
+  <li>Algorithm is <strong>greedy with constraint filtering</strong> — not exhaustive search (Dijkstra would take <span class="hl-red">100–500ms per partner evaluation</span>)</li>
+  <li>Three steps: geospatial query → hard constraint filter → weighted score → optimistic-lock assignment</li>
+</ul>`}}
 
 {{diagram "fd-partner-matching"}}
 
@@ -277,7 +327,11 @@ def score(partner: Partner, distance_km: float) -> float:
 
 {{phase 7 "Real-Time Location Tracking" "8 min"}}
 
-{{say "Location tracking has two concerns: ingesting 125K partner GPS pings per second and serving the customer tracking stream with sub-5-second staleness. These are separate read and write paths."}}
+{{say `Location tracking has two separate paths:
+<ul>
+  <li><strong>Write path:</strong> ingest <span class="hl">125K GPS pings/sec</span> from partner apps → Redis (geospatial index) + Cassandra (history) + Kafka (fan-out)</li>
+  <li><strong>Read path:</strong> serve customer tracking SSE stream with <span class="hl">&lt; 5 second</span> staleness — Kafka consumer per active order</li>
+</ul>`}}
 
 {{diagram "fd-real-time-tracking"}}
 
@@ -331,7 +385,13 @@ def stream_order_tracking(order_id: str) -> Generator:
 
 {{phase 8 "ETA & Surge Pricing" "8 min"}}
 
-{{say "ETA is a three-component sum: restaurant prep time remaining, partner travel to restaurant, and restaurant to customer travel. Each component uses different data sources. Surge pricing is a demand-supply ratio calculation over a rolling 5-minute window."}}
+{{say `ETA is a <strong>three-component sum</strong>:
+<ul>
+  <li><strong>Restaurant prep remaining</strong> — historical median for this cuisine, adjusted for elapsed time</li>
+  <li><strong>Partner → restaurant travel</strong> — Haversine × <span class="hl">1.3× tortuosity</span> × traffic multiplier</li>
+  <li><strong>Restaurant → customer travel</strong> — same formula + 10% buffer for pickup/handoff delays</li>
+</ul>
+Surge pricing is a demand/supply ratio over a <strong>5-minute rolling window</strong> per city zone.`}}
 
 {{diagram "fd-eta-prediction"}}
 
@@ -422,7 +482,12 @@ def stream_order_tracking(order_id: str) -> Generator:
 
 {{phase 9 "Data Model" "8 min"}}
 
-{{say "Three storage systems: PostgreSQL for order records and partner profiles (transactional, ACID). Redis for live partner locations and surge data (ephemeral, sub-ms access). Cassandra for location history and order event log (append-only, time-series)."}}
+{{say `Three storage systems, each chosen for its access pattern:
+<ul>
+  <li><strong>PostgreSQL</strong> — order records and partner profiles; transactional, ACID; source of truth for state machine</li>
+  <li><strong>Redis</strong> — live partner locations and surge data; ephemeral, sub-ms geospatial reads/writes</li>
+  <li><strong>Cassandra</strong> — location history and order event log; append-only time-series; absorbs <span class="hl">125K writes/sec</span> without MVCC overhead</li>
+</ul>`}}
 
 {{diagram "fd-data-model"}}
 
@@ -493,7 +558,12 @@ CREATE TABLE order_events (
 
 {{phase 10 "Batch Delivery & Failure Handling" "5 min"}}
 
-{{say "Batch delivery lets one partner carry 2-3 orders from nearby restaurants to nearby customers, improving partner utilization and reducing delivery cost. The critical constraint: max 2km between restaurant pickups, max 2km spread between customer dropoffs."}}
+{{say `Batch delivery — one partner carries 2–3 orders, improving utilization and reducing cost:
+<ul>
+  <li><strong>Pickup constraint:</strong> max <span class="hl">2km</span> between restaurant pickups</li>
+  <li><strong>Dropoff constraint:</strong> max <span class="hl">2km</span> spread between customer dropoffs</li>
+  <li><strong>ETA cap:</strong> max <span class="hl">10-minute</span> ETA inflation per order — if the second order adds more than 10 min to the first, don't batch</li>
+</ul>`}}
 
 {{diagram "fd-batch-delivery"}}
 
@@ -546,7 +616,12 @@ CREATE TABLE order_events (
 
 {{phase 11 "Scaling & Cost Estimates" "5 min"}}
 
-{{say "Scaling is about three independent bottlenecks: location write throughput, matching query throughput, and order read throughput. Each scales differently."}}
+{{say `Three independent scaling bottlenecks — each scales differently:
+<ul>
+  <li><strong>Location writes:</strong> <span class="hl">125K/sec</span> → Redis Cluster (6 shards by city)</li>
+  <li><strong>Matching queries:</strong> <span class="hl">350/sec</span> → stateless pods, horizontal scale</li>
+  <li><strong>Order reads:</strong> <span class="hl">350 writes/sec</span> → PostgreSQL primary + read replicas</li>
+</ul>`}}
 
 {{diagram "fd-scaling"}}
 

@@ -2,7 +2,13 @@
 
 {{phase 1 "Requirements" "4 min"}}
 
-{{say "I want to design a ticket booking system like BookMyShow. Core scope: users browse movies and events, select seats, reserve them during checkout, complete payment, and receive QR tickets. Hard constraint: zero double-booking — 100K users competing for 500 seats must have at most 500 successful bookings. Out of scope: content metadata ingestion, recommendation engine, venue management. Does that align?"}}
+{{say `Designing a ticket booking system like BookMyShow:
+<ul>
+  <li><strong>In scope:</strong> browse movies/events, select seats, reserve during checkout, complete payment, receive QR tickets</li>
+  <li><strong>Hard constraint:</strong> zero double-booking — <span class="hl">100K users competing for 500 seats</span> must have at most 500 successful bookings</li>
+  <li><strong>Out of scope:</strong> content metadata ingestion, recommendation engine, venue management</li>
+</ul>
+Does that align?`}}
 
 {{diagram "tb-requirements"}}
 
@@ -35,7 +41,13 @@
 
 {{phase 2 "APIs" "4 min"}}
 
-{{say "Three API groups: discovery (read-heavy, cached), booking (write-critical, strongly consistent), and ticket retrieval (read-only). Booking APIs are the most sensitive — they interact with seat locks and payment state."}}
+{{say `Three API groups:
+<ul>
+  <li><strong>Discovery</strong> — read-heavy, CDN + Redis cached; show listings, seat maps</li>
+  <li><strong>Booking</strong> — write-critical, strongly consistent; seat lock acquisition and payment confirmation</li>
+  <li><strong>Ticket retrieval</strong> — read-only; QR code download, booking history</li>
+</ul>
+Booking APIs are the most sensitive — they interact with seat locks and payment state.`}}
 
 {{diagram "tb-api-design"}}
 
@@ -76,7 +88,13 @@ POST /v1/payments/webhook                     # Stripe/Razorpay callback
 
 {{phase 3 "Seat Locking" "6 min"}}
 
-{{say "Seat locking uses Redis SET NX EX — set if not exists with expiry. For a seat, the key is lock:show:{show_id}:seat:{seat_id}. The value is the lock_token (UUID). This gives us both the lock and the owner in one key. Checking expiry is free — Redis handles TTL automatically."}}
+{{say `Seat locking uses <span class="hl-blue">Redis SET NX EX</span> — set if not exists with expiry:
+<ul>
+  <li><strong>Key:</strong> <code>lock:show:{show_id}:seat:{seat_id}</code></li>
+  <li><strong>Value:</strong> <code>{lock_token}:{user_id}</code> — lock and owner in one key</li>
+  <li><strong>TTL:</strong> <span class="hl">600 seconds</span> (10-minute payment window) — expiry is automatic, no cleanup needed</li>
+  <li><span class="hl-blue">SET NX</span> is atomic: two concurrent attempts on the same key → one gets 1 (acquired), one gets 0 (rejected); <strong>no race condition possible</strong></li>
+</ul>`}}
 
 {{diagram "tb-seat-locking"}}
 
@@ -147,7 +165,13 @@ def release_lock(show_id: str, seat_ids: list[str], lock_token: str):
 
 {{phase 4 "Architecture" "6 min"}}
 
-{{say "Three tiers: edge (CloudFront for show listings and static assets), API (Show Service, Booking Service, Ticket Service behind ALB), and data (Redis Cluster for seat locks, Postgres primary for bookings, read replicas for browsing). Payment flows through async webhooks, not synchronous calls in the critical path."}}
+{{say `Three tiers:
+<ul>
+  <li><strong>Edge</strong> — CloudFront for show listings and static assets; absorbs <span class="hl">~90%</span> of browse traffic</li>
+  <li><strong>API</strong> — Show Service, Booking Service, Ticket Service behind ALB; Booking Service is the critical path</li>
+  <li><strong>Data</strong> — Redis Cluster for seat locks, PostgreSQL primary for bookings, read replicas for browsing</li>
+</ul>
+Payment flows through <strong>async webhooks</strong> — not synchronous calls in the critical path.`}}
 
 {{diagram "tb-architecture"}}
 
@@ -173,7 +197,13 @@ def release_lock(show_id: str, seat_ids: list[str], lock_token: str):
 
 {{phase 5 "Data Model" "5 min"}}
 
-{{say "The entity hierarchy: theatres → screens → seats (static, set once). Shows are a mapping of screen × movie × time. Bookings reference a show and a list of seat IDs. Payment and ticket are downstream of booking — created after confirmation."}}
+{{say `Entity hierarchy:
+<ul>
+  <li><strong>theatres → screens → seats</strong> — static, set once during venue onboarding</li>
+  <li><strong>shows</strong> — mapping of screen × movie × time; created per screening</li>
+  <li><strong>bookings</strong> — reference a show and a list of seat IDs; state machine: <code>locked → confirmed | expired</code></li>
+  <li><strong>payments, tickets</strong> — created downstream after booking confirmation</li>
+</ul>`}}
 
 {{diagram "tb-data-model"}}
 
@@ -212,7 +242,12 @@ CREATE INDEX idx_bookings_show_active
 
 {{phase 6 "Rush Handling" "5 min"}}
 
-{{say "At 7pm when a blockbuster movie opens for advance booking, 100K users hit 'Book Now' simultaneously for 500 seats. Without flow control, 100K concurrent Redis SETNX attempts overwhelm the booking service. We use a virtual queue to metered admission: only 1K users per second enter the locking phase."}}
+{{say `At 7pm when a blockbuster opens for advance booking, <span class="hl">100K users</span> hit "Book Now" simultaneously for <span class="hl">500 seats</span>:
+<ul>
+  <li>Without flow control: 100K concurrent lock attempts overwhelm the booking service</li>
+  <li>Solution: <strong>virtual queue</strong> — metered admission, only <span class="hl">1K users/sec</span> enter the locking phase</li>
+  <li>Users see their queue position and estimated wait time — reduces abandonment vs silent blocking</li>
+</ul>`}}
 
 {{diagram "tb-rush-handling"}}
 
@@ -251,7 +286,13 @@ def dequeue_batch(show_id: str, batch_size=1000):
 
 {{phase 7 "Payment Flow" "5 min"}}
 
-{{say "Payment is async and webhook-driven. After seat lock, we create a payment intent with the gateway, redirect or embed the payment form. Gateway processes the card. On success, webhook fires. We verify the webhook signature, confirm the booking, delete the seat lock (now redundant — Postgres is source of truth), and generate the QR ticket asynchronously."}}
+{{say `Payment is <strong>async and webhook-driven</strong>:
+<ul>
+  <li>After seat lock: create a payment intent → redirect/embed payment form → gateway processes the card</li>
+  <li>On success: <strong>webhook fires</strong> → verify HMAC signature → confirm booking → release seat lock → generate QR ticket (async)</li>
+  <li>PostgreSQL is the <strong>source of truth</strong> after confirmation — Redis lock becomes redundant</li>
+  <li>If webhook arrives after lock TTL: re-check seat availability in PostgreSQL, auto-refund if double-booked</li>
+</ul>`}}
 
 {{diagram "tb-payment-flow"}}
 
@@ -317,7 +358,13 @@ def handle_payment_webhook(request):
 
 {{phase 8 "Real-Time Seats" "4 min"}}
 
-{{say "Users browsing the seat map for a popular show need to see seats get locked and released in near-real-time. We use Redis Pub/Sub to fan out seat state change events to all WebSocket-connected seat map sessions. Events are fine-grained: {show_id, seat_id, status: locked|available|booked}."}}
+{{say `Real-time seat map uses <strong>Redis Pub/Sub</strong> to fan out seat state changes:
+<ul>
+  <li>Every lock/release publishes to <code>seat:show:{show_id}</code> channel — sub-ms delivery</li>
+  <li>All WebSocket-connected seat map sessions receive the update immediately</li>
+  <li>Fine-grained events: <code>{seat_id, status: "locked"|"available"|"booked", ts}</code></li>
+  <li>On reconnect: fetch fresh seat map state first, then subscribe to channel for deltas</li>
+</ul>`}}
 
 {{diagram "tb-real-time-seats"}}
 
@@ -353,7 +400,12 @@ async def seat_map_ws(websocket, show_id: str):
 
 {{phase 9 "Scaling" "4 min"}}
 
-{{say "Read path scales horizontally: CDN for show listings, read replicas for seat map queries. Write path concentrates on Redis Cluster for locks and Postgres primary for confirms — these are the two bottlenecks. Redis is sharded by show_id so one popular show doesn't starve others."}}
+{{say `Two distinct scaling paths:
+<ul>
+  <li><strong>Read path</strong> — CDN for show listings, Redis cache for seat maps, read replicas for queries; scales horizontally</li>
+  <li><strong>Write path</strong> — Redis Cluster for locks, PostgreSQL primary for confirms; these are the two bottlenecks</li>
+</ul>
+Redis is sharded by <strong>show_id</strong> (hash tags) so one popular show doesn't starve others — and all seat locks for one show stay on one shard for atomic multi-seat operations.`}}
 
 {{diagram "tb-scaling"}}
 
@@ -371,7 +423,12 @@ async def seat_map_ws(websocket, show_id: str):
 
 {{phase 10 "QR Generation" "3 min"}}
 
-{{say "QR codes are generated asynchronously after payment confirmation. The QR token is HMAC-SHA256(booking_id + secret + show_date) — unforgeable without the secret. The QR image is a PNG stored in S3, delivered via CloudFront. Venue scanners verify by calling GET /tickets/validate?token=... — the only endpoint that needs to be online at the venue."}}
+{{say `QR codes generated <strong>asynchronously</strong> after payment confirmation:
+<ul>
+  <li>Token: <span class="hl-blue">HMAC-SHA256</span>(<code>booking_id + secret + show_date</code>) — unforgeable without the secret key</li>
+  <li>QR image: PNG stored in <strong>S3</strong>, delivered via <strong>CloudFront</strong> — static, immutable once generated</li>
+  <li>Venue validation: <code>GET /tickets/validate?token=...</code> — the <strong>only endpoint</strong> that needs to be online at the venue</li>
+</ul>`}}
 
 {{diagram "tb-qr-generation"}}
 
@@ -430,7 +487,14 @@ def validate_ticket(token_prefix: str, booking_id_suffix: str) -> dict:
 
 {{phase 11 "Anti-Scalping" "4 min"}}
 
-{{say "Bot scalpers try to buy all premium seats for resale. Defense is layered: WAF rate limits at edge, CAPTCHA on lock attempts for high-demand shows, device fingerprinting, and business logic limits (6 tickets per user per show). Bot traffic is detected by behavior patterns — sub-second lock attempts across multiple accounts from the same IP cluster."}}
+{{say `Bot scalpers try to buy all premium seats for resale — defense is layered:
+<ul>
+  <li><strong>WAF</strong> — rate limits at edge: <span class="hl">100 requests/min per IP</span> for booking endpoints</li>
+  <li><strong>reCAPTCHA v3</strong> — score &gt; 0.7 required for lock attempts on high-demand shows</li>
+  <li><strong>Device fingerprinting</strong> — max 3 accounts per device for high-demand bookings</li>
+  <li><strong>Business logic</strong> — max <span class="hl">6 tickets</span> per user per show; max 3 lock attempts per session per show</li>
+</ul>
+Bot traffic detected by behavior patterns: <span class="hl-red">sub-second lock attempts across multiple accounts from the same IP cluster</span>.`}}
 
 {{diagram "tb-anti-scalping"}}
 

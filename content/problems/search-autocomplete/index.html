@@ -2,7 +2,13 @@
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
-{{say "I want to clarify scope before diving in. We're building the autocomplete service that powers the search box — returning the top 10 suggestions for each keystroke prefix. We're not building spell correction, semantic search, or query understanding. The core constraint is latency: sub-100ms p99, ideally 50ms on cache hit. Let me confirm scale: are we talking Google-scale, roughly 5 billion queries per day?"}}
+{{say `Clarifying scope:
+<ul>
+  <li>Building the <strong>autocomplete service</strong> that powers the search box — top 10 suggestions per keystroke prefix</li>
+  <li><strong>Not building:</strong> spell correction, semantic search, query understanding</li>
+  <li><strong>Core constraint:</strong> latency — <span class="hl">sub-100ms p99</span>, ideally <span class="hl">50ms</span> on cache hit</li>
+  <li>Confirming scale: Google-scale, roughly <span class="hl">5 billion queries per day</span>?</li>
+</ul>`}}
 
 {{diagram "sa-requirements"}}
 
@@ -23,7 +29,7 @@
   (whatIf "viral query spikes — a celebrity tweet" "The 5-minute hot path update catches queries with >10K hits in a 5-min window and pushes them to Redis directly, bypassing the hourly rebuild.")
 }}
 
-{{hint "fail-fast vs degrade" "Autocomplete is non-critical. If trie service is down, degrade to empty suggestions rather than blocking the search box. Users can still search — they just lose autocomplete."}}}
+{{hint "fail-fast vs degrade" "Autocomplete is non-critical. If trie service is down, degrade to empty suggestions rather than blocking the search box. Users can still search — they just lose autocomplete."}}
 
 {{triggerQs "Requirements Questions"
   "How do you define 'top 10' — top globally or top for this user?"
@@ -36,7 +42,12 @@
 
 {{phase 2 "API Design" "4 min"}}
 
-{{say "The autocomplete API is a read-heavy GET endpoint — cacheability is non-negotiable. Every keystroke fires a request, so we need CDN and reverse-proxy caching on the prefix+language combination. The write side is fire-and-forget: we log the final submitted query asynchronously."}}
+{{say `The autocomplete API is a read-heavy <strong>GET endpoint</strong> — cacheability is non-negotiable:
+<ul>
+  <li>Every keystroke fires a request → <strong>CDN + reverse-proxy caching</strong> on the prefix+language combination is essential</li>
+  <li>Client debounces at <span class="hl">150ms</span> — reduces QPS by ~60% vs firing on every keypress</li>
+  <li>Write side is <strong>fire-and-forget</strong>: final submitted query is logged asynchronously to Kafka</li>
+</ul>`}}
 
 {{diagram "sa-api-design"}}
 
@@ -75,7 +86,12 @@ POST /queries/log
 
 {{phase 3 "Trie Structure" "6 min"}}
 
-{{say "The trie is the core data structure. Every node stores its children and — critically — the top-K suggestions pre-computed at that prefix. This makes lookup O(1): we navigate to the prefix node and return the cached top-10, no traversal needed."}}
+{{say `The trie is the core data structure:
+<ul>
+  <li>Every node stores its children and — critically — the <strong>top-K suggestions pre-computed</strong> at that prefix</li>
+  <li>Lookup is <span class="hl-blue">O(prefix_length)</span> navigation + <strong>O(1) result return</strong> — no subtree traversal needed</li>
+  <li>Storage: <span class="hl">~1.5 GB RAM</span> for the English trie — fits in L3 cache on a memory-optimized instance</li>
+</ul>`}}
 
 {{diagram "sa-trie-structure"}}
 
@@ -149,7 +165,12 @@ class Trie:
 
 {{phase 4 "Architecture" "6 min"}}
 
-{{say "The request path is: client debounces at 150ms, hits CDN which caches top-prefix responses, then the autocomplete service which keeps the trie in memory. We maintain a Redis L1 cache in front of the trie for the top 10K most-queried prefixes. The trie is rebuilt hourly from aggregated query counts."}}
+{{say `Three-layer request path:
+<ul>
+  <li><strong>CDN</strong> (CloudFront) — caches top-prefix GET responses; <span class="hl">~90%</span> of requests never reach origin</li>
+  <li><strong>Redis L1 cache</strong> — top <span class="hl">10K</span> most-queried prefixes, <span class="hl">60s TTL</span>; ~8ms on hit</li>
+  <li><strong>In-memory trie</strong> — <span class="hl">1.5 GB</span> per language, rebuilt hourly from aggregated query counts; ~12ms on lookup</li>
+</ul>`}}
 
 {{diagram "sa-architecture"}}
 
@@ -197,7 +218,12 @@ class AutocompleteHandler:
 
 {{phase 5 "Data Collection" "5 min"}}
 
-{{say "We collect query signals from two sources: submitted queries (the user actually hits search) and displayed autocomplete clicks (the user selected a suggestion). Submitted queries are the stronger signal. We batch-log to Kafka, aggregate hourly, and feed the trie rebuild job."}}
+{{say `Two query signal sources:
+<ul>
+  <li><strong>Submitted queries</strong> — user hits Search; the stronger signal; counts toward trie scores</li>
+  <li><strong>Autocomplete clicks</strong> — user selected a suggestion; secondary signal for ranking calibration</li>
+</ul>
+Batch-log to Kafka → <strong>aggregate hourly</strong> (Flink/Spark) → feed the trie rebuild job. Privacy: uid is daily-salted SHA-256 before logging.`}}
 
 {{diagram "sa-data-collection"}}
 
@@ -245,7 +271,12 @@ def rebuild_trie(hourly_counts, historical_counts):
 
 {{phase 6 "Ranking Algorithm" "5 min"}}
 
-{{say "The ranking score is a weighted blend of three signals: global popularity, recency boost for fresh queries, and personalization. Popularity dominates at 70% to ensure suggestions are broadly useful. Recency gets 20% to surface trending topics. Personalization gets 10% — meaningful but not enough to make suggestions feel filter-bubbled."}}
+{{say `Ranking score is a weighted blend of three signals:
+<ul>
+  <li><span class="hl">70%</span> <strong>global popularity</strong> — log-scaled historical submission count; ensures broadly useful suggestions</li>
+  <li><span class="hl">20%</span> <strong>recency boost</strong> — exponential decay from peak day; surfaces trending topics</li>
+  <li><span class="hl">10%</span> <strong>personalization</strong> — meaningful but capped; prevents filter-bubble effect</li>
+</ul>`}}
 
 {{diagram "sa-ranking-algorithm"}}
 
@@ -294,7 +325,12 @@ def compute_score(
 
 {{phase 7 "Trie Updates" "5 min"}}
 
-{{say "Updating a live trie is dangerous — we can't mutate shared data structures while serving 290K QPS. We use a blue/green deployment pattern: build the new trie in a background process, verify it, then atomically swap the pointer. Traffic sees either the old or new trie, never a partial state."}}
+{{say `Updating a live trie is dangerous — <span class="hl-red">never mutate shared data while serving 290K QPS</span>:
+<ul>
+  <li>Use a <strong>blue/green pattern</strong>: build new trie in a background thread, verify sanity checks, then atomically swap the pointer</li>
+  <li>Traffic sees either old or new trie — <strong>never a partial state</strong></li>
+  <li>Old trie is reference-counted and freed ~5 seconds after swap, once in-flight requests complete</li>
+</ul>`}}
 
 {{diagram "sa-trie-update"}}
 
@@ -340,7 +376,13 @@ class TrieManager:
 
 {{phase 8 "Data Model" "4 min"}}
 
-{{say "We have three data stores: raw query logs in Kafka (7-day retention), aggregated counts in a columnar store like Redshift or BigQuery (permanent, for trend analysis), and user personalization data in Redis. The trie itself lives entirely in service memory — it is not persisted to a DB, it's rebuilt from the aggregated counts on startup."}}
+{{say `Three data stores:
+<ul>
+  <li><strong>Kafka</strong> — raw query logs, <span class="hl">7-day retention</span>, ~5TB/day; feeds aggregation pipeline</li>
+  <li><strong>Redshift / BigQuery</strong> — aggregated counts, 5-year retention; source of truth for trie rebuild</li>
+  <li><strong>Redis</strong> — user personalization history (90-day TTL) + trending queries (60-min TTL)</li>
+</ul>
+The trie lives entirely in <strong>service memory</strong> — rebuilt from aggregated counts on startup. Cold start: <span class="hl">~90 seconds</span> to download + deserialize from S3 snapshot.`}}
 
 {{diagram "sa-data-model"}}
 
@@ -376,7 +418,12 @@ CREATE TABLE query_counts (
 
 {{phase 9 "Personalization" "4 min"}}
 
-{{say "Personalization blends each user's query history into the global top-10. We don't replace global results — we boost them. A query the user typed 5 times recently gets a 0.3 boost multiplier on the global score. This way suggestions stay broadly useful while surface personal favorites."}}
+{{say `Personalization <strong>blends</strong> user query history into the global top-10 — it doesn't replace global results:
+<ul>
+  <li>A query the user typed recently gets a <span class="hl">0.3 boost multiplier</span> on the global score</li>
+  <li>Personal-only queries (not in global top-10) are added with a <span class="hl">0.3 × affinity</span> score cap</li>
+  <li>Blending is <strong>ephemeral</strong> — computed at query time, never stored; prevents filter-bubble feedback loops</li>
+</ul>`}}
 
 {{diagram "sa-personalization"}}
 
@@ -435,7 +482,13 @@ def blend_personal(
 
 {{phase 10 "Scaling" "5 min"}}
 
-{{say "290K peak QPS with <100ms p99 at global scale requires three layers of horizontal scaling: CDN absorbs the top-prefix traffic, stateless autocomplete service scales with standard replica counts, and the Kafka pipeline scales partition-count to handle ingestion. The memory constraint — 1.5GB trie per language — means we can't arbitrarily pack nodes onto small instances."}}
+{{say `<span class="hl">290K peak QPS</span> with <span class="hl">&lt;100ms p99</span> requires three independent scaling axes:
+<ul>
+  <li><strong>CDN</strong> absorbs <span class="hl">~90%</span> of traffic — top 10K prefixes cached at the edge</li>
+  <li><strong>Autocomplete service</strong> — stateless replicas; <span class="hl">50 replicas</span> at 6K QPS each for the remaining 10%</li>
+  <li><strong>Kafka pipeline</strong> — scale partition count for ingestion; 50 partitions handles 57K events/sec average</li>
+</ul>
+Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memory-optimized instances (r6g.2xlarge, 64GB RAM).`}}
 
 {{diagram "sa-scaling"}}
 
@@ -459,7 +512,12 @@ def blend_personal(
 
 {{phase 11 "Failure Modes" "4 min"}}
 
-{{say "Autocomplete is non-critical — degraded suggestions are better than a broken search box. Our failure model is: always return something in under 200ms, even if it's stale, globally generic, or empty. We never let autocomplete block search."}}
+{{say `Autocomplete is non-critical — degraded suggestions are better than a broken search box:
+<ul>
+  <li><strong>Always return something</strong> in under <span class="hl">200ms</span>, even if stale, globally generic, or empty</li>
+  <li><span class="hl-red">Never let autocomplete block search</span> — users can always submit a query manually</li>
+  <li>Graceful degradation order: Redis cache → in-memory trie → Elasticsearch fallback → empty []</li>
+</ul>`}}
 
 {{diagram "sa-failure-modes"}}
 
@@ -489,7 +547,12 @@ def blend_personal(
 
 {{phase 12 "Typeahead Flow" "10 min"}}
 
-{{say "Let me walk through the complete end-to-end flow — client to CDN to service to trie — and then cover the five most likely deep-dive questions."}}
+{{say `Complete end-to-end flow — client to CDN to service to trie:
+<ul>
+  <li>Client debounces at <strong>150ms</strong> → hits CDN (5ms if cached) → Redis (8ms) → trie (12ms) → personalization blend (2ms)</li>
+  <li>Total p99 on warm path: <span class="hl">~18ms</span></li>
+  <li>Total p99 on cold path (trie lookup): <span class="hl">~22ms</span></li>
+</ul>`}}
 
 {{diagram "sa-typeahead-flow"}}
 

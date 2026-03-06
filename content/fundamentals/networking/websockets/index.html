@@ -1,6 +1,12 @@
 {{phase 1 "What Are WebSockets?" "3 min"}}
 
-{{say "WebSockets give you a persistent, full-duplex TCP connection between client and server. Unlike HTTP, which is request-response, a WebSocket connection stays open — either side can send data at any time without waiting for the other. This is how Slack delivers messages instantly, how Uber streams driver locations, and how live scoreboards update without polling."}}
+{{say "<span class=\"hl-blue\">WebSockets</span> give you a persistent, full-duplex TCP connection between client and server:
+<ul>
+  <li>Unlike HTTP (request-response), a WebSocket stays open — either side sends data at any time without waiting</li>
+  <li>Latency drops from <span class=\"hl\">100–300ms</span> (HTTP polling) to <span class=\"hl\">1–5ms</span> (WebSocket frame over existing connection)</li>
+  <li>One connection per client: no repeated TCP handshakes, no HTTP headers per message</li>
+  <li>Examples: Slack instant messages, Uber driver location streaming, live scoreboards, Figma collaborative canvas</li>
+</ul>"}}
 
 {{diagram "fund-websocket-overview"}}
 
@@ -30,7 +36,13 @@
 
 {{phase 2 "Handshake & Protocol" "4 min"}}
 
-{{say "WebSocket starts as an HTTP/1.1 request. The client sends an Upgrade header. The server responds with 101 Switching Protocols. From that point, the connection speaks the WebSocket frame protocol — not HTTP."}}
+{{say "<span class=\"hl-blue\">WebSocket handshake</span> starts as an HTTP/1.1 request and upgrades in-place:
+<ul>
+  <li>Client sends <code>Upgrade: websocket</code> + <code>Sec-WebSocket-Key</code> header</li>
+  <li>Server responds with <strong>101 Switching Protocols</strong> — from this point the connection speaks WebSocket frames, not HTTP</li>
+  <li>The same TCP connection is reused — no new handshake, no port change</li>
+  <li>Rejection (e.g., <span class=\"hl-red\">400 Bad Request</span>) means the connection stays HTTP — client falls back to SSE or long polling</li>
+</ul>"}}
 
 {{code "http" `# Client → Server: WebSocket upgrade request
 GET /chat HTTP/1.1
@@ -72,7 +84,13 @@ Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`}}
 
 {{phase 3 "Connection Management" "5 min"}}
 
-{{say "A WebSocket connection can live for hours or days. You need heartbeats to detect dead connections, and exponential backoff reconnection on the client side. Without these, you get ghost connections on the server and clients that silently stop receiving updates."}}
+{{say "A WebSocket connection can live for hours or days — two mechanisms keep it healthy:
+<ul>
+  <li><strong>Heartbeat (ping/pong):</strong> send a WebSocket ping frame every <span class=\"hl\">30 seconds</span>; expect pong within 5 seconds; close and clean up if no pong arrives
+    <ul><li><span class=\"hl-red\">Without this:</span> <em>ghost connections</em> accumulate — server holds state for clients that silently disconnected; TCP keepalive takes up to 10 minutes to notice</li></ul>
+  </li>
+  <li><strong>Exponential backoff reconnect:</strong> start at <span class=\"hl\">1s</span>, double each attempt, cap at <span class=\"hl\">60s</span>, add ±20% jitter to avoid thundering herd on server restart</li>
+</ul>"}}
 
 {{diagram "fund-websocket-heartbeat"}}
 
@@ -141,7 +159,13 @@ class ReconnectingWebSocket {
 
 {{phase 4 "Scaling WebSockets" "6 min"}}
 
-{{say "The fundamental scaling problem: client A is connected to server 1. A message meant for client A arrives at server 2. How does server 2 route it to server 1 without knowing where client A is connected? The answer is a shared pub/sub layer — typically Redis Pub/Sub."}}
+{{say "The fundamental scaling problem: <strong>client A is connected to server 1; a message for client A arrives at server 2</strong>. How does server 2 deliver it?
+<ul>
+  <li><span class=\"hl-red\">Naive approach:</span> server-to-server RPC — requires every server to know where every client is connected; O(N²) coordination</li>
+  <li><strong>Solution:</strong> shared <span class=\"hl-blue\">pub/sub layer</span> (typically Redis Pub/Sub) — any server publishes to <code>user:{id}</code> channel; the server holding that connection delivers it</li>
+  <li><strong>Sticky sessions (ALB)</strong> reduce Redis traffic by routing reconnects to the same server — but they don't eliminate the routing problem if the server crashes</li>
+  <li>At <span class=\"hl\">1M concurrent connections</span>: shard by city or user_id range across multiple Redis nodes — Uber runs hundreds of Redis shards for this workload</li>
+</ul>"}}
 
 {{diagram "fund-websocket-scaling"}}
 
@@ -192,7 +216,14 @@ func (h *Hub) Publish(userID string, payload []byte) {
 
 {{phase 5 "Redis Pub/Sub Fan-Out" "5 min"}}
 
-{{say "Redis Pub/Sub is the standard backend for WebSocket fan-out. One publisher, N subscribers — each WebSocket server subscribes to relevant channels, and Redis delivers to all. This is how Slack delivers messages to all browser tabs open for the same user."}}
+{{say "<span class=\"hl-blue\">Redis Pub/Sub</span> is the standard backend for WebSocket fan-out:
+<ul>
+  <li>One publisher, N subscribers — each WebSocket server subscribes to the channels for its connected users</li>
+  <li>Throughput: <span class=\"hl\">~1M publishes/sec</span> on a single Redis node <small>(r6g.xlarge)</small></li>
+  <li><span class=\"hl-red\">Fire-and-forget:</span> if no subscriber is listening when a message is published, it is dropped — not persisted</li>
+  <li>For offline clients that need to catch up on missed messages, pair with <strong>Redis Streams</strong> or <strong>Kafka</strong> as a durable layer</li>
+  <li>Slack uses this pattern: each browser tab has a WebSocket connection; Redis delivers to all tabs for the same user simultaneously</li>
+</ul>"}}
 
 {{diagram "fund-redis-pubsub-fanout"}}
 
@@ -238,7 +269,13 @@ async def handler(websocket, path):
 
 {{phase 6 "Fallback Strategies" "4 min"}}
 
-{{say "Some environments block WebSockets — corporate firewalls, strict proxies, old load balancers. A robust real-time system degrades gracefully to SSE or long polling when WebSocket upgrade fails."}}
+{{say "Some environments block WebSockets — corporate firewalls, Zscaler, Cisco Umbrella proxies:
+<ul>
+  <li><strong>Fallback order:</strong> <span class=\"hl-blue\">WebSocket</span> → <span class=\"hl-blue\">SSE</span> → <span class=\"hl-blue\">Long Polling</span> — each step adds latency but maintains functionality</li>
+  <li>Detect failure: if WebSocket handshake returns non-101, or connection closes immediately, fall back to SSE</li>
+  <li>If SSE is also blocked (some proxies strip <code>Content-Type: text/event-stream</code>), fall back to long polling with <span class=\"hl\">30-second</span> timeout</li>
+  <li><strong>Socket.IO</strong> handles all three modes automatically <small>(~40KB bundle)</small> — pragmatic choice for teams without WebSocket expertise</li>
+</ul>"}}
 
 {{think "Fallback order: WebSocket → SSE → Long Polling. Each step adds latency but maintains functionality."
   (how "upgrade failure detection" "If the WebSocket handshake returns a non-101 status, or the connection closes immediately, fall back to SSE. If SSE is also blocked (some proxies strip Content-Type: text/event-stream), fall back to long polling with 30-second timeout.")
@@ -285,7 +322,14 @@ async function startLongPolling(userId, onMessage) {
 
 {{phase 7 "Security & Health" "3 min"}}
 
-{{say "WebSocket connections over plain WS (port 80) are as insecure as HTTP. Always use WSS — WebSocket Secure — which is WebSocket over TLS. Authentication must happen at connection time, not per-message."}}
+{{say "<span class=\"hl-red\">Always use WSS</span> — WebSocket over TLS — never plain WS:
+<ul>
+  <li>Plain WS is as insecure as HTTP — eavesdropping, injection, proxy interference</li>
+  <li><strong>Authentication at upgrade time:</strong> validate JWT before returning 101; once connected, trust the connection for its lifetime</li>
+  <li>Pass JWT as a query parameter <small>(appears in server logs — lower security)</small> or in the <code>Sec-WebSocket-Protocol</code> subprotocol header</li>
+  <li>For long-lived connections (>15 min with a 15-min JWT TTL): implement a re-auth flow — server sends auth-challenge, client responds with refreshed token</li>
+  <li><span class=\"hl-red\">Avoid cookie auth alone</span> — cookies are sent automatically on upgrade, making WebSocket vulnerable to CSRF</li>
+</ul>"}}
 
 {{think "Authentication strategy: validate JWT at upgrade time, then trust the connection for its lifetime."
   (how "JWT in WebSocket headers" "Pass the JWT as a query parameter (?token=...) or in the Sec-WebSocket-Protocol header during the upgrade request. Validate on the server before accepting the connection. Query parameters appear in server logs — prefer the Subprotocol header method or an initial auth message.")
@@ -315,7 +359,14 @@ async function startLongPolling(userId, onMessage) {
 
 {{phase 8 "Interview Summary" "2 min"}}
 
-{{say "WebSockets give you full-duplex, low-latency communication over a persistent TCP connection. The hard part isn't the protocol — it's scaling across servers. Redis Pub/Sub solves cross-server routing. ALB sticky sessions reduce Redis traffic. Heartbeats kill ghost connections. Always use WSS, validate JWT at upgrade, and have a fallback plan for proxy-hostile environments."}}
+{{say "The interview story for WebSockets:
+<ul>
+  <li><strong>Protocol:</strong> HTTP/1.1 upgrade → 101 Switching Protocols → full-duplex frames; latency <span class=\"hl\">1–5ms</span></li>
+  <li><strong>Scaling:</strong> connections are stateful — sticky sessions (ALB) reduce Redis traffic, Redis Pub/Sub solves cross-server routing; shard Redis at <span class=\"hl\">1M+ connections</span></li>
+  <li><strong>Reliability:</strong> ping every <span class=\"hl\">30s</span>, exponential backoff reconnect with <span class=\"hl\">60s</span> cap, jitter to avoid thundering herd</li>
+  <li><strong>Security:</strong> always WSS, JWT at upgrade, validate Origin, rate limit per connection, size-limit payloads to <span class=\"hl\">64KB</span></li>
+  <li><strong>Fallback:</strong> WebSocket → SSE → Long Polling for proxy-hostile environments</li>
+</ul>"}}
 
 {{avoid "Don't say WebSockets scale easily horizontally. They don't — connections are stateful. You need sticky sessions AND a shared pub/sub layer. Say both. The interviewer is specifically testing whether you know this."}}
 
