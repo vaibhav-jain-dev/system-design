@@ -163,9 +163,16 @@ func registerInstagram(r *Registry) {
 		Description: "Entity relationship diagram for users, posts, follows, likes, and comments",
 		ContentFile: "problems/instagram",
 		Type:        TypeHTML,
-		HTML:        `<div class="d-cols">
-  <div class="d-col">
-    <div class="d-entity" data-tip="Sharded by user_id at 50M+ users. Each shard holds ~10M users. Postgres BIGSERIAL gives 9.2 quintillion IDs.">
+		HTML:        `<div class="d-flow" style="justify-content:center; margin-bottom:12px;">
+  <div class="d-number"><div class="d-number-value">5</div><div class="d-number-label">core tables</div></div>
+  <div class="d-number"><div class="d-number-value">400B</div><div class="d-number-label">follows rows</div></div>
+  <div class="d-number"><div class="d-number-value">100K+</div><div class="d-number-label">peak WPS (likes)</div></div>
+  <div class="d-number"><div class="d-number-value">1,150</div><div class="d-number-label">post writes/sec</div></div>
+</div>
+<!-- Primary chain: users → posts → comments with visual arrows -->
+<div style="display:flex; align-items:center; gap:0; overflow-x:auto; padding:4px 0; width:100%;">
+  <div style="flex-shrink:0; min-width:175px;">
+    <div class="d-entity" data-tip="Sharded by user_id at 50M+ users. Postgres BIGSERIAL gives 9.2 quintillion IDs.">
       <div class="d-entity-header blue">users <span class="d-metric size">~2B rows</span></div>
       <div class="d-entity-body">
         <div class="pk">id BIGSERIAL</div>
@@ -177,8 +184,12 @@ func registerInstagram(r *Registry) {
       </div>
     </div>
   </div>
-  <div class="d-col">
-    <div class="d-entity" data-tip="Hottest table by write volume. Composite index on (user_id, created_at DESC) is critical for profile page queries. Migrated to DynamoDB at scale for single-digit ms reads.">
+  <div class="d-rel-card" style="flex-shrink:0; padding:0 10px; align-self:center;">
+    <div class="d-rel-card-label">1:N</div>
+    <div class="d-rel-line-arrow" style="min-width:44px;"></div>
+  </div>
+  <div style="flex-shrink:0; min-width:185px;">
+    <div class="d-entity" data-tip="Hottest table by write volume. Composite index (user_id, created_at DESC) critical for profile page queries.">
       <div class="d-entity-header green">posts <span class="d-metric throughput">1,150 writes/sec</span></div>
       <div class="d-entity-body">
         <div class="pk">id BIGSERIAL</div>
@@ -189,30 +200,14 @@ func registerInstagram(r *Registry) {
         <div class="idx idx-btree">created_at TIMESTAMP</div>
       </div>
     </div>
-    <div style="font-size:0.68rem; color:var(--text-muted); margin-top:4px; text-align:center;">idx: (user_id, created_at DESC)</div>
+    <div style="font-size:0.65rem; color:var(--text-muted); margin-top:3px; text-align:center;">idx: (user_id, created_at DESC)</div>
   </div>
-  <div class="d-col">
-    <div class="d-entity" data-tip="Composite PK (follower_id, followee_id) prevents duplicates. Reverse index on followee_id enables 'who follows me?' in O(log N). At scale, this is the largest table by row count.">
-      <div class="d-entity-header purple">follows <span class="d-metric size">~400B rows</span></div>
-      <div class="d-entity-body">
-        <div class="pk fk">follower_id BIGINT &#8594; users.id</div>
-        <div class="pk fk">followee_id BIGINT &#8594; users.id</div>
-        <div>created_at TIMESTAMP</div>
-      </div>
-    </div>
-    <div style="font-size:0.68rem; color:var(--text-muted); margin-top:4px; text-align:center;">idx: followee_id (reverse lookup)</div>
-    <div class="d-entity" style="margin-top: 0.75rem;" data-tip="Composite PK deduplicates likes. At viral scale, sharded counters aggregate across 100 Redis shards every 5s. DynamoDB at scale for 100K+ WPS.">
-      <div class="d-entity-header amber">likes <span class="d-metric throughput">100K+ WPS peak</span></div>
-      <div class="d-entity-body">
-        <div class="pk fk">user_id BIGINT &#8594; users.id</div>
-        <div class="pk fk">post_id BIGINT &#8594; posts.id</div>
-        <div>created_at TIMESTAMP</div>
-      </div>
-    </div>
-    <div style="font-size:0.68rem; color:var(--text-muted); margin-top:4px; text-align:center;">idx: post_id (count query)</div>
+  <div class="d-rel-card" style="flex-shrink:0; padding:0 10px; align-self:center;">
+    <div class="d-rel-card-label">1:N</div>
+    <div class="d-rel-line-arrow" style="min-width:44px;"></div>
   </div>
-  <div class="d-col">
-    <div class="d-entity" data-tip="Ordered by (post_id, created_at DESC) for threaded display. Text indexed with GIN for spam detection. At scale, partitioned by post_id range.">
+  <div style="flex-shrink:0; min-width:185px;">
+    <div class="d-entity" data-tip="Ordered by (post_id, created_at DESC) for threaded display. GIN index on text for spam detection.">
       <div class="d-entity-header red">comments <span class="d-metric throughput">~6K WPS</span></div>
       <div class="d-entity-body">
         <div class="pk">id BIGSERIAL</div>
@@ -222,23 +217,56 @@ func registerInstagram(r *Registry) {
         <div class="idx idx-btree">created_at TIMESTAMP</div>
       </div>
     </div>
-    <div style="font-size:0.68rem; color:var(--text-muted); margin-top:4px; text-align:center;">idx: (post_id, created_at DESC)</div>
+    <div style="font-size:0.65rem; color:var(--text-muted); margin-top:3px; text-align:center;">idx: (post_id, created_at DESC)</div>
   </div>
 </div>
-<div class="d-er-lines">
-  <div class="d-er-connector"><span class="d-er-from">users</span> <span class="d-er-type">1:N</span> <span class="d-er-to">posts</span></div>
-  <div class="d-er-connector"><span class="d-er-from">users</span> <span class="d-er-type">M:N</span> <span class="d-er-to">users</span> (via follows)</div>
-  <div class="d-er-connector"><span class="d-er-from">users</span> <span class="d-er-type">M:N</span> <span class="d-er-to">posts</span> (via likes)</div>
-  <div class="d-er-connector"><span class="d-er-from">posts</span> <span class="d-er-type">1:N</span> <span class="d-er-to">comments</span></div>
+<!-- M:N junction tables below with relationship labels -->
+<div style="display:flex; gap:20px; margin-top:14px; justify-content:center; flex-wrap:wrap;">
+  <div style="min-width:195px; text-align:center;">
+    <div style="display:flex; align-items:center; justify-content:center; gap:6px; margin-bottom:6px; font-size:0.68rem; color:var(--text-muted); font-weight:600;">
+      <span style="color:var(--blue); font-weight:700;">users</span>
+      <div class="d-rel-line-arrow" style="min-width:18px;"></div>
+      <span style="font-family:var(--font-mono); color:var(--indigo); font-size:0.7rem; font-weight:700;">M:N</span>
+      <div class="d-rel-line-arrow" style="min-width:18px; transform:rotate(180deg);"></div>
+      <span style="color:var(--blue); font-weight:700;">users</span>
+    </div>
+    <div class="d-entity" data-tip="Composite PK (follower_id, followee_id) prevents duplicates. Reverse index on followee_id enables 'who follows me?' in O(log N). At 2B users, largest table by row count.">
+      <div class="d-entity-header purple">follows <span class="d-metric size">~400B rows</span></div>
+      <div class="d-entity-body">
+        <div class="pk fk">follower_id BIGINT &#8594; users.id</div>
+        <div class="pk fk">followee_id BIGINT &#8594; users.id</div>
+        <div>created_at TIMESTAMP</div>
+      </div>
+    </div>
+    <div style="font-size:0.65rem; color:var(--text-muted); margin-top:3px;">idx: followee_id (reverse lookup)</div>
+  </div>
+  <div style="min-width:195px; text-align:center;">
+    <div style="display:flex; align-items:center; justify-content:center; gap:6px; margin-bottom:6px; font-size:0.68rem; color:var(--text-muted); font-weight:600;">
+      <span style="color:var(--blue); font-weight:700;">users</span>
+      <div class="d-rel-line-arrow" style="min-width:18px;"></div>
+      <span style="font-family:var(--font-mono); color:var(--indigo); font-size:0.7rem; font-weight:700;">M:N</span>
+      <div class="d-rel-line-arrow" style="min-width:18px;"></div>
+      <span style="color:var(--green); font-weight:700;">posts</span>
+    </div>
+    <div class="d-entity" data-tip="Composite PK deduplicates likes. At viral scale, sharded Redis counters aggregate across 100 shards every 5s before writing to DynamoDB.">
+      <div class="d-entity-header amber">likes <span class="d-metric throughput">100K+ WPS peak</span></div>
+      <div class="d-entity-body">
+        <div class="pk fk">user_id BIGINT &#8594; users.id</div>
+        <div class="pk fk">post_id BIGINT &#8594; posts.id</div>
+        <div>created_at TIMESTAMP</div>
+      </div>
+    </div>
+    <div style="font-size:0.65rem; color:var(--text-muted); margin-top:3px;">idx: post_id (count query)</div>
+  </div>
 </div>
-<div class="d-legend">
+<div class="d-legend" style="margin-top:12px;">
   <span class="d-legend-item"><span class="d-legend-color blue"></span>Identity</span>
   <span class="d-legend-item"><span class="d-legend-color green"></span>Content</span>
-  <span class="d-legend-item"><span class="d-legend-color purple"></span>Relationships</span>
+  <span class="d-legend-item"><span class="d-legend-color purple"></span>M:N self-join</span>
   <span class="d-legend-item"><span class="d-legend-color amber"></span>Engagement (high write)</span>
   <span class="d-legend-item"><span class="d-legend-color red"></span>User-generated text</span>
 </div>
-<div class="d-caption">Five tables handle 99% of Instagram's core data. The follows table is the largest by row count (~400B), while likes sees the highest peak write throughput during viral events.</div>`,
+<div class="d-caption">Five tables handle 99% of Instagram's core data. Arrows show FK relationships. The follows table is the largest (~400B rows); likes sees the highest peak write throughput during viral events.</div>`,
 	})
 
 	r.Register(&Diagram{
@@ -664,31 +692,27 @@ func registerInstagram(r *Registry) {
 		Description: "Notification system flow from event producers through Kafka to push and in-app delivery",
 		ContentFile: "problems/instagram",
 		Type:        TypeHTML,
-		HTML:        `<div class="d-flow-v">
-  <div class="d-cols">
-    <div class="d-col">
-      <div class="d-group">
-        <div class="d-group-title">Event Producers</div>
-        <div class="d-flow-v">
-          <div class="d-box green" data-tip="Fires on every new post. Triggers fan-out to all followers' notification feeds."><span class="d-step">1</span> Post Svc: post_created <span class="d-status active"></span></div>
-          <div class="d-box green" data-tip="Highest volume event source. Viral posts generate 1M+ like events. Batched to avoid notification spam."><span class="d-step">1</span> Engagement Svc: post_liked, comment_added <span class="d-metric throughput">100K events/sec</span></div>
-          <div class="d-box green"><span class="d-step">1</span> User Svc: user_followed</div>
-        </div>
-      </div>
-    </div>
-    <div class="d-col">
-      <div class="d-flow-v">
-        <div class="d-label">all events flow into</div>
-        <div class="d-arrow-down">&#8595;</div>
-        <div class="d-box red" data-tip="Partitioned by target_user_id for ordering guarantees. 50 partitions, 7-day retention. Consumer lag monitored via CloudWatch."><span class="d-step">2</span> Kafka (MSK) &#8212; notification topic <span class="d-metric throughput">500K msg/sec</span></div>
-      </div>
+		HTML:        `<div class="d-flow" style="justify-content:center; margin-bottom:12px;">
+  <div class="d-number"><div class="d-number-value">500K</div><div class="d-number-label">events/sec (Kafka)</div></div>
+  <div class="d-number"><div class="d-number-value">&lt;500ms</div><div class="d-number-label">push delivery</div></div>
+  <div class="d-number"><div class="d-number-value">&lt;50ms</div><div class="d-number-label">web real-time</div></div>
+  <div class="d-number"><div class="d-number-value">90%</div><div class="d-number-label">like batching reduction</div></div>
+</div>
+<div class="d-flow-v">
+  <div class="d-group" style="width:100%">
+    <div class="d-group-title">Step 1 — Event Producers</div>
+    <div class="d-row" style="flex-wrap:wrap; gap:8px;">
+      <div class="d-box green" data-tip="Fires on every new post. Triggers fan-out to all followers' notification feeds."><span class="d-step">1a</span> Post Svc: post_created <span class="d-status active"></span></div>
+      <div class="d-box green" data-tip="Highest volume event source. Viral posts generate 1M+ like events. Batched to avoid notification spam."><span class="d-step">1b</span> Engagement Svc: post_liked, comment_added <span class="d-metric throughput">100K events/sec</span></div>
+      <div class="d-box green" data-tip="Fired when user A follows user B. Lower volume than likes but fan-out is large for celebrity accounts."><span class="d-step">1c</span> User Svc: user_followed</div>
     </div>
   </div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box indigo" data-tip="Deduplicates using (event_type, target_user, source_entity) key in Redis with 1h TTL. Batches likes into 'alice and 12 others liked your post' style messages."><span class="d-step">3</span> Notification Service (ECS consumers) <span class="d-metric latency">50-200ms</span></div>
-  <div class="d-label">Dedup by (event_type, target_user, source_entity) &#8212; batch similar events</div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-branch">
+  <div class="d-arrow-down" data-tip="All event types published to single Kafka topic. Partitioned by target_user_id so all events for a user go to the same partition.">&#8595; all events publish to Kafka</div>
+  <div class="d-box red" style="width:100%; text-align:center;" data-tip="Partitioned by target_user_id for ordering guarantees. 50 partitions, 7-day retention. Consumer lag monitored via CloudWatch."><span class="d-step">2</span> <strong>Kafka (MSK)</strong> — notification topic <span class="d-metric throughput">500K msg/sec</span> <span class="d-tag red">50 partitions</span></div>
+  <div class="d-arrow-down">&#8595; ECS consumer group</div>
+  <div class="d-box indigo" style="width:100%; text-align:center;" data-tip="Deduplicates using (event_type, target_user, source_entity) key in Redis with 1h TTL. Batches likes into 'alice and 12 others liked your post' style messages."><span class="d-step">3</span> <strong>Notification Service</strong> (ECS consumers) <span class="d-metric latency">50-200ms</span> — dedup + batch similar events</div>
+  <div class="d-arrow-down">&#8595; fan-out to delivery channels</div>
+  <div class="d-branch" style="width:100%;">
     <div class="d-branch-arm">
       <div class="d-group">
         <div class="d-group-title">Mobile Push</div>
@@ -696,8 +720,8 @@ func registerInstagram(r *Registry) {
           <div class="d-box amber" data-tip="Fan-out to platform-specific endpoints. Handles token rotation and delivery receipts. $1 per 1M publishes."><span class="d-step">4a</span> SNS Platform App <span class="d-metric cost">$1/1M msgs</span></div>
           <div class="d-arrow-down">&#8595;</div>
           <div class="d-row">
-            <div class="d-box blue">APNs (iOS) <span class="d-metric latency">100-500ms</span></div>
-            <div class="d-box green">FCM (Android) <span class="d-metric latency">100-500ms</span></div>
+            <div class="d-box blue" data-tip="Apple Push Notification Service. Requires device token, certificate auth. 100-500ms delivery.">APNs (iOS) <span class="d-metric latency">100-500ms</span></div>
+            <div class="d-box green" data-tip="Firebase Cloud Messaging. Handles Android + web push. Higher throughput ceiling than APNs.">FCM (Android) <span class="d-metric latency">100-500ms</span></div>
           </div>
         </div>
       </div>
@@ -708,7 +732,7 @@ func registerInstagram(r *Registry) {
         <div class="d-flow-v">
           <div class="d-box purple" data-tip="SSE preferred over WebSocket for unidirectional notifications. 100K concurrent connections per gateway instance. Redis Pub/Sub for cross-instance delivery."><span class="d-step">4b</span> SSE / WebSocket Gateway <span class="d-metric latency">&lt;50ms</span></div>
           <div class="d-arrow-down">&#8595;</div>
-          <div class="d-box blue">Browser client <span class="d-status active"></span></div>
+          <div class="d-box blue" data-tip="EventSource API reconnects automatically on drop. No custom client code needed.">Browser client <span class="d-status active"></span></div>
         </div>
       </div>
     </div>
@@ -717,15 +741,21 @@ func registerInstagram(r *Registry) {
         <div class="d-group-title">In-App Badge</div>
         <div class="d-flow-v">
           <div class="d-box red" data-tip="Atomic INCR for badge count. Reset to 0 on notification tab open. O(1) operation, sub-ms latency."><span class="d-step">4c</span> Redis INCR badge:{user_id} <span class="d-metric latency">&lt;1ms</span></div>
-          <div class="d-arrow-down">&#8595;</div>
+          <div class="d-arrow-down">&#8595; persist history</div>
           <div class="d-box amber" data-tip="TTL 30 days auto-deletes old notifications. PK=user_id, SK=timestamp. On-demand capacity handles traffic spikes."><span class="d-step">5</span> DynamoDB (notification history, TTL 30d) <span class="d-metric latency">3ms</span></div>
         </div>
       </div>
     </div>
   </div>
-  <div class="d-label">Rate limit: max 50 push notifications/hr per user &#8212; batch likes: "alice and 12 others liked your post"</div>
 </div>
-<div class="d-caption">End-to-end notification latency: &lt;500ms for push, &lt;50ms for web real-time. Like batching reduces push volume by 90% during viral events. Rate limiting prevents notification fatigue.</div>`,
+<div class="d-legend">
+  <div class="d-legend-item"><div class="d-legend-color green"></div>Event producers</div>
+  <div class="d-legend-item"><div class="d-legend-color red"></div>Kafka stream</div>
+  <div class="d-legend-item"><div class="d-legend-color indigo"></div>Processing (dedup/batch)</div>
+  <div class="d-legend-item"><div class="d-legend-color amber"></div>Mobile push</div>
+  <div class="d-legend-item"><div class="d-legend-color purple"></div>Web real-time</div>
+</div>
+<div class="d-caption">Rate limit: max 50 push/hr per user. Like batching reduces push volume 90% during viral events. End-to-end: &lt;500ms push, &lt;50ms web.</div>`,
 	})
 
 	r.Register(&Diagram{

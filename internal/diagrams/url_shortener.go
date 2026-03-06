@@ -481,39 +481,65 @@ func registerURLShortener(r *Registry) {
 		Description: "End-to-end system architecture from clients through CDN, API, cache, and storage.",
 		ContentFile: "problems/url-shortener",
 		Type:        TypeHTML,
-		HTML: `<div class="d-flow-v">
-  <div class="d-box blue" data-tip="Browser, mobile apps, and API consumers. 100M new URLs/day, 10:1 read:write ratio.">Clients (Browser / Mobile / API consumers) <span class="d-metric throughput">57K peak RPS</span></div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box purple" data-tip="Latency-based routing sends users to the nearest region. Weighted routing for blue/green deploys.">Route 53 (DNS) &#8594; latency-based routing <span class="d-metric latency">&lt;5ms</span></div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box purple" data-tip="400+ edge PoPs worldwide. Cache 301 redirects with TTL 24h. Absorbs 60%+ of read traffic."><span class="d-status active"></span>CloudFront (CDN) &#8212; 301 cached at edge <span class="d-metric throughput">60% absorbed</span></div>
-  <div class="d-arrow-down">&#8595; cache miss</div>
-  <div class="d-box indigo" data-tip="Application Load Balancer. TLS termination, /health check every 30s. Cross-AZ distribution.">ALB (Load Balancer) &#8212; TLS termination <span class="d-metric latency">~1ms</span></div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-row">
-    <div class="d-box green" data-tip="Stateless ECS Fargate tasks. Auto-scale on CPU 60%. Each handles 2-3K RPS.">API Server 1</div>
-    <div class="d-box green">API Server 2</div>
-    <div class="d-box green">API Server N</div>
+		HTML: `<div class="d-flow" style="justify-content:center; margin-bottom:14px; flex-wrap:wrap;">
+  <div class="d-number"><div class="d-number-value">57K</div><div class="d-number-label">peak redirect RPS</div></div>
+  <div class="d-number"><div class="d-number-value">60%+</div><div class="d-number-label">CDN absorbed</div></div>
+  <div class="d-number"><div class="d-number-value">&lt;10ms</div><div class="d-number-label">p99 redirect</div></div>
+  <div class="d-number"><div class="d-number-value">99.99%</div><div class="d-number-label">availability</div></div>
+</div>
+<div class="d-flow-v" style="gap:6px;">
+  <div class="d-group" style="width:100%;">
+    <div class="d-group-title">Clients</div>
+    <div class="d-box blue" style="width:100%; text-align:center;" data-tip="Browser, mobile apps, and API consumers. 100M new URLs/day, 10:1 read:write ratio.">Browser / Mobile / API <span class="d-metric throughput">57K peak RPS</span> &nbsp;·&nbsp; <span class="d-metric size">100M new URLs/day</span></div>
   </div>
-  <div class="d-arrow-down">&#8595;</div>
-  <div class="d-row">
-    <div class="d-box red" data-tip="Cache-aside pattern. 10 GB covers 20M hot URLs. 95% hit rate. TTL 1h.">ElastiCache Redis <span class="d-metric latency">&lt;1ms</span></div>
-    <div class="d-box amber" data-tip="Source of truth. On-demand capacity. GetItem O(1) by short_code PK.">DynamoDB <span class="d-metric latency">~5ms</span></div>
-    <div class="d-box purple" data-tip="Pre-generates batches of unique keys. Lambda + DynamoDB. Each API server holds a local batch of 1000 keys.">KGS</div>
+  <div class="d-arrow-down">&#8595; DNS</div>
+  <div class="d-group" style="width:100%;">
+    <div class="d-group-title">Edge Tier — absorbs 60%+ of reads before touching origin</div>
+    <div class="d-row" style="gap:10px; width:100%; flex-wrap:wrap;">
+      <div class="d-box purple" style="flex:1; text-align:center; min-width:120px;" data-tip="Latency-based routing resolves to nearest region. Weighted routing supports blue/green deploys.">Route 53 <span class="d-metric latency">&lt;5ms</span></div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box purple" style="flex:3; text-align:center; min-width:200px;" data-tip="400+ edge PoPs worldwide. Caches 301 redirects with Cache-Control: max-age=86400. Absorbs 60%+ of all read traffic at near-zero marginal cost."><span class="d-status active"></span> CloudFront CDN — 301 cached at edge <span class="d-metric throughput">60%+ absorbed</span> <span class="d-metric latency">&lt;5ms</span></div>
+    </div>
   </div>
-  <div class="d-arrow-down">&#8595; async analytics</div>
-  <div class="d-row">
-    <div class="d-box gray" data-tip="Click events streamed asynchronously. No impact on redirect latency.">Kinesis (click stream)</div>
-    <div class="d-box gray">Lambda (aggregate)</div>
-    <div class="d-box gray">S3 (archive)</div>
+  <div class="d-arrow-down">&#8595; cache miss only (~40% of reads)</div>
+  <div class="d-group" style="width:100%;">
+    <div class="d-group-title">Compute Tier — stateless, auto-scales to 23 tasks at peak</div>
+    <div class="d-row" style="gap:10px; width:100%; flex-wrap:wrap;">
+      <div class="d-box indigo" style="flex:1; text-align:center; min-width:120px;" data-tip="Application Load Balancer. TLS termination, /health check every 30s. Cross-AZ distribution.">ALB <span class="d-metric latency">~1ms</span></div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box green" style="flex:1; text-align:center; min-width:90px;" data-tip="Stateless ECS Fargate, 2 vCPU/4 GB. Each handles 2-3K RPS. Auto-scales on CPU 60%."><span class="d-status active"></span> ECS 1</div>
+      <div class="d-box green" style="flex:1; text-align:center; min-width:90px;"><span class="d-status active"></span> ECS 2</div>
+      <div class="d-box green" style="flex:1; text-align:center; min-width:90px;" data-tip="Scale to 23 tasks at peak 57K RPS ÷ 2.5K/task. Stateless — no coordination overhead.">ECS N <span class="d-tag green">×23 peak</span></div>
+    </div>
   </div>
-  <div class="d-legend">
-    <div class="d-legend-item"><div class="d-legend-color purple"></div>Network edge</div>
-    <div class="d-legend-item"><div class="d-legend-color green"></div>Compute</div>
-    <div class="d-legend-item"><div class="d-legend-color red"></div>Cache</div>
-    <div class="d-legend-item"><div class="d-legend-color amber"></div>Storage</div>
-    <div class="d-legend-item"><div class="d-legend-color gray"></div>Analytics (async)</div>
+  <div class="d-arrow-down">&#8595; cache-aside</div>
+  <div class="d-group" style="width:100%;">
+    <div class="d-group-title">Data Tier</div>
+    <div class="d-row" style="gap:10px; width:100%; flex-wrap:wrap;">
+      <div class="d-box red" style="flex:1; text-align:center; min-width:130px;" data-tip="Cache-aside. 10 GB covers 20M hot URLs (80/20 rule). TTL 1h. 95% hit rate eliminates most DB reads.">ElastiCache Redis<br><span class="d-metric latency">&lt;1ms</span> · <span class="d-metric throughput">95% hit rate</span></div>
+      <div class="d-box amber" style="flex:1; text-align:center; min-width:130px;" data-tip="Source of truth. On-demand capacity. GetItem O(1) by short_code PK. 11 nines durability. TTL auto-deletes expired URLs.">DynamoDB<br><span class="d-metric latency">~5ms</span> · <span class="d-tag amber">source of truth</span></div>
+      <div class="d-box purple" style="flex:1; text-align:center; min-width:130px;" data-tip="Pre-generates 7-char Base62 key batches. Each ECS task holds 1,000 pre-allocated keys locally. O(1) assignment, no network call per URL.">KGS (Key Gen Svc)<br><span class="d-metric latency">&lt;0.1ms assign</span></div>
+    </div>
   </div>
+  <div class="d-arrow-down">&#8595; async · fire-and-forget · zero redirect latency impact</div>
+  <div class="d-group" style="width:100%;">
+    <div class="d-group-title">Analytics Tier (Async)</div>
+    <div class="d-row" style="gap:10px; width:100%; flex-wrap:wrap;">
+      <div class="d-box gray" style="flex:1; text-align:center; min-width:120px;" data-tip="PutRecord call is non-blocking goroutine. If Kinesis is down, click data is lost — redirect latency is never affected.">Kinesis Streams <span class="d-metric latency">&lt;1ms async</span></div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box gray" style="flex:1; text-align:center; min-width:120px;" data-tip="Lambda triggered every 60s. Batches DynamoDB click_count ADDs to reduce WCU consumption.">Lambda (aggregate)</div>
+      <div class="d-arrow">&#8594;</div>
+      <div class="d-box gray" style="flex:1; text-align:center; min-width:120px;" data-tip="Kinesis Firehose writes Snappy-compressed Parquet. Athena queries at $5/TB.">S3 + Athena</div>
+    </div>
+  </div>
+</div>
+<div class="d-legend" style="margin-top:10px;">
+  <div class="d-legend-item"><div class="d-legend-color purple"></div>Edge / DNS</div>
+  <div class="d-legend-item"><div class="d-legend-color indigo"></div>Load balancer</div>
+  <div class="d-legend-item"><div class="d-legend-color green"></div>Compute (stateless)</div>
+  <div class="d-legend-item"><div class="d-legend-color red"></div>Cache</div>
+  <div class="d-legend-item"><div class="d-legend-color amber"></div>Storage</div>
+  <div class="d-legend-item"><div class="d-legend-color gray"></div>Analytics (async)</div>
 </div>`,
 	})
 
@@ -572,16 +598,45 @@ func registerURLShortener(r *Registry) {
 		Description: "Four cache layers from browser to DynamoDB with hit rates and latencies.",
 		ContentFile: "problems/url-shortener",
 		Type:        TypeHTML,
-		HTML: `<div class="d-flow-v">
-  <div class="d-box blue" data-tip="HTTP 301 sets Cache-Control: max-age=86400 (24h). Browser caches locally — subsequent clicks are instant. Trade-off: lose analytics for cached clicks.">L1: Browser Cache (301 Cache-Control: max-age=86400) <span class="d-metric latency">0ms</span> <span class="d-metric throughput">~30% hit</span></div>
-  <div class="d-arrow-down">&#8595; miss</div>
-  <div class="d-box purple" data-tip="400+ edge PoPs globally. TTL 24h. Cache key is the URL path. Invalidation via CreateInvalidation API if URL destination changes.">L2: CloudFront Edge (400+ PoPs, TTL 24h) <span class="d-metric latency">&lt;5ms</span> <span class="d-metric throughput">~60% hit</span></div>
-  <div class="d-arrow-down">&#8595; miss</div>
-  <div class="d-box red" data-tip="Cache-aside pattern. Key: url:{short_code}. 20M hot URLs × 500B = 10 GB. r6g.large = 13 GB. TTL 1h to balance freshness vs hit rate.">L3: ElastiCache Redis (regional, TTL 1h) <span class="d-metric latency">&lt;1ms</span> <span class="d-metric throughput">~95% hit</span></div>
-  <div class="d-arrow-down">&#8595; miss (5%)</div>
-  <div class="d-box amber" data-tip="Source of truth. On-demand capacity scales automatically. GetItem by PK is always O(1). TTL attribute auto-deletes expired URLs.">L4: DynamoDB (source of truth) <span class="d-metric latency">~5ms</span> <span class="d-metric throughput">~2.9K RPS</span></div>
-  <div class="d-caption">Combined hit rate across all layers: <strong>99.7%</strong> of redirects served from cache. Only <strong>~170 RPS</strong> reach DynamoDB at peak.</div>
-</div>`,
+		HTML: `<div class="d-flow" style="justify-content:center; margin-bottom:14px; flex-wrap:wrap;">
+  <div class="d-number"><div class="d-number-value">99.7%</div><div class="d-number-label">combined hit rate</div></div>
+  <div class="d-number"><div class="d-number-value">~170</div><div class="d-number-label">RPS reach DynamoDB</div></div>
+  <div class="d-number"><div class="d-number-value">57K</div><div class="d-number-label">peak total RPS</div></div>
+</div>
+<div class="d-flow-v" style="gap:4px;">
+  <div class="d-group" style="width:100%;">
+    <div class="d-group-title">L1 — Browser Cache &nbsp;<span class="d-metric latency">0ms</span> &nbsp;<span class="d-tag blue">~30% hit</span></div>
+    <div class="d-box blue" style="width:100%; text-align:center;" data-tip="HTTP 301 sets Cache-Control: max-age=86400 (24h). Browser caches locally — subsequent clicks are instant. Trade-off: analytics lost for cached clicks.">
+      Cache-Control: max-age=86400 (24h TTL)<br>
+      <small>Repeat visitor clicks never leave the browser</small>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595; miss (~70% pass through)</div>
+  <div class="d-group" style="width:100%;">
+    <div class="d-group-title">L2 — CloudFront CDN Edge &nbsp;<span class="d-metric latency">&lt;5ms</span> &nbsp;<span class="d-tag purple">~60% cumulative hit</span></div>
+    <div class="d-box purple" style="width:100%; text-align:center;" data-tip="400+ edge PoPs globally. TTL 24h. Cache key is URL path. Invalidation via CreateInvalidation API ($0.005 per 1,000 paths).">
+      400+ global PoPs · TTL 24h · absorbs majority of read traffic<br>
+      <small>~22K of 57K peak RPS served from edge — never reaches origin</small>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595; miss (~40% reach regional servers)</div>
+  <div class="d-group" style="width:100%;">
+    <div class="d-group-title">L3 — ElastiCache Redis (regional) &nbsp;<span class="d-metric latency">&lt;1ms</span> &nbsp;<span class="d-tag red">~95% hit on warm codes</span></div>
+    <div class="d-box red" style="width:100%; text-align:center;" data-tip="Cache-aside: GET url:{short_code}. 20M hot URLs × 500B = 10 GB working set. r6g.large = 13 GB. TTL 1h balances freshness vs hit rate.">
+      Key: <code>url:{short_code}</code> · 10 GB working set · TTL 1h<br>
+      <small>Only ~2.9K RPS reach DynamoDB after Redis hit rate is applied</small>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595; miss (5% of what reaches Redis)</div>
+  <div class="d-group" style="width:100%;">
+    <div class="d-group-title">L4 — DynamoDB (source of truth) &nbsp;<span class="d-metric latency">~5ms</span> &nbsp;<span class="d-tag amber">~170 RPS at peak</span></div>
+    <div class="d-box amber" style="width:100%; text-align:center;" data-tip="GetItem O(1) by short_code PK regardless of table size. On-demand capacity auto-scales. TTL attribute auto-deletes expired URLs at zero cost.">
+      GetItem(PK=short_code) · O(1) · on-demand auto-scale<br>
+      <small>Result written back to Redis (TTL 1h) to warm cache for next hit</small>
+    </div>
+  </div>
+</div>
+<div class="d-caption">Only ~170 RPS (~0.3% of peak 57K) ever reach DynamoDB. Four-layer caching eliminates 99.7% of database load.</div>`,
 	})
 
 	r.Register(&Diagram{
