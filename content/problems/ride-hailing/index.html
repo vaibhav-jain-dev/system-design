@@ -2,7 +2,13 @@
 
 {{phase 1 "Requirements" "5 min"}}
 
-{{say "I want to design a ride-hailing platform like Uber or Ola. Core scope: rider requests a ride, system matches them with a nearby driver, both sides track each other in real time, and the fare is calculated dynamically. Out of scope: driver onboarding, background checks, dispute resolution, scheduled rides. Scale: global top-tier city deployment, 100M users, 5M drivers. Does that align?"}}
+{{say `Designing a ride-hailing platform like Uber or Ola:
+<ul>
+  <li><strong>In scope:</strong> rider requests a ride, system matches with a nearby driver, real-time tracking for both sides, dynamic fare calculation</li>
+  <li><strong>Out of scope:</strong> driver onboarding, background checks, dispute resolution, scheduled rides</li>
+  <li><strong>Scale:</strong> global top-tier city deployment, <span class="hl">100M users</span>, <span class="hl">5M drivers</span></li>
+</ul>
+Does that align?`}}
 
 {{diagram "rh-requirements"}}
 
@@ -34,7 +40,12 @@
 
 {{phase 2 "APIs" "5 min"}}
 
-{{say "I'll define rider APIs over REST, driver location updates over WebSocket (bidirectional for offer delivery), and internal service APIs for matching. WebSocket is key for drivers because they both push location AND receive ride offers — bidirectional traffic requires a persistent connection."}}
+{{say `Three API groups:
+<ul>
+  <li><strong>Rider APIs</strong> — REST over HTTPS: request ride, poll status, cancel</li>
+  <li><strong>Driver APIs</strong> — <span class="hl-blue">WebSocket</span> (bidirectional): drivers push location AND receive ride offers — bidirectional traffic requires a persistent connection</li>
+  <li><strong>Internal APIs</strong> — service-to-service: trigger matching, geospatial query, ETA calculation</li>
+</ul>`}}
 
 {{diagram "rh-api-design"}}
 
@@ -78,7 +89,12 @@ GET    /internal/geo/nearby?lat=&lng=&r=5km   # Query Redis GEO`}}
 
 {{phase 3 "Ride Flow" "5 min"}}
 
-{{say "The ride lifecycle has six states: REQUESTED, MATCHED, ARRIVING, IN_PROGRESS, COMPLETED, CANCELLED. Every state transition is an atomic write to Postgres and an event published to Kafka. The dispatch loop is intentionally stateless — any matching service instance can handle any ride."}}
+{{say `Six ride states — every transition is an atomic write to PostgreSQL + a Kafka event:
+<ul>
+  <li><strong>REQUESTED → MATCHED → ARRIVING → IN_PROGRESS → COMPLETED</strong> (happy path)</li>
+  <li><strong>CANCELLED</strong> accessible from REQUESTED or MATCHED (before pickup)</li>
+  <li>Dispatch loop is <strong>intentionally stateless</strong> — any matching service instance can handle any ride; all state lives in PostgreSQL + Redis</li>
+</ul>`}}
 
 {{diagram "rh-ride-flow"}}
 
@@ -119,7 +135,14 @@ class RideMatchingService:
 
 {{phase 4 "Architecture" "6 min"}}
 
-{{say "The system splits into four planes: the API plane (REST + WebSocket gateway), the matching plane (stateless workers), the tracking plane (Redis GEO + WebSocket fan-out), and the data plane (Postgres for rides, Kafka for events, Cassandra for location history). City-based sharding keeps each shard independently scalable."}}
+{{say `Four planes:
+<ul>
+  <li><strong>API plane</strong> — REST + WebSocket gateway; stateless, horizontal scale</li>
+  <li><strong>Matching plane</strong> — stateless workers; geospatial query → scoring → offer dispatch</li>
+  <li><strong>Tracking plane</strong> — Redis GEO + WebSocket fan-out; <span class="hl">1.25M location writes/sec</span></li>
+  <li><strong>Data plane</strong> — PostgreSQL for rides, Kafka for events, Cassandra for location history</li>
+</ul>
+<strong>City-based sharding</strong> keeps each city's data and workers independent — a failure in one city doesn't affect others.`}}
 
 {{diagram "rh-architecture"}}
 
@@ -145,7 +168,12 @@ class RideMatchingService:
 
 {{phase 5 "Geospatial Indexing" "5 min"}}
 
-{{say "We use Redis GEO commands backed by a sorted set with geohash encoding. Each driver is stored as GEOADD drivers:{city_id} lng lat driver_id. When a rider requests a ride, we run GEORADIUS drivers:{city_id} pickup_lng pickup_lat 5 km ASC COUNT 50 to get up to 50 nearest available drivers in one command."}}
+{{say `Using <span class="hl-blue">Redis GEO</span> backed by a sorted set with 52-bit geohash encoding:
+<ul>
+  <li><strong>Write:</strong> <code>GEOADD drivers:{city_id} lng lat driver_id</code> — O(log N), runs at <span class="hl">1.25M writes/sec</span> globally</li>
+  <li><strong>Read:</strong> <code>GEORADIUS drivers:{city_id} pickup_lng pickup_lat 5 km ASC COUNT 50</code> — returns up to <span class="hl">50 nearest available drivers</span> in one command</li>
+  <li><strong>Staleness:</strong> separate TTL key per driver (<span class="hl">30s</span>) — auto-expires offline drivers without an explicit event</li>
+</ul>`}}
 
 {{diagram "rh-geospatial"}}
 
@@ -196,7 +224,14 @@ def find_nearby_drivers(city_id: str, pickup_lat: float, pickup_lng: float, radi
 
 {{phase 6 "Matching" "6 min"}}
 
-{{say "Matching ranks the nearby driver candidates using a weighted score: 40% proximity, 20% driver rating, 20% acceptance rate, 20% ETA. We don't need the globally optimal matching — we need a good match in under 2 seconds. Greedy with local optimization is correct here."}}
+{{say `Matching ranks nearby driver candidates using a <strong>weighted score</strong>:
+<ul>
+  <li><span class="hl">40%</span> proximity — nearest driver wins the biggest weight</li>
+  <li><span class="hl">20%</span> driver rating — quality floor matters</li>
+  <li><span class="hl">20%</span> acceptance rate — penalizes drivers who cherry-pick rides</li>
+  <li><span class="hl">20%</span> ETA — actual pickup time, not just straight-line distance</li>
+</ul>
+Goal is a <strong>good match in under 2 seconds</strong> — not the globally optimal match. Greedy with local optimization is correct.`}}
 
 {{diagram "rh-matching-algorithm"}}
 
@@ -255,7 +290,13 @@ def dispatch(ride_id, ranked_drivers):
 
 {{phase 7 "Surge Pricing" "4 min"}}
 
-{{say "Surge pricing is calculated per H3 hex cell, updated every 5 minutes. The multiplier is a function of demand-to-supply ratio in the cell. We cap at 3x and show riders the multiplier explicitly before they confirm. Drivers in low-supply cells see a surge bonus notification to attract them."}}
+{{say `Surge pricing per <span class="hl-blue">H3 hex cell</span> (resolution 8, ~<span class="hl">0.7 km²</span>), updated every <span class="hl">5 minutes</span>:
+<ul>
+  <li>Multiplier = function of demand/supply ratio in the cell</li>
+  <li>Hard cap at <span class="hl">3×</span> — uncapped surge creates PR disasters and regulatory risk</li>
+  <li>Shown to riders <strong>before confirmation</strong> — transparent pricing is also a legal requirement in several markets</li>
+  <li>Drivers in low-supply cells see a <strong>surge bonus notification</strong> to attract them</li>
+</ul>`}}
 
 {{diagram "rh-surge-pricing"}}
 
@@ -294,7 +335,12 @@ def calculate_fare(base_fare, distance_km, duration_min, surge) -> int:
 
 {{phase 8 "Live Tracking" "4 min"}}
 
-{{say "Driver GPS updates flow from the driver app through a WebSocket gateway into Redis GEO. The tracking service subscribes to driver location updates via Redis Pub/Sub and fans out to rider WebSocket sessions. ETA is recalculated every 30 seconds using the current driver position and a route engine."}}
+{{say `Live tracking flow:
+<ul>
+  <li>Driver GPS → WebSocket gateway → <strong>Redis GEO</strong> (geospatial index) + <strong>Redis Pub/Sub</strong> (fan-out)</li>
+  <li>Tracking service subscribes to <code>ride:track:{ride_id}</code> channel and forwards updates to rider's WebSocket</li>
+  <li>ETA recalculated every <span class="hl">30 seconds</span> using current driver position + <span class="hl-blue">OSRM</span> routing engine</li>
+</ul>`}}
 
 {{diagram "rh-tracking"}}
 
@@ -339,7 +385,12 @@ class TrackingService:
 
 {{phase 9 "Data Model" "5 min"}}
 
-{{say "Three storage tiers: Postgres for rides, bookings, and users — strongly consistent, relational. Redis for hot operational state — driver locations, locks, active ride mapping. Cassandra for write-heavy time-series — GPS location history per trip for analytics and audit."}}
+{{say `Three storage tiers:
+<ul>
+  <li><strong>PostgreSQL</strong> — rides, bookings, users; strongly consistent, relational; source of truth for state machine</li>
+  <li><strong>Redis</strong> — hot operational state: driver locations (<span class="hl-blue">GEO</span>), distributed locks (<span class="hl-blue">SET NX</span>), active ride mapping (<span class="hl-blue">HASH</span>)</li>
+  <li><strong>Cassandra</strong> — GPS location history per trip: write-heavy time-series, append-only, <span class="hl">~1.25M writes/sec</span> absorbed without MVCC overhead</li>
+</ul>`}}
 
 {{diagram "rh-data-model"}}
 
@@ -395,7 +446,12 @@ CREATE TABLE drivers (
 
 {{phase 10 "Scaling" "4 min"}}
 
-{{say "The system scales along three independent axes: read replicas for Postgres (ride history queries), Redis cluster expansion (more city shards and GEO shards), and horizontal scaling of stateless matching and tracking workers. The WebSocket gateway uses sticky sessions so a rider's tracking stream doesn't hop between servers."}}
+{{say `Three independent scaling axes:
+<ul>
+  <li><strong>PostgreSQL</strong> — read replicas for ride history queries; shard by city_id beyond <span class="hl">~14K writes/sec</span></li>
+  <li><strong>Redis</strong> — cluster expansion: more city shards and GEO shards; each shard handles <span class="hl">~62.5K writes/sec</span></li>
+  <li><strong>Matching + tracking workers</strong> — stateless, horizontal auto-scale; WebSocket gateway uses sticky sessions to avoid reconnect churn</li>
+</ul>`}}
 
 {{diagram "rh-scaling"}}
 
@@ -417,7 +473,12 @@ CREATE TABLE drivers (
 
 {{phase 11 "Failure Modes" "5 min"}}
 
-{{say "Three high-value failure scenarios to cover: driver cancellation after match (state rollback), payment failure at ride completion (ride completed but unpaid), and GPS drift or tunnel blackout mid-ride (ETA goes stale, interpolate)."}}
+{{say `Three high-value failure scenarios:
+<ul>
+  <li><strong>Driver cancellation after match</strong> — state rollback, re-enter matching with next ranked driver</li>
+  <li><strong>Payment failure at ride completion</strong> — ride completed but unpaid; retry 3× then mark pending, bill on next open</li>
+  <li><strong>GPS drift or tunnel blackout mid-ride</strong> — ETA goes stale; snap to nearest road, interpolate position, widen error bars</li>
+</ul>`}}
 
 {{diagram "rh-failure-modes"}}
 
@@ -438,7 +499,12 @@ CREATE TABLE drivers (
 
 {{diagram "rh-shared-rides"}}
 
-{{say "Shared rides (ride pooling) use a detour-constrained matching algorithm. A new ride request is matched with an in-progress ride if the pickup detour is < 40% of the original route and the ETA increase is < 10 minutes for existing riders."}}
+{{say `Shared rides (ride pooling) use a <strong>detour-constrained matching algorithm</strong>:
+<ul>
+  <li>Match a new request with an in-progress ride if pickup detour is <span class="hl">&lt; 40%</span> of the original route</li>
+  <li>ETA increase for existing riders must be <span class="hl">&lt; 10 minutes</span></li>
+  <li>Rider receives a <span class="hl">25–35% fare discount</span> in exchange for the detour</li>
+</ul>`}}
 
 {{hint "shared rides detour constraint" "The 40% detour threshold is an empirical value from Uber Pool data. Below 40%, most riders accept the trade-off for a 25–35% fare discount. Above 40%, cancellation rates spike above 15%."}}
 
