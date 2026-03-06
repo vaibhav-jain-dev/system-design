@@ -556,6 +556,897 @@ func registerFundamentals(r *Registry) {
 <div class="d-caption">3 shards x 26GB = 78GB total. 3 shards x 100K ops/s = 300K ops/s. Scale horizontally by adding shards — online resharding redistributes hash slots with zero downtime.</div>`,
 	})
 
+	// -------------------------------------------------------
+	// CAP Theorem
+	// -------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "fund-cap-overview",
+		Title:       "CAP Theorem Overview",
+		Description: "CP vs AP decision triangle showing the tradeoff between consistency and availability during network partitions",
+		ContentFile: "fundamentals/distributed/cap-theorem",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box gray">Network Partition (always possible in distributed systems)</div>
+  <div class="d-arrow-down">↓ When it happens, choose:</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">CP — Consistency + Partition Tolerance</div>
+        <div class="d-flow-v">
+          <div class="d-box blue">Return error or wait</div>
+          <div class="d-box blue">Never return stale data</div>
+          <div class="d-box blue">Examples: HBase, Zookeeper, etcd</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">AP — Availability + Partition Tolerance</div>
+        <div class="d-flow-v">
+          <div class="d-box green">Always return a response</div>
+          <div class="d-box green">May return stale data</div>
+          <div class="d-box green">Examples: Cassandra, DynamoDB, CouchDB</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-caption">CA (no partition tolerance) is impossible in a network — partitions always happen. The real choice is CP vs AP.</div>
+</div>`,
+	})
+
+	// -------------------------------------------------------
+	// Circuit Breaker
+	// -------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "fund-cb-overview",
+		Title:       "Circuit Breaker Overview",
+		Description: "How a circuit breaker wraps a dependency call to prevent cascade failures",
+		ContentFile: "fundamentals/distributed/circuit-breaker",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">Service A (caller)</div>
+  <div class="d-arrow-down">↓ all calls go through</div>
+  <div class="d-box purple">Circuit Breaker (proxy layer)<br><small>tracks success/failure counts, manages state</small></div>
+  <div class="d-arrow-down">↓ forwards when CLOSED</div>
+  <div class="d-box green">Service B (dependency)</div>
+  <div class="d-caption">When B fails repeatedly, the breaker OPENS and returns errors immediately — no waiting for timeouts. Service A degrades gracefully instead of hanging.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-cb-state-machine",
+		Title:       "Circuit Breaker State Machine",
+		Description: "CLOSED → OPEN → HALF_OPEN state transitions based on failure thresholds",
+		ContentFile: "fundamentals/distributed/circuit-breaker",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow">
+  <div class="d-group">
+    <div class="d-group-title">CLOSED</div>
+    <div class="d-box green">Requests pass through<br>Counting failures</div>
+    <div class="d-label">failure rate &gt; threshold →</div>
+  </div>
+  <div class="d-arrow">→</div>
+  <div class="d-group">
+    <div class="d-group-title">OPEN</div>
+    <div class="d-box red">Fail fast<br>No calls to dependency<br>Return fallback immediately</div>
+    <div class="d-label">→ after timeout period</div>
+  </div>
+  <div class="d-arrow">→</div>
+  <div class="d-group">
+    <div class="d-group-title">HALF_OPEN</div>
+    <div class="d-box amber">Allow 1 probe request<br>Success → CLOSED<br>Failure → OPEN</div>
+  </div>
+</div>`,
+	})
+
+	// -------------------------------------------------------
+	// Saga Pattern
+	// -------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "fund-saga-overview",
+		Title:       "Saga Pattern Overview",
+		Description: "Sequence of local transactions with compensating transactions on failure",
+		ContentFile: "fundamentals/distributed/saga-pattern",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-box blue">T1: Reserve Inventory</div>
+    <div class="d-arrow">→</div>
+    <div class="d-box blue">T2: Charge Customer</div>
+    <div class="d-arrow">→</div>
+    <div class="d-box blue">T3: Ship Order</div>
+    <div class="d-arrow">→</div>
+    <div class="d-box green">Done ✓</div>
+  </div>
+  <div class="d-label">If T3 fails → run compensating transactions backwards:</div>
+  <div class="d-flow">
+    <div class="d-box red">T3 FAILS</div>
+    <div class="d-arrow">→</div>
+    <div class="d-box amber">C2: Refund Customer</div>
+    <div class="d-arrow">→</div>
+    <div class="d-box amber">C1: Release Inventory</div>
+    <div class="d-arrow">→</div>
+    <div class="d-box gray">Rolled Back</div>
+  </div>
+  <div class="d-caption">Each step is a local transaction. No distributed lock. Compensating transactions must be idempotent.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-saga-choreography",
+		Title:       "Choreography-Based Saga",
+		Description: "Event-driven service chain with no central orchestrator",
+		ContentFile: "fundamentals/distributed/saga-pattern",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow">
+  <div class="d-box blue">Order Service<br><small>emits OrderPlaced</small></div>
+  <div class="d-arrow">→</div>
+  <div class="d-box green">Inventory Service<br><small>listens OrderPlaced<br>emits InventoryReserved</small></div>
+  <div class="d-arrow">→</div>
+  <div class="d-box purple">Payment Service<br><small>listens InventoryReserved<br>emits PaymentCharged</small></div>
+  <div class="d-arrow">→</div>
+  <div class="d-box amber">Shipping Service<br><small>listens PaymentCharged<br>emits OrderShipped</small></div>
+</div>
+<div class="d-caption">No central coordinator. Each service reacts to events and emits new ones. Simple to add new services, but hard to trace overall saga state.</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-saga-orchestration",
+		Title:       "Orchestration-Based Saga",
+		Description: "Central orchestrator directing services step by step",
+		ContentFile: "fundamentals/distributed/saga-pattern",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box indigo">Saga Orchestrator<br><small>owns the saga_log, drives each step</small></div>
+  <div class="d-flow" style="margin-top:0.5rem;">
+    <div class="d-arrow">→ step 1</div>
+    <div class="d-box blue">Inventory Service</div>
+    <div class="d-arrow">← ok/fail</div>
+  </div>
+  <div class="d-flow">
+    <div class="d-arrow">→ step 2</div>
+    <div class="d-box green">Payment Service</div>
+    <div class="d-arrow">← ok/fail</div>
+  </div>
+  <div class="d-flow">
+    <div class="d-arrow">→ step 3</div>
+    <div class="d-box amber">Shipping Service</div>
+    <div class="d-arrow">← ok/fail</div>
+  </div>
+  <div class="d-caption">Orchestrator knows the full saga state. Easy to observe and debug. Single point of coordination — but not a single point of failure if the log is durable.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-saga-compensation",
+		Title:       "Saga Compensation Flow",
+		Description: "Forward steps and their corresponding compensating transactions",
+		ContentFile: "fundamentals/distributed/saga-pattern",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Forward Steps</div>
+      <div class="d-box blue">T1: reserve_inventory(order_id)</div>
+      <div class="d-box blue">T2: charge_customer(order_id)</div>
+      <div class="d-box blue">T3: create_shipment(order_id)</div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Compensating Transactions</div>
+      <div class="d-box amber">C1: release_inventory(order_id)</div>
+      <div class="d-box amber">C2: refund_customer(order_id)</div>
+      <div class="d-box amber">C3: cancel_shipment(order_id)</div>
+    </div>
+  </div>
+</div>
+<div class="d-caption">Every forward step must have a compensating transaction. Compensations must be idempotent — they may be called more than once if the orchestrator retries.</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-saga-recovery",
+		Title:       "Saga Crash Recovery",
+		Description: "Orchestrator recovers from crash by reading saga_log and replaying from last successful step",
+		ContentFile: "fundamentals/distributed/saga-pattern",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box red">Orchestrator Crashes mid-saga</div>
+  <div class="d-arrow-down">↓ on restart</div>
+  <div class="d-box indigo">Read saga_log from durable store (Postgres / DynamoDB)</div>
+  <div class="d-arrow-down">↓ find last committed step</div>
+  <div class="d-box amber">Determine: last completed step = T2 (charge_customer)</div>
+  <div class="d-arrow-down">↓ replay forward idempotently</div>
+  <div class="d-box green">Execute T3: create_shipment (safe — idempotent)</div>
+  <div class="d-caption">Each step's idempotency key (order_id) ensures replaying a completed step has no side effects. The log is the source of truth for saga state.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-saga-vs-2pc",
+		Title:       "Saga vs 2-Phase Commit",
+		Description: "Comparison of 2PC (distributed locks) vs Saga (local commits) for distributed transactions",
+		ContentFile: "fundamentals/distributed/saga-pattern",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">2-Phase Commit (2PC)</div>
+      <div class="d-box red">Phase 1: coordinator sends PREPARE<br>all participants hold locks</div>
+      <div class="d-box red">Phase 2: coordinator sends COMMIT<br>participants release locks</div>
+      <div class="d-label">If coordinator crashes in phase 2 → locks held forever</div>
+      <div class="d-box amber">Blocking, coordinator SPOF, poor availability</div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Saga</div>
+      <div class="d-box green">Each step is a local transaction<br>commits immediately, no locks held</div>
+      <div class="d-box green">Failures trigger compensating transactions<br>eventual consistency</div>
+      <div class="d-label">No distributed lock, no coordinator SPOF</div>
+      <div class="d-box blue">Non-blocking, high availability, eventual consistency</div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	// -------------------------------------------------------
+	// Rate Limiting
+	// -------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "fund-rl-token-bucket",
+		Title:       "Token Bucket Algorithm",
+		Description: "Token bucket fill and consume cycle for rate limiting",
+		ContentFile: "fundamentals/distributed/rate-limiting",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-box blue">Refill Thread<br><small>adds tokens at rate R/sec</small></div>
+    <div class="d-arrow">→</div>
+    <div class="d-box purple">Token Bucket<br><small>capacity C tokens<br>current: 7/10</small></div>
+    <div class="d-arrow">→</div>
+    <div class="d-box green">Incoming Request<br><small>consumes 1 token</small></div>
+  </div>
+  <div class="d-flow" style="margin-top:0.5rem;">
+    <div class="d-box green">Token available → allow request</div>
+    <div class="d-arrow">vs</div>
+    <div class="d-box red">No token → reject with 429</div>
+  </div>
+  <div class="d-caption">Allows bursts up to capacity C. Sustained rate limited to R tokens/sec. Redis INCR + EX implements a leaky bucket variant in one atomic call.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-rl-distributed",
+		Title:       "Distributed Rate Limiter",
+		Description: "Multi-server rate limiter with shared Redis counter for consistent limits across the fleet",
+		ContentFile: "fundamentals/distributed/rate-limiting",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-box blue">App Server 1</div>
+    <div class="d-box blue">App Server 2</div>
+    <div class="d-box blue">App Server 3</div>
+  </div>
+  <div class="d-arrow-down">↓ all servers check the same key</div>
+  <div class="d-box purple">Redis Cluster<br><small>key: rate:user:12345:2024010312<br>INCR + EXPIRE (atomic Lua script)</small></div>
+  <div class="d-flow" style="margin-top:0.5rem;">
+    <div class="d-box green">count ≤ 1000 → allow</div>
+    <div class="d-arrow">vs</div>
+    <div class="d-box red">count &gt; 1000 → 429 Too Many Requests</div>
+  </div>
+  <div class="d-caption">Shared Redis counter ensures the limit applies across the entire fleet. Lua script makes INCR+EXPIRE atomic — no race conditions between servers.</div>
+</div>`,
+	})
+
+	// -------------------------------------------------------
+	// Message Queues
+	// -------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "fund-message-queue-overview",
+		Title:       "Message Queue Overview",
+		Description: "Producer → Queue → Consumer basic flow with decoupling benefits",
+		ContentFile: "fundamentals/messaging/message-queues",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-box blue">Producer A<br><small>order-service</small></div>
+    <div class="d-box blue">Producer B<br><small>payment-service</small></div>
+  </div>
+  <div class="d-arrow-down">↓ publish messages</div>
+  <div class="d-box purple">Message Queue / Topic<br><small>durable, ordered, replicated</small></div>
+  <div class="d-arrow-down">↓ consume at own pace</div>
+  <div class="d-flow">
+    <div class="d-box green">Consumer A<br><small>notification-service</small></div>
+    <div class="d-box green">Consumer B<br><small>analytics-service</small></div>
+    <div class="d-box green">Consumer C<br><small>audit-service</small></div>
+  </div>
+  <div class="d-caption">Producers and consumers are decoupled in time and scale. Queue absorbs bursts. Consumers can be added or removed without changing producers.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-kafka-architecture",
+		Title:       "Kafka Architecture",
+		Description: "Topics, partitions, and consumer groups showing how Kafka scales throughput",
+		ContentFile: "fundamentals/messaging/message-queues",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">Producers (any service)</div>
+  <div class="d-arrow-down">↓ write to partition by key hash</div>
+  <div class="d-group">
+    <div class="d-group-title">Topic: order-events (3 partitions, replication factor 3)</div>
+    <div class="d-flow">
+      <div class="d-box purple">Partition 0<br><small>broker 1 (leader)</small></div>
+      <div class="d-box purple">Partition 1<br><small>broker 2 (leader)</small></div>
+      <div class="d-box purple">Partition 2<br><small>broker 3 (leader)</small></div>
+    </div>
+  </div>
+  <div class="d-arrow-down">↓ each consumer group reads independently</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Consumer Group: notifications</div>
+        <div class="d-box green">Consumer 1 → P0</div>
+        <div class="d-box green">Consumer 2 → P1</div>
+        <div class="d-box green">Consumer 3 → P2</div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Consumer Group: analytics</div>
+        <div class="d-box amber">Consumer 1 → P0+P1</div>
+        <div class="d-box amber">Consumer 2 → P2</div>
+      </div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-exactly-once-flow",
+		Title:       "Exactly-Once Delivery Flow",
+		Description: "Idempotent producer and transactional consumer achieving exactly-once semantics",
+		ContentFile: "fundamentals/messaging/message-queues",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">Producer<br><small>idempotent producer ID + sequence number</small></div>
+  <div class="d-arrow-down">↓ broker deduplicates using (producer_id, seq)</div>
+  <div class="d-box purple">Kafka Broker<br><small>stores message exactly once even on retry</small></div>
+  <div class="d-arrow-down">↓ consumer reads + processes atomically</div>
+  <div class="d-box green">Consumer<br><small>commits offset + side effect in same DB transaction</small></div>
+  <div class="d-flow" style="margin-top:0.5rem;">
+    <div class="d-box gray">BEGIN TRANSACTION</div>
+    <div class="d-arrow">→</div>
+    <div class="d-box gray">write result to DB</div>
+    <div class="d-arrow">→</div>
+    <div class="d-box gray">commit offset</div>
+    <div class="d-arrow">→</div>
+    <div class="d-box gray">COMMIT</div>
+  </div>
+  <div class="d-caption">Idempotent producer prevents duplicates at broker. Transactional consumer prevents duplicates at sink. Together: exactly-once end-to-end.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-backpressure-handling",
+		Title:       "Backpressure Handling",
+		Description: "Consumer-driven flow control preventing producer from overwhelming slow consumers",
+		ContentFile: "fundamentals/messaging/message-queues",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">Producer<br><small>1000 msg/s</small></div>
+  <div class="d-arrow-down">↓</div>
+  <div class="d-box purple">Queue / Buffer<br><small>growing backlog → signal to slow down</small></div>
+  <div class="d-arrow-down">↓ consumer pulls at its own rate</div>
+  <div class="d-box green">Consumer<br><small>200 msg/s (slow)</small></div>
+  <div class="d-cols" style="margin-top:0.5rem;">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Backpressure Strategies</div>
+        <div class="d-box amber">Drop (shed load) — reject new messages when full</div>
+        <div class="d-box amber">Block producer — pause until consumer catches up</div>
+        <div class="d-box amber">Scale consumers — add more consumer instances</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-caption">Backpressure is essential to prevent OOM crashes. Kafka handles it naturally — consumers pull at their own rate, so producers cannot overwhelm them.</div>
+</div>`,
+	})
+
+	// -------------------------------------------------------
+	// WebSockets
+	// -------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "fund-websocket-overview",
+		Title:       "WebSocket Connection Overview",
+		Description: "HTTP upgrade handshake establishing a persistent bidirectional WebSocket connection",
+		ContentFile: "fundamentals/networking/websockets",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-box blue">Browser</div>
+    <div class="d-arrow">→ HTTP GET /ws<br>Upgrade: websocket</div>
+    <div class="d-box green">Server</div>
+  </div>
+  <div class="d-flow">
+    <div class="d-box blue">Browser</div>
+    <div class="d-arrow">← 101 Switching Protocols</div>
+    <div class="d-box green">Server</div>
+  </div>
+  <div class="d-arrow-down">↓ TCP connection stays open</div>
+  <div class="d-flow">
+    <div class="d-box blue">Browser</div>
+    <div class="d-arrow">⟷ bidirectional frames<br>(no HTTP overhead)</div>
+    <div class="d-box green">Server</div>
+  </div>
+  <div class="d-caption">After the upgrade, both sides can send frames at any time without HTTP request/response overhead. Latency: ~1ms per frame (vs ~50ms for HTTP polling).</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-websocket-heartbeat",
+		Title:       "WebSocket Ping/Pong Heartbeat",
+		Description: "Ping/pong keepalive mechanism detecting dead connections",
+		ContentFile: "fundamentals/networking/websockets",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-box green">Server</div>
+    <div class="d-arrow">→ PING frame (every 30s)</div>
+    <div class="d-box blue">Client</div>
+  </div>
+  <div class="d-flow">
+    <div class="d-box green">Server</div>
+    <div class="d-arrow">← PONG frame</div>
+    <div class="d-box blue">Client</div>
+  </div>
+  <div class="d-flow" style="margin-top:0.5rem;">
+    <div class="d-box red">No PONG within 60s</div>
+    <div class="d-arrow">→</div>
+    <div class="d-box amber">Server closes connection<br>removes from session map</div>
+  </div>
+  <div class="d-caption">Heartbeats detect silently disconnected clients (mobile switching networks, NAT timeouts). Without heartbeats, zombie connections accumulate and exhaust file descriptors.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-websocket-scaling",
+		Title:       "WebSocket Horizontal Scaling",
+		Description: "Multiple WebSocket servers coordinated via Redis pub/sub for cross-server message delivery",
+		ContentFile: "fundamentals/networking/websockets",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">Client A (on WS Server 1)</div>
+  <div class="d-label">sends message to Client B (on WS Server 2)</div>
+  <div class="d-flow">
+    <div class="d-box green">WS Server 1<br><small>has Client A connection</small></div>
+    <div class="d-arrow">→ publish to Redis channel</div>
+    <div class="d-box purple">Redis Pub/Sub</div>
+    <div class="d-arrow">→ fan out to all servers</div>
+    <div class="d-box green">WS Server 2<br><small>has Client B connection<br>delivers to Client B</small></div>
+  </div>
+  <div class="d-caption">Sticky sessions (via load balancer) bind a client to one WS server. Redis pub/sub routes cross-server messages. Each server only holds connections for its clients.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-redis-pubsub-fanout",
+		Title:       "Redis Pub/Sub Fanout",
+		Description: "Redis pub/sub message broadcast to multiple WebSocket server subscribers",
+		ContentFile: "fundamentals/networking/websockets",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">Publisher (any service)<br><small>PUBLISH chat:room:42 "Hello"</small></div>
+  <div class="d-arrow-down">↓ Redis fan-out</div>
+  <div class="d-box purple">Redis Pub/Sub<br><small>channel: chat:room:42</small></div>
+  <div class="d-flow" style="margin-top:0.5rem;">
+    <div class="d-box green">WS Server 1<br><small>subscribed to channel<br>3 connected clients in room 42</small></div>
+    <div class="d-box green">WS Server 2<br><small>subscribed to channel<br>5 connected clients in room 42</small></div>
+    <div class="d-box green">WS Server 3<br><small>subscribed to channel<br>2 connected clients in room 42</small></div>
+  </div>
+  <div class="d-caption">Redis pub/sub is fire-and-forget — no persistence. If a server is down when the message is published, it misses it. Use Kafka for durability + pub/sub fan-out.</div>
+</div>`,
+	})
+
+	// -------------------------------------------------------
+	// Sharding
+	// -------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "fund-shard-range",
+		Title:       "Range-Based Sharding",
+		Description: "Range-based partition assignment mapping key ranges to specific shards",
+		ContentFile: "fundamentals/storage/sharding",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">Shard Key: user_id</div>
+  <div class="d-flow" style="margin-top:0.5rem;">
+    <div class="d-box green">Shard 0<br><small>user_id 1 – 1,000,000</small></div>
+    <div class="d-box green">Shard 1<br><small>user_id 1M – 2,000,000</small></div>
+    <div class="d-box green">Shard 2<br><small>user_id 2M – 3,000,000</small></div>
+    <div class="d-box amber">Shard 3 (hot!)<br><small>user_id 3M – 4,000,000<br>all new signups land here</small></div>
+  </div>
+  <div class="d-flow" style="margin-top:0.5rem;">
+    <div class="d-box blue">Range query user_id 500K–600K</div>
+    <div class="d-arrow">→ hits only Shard 0</div>
+    <div class="d-box green">Shard 0</div>
+  </div>
+  <div class="d-caption">Range sharding preserves locality — range queries hit one shard. But monotonic keys (auto-increment, timestamp) always write to the latest shard: hotspot risk.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-shard-hash",
+		Title:       "Hash-Based Sharding",
+		Description: "Hash-based partition assignment distributing keys uniformly across shards",
+		ContentFile: "fundamentals/storage/sharding",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">shard_id = hash(user_id) mod N</div>
+  <div class="d-flow" style="margin-top:0.5rem;">
+    <div class="d-box blue">user_id = 1001<br><small>hash → shard 2</small></div>
+    <div class="d-box blue">user_id = 1002<br><small>hash → shard 0</small></div>
+    <div class="d-box blue">user_id = 1003<br><small>hash → shard 1</small></div>
+  </div>
+  <div class="d-flow" style="margin-top:0.5rem;">
+    <div class="d-box green">Shard 0<br><small>~equal load</small></div>
+    <div class="d-box green">Shard 1<br><small>~equal load</small></div>
+    <div class="d-box green">Shard 2<br><small>~equal load</small></div>
+  </div>
+  <div class="d-caption">Even distribution — no hotspots. Tradeoff: range queries must scatter to all shards. Adding a shard with simple mod moves (N-1)/N ≈ 80% of keys. Use consistent hashing instead.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-shard-directory",
+		Title:       "Directory-Based Sharding",
+		Description: "Lookup-table based routing mapping each key to a specific shard",
+		ContentFile: "fundamentals/storage/sharding",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">Incoming Request<br><small>key: user:12345</small></div>
+  <div class="d-arrow-down">↓ lookup (cached locally)</div>
+  <div class="d-box purple">Directory Service / Lookup Table<br><small>user:12345 → shard3<br>user:67890 → shard1</small></div>
+  <div class="d-arrow-down">↓ route to correct shard</div>
+  <div class="d-flow">
+    <div class="d-box gray">Shard 1</div>
+    <div class="d-box gray">Shard 2</div>
+    <div class="d-box green">Shard 3 ← user:12345</div>
+    <div class="d-box gray">Shard 4</div>
+  </div>
+  <div class="d-caption">Most flexible — any key can move to any shard without math. Cache the lookup table locally in each app server (4MB for 1M users). Downside: lookup service is a potential SPOF.</div>
+</div>`,
+	})
+
+	// -------------------------------------------------------
+	// Geospatial
+	// -------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "fund-geospatial-overview",
+		Title:       "Geospatial Indexing Overview",
+		Description: "2D coordinates mapped to 1D index key enabling efficient proximity queries",
+		ContentFile: "fundamentals/storage/geospatial",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Without Spatial Index</div>
+        <div class="d-box red">WHERE lat BETWEEN 40.7 AND 40.8<br>AND lng BETWEEN -74.0 AND -73.9</div>
+        <div class="d-label">→ Full table scan on 2 columns</div>
+        <div class="d-box red">O(N) — unusable at scale</div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">With Spatial Index</div>
+        <div class="d-box green">Map (lat, lng) → 1D key<br><small>GeoHash string / S2 cell ID / H3 cell ID</small></div>
+        <div class="d-label">→ Range scan on single key</div>
+        <div class="d-box green">O(log N) — fast at any scale</div>
+      </div>
+    </div>
+  </div>
+  <div class="d-caption">Key insight: nearby points in 2D produce nearby keys in 1D (locality-preserving mapping). This converts a 2D proximity query into an efficient 1D range scan.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-geospatial-geohash",
+		Title:       "GeoHash Encoding",
+		Description: "World grid with base32 encoding hierarchy showing prefix-based proximity",
+		ContentFile: "fundamentals/storage/geospatial",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-box blue">(40.7484, -73.9857)<br><small>Times Square, NYC</small></div>
+    <div class="d-arrow">→ encode</div>
+    <div class="d-box purple">dr5ru<br><small>5-char GeoHash ≈ 4.9km cell</small></div>
+    <div class="d-arrow">→ longer</div>
+    <div class="d-box green">dr5ruj<br><small>6-char ≈ 1.2km cell</small></div>
+  </div>
+  <div class="d-label">Nearby points share prefix:</div>
+  <div class="d-flow">
+    <div class="d-box green">dr5ruj = Times Square</div>
+    <div class="d-box green">dr5rum = 500m away</div>
+    <div class="d-box amber">dr5q = different neighborhood<br><small>no common prefix at 5 chars</small></div>
+  </div>
+  <div class="d-caption">Shared prefix = geographic proximity. But check 8 neighboring cells for boundary safety — two points 1m apart can be on opposite sides of a cell edge.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-geospatial-s2",
+		Title:       "S2 Cell Hierarchy",
+		Description: "S2 sphere cell hierarchy from cube face to centimeter-scale cells",
+		ContentFile: "fundamentals/storage/geospatial",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-box blue">Level 0<br><small>6 cube faces<br>~85M km² each</small></div>
+    <div class="d-arrow">→ subdivide</div>
+    <div class="d-box green">Level 10<br><small>~100 km²<br>city district</small></div>
+    <div class="d-arrow">→ subdivide</div>
+    <div class="d-box purple">Level 14<br><small>~0.6 km²<br>driver matching</small></div>
+    <div class="d-arrow">→ subdivide</div>
+    <div class="d-box amber">Level 30<br><small>~1 cm²<br>precise point</small></div>
+  </div>
+  <div class="d-label">Each cell has a unique 64-bit integer ID — store as BIGINT in any DB:</div>
+  <div class="d-flow">
+    <div class="d-box blue">Point (lat, lng)</div>
+    <div class="d-arrow">→</div>
+    <div class="d-box purple">S2 Cell ID (uint64)<br><small>3845968832901234688</small></div>
+    <div class="d-arrow">→</div>
+    <div class="d-box green">B-tree range scan<br><small>containment query</small></div>
+  </div>
+  <div class="d-caption">Used by Google Maps, Pokémon GO for polygon containment. Sphere-aware — no latitude distortion unlike GeoHash rectangles.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-geospatial-h3",
+		Title:       "H3 Hexagonal Grid",
+		Description: "Hexagonal H3 grid cells for equal-area spatial analytics",
+		ContentFile: "fundamentals/storage/geospatial",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-box blue">Resolution 5<br><small>252 km² per cell<br>city district</small></div>
+    <div class="d-arrow">→ finer</div>
+    <div class="d-box purple">Resolution 8<br><small>0.74 km² per cell<br>Uber surge zones</small></div>
+    <div class="d-arrow">→ finer</div>
+    <div class="d-box green">Resolution 11<br><small>0.0003 km² per cell<br>building scale</small></div>
+  </div>
+  <div class="d-label">Equal-area: every cell at the same resolution covers the same area:</div>
+  <div class="d-flow">
+    <div class="d-box amber">H3 cell at equator<br>0.74 km²</div>
+    <div class="d-arrow">=</div>
+    <div class="d-box amber">H3 cell near pole<br>0.74 km²</div>
+    <div class="d-arrow">→</div>
+    <div class="d-box green">density ratio = supply/demand<br>comparable everywhere</div>
+  </div>
+  <div class="d-caption">Uber uses H3 resolution 8 for surge pricing. Each hexagon has exactly 6 equidistant neighbors — smoother spatial aggregation than rectangles.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-geospatial-redis-geo",
+		Title:       "Redis GEO Sorted Set",
+		Description: "Redis GEO sorted set with 52-bit GeoHash score for real-time proximity queries",
+		ContentFile: "fundamentals/storage/geospatial",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-box blue">GEOADD drivers:active<br><small>(-73.9857, 40.7484, "driver:1001")</small></div>
+    <div class="d-arrow">→</div>
+    <div class="d-box purple">Sorted Set<br><small>score = 52-bit GeoHash<br>member = "driver:1001"</small></div>
+  </div>
+  <div class="d-label">GEOSEARCH (replaces deprecated GEORADIUS):</div>
+  <div class="d-flow">
+    <div class="d-box green">GEOSEARCH drivers:active<br><small>FROMLONLAT -73.99 40.75<br>BYRADIUS 5 km ASC COUNT 10</small></div>
+    <div class="d-arrow">→</div>
+    <div class="d-box green">Returns 10 nearest drivers<br><small>O(N+log M) — sub-ms</small></div>
+  </div>
+  <div class="d-caption">No per-member TTL. Use a parallel Redis hash (drivers:last_seen) + background job to remove stale drivers older than 60s. Accuracy: ~0.6 meters.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-geospatial-postgis",
+		Title:       "PostGIS Spatial Index Query Flow",
+		Description: "PostGIS GIST index query flow with bounding-box pre-filter and exact distance computation",
+		ContentFile: "fundamentals/storage/geospatial",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue">ST_DWithin(location, point, 5000)<br><small>find all drivers within 5km</small></div>
+  <div class="d-arrow-down">↓ GIST index: bounding box pre-filter</div>
+  <div class="d-box amber">Bounding box scan<br><small>~1000 candidate rows from index</small></div>
+  <div class="d-arrow-down">↓ exact distance computation</div>
+  <div class="d-box green">Haversine distance filter<br><small>~50 rows within exact 5km radius</small></div>
+  <div class="d-arrow-down">↓ ORDER BY dist_meters LIMIT 10</div>
+  <div class="d-box green">Top 10 nearest drivers<br><small>total: ~10ms at 1M rows</small></div>
+  <div class="d-caption">GIST index reduces O(N) full scan to O(log N) bounding-box lookup. Exact distance only computed on the small candidate set. 10x slower than Redis GEO but durable.</div>
+</div>`,
+	})
+
+	// -------------------------------------------------------
+	// Consistent Hashing (Fundamental)
+	// -------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "fund-consistent-hashing-overview",
+		Title:       "Consistent Hashing Ring",
+		Description: "Hash ring with node positions and key assignment to nearest clockwise node",
+		ContentFile: "fundamentals/distributed/consistent-hashing",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-label">Hash ring [0, 2³²): nodes and keys mapped to positions</div>
+  <div class="d-flow">
+    <div class="d-box blue">Node A<br><small>position 10</small></div>
+    <div class="d-box green">Node B<br><small>position 40</small></div>
+    <div class="d-box purple">Node C<br><small>position 70</small></div>
+  </div>
+  <div class="d-label">Keys assigned to first node clockwise from their hash position:</div>
+  <div class="d-flow">
+    <div class="d-box amber">Key "user:1"<br><small>hash=15 → Node B (pos 40)</small></div>
+    <div class="d-box amber">Key "user:2"<br><small>hash=55 → Node C (pos 70)</small></div>
+    <div class="d-box amber">Key "user:3"<br><small>hash=80 → Node A (pos 10, wraps)</small></div>
+  </div>
+  <div class="d-caption">Adding a node only affects keys between the new node and its predecessor. O(K/N) keys move — not all keys like with modulo hashing.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-consistent-hashing-vnodes",
+		Title:       "Virtual Nodes",
+		Description: "Virtual nodes spread across ring for even load distribution",
+		ContentFile: "fundamentals/distributed/consistent-hashing",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Without vnodes (uneven)</div>
+        <div class="d-box red">Node A: handles 60% of keys</div>
+        <div class="d-box amber">Node B: handles 25% of keys</div>
+        <div class="d-box amber">Node C: handles 15% of keys</div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">With vnodes (even)</div>
+        <div class="d-box blue">Node A: 150 positions on ring<br><small>handles ~33% of keys</small></div>
+        <div class="d-box green">Node B: 150 positions on ring<br><small>handles ~33% of keys</small></div>
+        <div class="d-box purple">Node C: 150 positions on ring<br><small>handles ~33% of keys</small></div>
+      </div>
+    </div>
+  </div>
+  <div class="d-caption">Cassandra uses 256 vnodes per node by default. More positions = better statistical balance. Adding a node steals a few vnodes from each existing node — balanced migration.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-consistent-hashing-rebalance",
+		Title:       "Rebalancing on Node Add/Remove",
+		Description: "Key movement when adding or removing a node from the consistent hash ring",
+		ContentFile: "fundamentals/distributed/consistent-hashing",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Add Node D (pos 55)</div>
+      <div class="d-box blue">Node A (pos 10)</div>
+      <div class="d-box green">Node B (pos 40)</div>
+      <div class="d-box purple">Node D NEW (pos 55)<br><small>steals keys 40–55 from Node C</small></div>
+      <div class="d-box purple">Node C (pos 70)<br><small>loses keys 40–55 only</small></div>
+      <div class="d-label">Only 1/N keys move → minimal disruption</div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Remove Node B (pos 40)</div>
+      <div class="d-box blue">Node A (pos 10)</div>
+      <div class="d-box red">Node B REMOVED (pos 40)</div>
+      <div class="d-box purple">Node C (pos 70)<br><small>inherits keys 10–40 from B</small></div>
+      <div class="d-label">Only B's keys move → rest unaffected</div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-consistent-hashing-hotspot",
+		Title:       "Hotspot Detection and Mitigation",
+		Description: "Identifying and mitigating hot keys on the consistent hash ring",
+		ContentFile: "fundamentals/distributed/consistent-hashing",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box red">Hot key: "celebrity:user:12345"<br><small>1M requests/sec all land on Node A</small></div>
+  <div class="d-arrow-down">↓ mitigation strategies</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Write Sharding</div>
+        <div class="d-box amber">Split into N virtual keys<br>user:12345#0...user:12345#9</div>
+        <div class="d-box amber">Writes distributed across 10 nodes</div>
+        <div class="d-box amber">Reads scatter-gather + merge</div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Local Cache</div>
+        <div class="d-box green">Cache hot key in each app server</div>
+        <div class="d-box green">Skip ring lookup for cached hits</div>
+        <div class="d-box green">TTL invalidation (10s)</div>
+      </div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-consistent-hashing-failure",
+		Title:       "Node Failure and Key Rerouting",
+		Description: "Consistent hash ring behavior when a node fails and keys are rerouted",
+		ContentFile: "fundamentals/distributed/consistent-hashing",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow">
+    <div class="d-box blue">Node A (pos 10)</div>
+    <div class="d-box red">Node B FAILED (pos 40)</div>
+    <div class="d-box purple">Node C (pos 70)</div>
+  </div>
+  <div class="d-arrow-down">↓ Node B removed from ring</div>
+  <div class="d-flow">
+    <div class="d-box blue">Node A (pos 10)</div>
+    <div class="d-box purple">Node C (pos 70)<br><small>inherits all of B's keys (pos 10–40)</small></div>
+  </div>
+  <div class="d-label">With replication factor R=3: replicas on next 2 clockwise nodes</div>
+  <div class="d-flow">
+    <div class="d-box amber">Key at pos 25 → primary: B (failed)</div>
+    <div class="d-arrow">→</div>
+    <div class="d-box green">Promoted replica: C<br><small>no data loss with R=3</small></div>
+  </div>
+  <div class="d-caption">With replication factor 3, node failure causes zero data loss. Keys served from surviving replicas within seconds of failure detection.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-consistent-hashing-summary",
+		Title:       "Consistent Hashing Summary",
+		Description: "Full ring with replication and key assignment walkthrough",
+		ContentFile: "fundamentals/distributed/consistent-hashing",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-label">Full system: 4 nodes, 150 vnodes each, replication factor 3</div>
+  <div class="d-flow">
+    <div class="d-box blue">Node A<br><small>150 positions</small></div>
+    <div class="d-box green">Node B<br><small>150 positions</small></div>
+    <div class="d-box purple">Node C<br><small>150 positions</small></div>
+    <div class="d-box amber">Node D<br><small>150 positions</small></div>
+  </div>
+  <div class="d-label">Key "user:999" flow:</div>
+  <div class="d-flow">
+    <div class="d-box gray">hash("user:999") → pos 234</div>
+    <div class="d-arrow">→</div>
+    <div class="d-box green">Primary: Node B (nearest clockwise vnode)</div>
+  </div>
+  <div class="d-flow">
+    <div class="d-box purple">Replica 1: Node C</div>
+    <div class="d-box amber">Replica 2: Node D</div>
+    <div class="d-label">(next 2 clockwise nodes)</div>
+  </div>
+  <div class="d-caption">3 copies survive any single node failure. Adding Node E moves only 1/5 of keys. DynamoDB, Cassandra, and Redis Cluster all use consistent hashing variants.</div>
+</div>`,
+	})
+
 	r.Register(&Diagram{
 		Slug:        "fund-redis-failover",
 		Title:       "Redis Failover Flow",

@@ -1,12 +1,12 @@
 {{phase 1 "What Are WebSockets?" "3 min"}}
 
-{{say "<span class=\"hl-blue\">WebSockets</span> give you a persistent, full-duplex TCP connection between client and server:
+{{say `<span class="hl-blue">WebSockets</span> give you a persistent, full-duplex TCP connection between client and server:
 <ul>
   <li>Unlike HTTP (request-response), a WebSocket stays open — either side sends data at any time without waiting</li>
-  <li>Latency drops from <span class=\"hl\">100–300ms</span> (HTTP polling) to <span class=\"hl\">1–5ms</span> (WebSocket frame over existing connection)</li>
+  <li>Latency drops from <span class="hl">100–300ms</span> (HTTP polling) to <span class="hl">1–5ms</span> (WebSocket frame over existing connection)</li>
   <li>One connection per client: no repeated TCP handshakes, no HTTP headers per message</li>
   <li>Examples: Slack instant messages, Uber driver location streaming, live scoreboards, Figma collaborative canvas</li>
-</ul>"}}
+</ul>`}}
 
 {{diagram "fund-websocket-overview"}}
 
@@ -36,13 +36,13 @@
 
 {{phase 2 "Handshake & Protocol" "4 min"}}
 
-{{say "<span class=\"hl-blue\">WebSocket handshake</span> starts as an HTTP/1.1 request and upgrades in-place:
+{{say `<span class="hl-blue">WebSocket handshake</span> starts as an HTTP/1.1 request and upgrades in-place:
 <ul>
   <li>Client sends <code>Upgrade: websocket</code> + <code>Sec-WebSocket-Key</code> header</li>
   <li>Server responds with <strong>101 Switching Protocols</strong> — from this point the connection speaks WebSocket frames, not HTTP</li>
   <li>The same TCP connection is reused — no new handshake, no port change</li>
-  <li>Rejection (e.g., <span class=\"hl-red\">400 Bad Request</span>) means the connection stays HTTP — client falls back to SSE or long polling</li>
-</ul>"}}
+  <li>Rejection (e.g., <span class="hl-red">400 Bad Request</span>) means the connection stays HTTP — client falls back to SSE or long polling</li>
+</ul>`}}
 
 {{code "http" `# Client → Server: WebSocket upgrade request
 GET /chat HTTP/1.1
@@ -84,13 +84,13 @@ Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`}}
 
 {{phase 3 "Connection Management" "5 min"}}
 
-{{say "A WebSocket connection can live for hours or days — two mechanisms keep it healthy:
+{{say `A WebSocket connection can live for hours or days — two mechanisms keep it healthy:
 <ul>
-  <li><strong>Heartbeat (ping/pong):</strong> send a WebSocket ping frame every <span class=\"hl\">30 seconds</span>; expect pong within 5 seconds; close and clean up if no pong arrives
-    <ul><li><span class=\"hl-red\">Without this:</span> <em>ghost connections</em> accumulate — server holds state for clients that silently disconnected; TCP keepalive takes up to 10 minutes to notice</li></ul>
+  <li><strong>Heartbeat (ping/pong):</strong> send a WebSocket ping frame every <span class="hl">30 seconds</span>; expect pong within 5 seconds; close and clean up if no pong arrives
+    <ul><li><span class="hl-red">Without this:</span> <em>ghost connections</em> accumulate — server holds state for clients that silently disconnected; TCP keepalive takes up to 10 minutes to notice</li></ul>
   </li>
-  <li><strong>Exponential backoff reconnect:</strong> start at <span class=\"hl\">1s</span>, double each attempt, cap at <span class=\"hl\">60s</span>, add ±20% jitter to avoid thundering herd on server restart</li>
-</ul>"}}
+  <li><strong>Exponential backoff reconnect:</strong> start at <span class="hl">1s</span>, double each attempt, cap at <span class="hl">60s</span>, add ±20% jitter to avoid thundering herd on server restart</li>
+</ul>`}}
 
 {{diagram "fund-websocket-heartbeat"}}
 
@@ -216,14 +216,14 @@ func (h *Hub) Publish(userID string, payload []byte) {
 
 {{phase 5 "Redis Pub/Sub Fan-Out" "5 min"}}
 
-{{say "<span class=\"hl-blue\">Redis Pub/Sub</span> is the standard backend for WebSocket fan-out:
+{{say `<span class="hl-blue">Redis Pub/Sub</span> is the standard backend for WebSocket fan-out:
 <ul>
   <li>One publisher, N subscribers — each WebSocket server subscribes to the channels for its connected users</li>
-  <li>Throughput: <span class=\"hl\">~1M publishes/sec</span> on a single Redis node <small>(r6g.xlarge)</small></li>
-  <li><span class=\"hl-red\">Fire-and-forget:</span> if no subscriber is listening when a message is published, it is dropped — not persisted</li>
+  <li>Throughput: <span class="hl">~1M publishes/sec</span> on a single Redis node <small>(r6g.xlarge)</small></li>
+  <li><span class="hl-red">Fire-and-forget:</span> if no subscriber is listening when a message is published, it is dropped — not persisted</li>
   <li>For offline clients that need to catch up on missed messages, pair with <strong>Redis Streams</strong> or <strong>Kafka</strong> as a durable layer</li>
   <li>Slack uses this pattern: each browser tab has a WebSocket connection; Redis delivers to all tabs for the same user simultaneously</li>
-</ul>"}}
+</ul>`}}
 
 {{diagram "fund-redis-pubsub-fanout"}}
 
@@ -269,13 +269,13 @@ async def handler(websocket, path):
 
 {{phase 6 "Fallback Strategies" "4 min"}}
 
-{{say "Some environments block WebSockets — corporate firewalls, Zscaler, Cisco Umbrella proxies:
+{{say `Some environments block WebSockets — corporate firewalls, Zscaler, Cisco Umbrella proxies:
 <ul>
-  <li><strong>Fallback order:</strong> <span class=\"hl-blue\">WebSocket</span> → <span class=\"hl-blue\">SSE</span> → <span class=\"hl-blue\">Long Polling</span> — each step adds latency but maintains functionality</li>
+  <li><strong>Fallback order:</strong> <span class="hl-blue">WebSocket</span> → <span class="hl-blue">SSE</span> → <span class="hl-blue">Long Polling</span> — each step adds latency but maintains functionality</li>
   <li>Detect failure: if WebSocket handshake returns non-101, or connection closes immediately, fall back to SSE</li>
-  <li>If SSE is also blocked (some proxies strip <code>Content-Type: text/event-stream</code>), fall back to long polling with <span class=\"hl\">30-second</span> timeout</li>
+  <li>If SSE is also blocked (some proxies strip <code>Content-Type: text/event-stream</code>), fall back to long polling with <span class="hl">30-second</span> timeout</li>
   <li><strong>Socket.IO</strong> handles all three modes automatically <small>(~40KB bundle)</small> — pragmatic choice for teams without WebSocket expertise</li>
-</ul>"}}
+</ul>`}}
 
 {{think "Fallback order: WebSocket → SSE → Long Polling. Each step adds latency but maintains functionality."
   (how "upgrade failure detection" "If the WebSocket handshake returns a non-101 status, or the connection closes immediately, fall back to SSE. If SSE is also blocked (some proxies strip Content-Type: text/event-stream), fall back to long polling with 30-second timeout.")
@@ -322,14 +322,14 @@ async function startLongPolling(userId, onMessage) {
 
 {{phase 7 "Security & Health" "3 min"}}
 
-{{say "<span class=\"hl-red\">Always use WSS</span> — WebSocket over TLS — never plain WS:
+{{say `<span class="hl-red">Always use WSS</span> — WebSocket over TLS — never plain WS:
 <ul>
   <li>Plain WS is as insecure as HTTP — eavesdropping, injection, proxy interference</li>
   <li><strong>Authentication at upgrade time:</strong> validate JWT before returning 101; once connected, trust the connection for its lifetime</li>
   <li>Pass JWT as a query parameter <small>(appears in server logs — lower security)</small> or in the <code>Sec-WebSocket-Protocol</code> subprotocol header</li>
   <li>For long-lived connections (>15 min with a 15-min JWT TTL): implement a re-auth flow — server sends auth-challenge, client responds with refreshed token</li>
-  <li><span class=\"hl-red\">Avoid cookie auth alone</span> — cookies are sent automatically on upgrade, making WebSocket vulnerable to CSRF</li>
-</ul>"}}
+  <li><span class="hl-red">Avoid cookie auth alone</span> — cookies are sent automatically on upgrade, making WebSocket vulnerable to CSRF</li>
+</ul>`}}
 
 {{think "Authentication strategy: validate JWT at upgrade time, then trust the connection for its lifetime."
   (how "JWT in WebSocket headers" "Pass the JWT as a query parameter (?token=...) or in the Sec-WebSocket-Protocol header during the upgrade request. Validate on the server before accepting the connection. Query parameters appear in server logs — prefer the Subprotocol header method or an initial auth message.")
@@ -359,14 +359,14 @@ async function startLongPolling(userId, onMessage) {
 
 {{phase 8 "Interview Summary" "2 min"}}
 
-{{say "The interview story for WebSockets:
+{{say `The interview story for WebSockets:
 <ul>
-  <li><strong>Protocol:</strong> HTTP/1.1 upgrade → 101 Switching Protocols → full-duplex frames; latency <span class=\"hl\">1–5ms</span></li>
-  <li><strong>Scaling:</strong> connections are stateful — sticky sessions (ALB) reduce Redis traffic, Redis Pub/Sub solves cross-server routing; shard Redis at <span class=\"hl\">1M+ connections</span></li>
-  <li><strong>Reliability:</strong> ping every <span class=\"hl\">30s</span>, exponential backoff reconnect with <span class=\"hl\">60s</span> cap, jitter to avoid thundering herd</li>
-  <li><strong>Security:</strong> always WSS, JWT at upgrade, validate Origin, rate limit per connection, size-limit payloads to <span class=\"hl\">64KB</span></li>
+  <li><strong>Protocol:</strong> HTTP/1.1 upgrade → 101 Switching Protocols → full-duplex frames; latency <span class="hl">1–5ms</span></li>
+  <li><strong>Scaling:</strong> connections are stateful — sticky sessions (ALB) reduce Redis traffic, Redis Pub/Sub solves cross-server routing; shard Redis at <span class="hl">1M+ connections</span></li>
+  <li><strong>Reliability:</strong> ping every <span class="hl">30s</span>, exponential backoff reconnect with <span class="hl">60s</span> cap, jitter to avoid thundering herd</li>
+  <li><strong>Security:</strong> always WSS, JWT at upgrade, validate Origin, rate limit per connection, size-limit payloads to <span class="hl">64KB</span></li>
   <li><strong>Fallback:</strong> WebSocket → SSE → Long Polling for proxy-hostile environments</li>
-</ul>"}}
+</ul>`}}
 
 {{avoid "Don't say WebSockets scale easily horizontally. They don't — connections are stateful. You need sticky sessions AND a shared pub/sub layer. Say both. The interviewer is specifically testing whether you know this."}}
 
