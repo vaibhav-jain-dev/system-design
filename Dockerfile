@@ -6,20 +6,16 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -o /sd-dashboard .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /sd-dashboard .
 
-# Runtime stage
+# Runtime stage — minimal Alpine (no Playwright/Chromium; PDF engine is not yet active)
 FROM alpine:3.19
 
-RUN apk add --no-cache python3 py3-pip chromium
+# ca-certificates for HTTPS, tzdata for timezone, python3 for future PDF engine
+RUN apk add --no-cache ca-certificates tzdata python3
 
 WORKDIR /app
 COPY --from=builder /sd-dashboard /app/sd-dashboard
-
-# Install Python deps for PDF engine
-COPY engine/requirements.txt /app/engine/requirements.txt
-RUN pip3 install --break-system-packages -r /app/engine/requirements.txt && \
-    python3 -m playwright install chromium
 
 # Copy content + engine (these may also be mounted as volumes)
 COPY content/ /app/content/

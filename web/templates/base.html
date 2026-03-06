@@ -89,6 +89,14 @@
         <!-- Overlay for mobile sidebar -->
         <div class="sidebar-overlay" onclick="document.querySelector('.app').classList.remove('sidebar-open')"></div>
 
+        <!-- Reading progress bar -->
+        <div id="reading-progress" class="reading-progress"></div>
+
+        <!-- Scroll-to-top button -->
+        <button id="scroll-top-btn" class="scroll-top-btn" title="Back to top" aria-label="Back to top">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="18 15 12 9 6 15"/></svg>
+        </button>
+
         <!-- Main content area -->
         <main class="detail" id="detail">
             {{if eq .PageType "problem"}}
@@ -1136,6 +1144,169 @@
                 if (!book.active) initStageNav();
                 restoreScroll();
             });
+        });
+    })();
+    </script>
+
+    <!-- ── UI Enhancements: Progress Bar, Scroll-to-Top, Copy Buttons, Sidebar Search ── -->
+    <script>
+    (function() {
+        var detail = document.getElementById('detail');
+
+        // ── Reading Progress Bar ─────────────────────────────────────────
+        var progressBar = document.getElementById('reading-progress');
+        function updateProgress() {
+            if (!progressBar || !detail) return;
+            var scrollable = detail.scrollHeight - detail.clientHeight;
+            var pct = scrollable > 0 ? Math.min(100, (detail.scrollTop / scrollable) * 100) : 0;
+            progressBar.style.width = pct + '%';
+        }
+        if (detail) {
+            detail.addEventListener('scroll', updateProgress, { passive: true });
+        }
+
+        // ── Scroll-to-Top Button ─────────────────────────────────────────
+        var scrollBtn = document.getElementById('scroll-top-btn');
+        if (scrollBtn && detail) {
+            detail.addEventListener('scroll', function() {
+                scrollBtn.classList.toggle('visible', detail.scrollTop > 320);
+            }, { passive: true });
+            scrollBtn.addEventListener('click', function() {
+                detail.scrollTo({ top: 0, behavior: 'smooth' });
+            });
+        }
+
+        // ── Copy Buttons on Code Blocks ──────────────────────────────────
+        function addCopyButtons() {
+            document.querySelectorAll('.code-block').forEach(function(block) {
+                if (block.querySelector('.copy-btn')) return;
+                var btn = document.createElement('button');
+                btn.className = 'copy-btn';
+                btn.textContent = 'Copy';
+                btn.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    var code = block.querySelector('code');
+                    if (!code) return;
+                    var text = code.innerText || code.textContent || '';
+                    if (!navigator.clipboard) {
+                        var ta = document.createElement('textarea');
+                        ta.value = text;
+                        ta.style.cssText = 'position:fixed;opacity:0;';
+                        document.body.appendChild(ta);
+                        ta.select();
+                        document.execCommand('copy');
+                        document.body.removeChild(ta);
+                        btn.textContent = 'Copied!';
+                        btn.classList.add('copied');
+                        setTimeout(function() { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+                        return;
+                    }
+                    navigator.clipboard.writeText(text).then(function() {
+                        btn.textContent = 'Copied!';
+                        btn.classList.add('copied');
+                        setTimeout(function() { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+                    }).catch(function() {
+                        btn.textContent = 'Error';
+                        setTimeout(function() { btn.textContent = 'Copy'; }, 1500);
+                    });
+                });
+                block.appendChild(btn);
+            });
+        }
+
+        addCopyButtons();
+
+        // Re-run after HTMX swaps
+        document.addEventListener('htmx:afterSwap', function(e) {
+            if (e.detail && e.detail.target && e.detail.target.id === 'detail') {
+                addCopyButtons();
+                updateProgress();
+                if (scrollBtn) scrollBtn.classList.remove('visible');
+            }
+        });
+
+        // ── Sidebar Search / Filter ──────────────────────────────────────
+        function initSidebarSearch() {
+            var input = document.getElementById('sidebar-search');
+            var clearBtn = document.getElementById('sidebar-search-clear');
+            if (!input) return;
+
+            function doFilter() {
+                var q = input.value.toLowerCase().trim();
+
+                // Show/hide clear button
+                if (clearBtn) clearBtn.classList.toggle('visible', q.length > 0);
+
+                // Show everything when query is empty
+                if (!q) {
+                    document.querySelectorAll('.sidebar-section').forEach(function(s) {
+                        s.classList.remove('sidebar-section-hidden');
+                    });
+                    document.querySelectorAll('.sidebar-list > li, .sidebar-children > li').forEach(function(li) {
+                        li.classList.remove('sidebar-item-hidden');
+                    });
+                    return;
+                }
+
+                // Filter each section
+                document.querySelectorAll('.sidebar-section').forEach(function(section) {
+                    var anyMatch = false;
+                    section.querySelectorAll('.sidebar-item').forEach(function(item) {
+                        var label = item.querySelector('.item-label, .sidebar-category-label');
+                        var text = label ? label.textContent.toLowerCase() : item.textContent.toLowerCase();
+                        var matches = text.includes(q);
+                        var li = item.closest('li');
+                        if (li) li.classList.toggle('sidebar-item-hidden', !matches);
+                        if (matches) anyMatch = true;
+                    });
+                    section.classList.toggle('sidebar-section-hidden', !anyMatch);
+                    // Expand sections with matches
+                    if (anyMatch && section.classList.contains('collapsed')) {
+                        section.classList.remove('collapsed');
+                    }
+                });
+            }
+
+            input.addEventListener('input', doFilter);
+
+            if (clearBtn) {
+                clearBtn.addEventListener('click', function() {
+                    input.value = '';
+                    doFilter();
+                    input.focus();
+                });
+            }
+
+            // Keyboard shortcut: / focuses the search
+            document.addEventListener('keydown', function(e) {
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+                if (e.key === '/') {
+                    e.preventDefault();
+                    var app = document.querySelector('.app');
+                    if (app && !app.classList.contains('sidebar-open') && !app.classList.contains('sidebar-pinned')) {
+                        app.classList.add('sidebar-open');
+                    }
+                    setTimeout(function() { input.focus(); }, 50);
+                }
+                if (e.key === 'Escape' && document.activeElement === input) {
+                    input.value = '';
+                    doFilter();
+                    input.blur();
+                }
+            });
+        }
+
+        initSidebarSearch();
+
+        // Re-init sidebar search after HTMX swaps (sidebar persists, no re-init needed)
+        // but clear search state when navigating
+        document.addEventListener('htmx:afterSwap', function(e) {
+            if (e.detail && e.detail.target && e.detail.target.id === 'detail') {
+                var input = document.getElementById('sidebar-search');
+                if (input && input.value) {
+                    // Keep filter active if user typed something
+                }
+            }
         });
     })();
     </script>
