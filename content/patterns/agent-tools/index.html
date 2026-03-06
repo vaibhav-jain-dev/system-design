@@ -1,6 +1,11 @@
 {{phase 1 "What Is the Agent Pattern?" "5 min"}}
 
-{{say "An LLM agent is a system where the model decides what actions to take, executes those actions via tools, observes the results, and iterates until the task is complete. Instead of a single prompt-response cycle, the agent runs an autonomous loop: reason about what to do, call a tool, observe the result, then decide the next step."}}
+{{say "An <span class=\"hl-blue\">LLM agent</span> is a system where the model decides what actions to take, executes those actions via tools, observes results, and iterates until complete:
+<ul>
+  <li>Instead of a single prompt-response cycle, the agent runs an <strong>autonomous loop</strong>: reason → call tool → observe → repeat</li>
+  <li>The model is the <em>controller</em>, not just a text generator — it selects tools, formats calls, and decides when to stop</li>
+  <li>Foundation of Claude tool use, OpenAI function calling, and every AI assistant that browses the web or runs code</li>
+</ul>"}}
 
 {{think "The key insight: the LLM becomes a controller, not just a text generator. It reads the user's request, selects the right tool from a defined set, formats the tool call, interprets the result, and decides whether to call another tool or return a final answer. This is the foundation of Claude's tool use, OpenAI function calling, and every AI assistant that can browse the web or run code."
   (whyNot "a single large prompt" "A single prompt cannot access real-time data, execute code, or query a database. The model's knowledge is frozen at training time. Tools break that limitation — the agent becomes a real-time actor, not a static text predictor.")
@@ -26,7 +31,12 @@
 
 {{phase 2 "Agent Architecture: The ReAct Loop" "8 min"}}
 
-{{say "The dominant agent architecture is ReAct: Reasoning plus Acting. The LLM alternates between thinking about what to do (Reason) and executing a tool call (Act). After each action, it observes the result and decides the next step."}}
+{{say "The dominant agent architecture is <span class=\"hl-blue\">ReAct</span>: <strong>Re</strong>asoning + <strong>Act</strong>ing:
+<ul>
+  <li>The LLM alternates: <strong>Reason</strong> (think about what to do) → <strong>Act</strong> (call a tool) → <strong>Observe</strong> (read the result) → repeat</li>
+  <li>Each iteration adds to the conversation history — the model sees all prior reasoning and tool results</li>
+  <li>Terminates when the model returns a text response without requesting a tool call</li>
+</ul>"}}
 
 {{diagram "pat-react-agent-loop"}}
 
@@ -38,11 +48,20 @@
   (row "Terminate"    "LLM decides the task is complete"                "LLM returns text without tool call"      "Set max iterations to prevent loops")
 )}}
 
-{{hint "max_iterations = 10-20" "Most legitimate agent tasks complete in 3-7 iterations. Setting a hard cap at 10-20 catches infinite loops without frustrating users on complex tasks. If you see requests hitting the cap regularly, your task decomposition is wrong — the agent is stuck in a loop trying to recover from a bad tool call or unclear instructions."}}
+{{hint "max_iterations = 10-20" "Most legitimate agent tasks complete in <span class=\"hl\">3-7 iterations</span>. A hard cap at 10-20 catches infinite loops without frustrating users on complex tasks.
+<ul>
+  <li>If requests regularly hit the cap, task decomposition is wrong — the agent is stuck recovering from a bad tool call</li>
+  <li>Log iteration count per request; p95 tells you where to set the limit</li>
+</ul>"}}
 
 {{phase 3 "Tool Definition & Function Calling" "8 min"}}
 
-{{say "Tools are defined with a name, description, and a JSON schema for parameters. The LLM reads these definitions and decides which tool to call based on the user request. Good tool descriptions are critical — the LLM uses them to select the right tool."}}
+{{say "Tools are defined with a name, description, and a JSON schema for parameters:
+<ul>
+  <li>The LLM reads these definitions and selects tools based on the user request and its own reasoning</li>
+  <li><span class=\"hl-red\">Good tool descriptions are critical</span> — the description is the LLM's only guide for when to use each tool</li>
+  <li>Be explicit about when <em>not</em> to call a tool: <em>\"Only use when user explicitly asks to send an email\"</em></li>
+</ul>"}}
 
 {{code "python" `# Tool definitions using JSON schema format
 # Works with both OpenAI and Anthropic APIs
@@ -543,7 +562,13 @@ class ClaudeAgent:
 
 {{phase 6 "Error Handling & Safety Controls" "8 min"}}
 
-{{say "Agents can fail in dangerous ways: infinite loops, runaway costs, tool misuse, and prompt injection via tool results. Production agents need robust safeguards."}}
+{{say "Agents fail in dangerous and expensive ways — four failure categories to design against:
+<ul>
+  <li><strong>Infinite loops</strong> — agent keeps calling tools without converging; costs mount per iteration</li>
+  <li><strong>Runaway costs</strong> — unbounded token spend; one adversarial prompt can trigger hundreds of LLM calls</li>
+  <li><strong>Tool misuse</strong> — agent calls a destructive tool incorrectly or with malformed arguments</li>
+  <li><strong>Prompt injection via tool results</strong> — malicious data in tool output hijacks the agent's next action</li>
+</ul>"}}
 
 {{table "Agent Failure Modes" (rows
   (row "Failure"                  "What Happens"                                  "Prevention"                                   "Detection")
@@ -688,7 +713,12 @@ class SafeAgent(Agent):
 
 {{phase 7 "Agent Observability" "5 min"}}
 
-{{say "Agents are hard to debug because the execution path is non-deterministic. The same input can produce different tool call sequences on different runs. You need structured logging and tracing."}}
+{{say "Agents are hard to debug — the execution path is <span class=\"hl-blue\">non-deterministic</span>:
+<ul>
+  <li>The same input can produce different tool call sequences on different runs</li>
+  <li>Without structured tracing, a failing agent is a black box — you see the wrong answer but not which tool call caused it</li>
+  <li>Minimum viable observability: <strong>trace ID</strong> per request, <strong>log every tool call</strong> with name, arguments, result, and latency</li>
+</ul>"}}
 
 {{code "python" `import logging
 import uuid
@@ -770,7 +800,12 @@ class TracedAgent(SafeAgent):
 
 {{phase 8 "Architecture Patterns & Interview Q&A" "13 min"}}
 
-{{say "There are three main agent architectures. Start simple and only add complexity when a single agent with well-defined tools is not enough."}}
+{{say "Three agent architectures — start with the simplest that works:
+<ul>
+  <li><strong>Simple Agent</strong>: one agent, <span class=\"hl\">3-5 tools</span>, handles 90% of use cases — easiest to debug and cheapest to run</li>
+  <li><strong>Router Agent</strong>: a classifier routes to a specialized sub-agent with fewer tools — use when tool selection quality degrades past 5+ tools</li>
+  <li><span class=\"hl-red\">Multi-Agent</span>: only for genuinely parallel subtasks — hype exceeds practical value for most use cases</li>
+</ul>"}}
 
 {{diagram "pat-agent-architecture-patterns"}}
 
@@ -785,7 +820,7 @@ class TracedAgent(SafeAgent):
   (whatIf "you need specialized expertise per subtask" "Use a router agent instead. A fast, cheap model classifies the request, then routes to a specialized single agent (legal agent, code agent, data agent) each with domain-specific tools and system prompts. Same cost as multi-agent but linearly debuggable.")
 }}
 
-{{say "These are the most common agent interview questions. Focus on cost, testing, and handling long-running tasks."}}
+{{say "The most common agent interview questions focus on cost, testing, and long-running task handling — interviewers probe whether you have deployed agents in production or just read about them."}}
 
 {{qa
   "What is the cost of running an agent in production?"
