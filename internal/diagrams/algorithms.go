@@ -576,4 +576,212 @@ func registerAlgorithms(r *Registry) {
 </div>
 <div class="d-caption">Redis key per user: rate_limit:{user_id}. Two fields: tokens (float64) and last_refill (timestamp). Total Redis memory: ~100 bytes/user. 10M users = 1 GB. Lua script ensures atomicity without distributed locks.</div>`,
 	})
+
+	// ---------------------------------------------------------------
+	// Trie / Prefix Tree
+	// ---------------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "algo-trie-overview",
+		Title:       "Trie Structure for Autocomplete",
+		Description: "Trie nodes represent characters; paths from root to marked nodes spell complete words; prefix search walks O(L) nodes",
+		ContentFile: "algorithms/trie",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow" style="gap: 1.5rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
+  <div class="d-number"><div class="d-number-value">O(L)</div><div class="d-number-label">Prefix lookup (L = query length)</div></div>
+  <div class="d-number"><div class="d-number-value">O(L+K)</div><div class="d-number-label">Autocomplete (K = results)</div></div>
+</div>
+<div class="d-flow-v" style="align-items: center;">
+  <div class="d-box blue" data-tip="Root node — empty string prefix. Every word in the trie passes through the root.">root</div>
+  <div class="d-flow" style="gap: 2rem;">
+    <div class="d-flow-v" style="align-items: center;">
+      <div class="d-arrow-down">s</div>
+      <div class="d-box green" data-tip="Node for prefix 's'. All words starting with 's' are in this subtree.">s</div>
+      <div class="d-flow" style="gap: 1rem;">
+        <div class="d-flow-v" style="align-items: center;">
+          <div class="d-arrow-down">e</div>
+          <div class="d-box green">e</div>
+          <div class="d-arrow-down">a</div>
+          <div class="d-box green">a</div>
+          <div class="d-arrow-down">r</div>
+          <div class="d-box green">r</div>
+          <div class="d-arrow-down">c</div>
+          <div class="d-box green">c</div>
+          <div class="d-arrow-down">h</div>
+          <div class="d-box amber" data-tip="Marked node (is_end=true). The path root→s→e→a→r→c→h spells 'search'. Score=10000 (popular).">h ★ <div class="d-tag amber">score: 10K</div></div>
+        </div>
+        <div class="d-flow-v" style="align-items: center;">
+          <div class="d-arrow-down">o</div>
+          <div class="d-box green">o</div>
+          <div class="d-arrow-down">r</div>
+          <div class="d-box green">r</div>
+          <div class="d-arrow-down">t</div>
+          <div class="d-box amber" data-tip="Word 'sort' — path root→s→o→r→t. Score=5000.">t ★ <div class="d-tag amber">score: 5K</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="d-flow-v" style="align-items: center;">
+      <div class="d-arrow-down">r</div>
+      <div class="d-box green" data-tip="Node for prefix 'r'. Words: 'redis', 'rate', etc.">r</div>
+      <div class="d-arrow-down">e</div>
+      <div class="d-box green">e</div>
+      <div class="d-arrow-down">d</div>
+      <div class="d-box green">d</div>
+      <div class="d-arrow-down">i</div>
+      <div class="d-box green">i</div>
+      <div class="d-arrow-down">s</div>
+      <div class="d-box amber" data-tip="Word 'redis' — 5 nodes shared with all other words starting with 'redis'.">s ★ <div class="d-tag amber">score: 8K</div></div>
+    </div>
+  </div>
+  <div class="d-caption">Query prefix "se": walk root→s→e in 2 steps. DFS from 'e' node collects 'search' (10K), any other se* words. Without trie: scan all words for prefix match = O(N×L). With trie: O(L + K) regardless of vocabulary size.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "algo-trie-distributed",
+		Title:       "Distributed Trie for Search Autocomplete",
+		Description: "Production architecture: CDN → Redis hot prefixes → sharded in-memory trie → Elasticsearch fallback",
+		ContentFile: "algorithms/trie",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue" data-tip="User types 'red' — browser fires API call on every keystroke (debounced 200ms). Each keystroke = one autocomplete query.">User types "red..." <span class="d-step">1</span></div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box amber" data-tip="CDN caches top-1000 prefix results (60s TTL). ~80% of queries start with the same popular prefixes. CDN hit returns in &lt;10ms.">CDN Cache <span class="d-step">2</span> <span class="d-metric latency">&lt;10ms</span> <div class="d-tag amber">HIT: ~80% of queries</div></div>
+  <div class="d-arrow-down">&#8595; MISS</div>
+  <div class="d-box indigo" data-tip="Redis sorted set: key='prefix:red', value=sorted(top-10 suggestions by score). ZRANGEBYSCORE returns in O(log N + K). ~1K hot prefixes cached.">Redis Sorted Set <span class="d-step">3</span> <span class="d-metric latency">&lt;1ms</span> <div class="d-tag indigo">top 1000 hot prefixes</div></div>
+  <div class="d-arrow-down">&#8595; MISS</div>
+  <div class="d-flow">
+    <div class="d-box green" data-tip="Shard 'r': all words starting with 'r'. In-memory compressed trie. Top-K pre-computed at every node. O(L) query.">Trie Shard "r" <span class="d-step">4</span> <span class="d-metric latency">~5ms</span></div>
+    <div class="d-box green" data-tip="Each letter has its own trie shard. 26 shards for English. Hot letters (t, s, a) get more replicas.">Trie Shard "s"</div>
+    <div class="d-box green">Trie Shard "a"</div>
+    <div class="d-label">... 26 shards total</div>
+  </div>
+  <div class="d-arrow-down">&#8595; long-tail / fuzzy</div>
+  <div class="d-box purple" data-tip="Elasticsearch completion suggester for: (1) prefixes > 10 chars, (2) fuzzy/typo-tolerant queries, (3) content not yet in trie rebuild cycle.">Elasticsearch Fallback <span class="d-step">5</span> <span class="d-metric latency">~20ms</span> <div class="d-tag purple">fuzzy + long-tail</div></div>
+  <div class="d-caption">Trie rebuilt offline every hour from query log batch. Trending overlay: Redis ZADD for queries in last 15 min. Atomic pointer swap to new trie — zero downtime rebuild.</div>
+</div>`,
+	})
+
+	// ---------------------------------------------------------------
+	// Geohash
+	// ---------------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "algo-geohash-overview",
+		Title:       "Geohash Encoding Grid",
+		Description: "Geographic coordinate encoded as a base32 string; same-prefix cells are geographically adjacent",
+		ContentFile: "algorithms/geohash",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow" style="gap: 1.5rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
+  <div class="d-number"><div class="d-number-value">6 chars</div><div class="d-number-label">~1.2 km × 0.6 km (precision 6)</div></div>
+  <div class="d-number"><div class="d-number-value">7 chars</div><div class="d-number-label">~153 m × 153 m (precision 7)</div></div>
+  <div class="d-number"><div class="d-number-value">9 cells</div><div class="d-number-label">Always query (self + 8 neighbors)</div></div>
+</div>
+<div class="d-cols" style="gap: 1.5rem;">
+  <div class="d-flow-v">
+    <div class="d-label" style="font-weight: 600;">Coordinate → Geohash</div>
+    <div class="d-box blue" data-tip="New Delhi coordinates: 28.6139°N, 77.2090°E. Geohash precision 6: 'ttnfv2' (example).">Input: (28.6139, 77.2090)</div>
+    <div class="d-arrow-down">&#8595; bisect alternating lon/lat 30 times</div>
+    <div class="d-box green" data-tip="30 bits → 6 base32 characters. Each character encodes 5 bits (2 lon + 3 lat or 3 lon + 2 lat alternating).">Geohash: "ttnfv2"</div>
+    <div class="d-arrow-down">&#8595; same prefix = nearby</div>
+    <div class="d-flow" style="flex-wrap: wrap; gap: 0.5rem;">
+      <div class="d-box amber" data-tip="All start with 'ttnf' — within ~5 km of each other. String prefix = geographic proximity.">"ttnf<strong>v1</strong>"</div>
+      <div class="d-box amber">"ttnf<strong>v2</strong>" ← you</div>
+      <div class="d-box amber">"ttnf<strong>v3</strong>"</div>
+    </div>
+  </div>
+  <div class="d-flow-v">
+    <div class="d-label" style="font-weight: 600;">9-Cell Proximity Search</div>
+    <div class="d-flow" style="flex-wrap: wrap; gap: 0.25rem;">
+      <div class="d-box gray" style="width: 5rem; text-align:center;" data-tip="Northwest neighbor">NW</div>
+      <div class="d-box gray" style="width: 5rem; text-align:center;">N</div>
+      <div class="d-box gray" style="width: 5rem; text-align:center;">NE</div>
+    </div>
+    <div class="d-flow" style="flex-wrap: wrap; gap: 0.25rem;">
+      <div class="d-box gray" style="width: 5rem; text-align:center;">W</div>
+      <div class="d-box blue" style="width: 5rem; text-align:center;" data-tip="Query point cell. Must query all 9 cells because nearby entities may be in neighboring cells — especially near cell borders.">CENTER ★</div>
+      <div class="d-box gray" style="width: 5rem; text-align:center;">E</div>
+    </div>
+    <div class="d-flow" style="flex-wrap: wrap; gap: 0.25rem;">
+      <div class="d-box gray" style="width: 5rem; text-align:center;">SW</div>
+      <div class="d-box gray" style="width: 5rem; text-align:center;">S</div>
+      <div class="d-box gray" style="width: 5rem; text-align:center;">SE</div>
+    </div>
+    <div class="d-label" style="font-size: 0.75rem; color: var(--color-muted);">Query all 9, then Haversine filter</div>
+  </div>
+</div>
+<div class="d-caption">Geohash turns 2D proximity into 1D string prefix matching — enabling O(log N) B-tree index lookups vs O(N) Haversine table scan. Always query 9 cells: entities at cell border are closer to neighbors than to cell center.</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "algo-geohash-boundary",
+		Title:       "Geohash Boundary Problem",
+		Description: "Two physically adjacent points can have completely different geohash strings near meridian or equator boundaries",
+		ContentFile: "algorithms/geohash",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-label" style="font-weight: 600; color: var(--color-red);">The Boundary Problem</div>
+  <div class="d-flow" style="gap: 0.5rem; flex-wrap: wrap;">
+    <div class="d-box red" data-tip="Point A at the east border of its geohash cell. 10 meters to the east is Point B.">Point A: "ezs42" <span class="d-metric">eastern border</span></div>
+    <div class="d-label" style="font-size: 2rem;">↔</div>
+    <div class="d-box red" data-tip="Point B is only 10 meters from Point A but has a completely different geohash string — no shared prefix.">Point B: "u10hf" <span class="d-metric">10m away!</span></div>
+  </div>
+  <div class="d-label" style="margin-top: 0.5rem;">String prefix: <span class="hl-red">no common prefix</span> despite physical adjacency</div>
+  <div class="d-label" style="margin-top: 1rem; font-weight: 600; color: var(--color-green);">The Fix: Always Query 9 Cells</div>
+  <div class="d-flow-v">
+    <div class="d-box blue" data-tip="Query point's geohash cell.">Center: encode(query_lat, query_lon, precision=7)</div>
+    <div class="d-arrow-down">&#8595; + compute 8 neighbors</div>
+    <div class="d-flow" style="flex-wrap: wrap; gap: 0.5rem;">
+      <div class="d-box green" style="font-size: 0.8rem;">NW</div>
+      <div class="d-box green" style="font-size: 0.8rem;">N</div>
+      <div class="d-box green" style="font-size: 0.8rem;">NE</div>
+      <div class="d-box green" style="font-size: 0.8rem;">W</div>
+      <div class="d-box blue" style="font-size: 0.8rem;">CENTER</div>
+      <div class="d-box green" style="font-size: 0.8rem;">E</div>
+      <div class="d-box green" style="font-size: 0.8rem;">SW</div>
+      <div class="d-box green" style="font-size: 0.8rem;">S</div>
+      <div class="d-box green" style="font-size: 0.8rem;">SE</div>
+    </div>
+    <div class="d-arrow-down">&#8595; Redis GEORADIUS / DB WHERE geohash IN (...9 cells...)</div>
+    <div class="d-box purple" data-tip="Apply exact Haversine distance calculation to candidates from all 9 cells. Filter and sort by actual distance.">Haversine filter → sort by distance → return top-N</div>
+  </div>
+  <div class="d-caption">Querying only the center cell misses entities at cell borders — the most common case for a query point near a cell edge. 9-cell query guarantees coverage of all entities within the cell diameter of the query point.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "algo-geohash-food-delivery",
+		Title:       "Geohash in Food Delivery",
+		Description: "Restaurant discovery and delivery partner matching using geohash precision 6 and 7 in Redis GEO",
+		ContentFile: "algorithms/geohash",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow" style="gap: 1.5rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
+  <div class="d-number"><div class="d-number-value">precision 6</div><div class="d-number-label">Restaurant index (~1.2 km cells)</div></div>
+  <div class="d-number"><div class="d-number-value">precision 7</div><div class="d-number-label">Partner tracking (~150 m cells)</div></div>
+  <div class="d-number"><div class="d-number-value">30s TTL</div><div class="d-number-label">Auto-remove offline partners</div></div>
+</div>
+<div class="d-cols" style="gap: 1.5rem;">
+  <div class="d-flow-v">
+    <div class="d-label" style="font-weight: 600;">Restaurant Discovery</div>
+    <div class="d-box blue">User opens app at (lat, lon)</div>
+    <div class="d-arrow-down">&#8595; GEORADIUS restaurants:global</div>
+    <div class="d-box indigo" data-tip="Redis GEO internally uses 52-bit geohash. GEORADIUS: O(N+log M) — N results, M elements in radius. Sorted by distance.">Redis GEO <span class="d-metric latency">&lt;1ms</span> <div class="d-tag indigo">GEORADIUS 5km</div></div>
+    <div class="d-arrow-down">&#8595; top 50 by distance</div>
+    <div class="d-box green" data-tip="DynamoDB lookup for restaurant details: name, rating, menu summary, open/closed status. Batch GetItem for 50 IDs.">DynamoDB: fetch restaurant details</div>
+    <div class="d-arrow-down">&#8595;</div>
+    <div class="d-box green">Return sorted restaurant list</div>
+  </div>
+  <div class="d-flow-v">
+    <div class="d-label" style="font-weight: 600;">Partner Matching</div>
+    <div class="d-box blue">Order placed → find nearest partner</div>
+    <div class="d-arrow-down">&#8595; GEORADIUS partners:active</div>
+    <div class="d-box indigo" data-tip="Partner locations expire after 30s if not updated — auto-removes offline partners. GEORADIUS finds nearest available partners.">Redis GEO (30s TTL) <span class="d-metric latency">&lt;1ms</span> <div class="d-tag indigo">GEORADIUS 3km</div></div>
+    <div class="d-arrow-down">&#8595; nearest 3 partners</div>
+    <div class="d-box amber" data-tip="Check DynamoDB for partner availability status — Redis GEO may return stale location for partner who just went offline.">DynamoDB: validate partner availability</div>
+    <div class="d-arrow-down">&#8595; assign first available</div>
+    <div class="d-box green">Dispatch order to nearest partner</div>
+  </div>
+</div>
+<div class="d-caption">Partner app sends GPS update every 4 seconds: GEOADD partners:active lon lat partner_id. At 100K active partners × 1 update/4s = 25K GEOADD/s — well within Redis single-node capacity (~100K ops/s).</div>`,
+	})
 }

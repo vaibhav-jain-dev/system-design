@@ -1,0 +1,246 @@
+{{phase 1 "What Is Elasticsearch?" "3 min"}}
+
+{{say `Elasticsearch is a distributed search and analytics engine built on Apache Lucene. At its core it maintains an <strong>inverted index</strong> — a mapping from every word to the list of documents containing it:
+<ul>
+  <li>Standard database: "find rows where body contains 'redis'" → <span class='hl-red'>O(N) full scan</span></li>
+  <li>Elasticsearch: look up "redis" in inverted index → <span class='hl'>O(1) lookup</span> returning document list</li>
+</ul>
+The result: full-text search across millions of documents in <span class='hl'>< 50ms</span>.`}}
+
+{{diagram "fund-es-overview"}}
+
+{{think "Elasticsearch is optimized for one thing databases are terrible at: searching arbitrary text across large document sets. The inverted index trades write amplification (each word must be indexed) for dramatically faster reads. This is the right trade-off when reads dominate writes."
+  (whyNot "using LIKE '%redis%' in Postgres" "LIKE with a leading wildcard cannot use any index — it forces a full table scan. At 100M rows with 500-byte text each, that's 50 GB scanned per query. Even with a GIN trigram index, Postgres cannot match Elasticsearch for relevance ranking, fuzzy matching, and aggregation performance.")
+  (how "inverted index works" "At index time: tokenize text → normalize (lowercase, remove stopwords, stem) → record {term → [doc_id, position]}. At query time: look up each search term → intersect/union document lists → score by TF-IDF or BM25. The index is stored as a sorted term dictionary + posting lists on disk.")
+}}
+
+{{hint "Elasticsearch vs OpenSearch" "AWS forked Elasticsearch 7.10 in 2021 as <strong>OpenSearch</strong> after Elastic changed licensing. APIs are near-identical. Use OpenSearch Service on AWS for managed deployment — same mental model as Elasticsearch."}}
+
+{{triggerQs "Phase 1 Trigger Questions"
+  "When would you choose Elasticsearch over a relational database for search?"
+  "Choose ES when you need: (1) full-text search with relevance ranking, (2) fuzzy/typo-tolerant matching, (3) aggregations across millions of documents, (4) autocomplete/prefix matching at scale. Keep the relational DB as the source of truth — ES is a derived read index, not a primary store."
+  "What does Elasticsearch NOT do well?"
+  "<span class='hl-red'>Transactions</span> — no ACID, no rollback. <span class='hl-red'>Strong consistency</span> — indexing is near-real-time (~1s lag). <span class='hl-red'>Joins</span> — denormalize data before indexing. <span class='hl-red'>Primary storage</span> — data loss possible if index corrupts. Always use ES as a secondary index derived from a primary database."
+}}
+
+{{phase 2 "Core Concepts" "5 min"}}
+
+{{say `Four key concepts:
+<ul>
+  <li><strong>Index</strong> — like a database table. Contains documents of the same type.</li>
+  <li><strong>Document</strong> — a JSON object, the unit of data stored and searched. Like a DB row.</li>
+  <li><strong>Shard</strong> — a Lucene index. An index is split into N primary shards for parallelism.</li>
+  <li><strong>Replica</strong> — a copy of a shard for fault tolerance and read scaling.</li>
+</ul>`}}
+
+{{diagram "fund-es-sharding"}}
+
+{{table "Elasticsearch vs SQL Terminology" (rows
+  (row "Elasticsearch" "SQL Equivalent" "Notes")
+  (row "Index" "Table" "Stores documents of one type")
+  (row "Document" "Row" "JSON object with an _id field")
+  (row "Field" "Column" "Typed: text, keyword, integer, date, geo_point")
+  (row "Mapping" "Schema" "Defines field types; partially dynamic")
+  (row "Shard" "Partition" "Lucene index; fixed at index creation time")
+  (row "Replica" "Read replica" "Copy of primary shard; auto-promoted on failure")
+  (row "Cluster" "Database cluster" "Multiple nodes sharing indices")
+)}}
+
+{{think "Shard count is fixed at index creation time — a critical capacity planning decision."
+  (whatIf "you create an index with 1 shard and it grows to 500 GB" "Lucene has a practical limit of ~50 GB per shard for good query performance. A 500 GB single-shard index forces all searches through one Lucene reader on one node — no parallelism. You must reindex into a new index with more shards, which requires downtime or complex alias switching.")
+  (how "replicas help with read scalability" "A shard with 2 replicas = 3 total copies (1 primary + 2 replicas). ES load-balances GET requests across all 3. For read-heavy workloads, adding replicas is the scaling lever. Replicas also provide fault tolerance — losing a node does not lose data if at least one replica survives.")
+}}
+
+{{hint "over-sharding is the most common mistake" "Many teams create 20 shards for an index with 1 GB of data. Each shard has overhead: ~1-2 MB RAM for the shard metadata + file handles. With 20 shards per index × 20 indices = 400 shards. Recommendation: target <span class='hl'>~30-50 GB per shard</span>. A 1 TB index → 20-30 shards is right."}}
+
+{{triggerQs "Core Concepts Questions"
+  "How many shards should you create for an index?"
+  "Target <span class='hl'>20-50 GB per shard</span>. For a 100 GB index: 3-5 shards. Rule: never over-shard. More shards means more merge overhead, more file handles, more coordination overhead per query. You can increase replicas for read scaling without recreating the index. Shard count is forever, replica count is adjustable."
+}}
+
+{{phase 3 "Query Types & Relevance" "6 min"}}
+
+{{say `Three query families for system design interviews:
+<ul>
+  <li><strong>Full-text queries</strong> — <code>match</code>, <code>match_phrase</code>: tokenize input, score by BM25</li>
+  <li><strong>Term queries</strong> — <code>term</code>, <code>terms</code>, <code>range</code>: exact match on keyword/numeric fields</li>
+  <li><strong>Compound queries</strong> — <code>bool</code>: combine must/should/must_not/filter clauses</li>
+</ul>`}}
+
+{{code "json" `// Autocomplete: search-autocomplete or twitter-feed use case
+{
+  "query": {
+    "bool": {
+      "must": [
+        {"match": {"title": {"query": "redis cache", "fuzziness": "AUTO"}}}
+      ],
+      "filter": [
+        {"term": {"status": "published"}},
+        {"range": {"created_at": {"gte": "now-30d"}}}
+      ]
+    }
+  },
+  "suggest": {
+    "title-suggest": {
+      "prefix": "redis",
+      "completion": {"field": "title.suggest", "size": 5}
+    }
+  },
+  "aggs": {
+    "by_tag": {"terms": {"field": "tags.keyword", "size": 10}}
+  }
+}`}}
+
+{{table "Query Performance Characteristics" (rows
+  (row "Query Type" "Speed" "Use Case" "Caching")
+  (row "term/terms on keyword" "~1ms" "Exact filter: status='published'" "Yes (filter cache)")
+  (row "range on numeric/date" "~1ms" "date > now-30d, price < 100" "Yes (filter cache)")
+  (row "match (full-text)" "~5-20ms" "Free-text search, BM25 scored" "No (scored per request)")
+  (row "fuzzy match" "~10-50ms" "Typo tolerance (fuzziness=1)" "No")
+  (row "completion suggester" "~1-5ms" "Prefix autocomplete" "Yes (FST in memory)")
+  (row "aggregation" "~10-100ms" "Facets, trending counts, histograms" "Partial")
+)}}
+
+{{think "The bool query's filter clause vs must clause is critical for performance."
+  (how "filter context improves performance" "filter clauses do not compute relevance scores — they return a binary yes/no. ES caches filter results (bitsets) per segment. A range filter on timestamp is computed once and reused across queries with the same filter. must clauses with match compute BM25 score every time — not cacheable.")
+  (whyNot "using match for all queries" "Full-text match tokenizes and scores every document — cannot be cached. Use <strong>filter</strong> for exact/range conditions (cacheable, faster) and <strong>must/should</strong> only when relevance scoring matters. A tweet search filtering by user_id should use filter, not match.")
+}}
+
+{{hint "completion suggester uses an FST" "The completion suggester builds a Finite State Transducer (FST) entirely in JVM heap memory. It enables sub-millisecond prefix autocomplete across millions of completion terms. For search-autocomplete systems, this is <strong>dramatically faster</strong> than a match_phrase_prefix query."}}
+
+{{phase 4 "Indexing Pipeline" "4 min"}}
+
+{{say `Elasticsearch is a <strong>derived index</strong> — never the primary store. The standard pattern:
+<ul>
+  <li>Primary database (Postgres/DynamoDB) → single source of truth</li>
+  <li>Change Data Capture (CDC) stream → Kafka/Kinesis</li>
+  <li>Sync worker → consumes events → indexes into ES</li>
+  <li>Result: <span class='hl'>~1 second</span> indexing lag (near-real-time, not real-time)</li>
+</ul>`}}
+
+{{diagram "fund-es-indexing-pipeline"}}
+
+{{think "The 1-second refresh interval is the most misunderstood ES behavior."
+  (how "ES refresh works" "ES writes to an in-memory buffer. Every 1 second (default), it flushes to a new Lucene segment and makes it searchable. Documents indexed in the last <1 second are not yet visible to searches. This is 'near-real-time' (NRT) indexing, not real-time.")
+  (whatIf "you need to search a document immediately after indexing" "Call index API with ?refresh=true to force a refresh after the write. Cost: blocks until refresh completes (~50ms). Alternative: ?refresh=wait_for blocks until the next scheduled refresh (~1s). Never set refresh_interval=-1 permanently on a production index.")
+  (whyNot "writing directly to Elasticsearch without a primary DB" "ES does not guarantee durability by default. A node crash can lose up to translog flush_interval (default: 5 seconds) of writes. And ES has no transactions — you cannot roll back a partial batch index. Primary DB + async sync is the correct architecture.")
+}}
+
+{{checklist
+  "Always keep a primary DB (Postgres/DynamoDB) as source of truth — ES is a derived index"
+  "Use CDC (Debezium/DynamoDB Streams) to sync changes reliably"
+  "Design for ~1s indexing lag — do not use ES for real-time consistency"
+  "Index only the fields you will search or aggregate — do not index everything"
+}}
+
+{{phase 5 "Autocomplete with ES" "4 min"}}
+
+{{say `ES provides three approaches for autocomplete — choose based on scale and accuracy:
+<ul>
+  <li><strong>Completion Suggester</strong> — FST in memory, fastest (<5ms), supports prefix only</li>
+  <li><strong>search_as_you_type</strong> — n-gram tokenized field, supports infix matching, ~10ms</li>
+  <li><strong>match_phrase_prefix</strong> — slowest, queries all segments, ~20-50ms</li>
+</ul>`}}
+
+{{code "json" `// Index mapping for completion suggester
+{
+  "mappings": {
+    "properties": {
+      "title": {"type": "text"},
+      "title_suggest": {
+        "type": "completion",
+        "analyzer": "simple",
+        "contexts": [
+          {"name": "category", "type": "category"}
+        ]
+      }
+    }
+  }
+}
+
+// Index a document with suggest field
+{
+  "title": "Redis Sorted Sets",
+  "title_suggest": {
+    "input": ["redis", "sorted sets", "redis sorted sets"],
+    "weight": 1000,
+    "contexts": {"category": "fundamentals"}
+  }
+}
+
+// Query: prefix "redis" in category "fundamentals"
+{
+  "suggest": {
+    "prefix-suggest": {
+      "prefix": "redis",
+      "completion": {
+        "field": "title_suggest",
+        "size": 5,
+        "contexts": {"category": "fundamentals"}
+      }
+    }
+  }
+}`}}
+
+{{hint "weight field controls ranking" "The <code>weight</code> field in the completion suggester is the ranking signal. Set it to the popularity score: search frequency, click-through rate, recency. A query for 'red' returns <strong>Redis</strong> (weight=10000) before <strong>red-black tree</strong> (weight=50)."}}
+
+{{phase 6 "Scaling Elasticsearch" "4 min"}}
+
+{{say `Three levers for scaling ES:
+<ul>
+  <li><strong>More replicas</strong> — scale reads without data loss risk (replicas can be added/removed online)</li>
+  <li><strong>More data nodes</strong> — increase shard count by reindexing</li>
+  <li><strong>Index rollover</strong> — create time-based indices (tweets-2024-01, tweets-2024-02), query via alias</li>
+</ul>`}}
+
+{{table "Elasticsearch Cluster Topology" (rows
+  (row "Node Role" "Responsibility" "Memory" "Typical Count")
+  (row "Master-eligible" "Cluster state management, shard allocation" "8-16 GB" "3 (odd number, quorum)")
+  (row "Data" "Store shards, execute queries and indexing" "64-128 GB" "3-20+ depending on data size")
+  (row "Coordinating" "Route requests, merge shard results" "8-16 GB" "Optional, 2-3 for high traffic")
+  (row "Ingest" "Pre-process documents before indexing (pipelines)" "8-16 GB" "Optional, 2-3 for ETL")
+)}}
+
+{{think "Time-series data (tweets, logs, events) should always use rolling indices, not one giant index."
+  (how "index lifecycle management (ILM) automates rollover" "Define a policy: Hot phase — rollover when index > 50 GB or > 7 days. Warm phase — reduce replicas to 1, force merge segments. Cold phase — move to cheaper hardware. Delete phase — delete after 90 days. ILM applies this automatically. No manual index management.")
+  (whatIf "your single tweet index grows to 10 TB" "Shard count was fixed at creation. If you created 20 shards, each shard is now 500 GB — well above the 50 GB sweet spot. Query performance degrades as each Lucene segment merge becomes expensive. Solution: reindex into monthly rolling indices. Tweets from 2 years ago are queried rarely — cold storage.")
+}}
+
+{{triggerQs "Scaling Questions"
+  "How does Elasticsearch handle a node failure?"
+  "Master node detects the failed node via missed heartbeats (30-60s default). Promotes replica shards on surviving nodes to primary. Re-allocates the failed node's primary shards across the cluster. The cluster goes from <strong>green</strong> (all shards healthy) to <strong>yellow</strong> (primaries OK, some replicas missing) to <strong>green</strong> once re-replication completes. No data loss if at least one replica survived."
+}}
+
+{{phase 7 "ES in System Design: Common Patterns" "3 min"}}
+
+{{table "ES in System Design Problems" (rows
+  (row "System" "ES Role" "What Is Indexed" "Primary Store")
+  (row "Search Autocomplete" "Completion suggester for prefix matching" "Query terms + popularity weights" "Redis (hot) + DynamoDB (cold)")
+  (row "Twitter Feed" "Tweet full-text search + hashtag index" "tweet_text, user_id, created_at, hashtags" "DynamoDB (timeline source of truth)")
+  (row "Instagram" "Explore page: hashtag search, user search" "captions, hashtags, user handles" "Postgres/DynamoDB (profile store)")
+  (row "E-commerce" "Product search with facets (brand, price range)" "product_name, description, attributes" "Postgres (catalog source)")
+  (row "Log Analytics" "Full-text log search, aggregation dashboards" "log lines, error codes, timestamps" "S3 (raw logs archive)")
+)}}
+
+{{qa "Why use Elasticsearch for search instead of adding full-text indexes to your primary database?"
+  "Three reasons: (1) <strong>Relevance ranking</strong> — BM25 scoring understands term frequency and document length; Postgres LIKE has no ranking. (2) <strong>Scale</strong> — ES horizontally shards search across nodes; a single Postgres instance hits a write/read ceiling. (3) <strong>Features</strong> — fuzzy matching, autocomplete suggester, aggregations, highlighting — months of work to replicate in SQL."
+  "What is the trade-off of adding Elasticsearch?"
+  "Operational complexity: another system to monitor, another failure domain. Indexing lag (~1s) — search results are slightly stale. Cost: ES nodes are memory-hungry. The trade-off is worth it when search is a core feature. If search is a minor feature used by 5% of users, a Postgres GIN trigram index may suffice."}}
+
+{{phase 8 "Trade-offs & Edge Cases" "3 min"}}
+
+{{table "ES Limitations" (rows
+  (row "Limitation" "Why It Matters" "Mitigation")
+  (row "1s indexing lag" "Newly created content not immediately searchable" "Acceptable for most cases. Force refresh for critical paths.")
+  (row "No transactions" "Cannot atomically update document + trigger business logic" "Use primary DB for transactions; ES is eventually consistent derived view")
+  (row "Memory-hungry" "Heap must hold FST (completion), field data cache, filter cache" "128 GB nodes, heap = 50% of RAM max, use Doc Values not fielddata")
+  (row "Shard count fixed at creation" "Under-sharding limits scale; over-sharding wastes resources" "Plan for 30-50 GB/shard. Use reindex API + alias switching to change shard count")
+  (row "Split-brain risk" "Network partition can elect two master nodes" "Always run 3 master-eligible nodes. Set discovery.zen.minimum_master_nodes = 2 (or use quorum)")
+  (row "JVM GC pauses" "Stop-the-world GC pauses cause query timeouts" "64 GB heap max. Use G1GC. Off-heap for large caches.")
+)}}
+
+{{think "The split-brain problem is the most dangerous ES failure mode."
+  (how "split-brain occurs" "Two network partitions each elect a master. Both halves accept writes. When partition heals, you have two diverged cluster states — manual recovery required. minimum_master_nodes = ⌊N/2⌋ + 1 prevents this: a partition of fewer than half the master-eligible nodes cannot elect a master.")
+}}
+
+{{key "Elasticsearch is a derived read-optimized index on top of your primary database. It excels at full-text search, prefix autocomplete, and aggregations that are O(N) in SQL. The cost: 1s indexing lag, operational complexity, and memory overhead. Use it when search is a core product feature, not a nice-to-have."}}

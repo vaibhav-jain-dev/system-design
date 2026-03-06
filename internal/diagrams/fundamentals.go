@@ -1469,4 +1469,205 @@ func registerFundamentals(r *Registry) {
   <div class="d-caption">Total failover window: 20-60 seconds. During this window, writes fail and reads may return stale data. Design applications to handle transient Redis unavailability gracefully.</div>
 </div>`,
 	})
+
+	// -------------------------------------------------------
+	// S3 / Object Storage
+	// -------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "fund-s3-overview",
+		Title:       "S3 Object Storage Overview",
+		Description: "Shows S3 bucket structure, durability via multi-AZ replication, and the three core operations (PUT/GET/DELETE)",
+		ContentFile: "fundamentals/storage/s3",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow" style="gap: 1.5rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
+  <div class="d-number"><div class="d-number-value">11 9s</div><div class="d-number-label">Durability (per object/year)</div></div>
+  <div class="d-number"><div class="d-number-value">$0.023</div><div class="d-number-label">Per GB/month (Standard)</div></div>
+  <div class="d-number"><div class="d-number-value">5 TB</div><div class="d-number-label">Max object size</div></div>
+</div>
+<div class="d-flow-v">
+  <div class="d-box blue" data-tip="Client (browser, app server, CDN). Three operations only: PUT (write), GET (read), DELETE. No in-place edit — must write a new object.">Client</div>
+  <div class="d-arrow-down">&#8595; PUT / GET / DELETE</div>
+  <div class="d-box indigo" data-tip="Globally unique name across all AWS accounts. Flat namespace — no real directories, just key prefixes. Versioning optional. One region per bucket.">S3 Bucket <span class="d-metric">flat key namespace</span></div>
+  <div class="d-arrow-down">&#8595; automatic replication</div>
+  <div class="d-flow">
+    <div class="d-box green" data-tip="Each AZ is a separate data center with independent power and networking. Multi-AZ replication is automatic, synchronous, invisible to the caller.">AZ-1 replica</div>
+    <div class="d-box green" data-tip="S3 replicates to at least 3 AZs within the region. All copies are identical. Loss of any 2 AZs still serves data from the third.">AZ-2 replica</div>
+    <div class="d-box green" data-tip="Third copy ensures 11-nines durability. Probability of losing all 3 simultaneously is vanishingly small (~10^-11 per year per object).">AZ-3 replica</div>
+  </div>
+  <div class="d-caption">S3 objects are immutable: no partial write, no in-place update. Write a new object at the same key to 'update'. Three AZ replicas give 11-nines durability. At 1M objects, expected loss: 0.00001 objects/year.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-s3-presigned",
+		Title:       "Pre-Signed URL Flow",
+		Description: "Client upload and download flow using pre-signed URLs — server generates signed URL, client talks directly to S3",
+		ContentFile: "fundamentals/storage/s3",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-group">
+    <div class="d-group-title">Upload Flow (Pre-Signed PUT)</div>
+    <div class="d-flow">
+      <div class="d-box blue" data-tip="Client requests permission to upload — does not send the file yet.">Client <span class="d-step">1</span> POST /upload-url</div>
+      <div class="d-arrow">→</div>
+      <div class="d-box indigo" data-tip="Generates pre-signed PUT URL in &lt;1ms (pure crypto, no network call to S3). Includes: bucket, key, expiry, HMAC-SHA256 signature.">App Server <span class="d-step">2</span> sign URL</div>
+    </div>
+    <div class="d-flow">
+      <div class="d-box blue" data-tip="Client receives the signed URL and uploads directly — app server is NOT in the data path.">Client <span class="d-step">3</span> PUT to S3 URL</div>
+      <div class="d-arrow">→</div>
+      <div class="d-box green" data-tip="S3 validates the HMAC signature. If valid and not expired, stores the object. No AWS credentials exposed to client.">S3 <span class="d-tag green">direct upload</span> <span class="d-metric latency">~10 Gbps</span></div>
+    </div>
+  </div>
+  <div class="d-group" style="margin-top: 0.75rem;">
+    <div class="d-group-title">Download Flow (CloudFront + OAC)</div>
+    <div class="d-flow">
+      <div class="d-box blue">User</div>
+      <div class="d-arrow">→</div>
+      <div class="d-box amber" data-tip="CloudFront edge PoP. Checks cache. HIT: serves from edge (~10ms). MISS: fetches from S3 origin, caches, serves.">CloudFront Edge <span class="d-metric latency">~10ms HIT</span></div>
+      <div class="d-arrow">→ MISS only</div>
+      <div class="d-box green" data-tip="S3 bucket is NOT public. OAC (Origin Access Control) allows only CloudFront service principal to GET objects. Direct S3 URL returns 403.">S3 (private bucket) <span class="d-tag indigo">OAC</span></div>
+    </div>
+  </div>
+  <div class="d-caption">Pre-signed URL removes app server from data path — at 1000 concurrent 5MB uploads, your server is not the bottleneck. OAC ensures S3 is never publicly accessible.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-s3-lifecycle",
+		Title:       "S3 Lifecycle Tiering",
+		Description: "Automatic cost optimization: objects move from Standard to IA to Glacier as they age",
+		ContentFile: "fundamentals/storage/s3",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow" style="gap: 1.5rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
+  <div class="d-number"><div class="d-number-value">$0.023</div><div class="d-number-label">Standard /GB/mo</div></div>
+  <div class="d-number"><div class="d-number-value">$0.00099</div><div class="d-number-label">Deep Archive /GB/mo</div></div>
+  <div class="d-number"><div class="d-number-value">23x</div><div class="d-number-label">Cost reduction to archive</div></div>
+</div>
+<div class="d-flow">
+  <div class="d-box blue" data-tip="$0.023/GB/mo. Immediate access. Best for recently uploaded user media accessed frequently in first 30 days.">Standard <div class="d-tag blue">Day 0-30</div> <div class="d-metric">$0.023/GB</div></div>
+  <div class="d-arrow">→ 30 days</div>
+  <div class="d-box amber" data-tip="$0.0125/GB/mo. Immediate access but $0.01/GB retrieval fee. Good for media accessed monthly — thumbnails, user profile pics from 1-3 months ago.">Standard-IA <div class="d-tag amber">Day 30-90</div> <div class="d-metric">$0.0125/GB</div></div>
+  <div class="d-arrow">→ 90 days</div>
+  <div class="d-box purple" data-tip="$0.004/GB/mo. Millisecond retrieval but higher per-GB-retrieved cost. Good for compliance scans, quarterly archive access.">Glacier Instant <div class="d-tag purple">Day 90-365</div> <div class="d-metric">$0.004/GB</div></div>
+  <div class="d-arrow">→ 1 year</div>
+  <div class="d-box gray" data-tip="$0.00099/GB/mo. 12-48h retrieval. Best for regulatory archives (7-year retention for financial records). 23x cheaper than Standard.">Deep Archive <div class="d-tag gray">Year 1+</div> <div class="d-metric">$0.00099/GB</div></div>
+</div>
+<div class="d-caption">Lifecycle policies execute automatically — no code changes. 1 PB of media: Standard forever = $23K/mo. With lifecycle to Deep Archive after 1 year = ~$4K/mo. $19K/month savings at Instagram scale.</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-s3-events",
+		Title:       "S3 Event Notification Pipeline",
+		Description: "S3 upload triggers Lambda/SQS/SNS for async processing: image resize, video transcode, content moderation",
+		ContentFile: "fundamentals/storage/s3",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue" data-tip="User uploads file directly to S3 via pre-signed PUT URL. Upload completes — HTTP 200 returned to user immediately.">User uploads to S3 (pre-signed PUT) <span class="d-step">1</span></div>
+  <div class="d-arrow-down">&#8595; s3:ObjectCreated event</div>
+  <div class="d-box amber" data-tip="S3 emits an event notification within milliseconds of the PUT completing. Targets: Lambda (sync invoke), SQS (queue), SNS (fan-out to multiple subscribers).">S3 Event Notification <span class="d-step">2</span> <span class="d-metric latency">&lt;1s</span></div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-flow">
+    <div class="d-box green" data-tip="Direct Lambda invocation. Good for simple transforms: resize image to 3 sizes. Max 15 min execution. At-least-once — Lambda is idempotent.">Lambda <div class="d-tag green">image resize</div></div>
+    <div class="d-box indigo" data-tip="SQS buffers events for batch processing. Lambda polls SQS (up to 10 messages per batch). Handles spiky upload bursts without throttling. DLQ for failures.">SQS → Lambda Workers <div class="d-tag indigo">video transcode</div></div>
+    <div class="d-box red" data-tip="SNS fans out to multiple subscribers: moderation queue, analytics queue, email notification. One S3 event reaches N downstream consumers.">SNS → Moderation + Analytics <div class="d-tag red">content safety</div></div>
+  </div>
+  <div class="d-caption">S3 events are at-least-once delivery — design Lambda/worker functions to be idempotent. Same image may be processed twice on retry. Check output existence before reprocessing.</div>
+</div>`,
+	})
+
+	// -------------------------------------------------------
+	// Elasticsearch / OpenSearch
+	// -------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "fund-es-overview",
+		Title:       "Elasticsearch Inverted Index",
+		Description: "How Elasticsearch's inverted index enables full-text search: tokenization, indexing, and query execution",
+		ContentFile: "fundamentals/storage/elasticsearch",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow" style="gap: 1.5rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
+  <div class="d-number"><div class="d-number-value">&lt;50ms</div><div class="d-number-label">Full-text search latency</div></div>
+  <div class="d-number"><div class="d-number-value">O(1)</div><div class="d-number-label">Inverted index lookup</div></div>
+</div>
+<div class="d-cols" style="gap: 1rem;">
+  <div class="d-flow-v">
+    <div class="d-label" style="font-weight: 600;">Documents (source)</div>
+    <div class="d-box gray" style="font-size: 0.8rem;" data-tip="Doc 1: contains words 'redis', 'cache', 'fast'">Doc 1: "Redis cache is fast"</div>
+    <div class="d-box gray" style="font-size: 0.8rem;" data-tip="Doc 2: contains words 'redis', 'sorted', 'sets'">Doc 2: "Redis sorted sets"</div>
+    <div class="d-box gray" style="font-size: 0.8rem;" data-tip="Doc 3: contains words 'cache', 'invalidation'">Doc 3: "Cache invalidation"</div>
+  </div>
+  <div class="d-arrow">→ index</div>
+  <div class="d-flow-v">
+    <div class="d-label" style="font-weight: 600;">Inverted Index</div>
+    <div class="d-box blue" style="font-size: 0.8rem;" data-tip="Term 'redis' appears in Doc 1 (pos 1) and Doc 2 (pos 1). O(1) lookup — no scan needed.">"redis" → [doc1, doc2]</div>
+    <div class="d-box blue" style="font-size: 0.8rem;" data-tip="Term 'cache' appears in Doc 1 and Doc 3.">"cache" → [doc1, doc3]</div>
+    <div class="d-box blue" style="font-size: 0.8rem;">"fast"  → [doc1]</div>
+    <div class="d-box blue" style="font-size: 0.8rem;">"sorted" → [doc2]</div>
+  </div>
+  <div class="d-arrow">→ query "redis cache"</div>
+  <div class="d-flow-v">
+    <div class="d-label" style="font-weight: 600;">Result (BM25 ranked)</div>
+    <div class="d-box green" data-tip="Doc 1 contains both 'redis' AND 'cache' — highest BM25 score.">#1 Doc 1 <span class="d-tag green">both terms</span></div>
+    <div class="d-box amber" data-tip="Doc 2 has 'redis', Doc 3 has 'cache' — single term match, lower score.">#2 Doc 2, Doc 3</div>
+  </div>
+</div>
+<div class="d-caption">Inverted index: during indexing, each term maps to the list of documents containing it. At query time: look up each term → intersect posting lists → score by BM25. O(1) per term lookup vs O(N) full scan in SQL.</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-es-sharding",
+		Title:       "Elasticsearch Shard Architecture",
+		Description: "Index split into primary shards across nodes, with replica shards for fault tolerance and read scaling",
+		ContentFile: "fundamentals/storage/elasticsearch",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow" style="gap: 1.5rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
+  <div class="d-number"><div class="d-number-value">30-50 GB</div><div class="d-number-label">Target per shard</div></div>
+  <div class="d-number"><div class="d-number-value">3</div><div class="d-number-label">Master-eligible nodes (odd)</div></div>
+</div>
+<div class="d-flow-v">
+  <div class="d-box blue" data-tip="Client query is sent to any node (coordinating node). It fans out the query to all shards in parallel, collects results, merges, ranks, and returns top-N.">Client Query</div>
+  <div class="d-arrow-down">&#8595; coordinating node fans out</div>
+  <div class="d-flow">
+    <div class="d-flow-v">
+      <div class="d-label">Node 1</div>
+      <div class="d-box green" data-tip="Primary shard 0 — stores 1/3 of the index data. Handles writes and reads.">P0 (primary)</div>
+      <div class="d-box amber" data-tip="Replica of shard 1 — promoted to primary if Node 2 fails. Handles read requests.">R1 (replica)</div>
+    </div>
+    <div class="d-flow-v">
+      <div class="d-label">Node 2</div>
+      <div class="d-box green" data-tip="Primary shard 1 — stores another 1/3 of index data.">P1 (primary)</div>
+      <div class="d-box amber" data-tip="Replica of shard 2 — fault tolerance for Node 3 failure.">R2 (replica)</div>
+    </div>
+    <div class="d-flow-v">
+      <div class="d-label">Node 3</div>
+      <div class="d-box green" data-tip="Primary shard 2 — final 1/3 of index data.">P2 (primary)</div>
+      <div class="d-box amber" data-tip="Replica of shard 0 — fault tolerance for Node 1 failure.">R0 (replica)</div>
+    </div>
+  </div>
+  <div class="d-arrow-down">&#8595; merge + rank results</div>
+  <div class="d-box blue">Top-N results returned to client</div>
+  <div class="d-caption">3 primaries × 1 replica = 6 total shards across 3 nodes. Each primary + its replica are never on the same node. Losing any 1 node = no data loss. Query fans out to all 3 primaries in parallel — O(1/N) latency vs single shard.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-es-indexing-pipeline",
+		Title:       "Elasticsearch Indexing Pipeline",
+		Description: "Primary DB as source of truth → CDC → Kafka → sync worker → Elasticsearch derived index",
+		ContentFile: "fundamentals/storage/elasticsearch",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-box blue" data-tip="PostgreSQL or DynamoDB. Source of truth. All writes go here first. Never write to ES directly as the primary.">Primary Database <span class="d-tag blue">source of truth</span></div>
+  <div class="d-arrow-down">&#8595; CDC (Debezium / DynamoDB Streams)</div>
+  <div class="d-box amber" data-tip="Change Data Capture captures every INSERT/UPDATE/DELETE as an event. Debezium for Postgres (reads WAL). DynamoDB Streams for DynamoDB. At-least-once delivery.">Change Events Stream <span class="d-metric latency">&lt;100ms lag</span></div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box indigo" data-tip="Kafka buffers CDC events. Consumer group 'es-sync' processes events. Dead letter queue for failed indexing attempts. Partition by entity_id for ordering.">Kafka / Kinesis <span class="d-tag indigo">buffer + replay</span></div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box green" data-tip="Sync worker: transform DB row to ES document format, call ES index API. Batch index (bulk API) for throughput. Handle ES backpressure with Kafka consumer pause.">ES Sync Worker <span class="d-metric latency">~1s total lag</span></div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-box purple" data-tip="Derived read index. Eventually consistent — 1s lag vs DB. Never the source of truth. Re-index from DB snapshot if ES index corrupts.">Elasticsearch Index <span class="d-tag purple">derived, eventually consistent</span></div>
+  <div class="d-caption">1-second end-to-end indexing lag (DB write → searchable). Design applications to tolerate this: 'your tweet is being indexed...' is acceptable. Use force_refresh only for critical paths (costs ~50ms per refresh).</div>
+</div>`,
+	})
 }

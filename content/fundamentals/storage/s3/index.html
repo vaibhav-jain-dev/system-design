@@ -1,0 +1,241 @@
+{{phase 1 "What Is Object Storage?" "3 min"}}
+
+{{say `Object storage treats every file as an opaque blob with a key. Unlike a file system — no directories, no in-place updates, no partial writes — just three operations:
+<ul>
+  <li><strong>PUT</strong> — write an entire object (atomic, all-or-nothing)</li>
+  <li><strong>GET</strong> — read an entire object by key</li>
+  <li><strong>DELETE</strong> — remove an object</li>
+</ul>
+S3 stores objects in <strong>buckets</strong>. A bucket is a flat namespace — keys can contain slashes to look like paths, but S3 sees them as opaque strings.`}}
+
+{{diagram "fund-s3-overview"}}
+
+{{think "Object storage is the right answer whenever you are storing large blobs that are written once and read many times. The 'flat namespace with a key' model is the exact opposite of how databases work — and that's the point: no schema, no index maintenance, no query optimizer needed."
+  (whyNot "storing blobs in Postgres/MySQL" "A 5 MB image stored in Postgres requires: binary escaping, WAL log entry, buffer pool space, replication payload — all for bytes you cannot query. Postgres is optimized for structured rows, not opaque bytes. At 1 million images that is 5 TB of database storage — S3 costs $115/mo, Postgres RDS would cost thousands.")
+  (how "S3 achieves 11 nines of durability" "Every object is automatically replicated across at least 3 Availability Zones within the region. Each AZ is an independent data center with its own power and networking. The probability of losing all three copies simultaneously is astronomically low — 10^-11 per year per object.")
+}}
+
+{{hint "bucket names are globally unique" "S3 bucket names are globally unique across all AWS accounts. <strong>my-images</strong> is gone once any customer uses it. Use a prefix like <strong>acme-prod-media-us-east-1</strong>. Include region in bucket names for clarity on cross-region replication."}}
+
+{{triggerQs "Phase 1 Trigger Questions"
+  "When would you use S3 vs a database vs a file system?"
+  "S3 for blobs > 1 KB that are written once and read often — images, videos, documents, exports. Database for structured data you need to query. File system for local scratch space or low-latency sequential access. <span class='hl-red'>Never store large blobs in a relational database</span> — binary I/O bypasses all the indexing benefits you are paying for."
+  "What is the maximum object size in S3?"
+  "Single PUT is capped at <span class='hl'>5 GB</span>. Multipart upload handles up to <span class='hl'>5 TB</span> per object, uploading in parts from 5 MB to 5 GB each. For video files or large exports, always use multipart upload."
+}}
+
+{{phase 2 "Pre-Signed URLs & Access Control" "5 min"}}
+
+{{say `Never proxy media through your app servers. Instead, give clients a <strong>pre-signed URL</strong> — a time-limited signed URL that grants the client direct access to one specific S3 object:
+<ul>
+  <li>Your server generates the URL in <span class='hl'>< 1ms</span> (pure crypto, no network call)</li>
+  <li>Client uploads/downloads directly to S3, bypassing your servers entirely</li>
+  <li>URL expires after TTL — no permanent access granted</li>
+  <li>S3 serves the bytes at <span class='hl'>~10 Gbps</span> per bucket — your servers are not the bottleneck</li>
+</ul>`}}
+
+{{diagram "fund-s3-presigned"}}
+
+{{table "S3 Access Patterns" (rows
+  (row "Pattern" "How It Works" "Use Case")
+  (row "Pre-signed GET" "Server signs URL with expiry; client GETs directly" "Private media download (avatar, invoice)")
+  (row "Pre-signed PUT" "Server signs URL; client PUTs directly to S3" "File upload without server proxy")
+  (row "CloudFront + OAC" "CDN serves S3 objects; S3 blocks direct access" "Public media at scale with edge caching")
+  (row "Public bucket" "All objects world-readable" "Public static assets (CSS, JS) — never for user data")
+  (row "VPC endpoint" "S3 accessed over private AWS network, no internet" "Internal service-to-service data transfer")
+)}}
+
+{{think "Pre-signed URL TTL is a security vs. UX trade-off. Too short and users get 403 errors if they pause before acting. Too long and a leaked URL remains exploitable."
+  (whatIf "a pre-signed URL is leaked or shared" "It grants time-limited access to that specific object. Set TTL to the minimum reasonable value: 15 min for uploads, 1–24h for downloads. For sensitive documents, use shorter TTLs and require re-generation on each page load.")
+  (whyNot "serving S3 objects through your API server" "Your API server becomes the bottleneck: every image download consumes a thread, a socket, and bandwidth. At 1,000 concurrent downloads of 5 MB files, your API server is saturated. S3 + pre-signed URLs remove the server from the data path entirely.")
+}}
+
+{{hint "OAC vs OAI" "<strong>Origin Access Control (OAC)</strong> is the modern replacement for <strong>Origin Access Identity (OAI)</strong> for CloudFront→S3. OAC supports all S3 operations (including SSE-KMS), OAI does not. Always use OAC for new CloudFront distributions."}}
+
+{{triggerQs "Access Control Questions"
+  "How does a client upload a file directly to S3 without exposing AWS credentials?"
+  "Your server generates a pre-signed PUT URL with: bucket, object key, expiry, and your AWS credentials baked into a HMAC-SHA256 signature. The client sends the file directly to that URL — S3 validates the signature without your server being in the data path. Credentials never leave your server."
+  "What is the difference between an S3 bucket policy and an IAM policy for S3 access?"
+  "Bucket policy is resource-based — attached to the bucket, can grant cross-account access. IAM policy is identity-based — attached to a user/role, controls what that identity can do. For cross-account access (e.g., CloudFront service principal), you need a bucket policy. For same-account service access, IAM role is simpler."
+}}
+
+{{phase 3 "Multipart Upload" "4 min"}}
+
+{{say `For files > 5 MB, use multipart upload. The client:
+<ul>
+  <li>Calls <strong>CreateMultipartUpload</strong> → gets an <span class='hl-blue'>upload_id</span></li>
+  <li>Uploads parts in parallel (min <span class='hl'>5 MB</span> each, max 10,000 parts)</li>
+  <li>Calls <strong>CompleteMultipartUpload</strong> with all part ETags → S3 assembles the object</li>
+</ul>
+If upload fails mid-way, call <strong>AbortMultipartUpload</strong> — S3 charges for incomplete parts until aborted.`}}
+
+{{code "python" `import boto3, os
+
+def upload_large_file(bucket, key, filepath):
+    s3 = boto3.client("s3")
+
+    # Initiate multipart upload
+    resp = s3.create_multipart_upload(Bucket=bucket, Key=key)
+    upload_id = resp["UploadId"]
+
+    parts = []
+    part_size = 64 * 1024 * 1024  # 64 MB chunks
+
+    with open(filepath, "rb") as f:
+        part_num = 1
+        while chunk := f.read(part_size):
+            resp = s3.upload_part(
+                Bucket=bucket, Key=key,
+                UploadId=upload_id, PartNumber=part_num,
+                Body=chunk
+            )
+            parts.append({"ETag": resp["ETag"], "PartNumber": part_num})
+            part_num += 1
+
+    # Assemble the object
+    s3.complete_multipart_upload(
+        Bucket=bucket, Key=key,
+        UploadId=upload_id,
+        MultipartUpload={"Parts": parts}
+    )`}}
+
+{{think "Always set a lifecycle rule to abort incomplete multipart uploads. Each incomplete upload's parts accumulate storage charges silently."
+  (whatIf "a multipart upload is never completed or aborted" "The uploaded parts are stored and billed indefinitely. At $0.023/GB a 1 GB in-progress upload costs $0.023/mo — trivial per upload, catastrophic if millions are abandoned. Set: AbortIncompleteMultipartUploads lifecycle rule with 7-day threshold.")
+  (how "parallel part uploads speed things up" "Parts are independent — upload 4 parts of 25 MB in parallel vs one 100 MB sequential upload. On a 1 Gbps uplink, parallel parts reduce wall-clock time by ~4x. AWS SDK TransferManager does this automatically.")
+}}
+
+{{triggerQs "Multipart Upload Questions"
+  "When should you switch from single-part to multipart upload?"
+  "AWS recommends multipart for files > <span class='hl'>100 MB</span>. The minimum part size is 5 MB. Benefits: resume interrupted uploads, parallel part upload, ability to abandon partial uploads. For chat media (< 5 MB images), single PUT is simpler and sufficient."
+}}
+
+{{phase 4 "Storage Classes & Lifecycle" "4 min"}}
+
+{{say `S3 offers 7 storage classes. The key trade-off is <strong>access cost vs storage cost</strong>:
+<ul>
+  <li><strong>S3 Standard</strong> — $0.023/GB/mo, immediate retrieval, low latency. Hot data.</li>
+  <li><strong>S3 Intelligent-Tiering</strong> — monitors access, auto-moves to cheaper tier. Use for unpredictable access.</li>
+  <li><strong>S3 Standard-IA</strong> — $0.0125/GB/mo, $0.01/GB retrieval fee. Monthly-accessed data.</li>
+  <li><strong>S3 Glacier Instant</strong> — $0.004/GB/mo, millisecond retrieval. Quarterly access.</li>
+  <li><strong>S3 Glacier Flexible</strong> — $0.0036/GB/mo, 3-5 hour retrieval. Annual compliance archive.</li>
+  <li><strong>S3 Glacier Deep Archive</strong> — $0.00099/GB/mo, 12-48 hour retrieval. 7-year regulatory archive.</li>
+</ul>`}}
+
+{{table "Storage Class Cost Comparison" (rows
+  (row "Class" "Storage/GB/mo" "Retrieval Cost" "Retrieval Speed" "Use Case")
+  (row "Standard" "$0.023" "Free" "Immediate" "Active media, user uploads")
+  (row "Intelligent-Tiering" "$0.023 (hot) / $0.0125 (infrequent)" "$0.0025/1K monitoring fee" "Immediate" "Unpredictable access patterns")
+  (row "Standard-IA" "$0.0125" "$0.01/GB" "Immediate" "Backup, older content")
+  (row "Glacier Instant" "$0.004" "$0.03/GB" "Milliseconds" "Medical images, rare access")
+  (row "Glacier Deep Archive" "$0.00099" "$0.02/GB" "12-48 hours" "Compliance, audit logs")
+)}}
+
+{{diagram "fund-s3-lifecycle"}}
+
+{{think "Lifecycle policies are the highest-leverage cost optimization for any media-heavy system."
+  (how "lifecycle policies automate tiering" "Define rules: 'After 30 days in Standard, move to Standard-IA. After 90 days, move to Glacier Instant. After 365 days, move to Glacier Deep Archive.' S3 executes transitions automatically — no application code changes needed.")
+  (whatIf "you store 1 PB in Standard forever vs lifecycle to Glacier" "1 PB in Standard: $23,000/mo. With lifecycle (60% in Glacier Deep Archive after 1 year): ~$7,500/mo. At Instagram scale that $15K/mo saving is $180K/year.")
+}}
+
+{{hint "minimum storage duration charges" "S3 charges minimum storage durations: Standard-IA 30 days, Glacier Instant 90 days, Glacier Flexible 90 days, Glacier Deep Archive 180 days. If you delete an object before the minimum, you pay the remaining days anyway. Design lifecycle transitions to avoid premature deletion."}}
+
+{{phase 5 "Versioning & Replication" "4 min"}}
+
+{{say `Two critical durability features:
+<ul>
+  <li><strong>Versioning</strong> — every PUT creates a new version ID. DELETE creates a delete marker, not actual deletion. Recover from accidental overwrites or deletions.</li>
+  <li><strong>Cross-Region Replication (CRR)</strong> — async copy of new/updated objects to another region. Adds ~1-2s propagation lag. Use for disaster recovery and latency optimization.</li>
+</ul>`}}
+
+{{table "Versioning Behaviour" (rows
+  (row "Operation" "Without Versioning" "With Versioning")
+  (row "PUT same key" "Overwrites object permanently" "Creates new version; old version preserved")
+  (row "DELETE" "Object gone permanently" "Adds delete marker; versions still retrievable")
+  (row "GET" "Current object" "Current object (latest version)")
+  (row "GET with version ID" "N/A" "Specific historical version")
+  (row "Cost" "N/A" "Storage cost × all versions retained")
+)}}
+
+{{think "Versioning is not a backup strategy. It protects against application-level deletes and overwrites. It does not protect against bucket deletion or access key compromise (attacker can delete all versions)."
+  (whatIf "versioning is enabled and an attacker deletes all objects" "Attacker adds delete markers to all objects — easy to recover by removing the delete markers. But if attacker has s3:DeleteObjectVersion permission, they can permanently delete all versions. Use MFA Delete to require multi-factor authentication for version deletion.")
+  (how "Object Lock prevents deletion entirely" "S3 Object Lock puts objects in WORM (write-once, read-many) mode. Compliance mode: nobody can delete, not even root. Governance mode: only privileged IAM users with s3:BypassGovernanceRetention can delete. Required for SEC 17a-4, FINRA, CFTC compliance.")
+}}
+
+{{triggerQs "Versioning & Replication Questions"
+  "What is the difference between S3 versioning and S3 replication?"
+  "Versioning stores multiple versions of the same object in the same bucket — protection against overwrite/delete. Replication copies objects to another bucket (same or different region) — protection against region-level failure. They are orthogonal: use both for full durability."
+  "How much does S3 replication add to latency?"
+  "Replication is <span class='hl-red'>asynchronous</span> — it does not add latency to the original PUT. The replica appears in the destination bucket within <span class='hl'>1-5 seconds</span> under normal conditions. If you need synchronous consistency, use multi-region strong consistency (Spanner or DynamoDB Global Tables, not S3)."
+}}
+
+{{phase 6 "S3 Event Notifications & Triggers" "3 min"}}
+
+{{say `S3 can trigger downstream processing on object events:
+<ul>
+  <li><strong>s3:ObjectCreated</strong> — fires on PUT, POST, COPY, multipart complete</li>
+  <li><strong>s3:ObjectRemoved</strong> — fires on DELETE</li>
+</ul>
+Targets: <strong>Lambda</strong> (direct invoke), <strong>SNS</strong> (fan-out), <strong>SQS</strong> (queue for batch processing), <strong>EventBridge</strong> (complex routing).`}}
+
+{{diagram "fund-s3-events"}}
+
+{{think "S3 event notifications are at-least-once delivery. Design downstream processors to be idempotent — the same image may be processed twice."
+  (how "image processing pipeline works" "Upload triggers S3 event → SQS queue → Lambda workers: resize to thumbnail/medium/large, transcode video, run content moderation, extract metadata — all in parallel. Original S3 object is the source of truth; derived versions are idempotent re-computations.")
+  (whatIf "Lambda is throttled during an upload burst" "SQS buffers events. Lambda scales to concurrency limit. Unprocessed events wait in SQS — no events lost. Set SQS visibility timeout > Lambda max processing time (300s) to prevent reprocessing mid-flight.")
+}}
+
+{{hint "EventBridge for complex routing" "S3→EventBridge allows content-based filtering: route .mp4 uploads to video transcoder, .jpg uploads to image resizer, uploads to 'uploads/sensitive/' prefix to DLP scanner — all from one S3 bucket. Simpler than maintaining multiple SQS queues."}}
+
+{{phase 7 "Interview: S3 in System Design" "4 min"}}
+
+{{say `When asked about object storage in any system design, address these four points:
+<ul>
+  <li><strong>Why S3 over DB</strong> — unstructured blobs, no need for query, cost ($0.023/GB vs $0.10+/GB for DB)</li>
+  <li><strong>Access pattern</strong> — pre-signed URLs for private, CloudFront for public, VPC endpoint for internal</li>
+  <li><strong>Durability</strong> — 11 nines, multi-AZ by default, CRR for multi-region DR</li>
+  <li><strong>Cost</strong> — lifecycle policies to automate tiering as data ages</li>
+</ul>`}}
+
+{{table "S3 Across System Design Problems" (rows
+  (row "System" "What Goes in S3" "Access Pattern" "Key Config")
+  (row "Instagram" "Photos, videos (original + transcoded)" "CloudFront CDN + OAC" "Intelligent-Tiering, S3 events → transcoding")
+  (row "Chat System" "Media attachments, voice notes" "Pre-signed URLs (1h TTL)" "Versioning off, 30-day lifecycle to IA")
+  (row "Ticket Booking" "QR code images, invoices (PDF)" "Pre-signed GET URLs" "Standard — high read rate at event time")
+  (row "Food Delivery" "Restaurant menus, dish photos" "CloudFront + OAC" "5-min menu TTL, 24h image TTL")
+  (row "Ride-Hailing" "Driver KYC docs, trip receipts" "Pre-signed GET (1h TTL)" "Versioning on, 7-year Glacier archive")
+  (row "URL Shortener" "Analytics exports (CSV/Parquet)" "Internal service access" "Lifecycle to IA after 30 days")
+)}}
+
+{{qa "Why use CloudFront in front of S3 instead of serving S3 directly?"
+  "Three reasons: (1) <strong>Latency</strong> — CloudFront has 600+ edge PoPs globally vs S3 in one region; (2) <strong>Cost</strong> — CloudFront data transfer is $0.085/GB vs S3 data transfer out at $0.09/GB, and cache hits eliminate S3 GET requests entirely; (3) <strong>Security</strong> — Origin Access Control means S3 bucket is never publicly accessible, reducing attack surface."
+  "How does CloudFront cache invalidation work?"
+  "Invalidation is propagated to all edge locations. Up to 1,000 paths/mo free, then $0.005 each. Wildcard: /images/* invalidates all objects under that prefix. Propagation takes <span class='hl'>~15 seconds</span> for targeted paths, up to 60s for wildcards. Prefer short TTLs + versioned URLs (image-v2.jpg) over invalidation at scale."}}
+
+{{phase 8 "Trade-offs & Edge Cases" "3 min"}}
+
+{{table "S3 Limitations & Mitigations" (rows
+  (row "Limitation" "Impact" "Mitigation")
+  (row "Eventual consistency on overwrite (old SDK)" "Rare stale reads after update" "S3 is now strongly consistent for all operations (Nov 2020). No longer an issue.")
+  (row "5 GB single PUT limit" "Cannot upload large video in one request" "Multipart upload for > 100 MB files")
+  (row "No atomic multi-object update" "Can't update object A and B atomically" "Use DynamoDB for atomic metadata, S3 for blob. Two-phase approach.")
+  (row "Bucket policy mistakes" "Accidental public exposure" "S3 Block Public Access (account-level) + automated policy scanner")
+  (row "Data egress cost" "$0.09/GB out to internet" "CloudFront reduces origin fetch. VPC endpoint for same-region access (free).")
+  (row "Request rate limits" "3,500 PUT/s or 5,500 GET/s per prefix" "Randomize key prefixes. Each unique prefix gets its own rate limit.")
+)}}
+
+{{think "S3 request rate limits are per prefix, not per bucket. If all keys start with 'images/', you hit the limit. Randomize: 'images/a3f5/photo.jpg' spreads across thousands of prefixes."
+  (whatIf "your key scheme is date-prefixed: 2024/01/15/photo.jpg" "All requests on the same day hit the same prefix '2024/01/15' — rate limit at peak hour. Use randomized hash prefix: hash(photo_id)[:2]/2024-01-15/photo.jpg. First 2 chars of hash give 256 prefix buckets.")
+}}
+
+{{checklist
+  "Use pre-signed URLs for all private object access — never proxy through app servers"
+  "Multipart upload for files > 100 MB — enables parallel parts and resume"
+  "CloudFront + OAC for public media — edge caching, not S3 direct access"
+  "Lifecycle policies to auto-tier aging data — Standard → IA → Glacier"
+  "Enable versioning on critical buckets — recover from accidental deletes"
+  "Randomize key prefixes to distribute request load across partitions"
+  "Block Public Access at account level — prevent accidental bucket exposure"
+  "Set AbortIncompleteMultipartUploads lifecycle rule — avoid silent cost accumulation"
+}}
+
+{{key "S3 is write-once, read-many blob storage at $0.023/GB. Pre-signed URLs remove servers from the data path. CloudFront + OAC delivers at edge. Lifecycle policies automatically tier aging data to Glacier — cutting storage cost by 10-20× over years."}}
