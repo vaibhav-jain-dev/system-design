@@ -142,7 +142,28 @@ problems:
 ```go
 type Problem struct {
     Slug, Title, Description, Path string
+    NFRs []ProblemNFR                        // Non-functional requirement tags with phase mappings
     Uses []UsageLink                        // Forward links to fundamentals
+}
+
+type ProblemNFR struct {
+    Slug   string    // e.g. "scalability", "performance" (from StandardNFRs)
+    Phases []int     // which phase numbers address this NFR
+    Title  string    // resolved from StandardNFRs (e.g. "Scalability")
+    Color  string    // resolved CSS color (e.g. "#6366F1")
+}
+
+// StandardNFRs defines the 8 canonical NFRs with display metadata.
+// Add new NFR types here — they become available for all problems.
+var StandardNFRs = map[string]NFRDef{
+    "scalability":   {Title: "Scalability",   Color: "#6366F1"},
+    "performance":   {Title: "Performance",   Color: "#2563EB"},
+    "availability":  {Title: "Availability",  Color: "#059669"},
+    "consistency":   {Title: "Consistency",   Color: "#D97706"},
+    "durability":    {Title: "Durability",    Color: "#7C3AED"},
+    "security":      {Title: "Security",      Color: "#DC2626"},
+    "cost":          {Title: "Cost",          Color: "#64748B"},
+    "observability": {Title: "Observability", Color: "#0891B2"},
 }
 
 type Fundamental struct {
@@ -165,6 +186,7 @@ type UsageLink struct {
     Fundamental    string                    // Forward: fundamental slug
     Problem        string                    // Reverse: problem slug (auto-filled)
     Config, Why, NotThis, Risk, Caveats string  // Rich context fields
+    NFRs           []string                  // Which NFRs this fundamental use addresses
     FundamentalRef *Fundamental              // Resolved pointer
     ProblemRef     *Problem                  // Resolved pointer
 }
@@ -609,10 +631,123 @@ fundamentals:
 - "Let me think about this..." (just give the answer)
 - "There are several approaches..." (name the best one first)
 
+## NFR (Non-Functional Requirements) Filter System
+
+Each problem page shows an interactive NFR selector panel. All NFRs are selected by default (no filtering). Deselecting an NFR dims the phases and context cards that don't address it, helping focus on what matters for a given requirement.
+
+### 8 Standard NFRs
+
+| Slug | Display Title | Color | What it covers |
+|------|--------------|-------|---------------|
+| `scalability` | Scalability | Indigo | Horizontal scaling, sharding, capacity, throughput at scale |
+| `performance` | Performance | Blue | Latency, throughput, caching, CDN, hot-path optimisation |
+| `availability` | Availability | Green | Fault tolerance, multi-AZ, failover, fail-open/closed |
+| `consistency` | Consistency | Amber | CAP tradeoffs, strong/eventual consistency, conflict detection |
+| `durability` | Durability | Purple | Data persistence, backup, replication, WAL, recovery |
+| `security` | Security | Red | Auth, encryption, abuse prevention, permissions |
+| `cost` | Cost | Gray | Cost analysis, managed vs self-hosted, capacity planning |
+| `observability` | Observability | Cyan | Monitoring, tracing, logging, metrics, alerting |
+
+To add a new NFR type, add it to `var StandardNFRs` in `internal/registry/registry.go`.
+
+### YAML Format for Problems
+
+```yaml
+problems:
+  - slug: my-problem
+    nfrs:
+      - slug: scalability       # must match a key in StandardNFRs
+        phases: [3, 5, 7]       # ONLY phases whose PRIMARY content is about this NFR
+      - slug: performance
+        phases: [2, 4, 5, 6]
+      - slug: availability
+        phases: [5, 8]
+    uses:
+      - fundamental: storage/redis
+        nfrs: [performance, availability]  # which NFRs this use primarily addresses (max 2)
+        config: "..."
+        ...
+```
+
+### NFR Phase Tagging Rules (CRITICAL — read before tagging)
+
+**The single most important rule**: Tag a phase with an NFR **only if that phase's primary content is about that NFR**. Do NOT tag a phase just because it mentions an NFR in passing.
+
+#### Phase 1 (Requirements) — almost never tagged
+Phase 1 is requirements gathering. It briefly mentions all NFRs in the constraints list. **Do not tag phase 1** with any NFR unless the problem is uniquely driven by it as the single most important constraint (example: rate-limiter phase 1 → security, because abuse prevention IS the reason the system exists).
+
+**Wrong**: `scalability: phases: [1, 3, 5, 7]` — phase 1 just lists requirements, it doesn't teach scalability
+**Right**: `scalability: phases: [3, 5, 7]` — data model, architecture, sharding are where you actually learn it
+
+#### Per-NFR Tagging Guide
+
+| NFR | Tag a phase IF it primarily covers… | Never tag for… |
+|-----|-------------------------------------|----------------|
+| `scalability` | Sharding, partitioning, horizontal scale-out, capacity estimation, consistent hashing, fan-out at scale | API design, requirements, monitoring |
+| `performance` | Caching strategy, latency-critical algorithms, hot-path design, CDN/edge delivery, sub-ms data structures | General architecture, requirements |
+| `availability` | Multi-AZ, failover, fail-open/closed decision, circuit breakers, health checks, redundancy | Data model, API design |
+| `consistency` | CAP theorem application, strong vs eventual choice, conflict detection, transaction boundaries, ordering guarantees | Requirements, general architecture |
+| `durability` | Persistence guarantees, replication factor, backup strategy, WAL, data recovery | Caching (which is ephemeral by design) |
+| `security` | Auth/authz mechanisms, encryption, abuse prevention, rate limiting as security measure, permissions model | General requirements (unless security IS the core problem) |
+| `cost` | Explicit cost estimates, build vs buy decisions, capacity cost calculation, storage cost tradeoffs | Requirements, API design |
+| `observability` | Monitoring setup, metrics/alerts definition, tracing, logging strategy, SLO/SLA definition | General architecture phases |
+
+#### Context Card (uses) NFR Tagging
+
+Each `uses:` entry in a problem should have `nfrs:` listing **which NFRs this specific use of the fundamental addresses** (maximum 2, pick the most dominant):
+
+```yaml
+uses:
+  - fundamental: storage/redis
+    config: "Sorted set sliding window per user_id"
+    nfrs: [performance, availability]   # Redis is chosen for sub-ms latency (perf) + fail-open fallback (avail)
+    # NOT [scalability] — Redis here is a single cluster, not a scaling solution
+```
+
+**Examples of correct tagging:**
+- Redis as cache → `[performance]` or `[performance, availability]`
+- Redis as geo-index → `[performance, scalability]`
+- Redis as distributed lock → `[consistency, availability]`
+- DynamoDB → `[scalability, durability]` (auto-sharding + managed replication)
+- Kafka → `[scalability, durability]` (partitioned fan-out + at-least-once delivery)
+- ALB → `[availability, scalability]` (health checks + horizontal routing)
+- CDN/CloudFront → `[performance, cost]` (edge latency + origin offload)
+- Consistent hashing → `[scalability]` only
+
+#### Validation Checklist (run before committing new problem)
+
+Before adding a new problem to `_registry.yaml`, verify:
+
+1. **Phase 1 exclusion**: Is phase 1 tagged? If yes, can you defend why the requirements phase (not a later phase) is the primary source of content for that NFR? If not, remove it.
+2. **Coverage spread**: Are at least 5-8 phases tagged across all NFRs? If fewer than 5 distinct phase numbers appear in total, the mappings are too sparse.
+3. **Phase 12 exclusion**: Phase 12 is "Interview Deep-Dive Q&A" and is **never tagged** (it covers everything). Leave it out of all NFR mappings.
+4. **No NFR tags every phase**: If any single NFR is mapped to 7+ phases, reconsider — it likely means you're tagging phases that just mention the NFR rather than teach it.
+5. **Consistency alone**: If you tag `consistency`, that phase must have a CAP theorem decision, a specific consistency model choice, or a conflict resolution mechanism. Not just "we use a database".
+6. **Security alone**: Only tag `security` when the phase is specifically about auth, encryption, or abuse defense mechanisms. Requirements phase only gets security if the problem is fundamentally a security problem (e.g., rate limiting).
+
+### How It Works
+
+1. **Registry**: `ProblemNFR.Phases` maps phase numbers → NFR slugs. `UsageLink.NFRs` tags context cards.
+2. **Handler**: Builds two JSON maps (`PhaseNFRMapJSON`, `UseNFRMapJSON`) and passes them to the template.
+3. **Template**: NFR chips rendered in `.nfr-panel`, JSON maps stored as `data-*` attributes.
+4. **Macro**: `{{phase N "Title" "Time"}}` adds `data-phase="N"` attribute to enable JS lookup.
+5. **JS** (`initNFRFilter`): On load and HTMX swap, reads JSON maps, wires chip click handlers, dims/restores phase sections and context cards on toggle.
+
+### What Gets Dimmed
+
+- **Phase sections**: The phase header `<div class="phase-header">` and all content until the next phase header in `.detail-content` get class `nfr-section-dim` (opacity 0.18) when the phase's NFR tags don't include any selected NFR.
+- **Context cards**: The "Uses Fundamentals" cards at the bottom get dimmed when their `UsageLink.NFRs` don't match.
+- **Untagged phases** (no NFRs in YAML): Always visible regardless of selection.
+- **All selected**: Nothing dimmed — normal view.
+- **Colored dots** appear on phase headers (always visible) showing which NFRs that phase covers.
+- **Colored pills** appear on context cards (always visible) showing which NFRs that fundamental use addresses.
+
+---
+
 ## Common Tasks
 
 ### Add a new problem
-1. Add entry to `content/_registry.yaml` under `problems:` with slug, title, description, path, and `uses:` links
+1. Add entry to `content/_registry.yaml` under `problems:` with slug, title, description, path, `nfrs:` phase mappings, and `uses:` links (with `nfrs:` per use)
 2. Create `content/problems/{slug}/index.html` following the Gold Standard above (12 phases, stageNav, deepQA)
 3. Create `internal/diagrams/{domain}.go` with diagram registrations, add to `BuildDefault()` in `registry.go`
 4. Restart server

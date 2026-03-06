@@ -183,6 +183,7 @@ func details(summary, lang, content string) template.HTML {
 }
 
 // phase renders a phase/section header with an anchor ID for navigation.
+// The data-phase attribute is used by the NFR filter system to map phases to NFRs.
 func phase(num int, title, time string) template.HTML {
 	slug := strings.ToLower(strings.ReplaceAll(title, " ", "-"))
 	slug = strings.Map(func(r rune) rune {
@@ -192,11 +193,11 @@ func phase(num int, title, time string) template.HTML {
 		return -1
 	}, slug)
 	return template.HTML(fmt.Sprintf(
-		`<div class="phase-header" id="phase-%d-%s">
+		`<div class="phase-header" id="phase-%d-%s" data-phase="%d">
 			<span class="phase-number">%d</span>
 			<span class="phase-title">%s</span>
 			<span class="phase-time">%s</span>
-		</div>`, num, slug, num, title, time))
+		</div>`, num, slug, num, num, title, time))
 }
 
 // code renders a syntax-highlighted code block.
