@@ -2,18 +2,18 @@
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
-{{say "Let me clarify scope before diving in:
+{{say `Let me clarify scope before diving in:
 <ul>
   <li>Designing a <strong>distributed</strong> rate limiter — one shared counter across all services, not a single-node problem</li>
   <li>Key question: <strong>which tier</strong> to enforce? API gateway catches abuse early; service-level gives per-team control — we want both</li>
   <li>Walking through functional requirements first, then non-functional, then the critical fail-open vs fail-closed decision</li>
-</ul>"}}
+</ul>`}}
 
-{{hint "why distributed?" "Single-node rate limiting is trivial — one in-memory counter. The hard problems only emerge at scale:
+{{hint "why distributed?" `Single-node rate limiting is trivial — one in-memory counter. The hard problems only emerge at scale:
 <ul>
   <li><strong>Multiple app servers</strong> — each server has its own counter; without a shared store, user A hits server 1 and server 2 alternately, getting <span class='hl'>2× the intended limit</span></li>
   <li><strong>Multiple regions</strong> — a synchronous cross-region Redis read adds <span class='hl'>50–150ms</span> per request; unacceptable on the hot path</li>
-</ul>"}}
+</ul>`}}
 
 {{table "Functional Requirements" (rows
   (row "Requirement"              "Description"                                          "Priority"  "Drives")
@@ -26,12 +26,12 @@
   (row "Dashboard & analytics"   "Real-time visibility into rate limit hit rates"         "P2"        "Metrics pipeline, Grafana dashboards")
 )}}
 
-{{hint "why P0 includes rate headers?" "Without <strong>X-RateLimit-Remaining</strong>, clients have no visibility into their quota:
+{{hint "why P0 includes rate headers?" `Without <strong>X-RateLimit-Remaining</strong>, clients have no visibility into their quota:
 <ul>
   <li>They blast requests until they hit <span class='hl'>429</span>, then back off aggressively</li>
   <li>With headers, well-behaved SDKs (Stripe, AWS) read Remaining and slow down at <span class='hl'>10% remaining</span> — smooth self-throttling instead of a spike of retries</li>
   <li>Stripe, GitHub, and Twitter all return rate headers on <em>every</em> response, not just rejections</li>
-</ul>"}}
+</ul>`}}
 
 {{diagram "rl-requirements"}}
 
@@ -41,16 +41,16 @@
   (how "payment APIs differ" "For payments, fail-open means a compromised key can drain an account during a Redis outage window. The fraud risk outweighs the availability cost, so payment endpoints should fail-closed with a clear 503 response so the client knows to retry later.")
 }}
 
-{{hint "which tier to rate limit?" "In practice you want limits at multiple tiers:
+{{hint "which tier to rate limit?" `In practice you want limits at multiple tiers:
 <ul>
   <li><strong>API Gateway / edge</strong> — coarse limits; catches DDoS and abuse before it reaches your fleet</li>
   <li><strong>Service level</strong> — fine-grained; each team controls per-endpoint limits tied to their SLAs</li>
   <li><strong>In-process middleware</strong> — per-user business logic; most specific but adds coupling between rate limit config and service deploys</li>
-</ul>"}}
+</ul>`}}
 
 {{triggerQs "Questions this section might trigger"
   "What is the difference between rate limiting and throttling?"
-  "<ul>
+  `<ul>
   <li><strong>Rate limiting</strong> — enforces a hard cap; requests over the limit are rejected with <span class='hl'>429</span>
     <ul><li>Connection ends immediately — no resources held</li></ul>
   </li>
@@ -58,31 +58,31 @@
     <ul><li>Better for batch workloads where a short wait is acceptable</li></ul>
   </li>
   <li>Most APIs use rate limiting — rejecting is cheaper than holding connections open waiting for a slot</li>
-</ul>"
+</ul>`
   "How do you choose rate limit values — where do those numbers come from?"
-  "<ul>
+  `<ul>
   <li>Start with <strong>p99 legitimate user behavior</strong> from existing traffic data, then set the limit at <span class='hl'>2–5×</span> that number</li>
   <li>A user averaging <strong>10 req/s</strong> with p99 of <strong>50 req/s</strong> should get a limit around <span class='hl'>100–200 req/s</span></li>
   <li>Too low → false positives for power users; too high → abusers get through</li>
   <li>Review and adjust <strong>quarterly</strong> based on observed abuse patterns</li>
-</ul>"
+</ul>`
   "Should rate limits be per-user, per-IP, or per-API-key?"
-  "<ul>
+  `<ul>
   <li>Use <strong>API key</strong> for authenticated traffic — ties to a billable account, survives IP changes</li>
   <li>Use <strong>IP address</strong> for unauthenticated traffic — it's the only identifier available</li>
   <li><span class='hl-red'>IP-only limits are weak</span> — attackers rotate IPs; treat IP limits as a last resort for unauthenticated endpoints like <code>/login</code></li>
   <li>For SaaS tier enforcement, combine both: API key for the limit level, IP as a secondary signal for abuse detection</li>
-</ul>"
+</ul>`
 }}
 
 {{phase 2 "Capacity Estimation" "3 min"}}
 
-{{say "Throughput math first — it drives the storage choice:
+{{say `Throughput math first — it drives the storage choice:
 <ul>
   <li>At <span class='hl'>500K req/s</span> peak, one rate limit check per request = <span class='hl'>500K Redis ops/s</span></li>
   <li>Redis handles <strong>100K+ ops/s per node</strong> — a 3-node cluster gives 300K+ ops/s; 6 nodes or Lua scripts handle 500K</li>
   <li>This eliminates DynamoDB (<span class='hl-red'>10–20ms latency</span>) before we even look at features</li>
-</ul>"}}
+</ul>`}}
 
 {{diagram "rl-capacity-estimation"}}
 
@@ -90,23 +90,23 @@
 
 {{say "ElastiCache r6g.large: <strong>100K+ ops/s per node</strong>. A 3-shard cluster = <span class='hl'>300K+ ops/s</span>. For 500K peak, 6 nodes or Lua scripts to halve round trips."}}
 
-{{hint "why Lua reduces round trips?" "Sliding window needs three Redis calls:
+{{hint "why Lua reduces round trips?" `Sliding window needs three Redis calls:
 <ul>
   <li><strong>ZREMRANGEBYSCORE</strong> — removes entries outside the time window</li>
   <li><strong>ZCARD</strong> — counts current entries to check the limit</li>
   <li><strong>ZADD</strong> — records the new request timestamp</li>
 </ul>
-Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</span></strong> per request. Lua runs all three atomically in one trip — at <strong>500K req/s</strong> that saves <span class='hl'>~150ms/s</span> of cumulative latency across the fleet."}}
+Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</span></strong> per request. Lua runs all three atomically in one trip — at <strong>500K req/s</strong> that saves <span class='hl'>~150ms/s</span> of cumulative latency across the fleet.`}}
 
 {{phase 3 "API Design with Rate Headers" "3 min"}}
 
-{{say "Rate limit headers are mandatory on <strong>every response</strong> — not just rejections:
+{{say `Rate limit headers are mandatory on <strong>every response</strong> — not just rejections:
 <ul>
   <li><strong>X-RateLimit-Limit</strong> — the configured cap (e.g., 1000 req/min)</li>
   <li><strong>X-RateLimit-Remaining</strong> — quota left in the current window; clients use this to self-throttle</li>
   <li><strong>X-RateLimit-Reset</strong> — Unix timestamp when the window resets; use absolute time, not relative seconds</li>
   <li><strong>Retry-After</strong> — relative seconds until the client can retry (on <span class='hl'>429</span> only)</li>
-</ul>"}}
+</ul>`}}
 
 {{diagram "rl-headers"}}
 
@@ -116,19 +116,19 @@ Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</
 
 {{triggerQs "Questions about rate headers"
   "What happens if a client ignores the rate limit headers?"
-  "<ul>
+  `<ul>
   <li>Headers are <strong>advisory</strong> — server-side enforcement still runs regardless</li>
   <li>Clients ignoring headers get <span class='hl'>429</span> responses with <strong>Retry-After</strong> specifying when to retry</li>
   <li>After repeated violations, escalate: temporary IP block, downgraded limit tier, or CAPTCHA after N failures</li>
   <li>Headers help good clients self-regulate; they don't replace enforcement</li>
-</ul>"
+</ul>`
   "Should rate limit headers use seconds or a Unix timestamp for the reset value?"
-  "<ul>
+  `<ul>
   <li><strong>X-RateLimit-Reset</strong>: use a <span class='hl-blue'>Unix timestamp</span> (seconds since epoch) — unambiguous across time zones and clock skew</li>
   <li><strong>Retry-After</strong>: use <span class='hl-blue'>relative seconds</span> until the client can retry (on 429 only)</li>
   <li><span class='hl-red'>Don't use relative seconds for Reset</span> — clock skew between client and server makes it ambiguous</li>
   <li>GitHub, Stripe, and Twitter all use Unix timestamps for Reset and relative seconds for Retry-After</li>
-</ul>"
+</ul>`
 }}
 
 {{phase 4 "Algorithm Deep Dive" "10 min"}}
@@ -199,12 +199,12 @@ class TokenBucket:
 
 {{diagram "rl-sliding-window"}}
 
-{{hint "why weighted average across two windows?" "A true <span class='hl-blue'>sliding window log</span> stores every request timestamp — <span class='hl-red'>O(N) memory</span>. Sliding window counter approximates it with <span class='hl'>O(1) memory</span>:
+{{hint "why weighted average across two windows?" `A true <span class='hl-blue'>sliding window log</span> stores every request timestamp — <span class='hl-red'>O(N) memory</span>. Sliding window counter approximates it with <span class='hl'>O(1) memory</span>:
 <ul>
   <li>Keep two counters: current window count + previous window count</li>
   <li>Weight the previous window by how much of it overlaps the current window: <code>prev_count × (1 - elapsed/window)</code></li>
   <li>Error is typically <span class='hl'>&lt; 1%</span> for real-world (non-perfectly-periodic) traffic patterns</li>
-</ul>"}}
+</ul>`}}
 
 {{code "python" `import time
 import redis
@@ -279,36 +279,36 @@ class SlidingWindowCounter:
 
 {{triggerQs "Questions this section might trigger"
   "Why not use a simple counter instead of sliding window?"
-  "<ul>
+  `<ul>
   <li>A simple counter resets at window boundaries — allows <span class='hl'>2× burst</span> at the reset point</li>
   <li>If the limit is <strong>100/min</strong> and a user sends <strong>100 requests at 0:59</strong> and <strong>100 at 1:00</strong>, they get <span class='hl'>200 requests in 2 seconds</span></li>
   <li>Sliding window counter prevents this by weighting the previous window — requests near the boundary carry over into the new window's calculation</li>
-</ul>"
+</ul>`
   "How does the sliding window log work and why is it impractical at scale?"
-  "<ul>
+  `<ul>
   <li>Stores a <strong>timestamp for every request</strong> in a sorted set, then counts entries in [now − window, now]</li>
   <li>Perfectly accurate but uses <span class='hl-red'>O(N) memory per key</span> where N is requests in the window</li>
   <li>At <strong>1,000 req/min per user</strong> with <strong>50M users</strong>: <span class='hl'>50 billion sorted set entries</span> ≈ <span class='hl'>4 TB of Redis memory</span> just for rate limiting metadata</li>
-</ul>"
+</ul>`
   "Can you combine algorithms — for example, rate limit by both requests-per-minute and requests-per-day?"
-  "<ul>
+  `<ul>
   <li>Yes — run multiple independent checks in a single Lua script and take the most restrictive result</li>
   <li>GitHub does exactly this: <span class='hl'>5,000 req/hour</span> for the REST API, plus secondary per-minute limits to prevent bursting</li>
   <li>Bundle all checks in one Lua script so they're atomic together; if separate, each check is independently atomic but the combined decision is not</li>
-</ul>"
+</ul>`
 }}
 
 {{phase 5 "Architecture (Hop-by-Hop)" "8 min"}}
 
 {{say "The rate limiter sits in the request path. Three placement options — each with a different latency/flexibility trade-off:"}}
 
-{{hint "why middleware vs sidecar vs gateway — and when to use each?" "
+{{hint "why middleware vs sidecar vs gateway — and when to use each?" `
 <ul>
   <li><strong>Middleware</strong> (in-process) — zero network hop, tightest coupling to business logic; changes need service redeploy</li>
   <li><strong>Sidecar</strong> (same host, separate process) — one local network hop, adds <span class='hl'>~0.1ms</span>; language-agnostic; used in service mesh (Istio/Envoy)</li>
   <li><strong>API Gateway</strong> (edge) — catches abuse before it hits your fleet; can't enforce per-service limits that depend on account state</li>
 </ul>
-Production systems use all three: <strong>gateway</strong> for coarse DDoS protection, <strong>sidecar</strong> for per-service limits, <strong>middleware</strong> for per-user business rules."}}
+Production systems use all three: <strong>gateway</strong> for coarse DDoS protection, <strong>sidecar</strong> for per-service limits, <strong>middleware</strong> for per-user business rules.`}}
 
 {{diagram "rl-architecture"}}
 
@@ -361,33 +361,33 @@ async def rate_limit_middleware(request: Request, call_next):
 
 {{triggerQs "Questions this section might trigger"
   "Where exactly should the rate limiter sit — API gateway, load balancer, or application code?"
-  "<ul>
+  `<ul>
   <li><strong>API gateway</strong> — coarse limits; stops DDoS and enforces tier caps before traffic hits your fleet</li>
   <li><strong>Application code</strong> — fine-grained; per-endpoint business logic and per-user feature limits that depend on account state</li>
   <li><span class='hl-red'>Load balancers should not do rate limiting</span> — they lack shared state for distributed counting and it couples infrastructure config to business rules</li>
-</ul>"
+</ul>`
   "How do you handle rate limiting for internal service-to-service calls?"
-  "<ul>
+  `<ul>
   <li>Use the calling service's identity (service account or <span class='hl-blue'>mTLS cert CN</span>) as the rate limit key — not a user ID</li>
   <li>Internal limits should be much higher than external, but still exist to prevent one runaway service overwhelming a downstream dependency</li>
   <li>Circuit breakers handle fail-fast; rate limits prevent the overload in the first place — both are needed</li>
-</ul>"
+</ul>`
   "What happens if the rate limit key extraction fails — for example, a malformed JWT?"
-  "<ul>
+  `<ul>
   <li>Fail to a conservative default: treat the request as unauthenticated, apply the <strong>lowest-tier limit</strong> keyed by IP</li>
   <li><span class='hl-red'>Don't reject on extraction failure</span> — that lets a malformed auth header bypass rate limiting entirely by triggering an error path</li>
   <li>Log extraction failures as a security signal; repeated failures from the same IP are worth alerting on</li>
-</ul>"
+</ul>`
 }}
 
 {{phase 6 "Distributed Rate Limiting" "8 min"}}
 
-{{say "The hard problem is distributed counting — accurate limits across multiple app servers, Redis nodes, and regions:
+{{say `The hard problem is distributed counting — accurate limits across multiple app servers, Redis nodes, and regions:
 <ul>
   <li><strong>Multiple app servers + single Redis</strong> — easy; Lua scripts guarantee atomicity on the shared store</li>
   <li><strong>Redis Cluster</strong> — need <span class='hl-blue'>hash tags</span> to co-locate a user's keys on the same shard</li>
   <li><strong>Multi-region</strong> — hardest; synchronous cross-region read adds <span class='hl'>50–150ms</span> per request; must use async sync or accept slight over-counting</li>
-</ul>"}}
+</ul>`}}
 
 {{diagram "rl-distributed-challenges"}}
 
@@ -434,44 +434,44 @@ return {1, limit - count - 1, 0}
 
 {{qa "How do you count accurately across multiple Redis nodes in a cluster?" "You don't count across nodes — you ensure all keys for the same rate limit subject land on the same node using Redis hash tags. A key like rl:{user:123}:endpoint1 hashes only the {user:123} portion, so all endpoints for user 123 go to the same shard. The Lua script then runs locally on that one shard with full atomicity. Without hash tags, keys scatter across shards, and Lua scripts that touch multiple keys will fail with a CROSSSLOT error." "What if one user's traffic is so high it overwhelms a single shard?" "That is a hot-key problem. Solutions: 1) local in-process rate limiting with a short TTL cache (accept slight over-counting), 2) shard the user's key across N slots by appending a modulo suffix (rl:{user:123:0}, rl:{user:123:1}) and summing counts, or 3) use request coalescing to batch multiple checks into one Redis call per event-loop tick."}}
 
-{{hint "why hash tags matter in Redis Cluster?" "Redis Cluster distributes keys across <span class='hl'>16,384 hash slots</span>. A Lua script can only touch keys in the <strong>same slot</strong>. Without hash tags, <code>rl:user:123:endpoint1</code> and <code>rl:user:123:endpoint2</code> scatter to different shards — a unified Lua script is impossible and will return a <span class='hl-red'>CROSSSLOT error</span>.
+{{hint "why hash tags matter in Redis Cluster?" `Redis Cluster distributes keys across <span class='hl'>16,384 hash slots</span>. A Lua script can only touch keys in the <strong>same slot</strong>. Without hash tags, <code>rl:user:123:endpoint1</code> and <code>rl:user:123:endpoint2</code> scatter to different shards — a unified Lua script is impossible and will return a <span class='hl-red'>CROSSSLOT error</span>.
 <ul>
   <li><strong>Hash tag syntax:</strong> <code>rl:{user:123}:endpoint</code> — only the text inside <code>{}</code> is hashed</li>
   <li>Both keys land on the same shard → Lua can operate on them atomically</li>
   <li>Caveat: if one user generates disproportionate traffic, their shard becomes a <span class='hl-red'>hot key</span></li>
-</ul>"}}
+</ul>`}}
 
 {{triggerQs "Questions this section might trigger"
   "How does Cloudflare do distributed rate limiting at 100M+ req/sec?"
-  "<ul>
+  `<ul>
   <li>Hierarchical approach: each PoP maintains <strong>local counters</strong>, PoPs in the same region sync every <span class='hl'>~1s</span>, regions sync globally every <span class='hl'>~5s</span></li>
   <li>They accept up to <span class='hl'>3× the configured limit</span> for the few seconds before a sync — deliberate trade-off</li>
   <li>Volumetric DDoS is caught by separate infrastructure before reaching the rate limiter — rate limiting is the last line of defense, not the first</li>
   <li>Key insight: exact accuracy matters less than consistent enforcement at scale</li>
-</ul>"
+</ul>`
   "What is the race condition in distributed counting without Lua scripts?"
-  "<ul>
+  `<ul>
   <li>Server A reads <code>count=99</code> (limit=100), server B reads <code>count=99</code> simultaneously — both decide <strong>allowed</strong></li>
   <li>Both write <code>count=100</code>: <span class='hl-red'>2 requests got through when only 1 was allowed</span></li>
   <li>Lua scripts prevent this: Redis executes the entire script single-threaded — no other command runs between read and write</li>
   <li>Use Lua, not Redis MULTI/EXEC transactions — EXEC retries on contention, adding latency; Lua is a single operation</li>
-</ul>"
+</ul>`
   "How do you handle hot keys in Redis Cluster when one user sends massive traffic?"
-  "<ul>
+  `<ul>
   <li><strong>Local in-process caching</strong> with short TTL — accept slight over-counting; eliminates Redis hot key entirely</li>
   <li><strong>Request coalescing</strong> — batch multiple rate checks into one Redis call per event-loop tick</li>
   <li><strong>Key sharding</strong> — split user's key across N slots (<code>rl:{user:123:0}</code>, <code>rl:{user:123:1}</code>) and sum counts; most complex but fully eliminates hot key</li>
-</ul>"
+</ul>`
 }}
 
 {{phase 7 "Data Model & Redis Schema" "3 min"}}
 
-{{say "The Redis data model depends on the algorithm. Three schemas:
+{{say `The Redis data model depends on the algorithm. Three schemas:
 <ul>
   <li><strong>Sliding window counter</strong> — two string keys (current + previous window), <span class='hl-blue'>INCR</span> only, <span class='hl'>O(1)</span></li>
   <li><strong>Token bucket</strong> — one hash key with two fields: <code>tokens</code> + <code>last_refill</code></li>
   <li><strong>Sliding window log</strong> — sorted set with timestamp as score; supports range queries but <span class='hl-red'>O(N) memory</span></li>
-</ul>"}}
+</ul>`}}
 
 {{diagram "rl-data-model"}}
 
@@ -483,25 +483,25 @@ return {1, limit - count - 1, 0}
 
 {{triggerQs "Questions this section might trigger"
   "How much memory does each rate limit key use in Redis?"
-  "<ul>
+  `<ul>
   <li><strong>Sliding window counter</strong>: two string keys × <span class='hl'>~50 bytes</span> = <strong>~100 bytes</strong> per user per endpoint</li>
   <li><strong>Token bucket</strong>: one hash with two fields (tokens, last_refill) = <strong>~80 bytes</strong></li>
   <li><strong>Sorted set log</strong>: 50 bytes base + 50 bytes per request in the window</li>
   <li>For <strong>50M users × 10 endpoints</strong>: sliding window counter = <span class='hl'>~50 GB</span>; sorted set at 100 req/min = <span class='hl-red'>~250 GB</span> — <span class='hl'>5× more</span> for the same user base</li>
-</ul>"
+</ul>`
   "How do you set TTL on rate limit keys so they do not accumulate forever?"
-  "<ul>
+  `<ul>
   <li>Set TTL to <strong>window duration + buffer</strong>: for a 60s window, set EXPIRE to <span class='hl'>120s</span></li>
   <li>Buffer handles clock skew and ensures the previous window key is still available for the weighted calculation</li>
   <li>For token bucket: TTL = <code>capacity / refill_rate + 1</code> — the time to fully refill from empty; after that, the key is stale anyway</li>
-</ul>"
+</ul>`
   "Why store rate limit rules in a separate config store rather than hardcoding?"
-  "<ul>
+  `<ul>
   <li>Hardcoded limits require a <strong>deployment to change</strong> — takes minutes to hours in a CI/CD pipeline</li>
   <li>A config store (Redis hash, DynamoDB, or a config service) lets you change limits in <strong>seconds</strong> without redeployment</li>
   <li>Critical for incident response: if a customer is sending malicious traffic, you want to reduce their limit immediately</li>
   <li>Store rules as JSON keyed by <code>api_key</code> or tier; use a short <span class='hl'>60s in-process cache TTL</span> to avoid a Redis lookup on every request</li>
-</ul>"
+</ul>`
 }}
 
 {{phase 8 "Redis Configuration" "3 min"}}
@@ -558,34 +558,34 @@ activedefrag: yes                 # Defragment memory proactively
 
 {{qa "Should the rate limiter fail-open or fail-closed when Redis is unavailable?" "Fail-open is correct for most services. If Redis is down, allow all requests through rather than rejecting everything. A brief period of unlimited traffic is far less damaging than a total outage. The exception: security-critical endpoints like login or payment, where unlimited traffic enables brute-force attacks or fraud. For those, fail-closed with a local in-memory fallback counter that enforces a conservative limit (e.g., 10 req/sec per IP)." "How do you implement the fail-open/fail-closed toggle per endpoint?" "Store a per-endpoint policy in the rate limit config: {endpoint: '/login', fail_mode: 'closed', fallback_limit: 10}. In the middleware, wrap the Redis call in a try/catch. On Redis timeout or connection error, check the fail_mode. If open, return allowed. If closed, check the local in-memory counter (a simple map[string]int with a goroutine that resets it every second). This local counter is per-process so it under-counts across multiple servers, but it is better than nothing."}}
 
-{{hint "why return 429 with Retry-After instead of silently dropping?" "Silent drops look like network errors — clients retry <em>immediately</em>, making the overload worse. <strong>429 + Retry-After</strong> tells the client exactly when to retry:
+{{hint "why return 429 with Retry-After instead of silently dropping?" `Silent drops look like network errors — clients retry <em>immediately</em>, making the overload worse. <strong>429 + Retry-After</strong> tells the client exactly when to retry:
 <ul>
   <li>Well-behaved SDKs (AWS, Stripe) respect Retry-After and sleep rather than immediately retrying</li>
   <li>This turns a thundering herd of retries into a <span class='hl'>smooth retry distribution</span> spread across the window</li>
   <li>Add <strong>jitter</strong> to Retry-After: <code>window_reset + rand(0, 10s)</code> to prevent all clients retrying at the exact same second</li>
-</ul>"}}
+</ul>`}}
 
 {{triggerQs "Questions this section might trigger"
   "How do you prevent rate limit circumvention through account farming — creating many accounts to multiply effective limits?"
-  "<ul>
+  `<ul>
   <li>Rate limit by <strong>shared signals</strong> across accounts: same payment method, same device fingerprint, same /24 IP subnet</li>
   <li>When multiple accounts collectively exceed a threshold, apply a <strong>shared rate limit</strong> across them</li>
   <li>This is Stripe's approach — individual accounts may be within limits, but correlated accounts get a combined cap</li>
   <li>Requires ML-based fraud signals, not just simple counting; pure counting can't detect correlated accounts</li>
-</ul>"
+</ul>`
   "What is the thundering herd problem in rate limiting and how do you solve it?"
-  "<ul>
+  `<ul>
   <li>When the window resets, all <strong>throttled clients retry simultaneously</strong> — another spike that immediately triggers rate limiting again</li>
   <li>If <strong>10,000 clients</strong> hit a limit at T=0 and the window resets at T=60, all 10,000 retry at T=60</li>
   <li>Fix: return <strong>Retry-After with jitter</strong>: <code>window_reset + rand(0, 10s)</code> spreads retries across a <span class='hl'>10-second window</span></li>
-</ul>"
+</ul>`
   "How do you handle rate limiting for batch APIs that send one request representing many operations?"
-  "<ul>
+  `<ul>
   <li>Use <span class='hl-blue'>cost-based limiting</span> instead of request counting — a batch of 1,000 records costs 1,000 units, not 1</li>
   <li>GitHub GraphQL uses <strong>query complexity scoring</strong>: each field/resolver has a cost; the query's total cost deducts from a Token Bucket</li>
   <li>For REST batch APIs: read batch size from the request body in middleware and deduct accordingly</li>
   <li>Return <strong>X-RateLimit-Cost</strong> in the response so clients can plan batch sizes around their remaining quota</li>
-</ul>"
+</ul>`
 }}
 
 {{phase 10 "Cost Estimates" "2 min"}}
@@ -605,7 +605,7 @@ activedefrag: yes                 # Defragment memory proactively
 
 {{phase 11 "Sub-Problems & Building Blocks" "3 min"}}
 
-{{say "Let me summarize the building blocks and how they connect. Each of these is a sub-problem worth diving into if the interviewer asks."}}
+{{say "Here are the building blocks and how they connect — each is a sub-problem worth diving into if the interviewer asks."}}
 
 {{diagram "rl-sub-problems"}}
 
