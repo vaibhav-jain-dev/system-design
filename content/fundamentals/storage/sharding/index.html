@@ -1,17 +1,17 @@
 {{phase 1 "What Is Sharding?" "3 min"}}
 
-{{say "Sharding is {{info \"horizontal partitioning\" \"Horizontal partitioning = splitting rows across multiple databases. User 1-1M on shard1, 1M-2M on shard2, etc. Different from vertical = splitting columns.\"}} — splitting a dataset across multiple database instances (shards) so that each shard holds a subset of the rows. It is how you scale writes beyond what a single machine can handle."}}
+{{say "Sharding is <span class=\"hl-blue\">horizontal partitioning</span> — splitting a dataset across multiple database instances (shards) so that each shard holds a subset of the rows. It is how you scale writes beyond what a single machine can handle."}}
 
 {{table "Scaling Options (Before Sharding)" (rows
   (row "Technique"            "Handles"                      "Limit"                         "When to Use")
-  (row "{{info \"Vertical scaling\" \"Vertical scaling = buying a bigger server. More CPU, more RAM. Eventually you hit the biggest server AWS offers.\"}} " "CPU/RAM bottleneck"           "~128 cores, ~24TB RAM (RDS)"   "First step — no app changes")
-  (row "{{info \"Read replicas\" \"Read replicas = copy the database. Reads go to replicas, writes go to primary. Replication lag = slight delay before replicas see writes.\"}} " "Read-heavy workloads"         "{{info \"Replication lag\" \"Replication lag = delay between a write on primary and that write showing up on replicas. Usually milliseconds but can be seconds under load.\"}} , write still 1x" "Read:write ratio > 5:1")
+  (row "{{info \"Vertical scaling\" \"Vertical scaling = buying a bigger server. More CPU, more RAM. Eventually you hit the biggest server AWS offers.\"}}" "CPU/RAM bottleneck"           "~128 cores, ~24TB RAM (RDS)"   "First step — no app changes")
+  (row "{{info \"Read replicas\" \"Read replicas = copy the database. Reads go to replicas, writes go to primary. Replication lag = slight delay before replicas see writes.\"}}" "Read-heavy workloads"         "Replication lag, write still 1x" "Read:write ratio > 5:1")
   (row "Caching (Redis)"      "Repeated read patterns"       "Cache invalidation complexity"  "80% of reads are for 20% of data")
-  (row "Sharding"             "Write throughput, data volume" "{{info \"Cross-shard queries\" \"Cross-shard queries = queries that need to read from multiple shards. Not efficient. Example: 'find all users named John' must query all shards and merge results.\"}} , join loss" "After the above are exhausted")
+  (row "Sharding"             "Write throughput, data volume" "Cross-shard queries, join loss" "After the above are exhausted")
 )}}
 
 {{think "When is sharding the right answer?"
-  (whyNot "sharding first" "Sharding adds significant operational complexity: no cross-shard joins, cross-shard transactions require {{info \"2PC\" \"2PC (Two-Phase Commit) = a protocol to make transactions atomic across multiple databases. Phase 1: ask all databases if they can commit. Phase 2: all actually commit or all roll back. Very slow and has failure scenarios.\"}} , {{info \"re-sharding\" \"Re-sharding = changing the shard key or number of shards. Requires migrating data without downtime. Very complex and risky.\"}} requires zero-downtime migrations. A db.r6g.16xlarge handles 500GB RAM and 128 vCPUs. That covers most startups to mid-scale.")
+  (whyNot "sharding first" "Sharding adds significant operational complexity: no cross-shard joins, cross-shard transactions require 2PC, re-sharding requires zero-downtime migrations. A db.r6g.16xlarge handles 500GB RAM and 128 vCPUs. That covers most startups to mid-scale.")
   (how "the signal to shard" "Write throughput exceeds what a single primary can handle, OR your dataset exceeds the largest available instance. For Postgres on RDS: write-heavy workloads hit limits around 10K-50K writes/s. At that point, sharding is appropriate.")
   (whatIf "I shard too early" "You lock yourself into a shard key that cannot change without a full re-shard. You lose SQL joins across shards. Your team must understand distributed transaction semantics. All of this cost with no benefit if one big machine would have worked.")
 }}
@@ -38,9 +38,9 @@
   (row "geography"       "US-East → shard0, EU → shard1"       "Data residency, latency"   "Geographic growth imbalance")
 )}}
 
-{{think "Range sharding and the {{info \"hot\" \"Hot = receiving way more traffic than other shards. A bottleneck. Example: shard 1 gets 100 req/s while shard 2 gets 10 req/s.\"}} range problem"
+{{think "Range sharding and the hot range problem"
   (how "Why time-based ranges are dangerous" "All writes for today go to the current shard. If you are inserting 10K rows/s, 100% of write load hits one shard. Historical shards are read-only and idle. You have not distributed load — you have bottlenecked it.")
-  (whyNot "auto-increment IDs as range keys" "Auto-increment IDs are {{info \"monotonically increasing\" \"Monotonically increasing = always going up. 1, 2, 3, 4, etc. All new values are higher than old values. New records always end up on the same (newest) shard.\"}} . All new inserts go to the last shard. Same problem as time-based: the newest shard is always the hot shard.")
+  (whyNot "auto-increment IDs as range keys" "Auto-increment IDs are monotonically increasing — always going up. All new inserts go to the last shard. Same problem as time-based: the newest shard is always the hot shard.")
   (whatIf "one range is much larger than another" "Uneven ranges cause uneven storage and load. Range sharding requires monitoring per-shard size and splitting hot ranges manually. This is operationally expensive compared to hash sharding.")
 }}
 
@@ -130,11 +130,11 @@ def get_tweet_key(user_id: int, shard_suffix: int) -> str:
 
 {{table "Directory-Based Sharding Properties" (rows
   (row "Property"        "Detail")
-  (row "Mechanism"       "{{info \"Lookup service\" \"Lookup service = a service that stores a mapping of keys to shards. Query it to find which shard owns a key.\"}} : GET shard_id WHERE key = 'user:12345'")
+  (row "Mechanism"       "Lookup service: GET shard_id WHERE key = 'user:12345'")
   (row "Flexibility"     "Any key can be mapped to any shard, any time")
   (row "Rebalancing"     "Update the lookup table, then migrate data — no key-space math")
   (row "Bottleneck"      "Every request hits the lookup service before the shard")
-  (row "{{info \"SPOF\" \"SPOF (Single Point of Failure) = if this one component goes down, the entire system fails. Lookup service is a SPOF if not replicated.\"}} risk"       "Lookup service down = no requests can route")
+  (row "{{info \"SPOF\" \"SPOF (Single Point of Failure) = if this one component goes down, the entire system fails. Lookup service is a SPOF if not replicated.\"}}" "Lookup service down = no requests can route")
   (row "Used by"         "Vitess (MySQL sharding proxy), some legacy sharding frameworks")
 )}}
 
