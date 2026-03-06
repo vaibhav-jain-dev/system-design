@@ -112,11 +112,15 @@ type Pattern struct {
 	Path        string `yaml:"path"`
 }
 
-// QuickQuestion is a short interview Q&A (question + what you need to say).
+// QuickQuestion is a direct interview Q&A with full reasoning, tradeoffs and caveats.
 type QuickQuestion struct {
 	Number   int    `yaml:"number"`
 	Question string `yaml:"question"`
-	Needed   string `yaml:"needed"`
+	Needed   string `yaml:"needed"`   // One-liner: what to say first
+	Answer   string `yaml:"answer"`   // Full explanation with reasoning + justification
+	Tradeoff string `yaml:"tradeoff"` // Alternatives and why they are worse/different
+	Caveat   string `yaml:"caveat"`   // Common mistakes, gotchas, what NOT to say
+	Watch    string `yaml:"watch"`    // The thing that makes the answer stand out
 
 	// Optional cross-references (slugs)
 	RelatedProblems     []string `yaml:"related_problems"`
