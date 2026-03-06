@@ -1,6 +1,12 @@
 {{phase 1 "What Is a Circuit Breaker?" "3 min"}}
 
-{{say "A circuit breaker wraps calls to an external dependency. When service A calls service B and B is slow, A's threads pile up waiting. Eventually A runs out of threads and fails too — cascading failure. The circuit breaker detects the failure pattern and stops calling B entirely, failing fast in microseconds instead of blocking for 30 seconds."}}
+{{say "A circuit breaker wraps calls to an external dependency. When service A calls service B and B is slow:
+<ul>
+  <li>A's threads pile up waiting for B to respond</li>
+  <li>Eventually A runs out of threads and fails too — <span class='hl-red'>cascading failure</span></li>
+  <li>The circuit breaker detects the failure pattern and <strong>stops calling B entirely</strong></li>
+  <li>Calls fail fast in <span class='hl'>microseconds</span> instead of blocking for <span class='hl'>30 seconds</span></li>
+</ul>"}}
 
 {{diagram "fund-cb-overview"}}
 
@@ -10,18 +16,23 @@
   (whatIf "the circuit stays open permanently" "The dependency may have recovered but the circuit never closes. Half-open state exists to probe recovery: let one request through, if it succeeds, close the circuit and resume normal traffic.")
 }}
 
-{{hint "the key analogy" "An electrical circuit breaker trips when current exceeds a safe threshold — protecting wiring from fire. A software circuit breaker trips when failure rate exceeds a threshold — protecting your service from thread exhaustion."}}
+{{hint "the key analogy" "An electrical circuit breaker trips when current exceeds a safe threshold — protecting wiring from fire. A software circuit breaker trips when failure rate exceeds a threshold — protecting your service from <strong>thread exhaustion</strong>."}}
 
 {{triggerQs "Phase 1 Trigger Questions"
   "What problem does a circuit breaker solve that a timeout alone does not?"
-  "A timeout makes each call fail after N seconds. But if 100 calls/second are hitting a failing service, you still have 100 times N seconds of thread time consumed per second. Circuit breaker stops making the calls entirely — zero thread time consumed during OPEN state."
+  "A timeout makes each call fail after N seconds. But if <span class='hl'>100 calls/second</span> are hitting a failing service, you still have 100 × N seconds of thread time consumed per second. Circuit breaker stops making the calls entirely — <strong>zero thread time consumed</strong> during OPEN state."
   "Is a circuit breaker the same as a retry?"
-  "No. Retry re-attempts a failed call. Circuit breaker stops calling. They are complementary: use retry for transient errors, circuit breaker for sustained failures. Retry without circuit breaker can amplify load on an already-struggling dependency."
+  "No. Retry re-attempts a failed call. Circuit breaker stops calling. They are complementary: use retry for transient errors, circuit breaker for sustained failures. <span class='hl-red'>Retry without circuit breaker</span> can amplify load on an already-struggling dependency."
 }}
 
 {{phase 2 "State Machine" "5 min"}}
 
-{{say "The circuit breaker is a three-state machine. CLOSED is normal operation — calls pass through and failures are counted. OPEN means the circuit has tripped — all calls fail immediately without any network attempt. HALF_OPEN is the recovery probe state: exactly one test request gets through."}}
+{{say "The circuit breaker is a three-state machine:
+<ul>
+  <li><strong>CLOSED</strong> — normal operation; calls pass through and failures are counted</li>
+  <li><strong>OPEN</strong> — circuit has tripped; all calls fail immediately with zero network attempt</li>
+  <li><strong>HALF_OPEN</strong> — recovery probe; exactly one test request gets through</li>
+</ul>"}}
 
 {{diagram "fund-cb-state-machine"}}
 
@@ -38,18 +49,25 @@
   (whatIf "the HALF_OPEN test request itself times out" "Treat timeout as failure. Circuit goes back to OPEN for another wait period. A slow response from a recovering service is as dangerous as a fast error — threads are still blocked.")
 }}
 
-{{hint "do not confuse OPEN and CLOSED" "CLOSED means the circuit is closed — current flows — normal operation. OPEN means the circuit is open — current does not flow — all calls blocked. This is electrician terminology, the inverse of what most people expect."}}
+{{hint "do not confuse OPEN and CLOSED" "<strong>CLOSED</strong> means the circuit is closed — current flows — <em>normal operation</em>. <strong>OPEN</strong> means the circuit is open — current does not flow — <em>all calls blocked</em>. This is electrician terminology, the inverse of what most people expect."}}
 
 {{triggerQs "State Machine Questions"
   "How does the circuit breaker know when to transition from CLOSED to OPEN?"
-  "It maintains a sliding window of recent calls — either count-based (last N calls) or time-based (last N seconds). When failure rate exceeds the threshold AND minimum request count is met, it transitions to OPEN. The minimum request count prevents tripping on 1 failure out of 2 total calls."
+  "It maintains a sliding window of recent calls — either count-based (last N calls) or time-based (last N seconds). When failure rate exceeds the threshold <strong>AND</strong> minimum request count is met, it transitions to OPEN. The minimum request count prevents tripping on 1 failure out of 2 total calls."
   "What happens to requests queued during OPEN state?"
-  "They fail immediately with a circuit-open error — no queue. The caller receives a fast failure and applies its fallback strategy. Queuing OPEN-state requests defeats the purpose — you would still exhaust memory instead of threads."
+  "They fail immediately with a circuit-open error — <span class='hl-red'>no queue</span>. The caller receives a fast failure and applies its fallback strategy. Queuing OPEN-state requests defeats the purpose — you would still exhaust memory instead of threads."
 }}
 
 {{phase 3 "Configuration Parameters" "4 min"}}
 
-{{say "Four parameters control circuit breaker behavior: failure threshold, minimum request count, wait duration in OPEN state, and success threshold in HALF_OPEN. Tune these per dependency — a payment service and an analytics service have very different sensitivity requirements."}}
+{{say "Four parameters control circuit breaker behavior:
+<ul>
+  <li><strong>failure_threshold</strong> — failure rate that trips the circuit</li>
+  <li><strong>min_requests</strong> — minimum calls before tripping (prevents noise)</li>
+  <li><strong>wait_duration_in_open</strong> — how long to stay OPEN before probing</li>
+  <li><strong>success_threshold_in_half_open</strong> — consecutive successes needed to CLOSE</li>
+</ul>
+Tune these <em>per dependency</em> — a payment service and an analytics service have very different sensitivity requirements."}}
 
 {{table "Circuit Breaker Parameters" (rows
   (row "Parameter" "Typical Value" "Too Low Effect" "Too High Effect")
@@ -64,18 +82,18 @@
   (whyNot "a single global circuit breaker config" "A database and a recommendation engine have different latency profiles, failure modes, and business impact. One config will be wrong for at least one of them.")
 }}
 
-{{hint "sliding window type matters" "Count-based windows (last 100 calls) respond faster to sudden spikes. Time-based windows (last 10 seconds) are more representative of current system state. Resilience4j supports both. Choose count-based for high-QPS services, time-based for low-QPS services where count windows may span minutes."}}
+{{hint "sliding window type matters" "<strong>Count-based windows</strong> (last 100 calls) respond faster to sudden spikes. <strong>Time-based windows</strong> (last 10 seconds) are more representative of current system state. Resilience4j supports both. Choose count-based for high-QPS services, time-based for low-QPS services where count windows may span minutes."}}
 
 {{triggerQs "Configuration Questions"
   "How do you set the minimum request count?"
-  "It should be large enough to be statistically meaningful. With minimum=5, a 60% failure rate triggers on 3 failures — which could be noise. With minimum=20, you need 12+ failures. For a service handling 100 req/s, minimum=20 triggers within 200ms of a real outage. For 1 req/s, use minimum=5 or the circuit may never trip."
+  "It should be statistically meaningful. With minimum=5, a 60% failure rate triggers on 3 failures — which could be noise. With minimum=20, you need <span class='hl'>12+ failures</span>. For a service handling <span class='hl'>100 req/s</span>, minimum=20 triggers within <span class='hl'>200ms</span> of a real outage. For 1 req/s, use minimum=5 or the circuit may never trip."
   "Should the wait duration in OPEN state be fixed or exponential backoff?"
   "Start with fixed — 60 seconds. Exponential backoff in OPEN state adds complexity. If the dependency is slow to recover, operators prefer a fixed probe interval so they can predict when traffic resumes."
 }}
 
 {{phase 4 "Implementation" "6 min"}}
 
-{{say "Here is a Python circuit breaker state machine. In production, use a library — Resilience4j for Java, Polly for .NET, pybreaker for Python — but understanding the implementation tells you exactly what the configuration parameters control."}}
+{{say "Here is a Python circuit breaker state machine. In production, use a library — <strong>Resilience4j</strong> for Java, <strong>Polly</strong> for .NET, <strong>pybreaker</strong> for Python — but understanding the implementation tells you exactly what the configuration parameters control."}}
 
 {{code "python" `import time
 import threading
@@ -171,11 +189,11 @@ class CircuitBreaker:
         return 1.0 - (sum(self._window) / len(self._window))
 `}}
 
-{{hint "use a library in production" "This implementation omits metrics emission, configurable window types, and slow-call rate tracking. Resilience4j (Java), Polly (.NET), and pybreaker (Python) handle all of this. Know the concepts; do not hand-roll it in production."}}
+{{hint "use a library in production" "This implementation omits metrics emission, configurable window types, and slow-call rate tracking. <strong>Resilience4j</strong> (Java), <strong>Polly</strong> (.NET), and <strong>pybreaker</strong> (Python) handle all of this. Know the concepts; do not hand-roll it in production."}}
 
 {{phase 5 "Fallback Strategies" "4 min"}}
 
-{{say "When the circuit is OPEN, you need a fallback — a degraded but functional response. The right fallback depends on the business impact of the failing dependency. Not all failures justify showing an error page."}}
+{{say "When the circuit is OPEN, you need a fallback — a degraded but functional response. The right fallback depends on the business impact of the failing dependency. <span class='hl-red'>Not all failures justify showing an error page.</span>"}}
 
 {{compare "Fallback Strategy Selection" (options
   (best "Cached response — stale read" "Last known good response from local cache or Redis. Works for read-heavy endpoints where slightly stale data is acceptable: product pages, recommendations, user profiles.")
@@ -185,20 +203,25 @@ class CircuitBreaker:
 
 {{think "Fallback quality determines user experience during outages."
   (whyNot "returning a 500 error from the circuit-open path" "A 500 error breaks the user's flow entirely. In most cases, a stale or default response lets them complete the primary task. Reserve 500 for situations where proceeding with degraded data would cause harm — such as stale authorization data.")
-  (how "stale cache as fallback" "Set a long TTL on a separate 'fallback cache' key — say 6 hours. On successful calls, update both the main cache (TTL 5min) and the fallback cache (TTL 6h). On circuit OPEN, read from the fallback cache. This gives up to 6 hours of stale-but-functional data.")
+  (how "stale cache as fallback" "Set a long TTL on a separate 'fallback cache' key — say 6 hours. On successful calls, update both the main cache (TTL 5min) and the fallback cache (TTL 6h). On circuit OPEN, read from the fallback cache. This gives up to <span class='hl'>6 hours</span> of stale-but-functional data.")
   (whatIf "there is no cached response and the circuit is open" "Return a safe default — empty list, inline 'service temporarily unavailable' message — rather than propagating a 500. Log it — if it happens often, the cache warm-up strategy needs fixing.")
 }}
 
 {{triggerQs "Fallback Questions"
   "How do you handle payment processing when the payment service circuit is open?"
-  "Queue the payment attempt — SQS, Kafka — and return an 'order received, payment processing' response to the user. Do not return a payment failure — the user did nothing wrong. Process the queue when the circuit closes. This requires idempotency on the payment processor side."
+  "Queue the payment attempt — SQS, Kafka — and return an <em>'order received, payment processing'</em> response to the user. Do not return a payment failure — the user did nothing wrong. Process the queue when the circuit closes. This requires <strong>idempotency</strong> on the payment processor side."
   "Can a fallback itself fail?"
-  "Yes — if the fallback reads from Redis and Redis is also down. Layer your fallbacks: primary service → Redis cache → in-process cache → hardcoded default. Each layer should be faster and more reliable than the one above it."
+  "Yes — if the fallback reads from Redis and Redis is also down. <strong>Layer your fallbacks</strong>: primary service → Redis cache → in-process cache → hardcoded default. Each layer should be faster and more reliable than the one above it."
 }}
 
 {{phase 6 "Integration with Retry" "4 min"}}
 
-{{say "Retry and circuit breaker are complementary, not alternatives. Retry handles transient errors — a single packet loss, a brief lock contention. Circuit breaker handles sustained failures — a downstream service that has been degraded for 2 minutes. The correct layering: retry wraps the individual call, circuit breaker sits at a higher level counting logical request outcomes."}}
+{{say "Retry and circuit breaker are complementary, not alternatives:
+<ul>
+  <li><strong>Retry</strong> handles transient errors — a single packet loss, a brief lock contention</li>
+  <li><strong>Circuit breaker</strong> handles sustained failures — a downstream service degraded for 2 minutes</li>
+  <li>Correct layering: retry wraps the individual call; circuit breaker sits at a higher level counting logical request outcomes</li>
+</ul>"}}
 
 {{think "The interaction between retry and circuit breaker is subtle."
   (how "retry and circuit breaker layering" "Wrap the circuit breaker call with a retry policy. A single request retries 3 times with exponential backoff. Each failed logical request — after all retries exhausted — counts as one failure toward the circuit breaker window. The circuit breaker sees sustained failures across many requests, not per-retry attempts.")
@@ -234,18 +257,23 @@ def charge_with_circuit_breaker(payload):
         return queue_for_later(payload)
 `}}
 
-{{hint "jitter in exponential backoff" "Add random jitter to backoff: wait = base * 2^attempt + random(0, 0.1). Without jitter, all clients that failed at the same time retry at the same time — a retry storm. Jitter spreads retries across time and prevents thundering-herd on the recovering dependency."}}
+{{hint "jitter in exponential backoff" "Add random jitter to backoff: <code>wait = base * 2^attempt + random(0, 0.1)</code>. Without jitter, all clients that failed at the same time retry at the same time — a <span class='hl-red'>retry storm</span>. Jitter spreads retries across time and prevents thundering-herd on the recovering dependency."}}
 
 {{triggerQs "Retry Integration Questions"
   "Should you retry on CircuitOpenError?"
-  "No. CircuitOpenError is an immediate fast failure — there is no point retrying because the circuit breaker will reject the call again instantly. Catch it separately and apply the fallback strategy directly. Only retry on actual dependency errors like timeouts and 5xx responses."
+  "No. CircuitOpenError is an immediate fast failure — there is no point retrying because the circuit breaker will reject the call again instantly. <strong>Catch it separately</strong> and apply the fallback strategy directly. Only retry on actual dependency errors like timeouts and 5xx responses."
   "What is retry amplification and how does circuit breaker prevent it?"
-  "If 1000 req/s hit a service at 50% failure rate and each failed request retries 3 times, the failing service receives 1000 + 500*3 = 2500 req/s — 2.5x amplification on an already failing service. Circuit breaker trips after enough failures and reduces calls to zero, giving the dependency headroom to recover."
+  "If <span class='hl'>1000 req/s</span> hit a service at 50% failure rate and each failed request retries 3 times, the failing service receives <span class='hl'>1000 + 500×3 = 2500 req/s</span> — 2.5x amplification on an already failing service. Circuit breaker trips after enough failures and reduces calls to zero, giving the dependency headroom to recover."
 }}
 
 {{phase 7 "Monitoring & Alerting" "3 min"}}
 
-{{say "A circuit breaker that opens silently is useless for operations. Emit metrics on every state transition, track failure rate as an early warning, and alert when a circuit stays open for more than 5 minutes — that is a sustained outage, not a transient blip."}}
+{{say "A circuit breaker that opens silently is useless for operations:
+<ul>
+  <li>Emit metrics on every state transition</li>
+  <li>Track failure rate as an early warning signal</li>
+  <li>Alert when a circuit stays OPEN for more than <span class='hl'>5 minutes</span> — that is a sustained outage, not a transient blip</li>
+</ul>"}}
 
 {{table "Circuit Breaker Metrics to Emit" (rows
   (row "Metric" "Type" "Alert Condition")
@@ -257,22 +285,27 @@ def charge_with_circuit_breaker(payload):
 )}}
 
 {{think "Monitoring the fallback rate is as important as monitoring circuit state."
-  (how "fallback rate as early warning" "If the fallback rate spikes while the circuit is still CLOSED, the dependency is degrading but has not crossed the trip threshold yet. This is your 5-minute warning before the circuit opens. Page on-call at fallback rate above 10% to investigate before full outage.")
+  (how "fallback rate as early warning" "If the fallback rate spikes while the circuit is still CLOSED, the dependency is degrading but has not crossed the trip threshold yet. This is your <span class='hl'>5-minute warning</span> before the circuit opens. Page on-call at fallback rate above 10% to investigate before full outage.")
   (whatIf "the circuit opens and closes repeatedly — thrashing" "Every open/close cycle is a state transition metric event. If circuit_open_total increments more than 10 times per hour, the failure threshold or wait duration is misconfigured — or the dependency has chronic instability. Alert on thrash rate separately.")
 }}
 
-{{hint "dashboard layout for incidents" "One row per external dependency: current state, failure rate over last 5 minutes, open duration, fallback rate. Operators should see the health of all dependencies on one screen during an incident — not hunt through separate dashboards."}}
+{{hint "dashboard layout for incidents" "One row per external dependency: current state, failure rate over last 5 minutes, open duration, fallback rate. Operators should see the health of all dependencies on <strong>one screen</strong> during an incident — not hunt through separate dashboards."}}
 
 {{triggerQs "Monitoring Questions"
   "How do you know if your circuit breaker configuration is too sensitive?"
-  "Track false open rate: circuit opens that resolved back to CLOSED within 30 seconds. If more than 20% of opens close within 30 seconds, your minimum request count is too low or failure threshold is too low — you are tripping on transient noise. Increase min_requests."
+  "Track <strong>false open rate</strong>: circuit opens that resolved back to CLOSED within 30 seconds. If more than <span class='hl'>20%</span> of opens close within 30 seconds, your minimum request count is too low or failure threshold is too low — you are tripping on transient noise. Increase min_requests."
   "Should circuit breaker state be shared across service instances?"
-  "Usually not. Each instance maintains its own circuit breaker. This is fine — if one instance's circuit opens, others will follow within seconds as they hit the same failing dependency. Shared state via Redis adds complexity and a new dependency. Local state is simpler and sufficient."
+  "Usually not. Each instance maintains its own circuit breaker. If one instance's circuit opens, others will follow within seconds as they hit the same failing dependency. Shared state via Redis adds complexity and a new dependency. Local state is simpler and sufficient."
 }}
 
 {{phase 8 "Interview Summary" "3 min"}}
 
-{{say "Circuit breaker prevents cascading failures by detecting sustained dependency failures and failing fast — returning in microseconds instead of blocking threads for the full timeout. Three states: CLOSED (normal), OPEN (fast fail), HALF_OPEN (recovery probe). Pair with retry for transient errors, fallback for user experience, and metrics for observability."}}
+{{say "Circuit breaker prevents cascading failures by detecting sustained dependency failures and failing fast:
+<ul>
+  <li>Returns in <span class='hl'>microseconds</span> instead of blocking threads for the full timeout</li>
+  <li>Three states: <strong>CLOSED</strong> (normal), <strong>OPEN</strong> (fast fail), <strong>HALF_OPEN</strong> (recovery probe)</li>
+  <li>Pair with <strong>retry</strong> for transient errors, <strong>fallback</strong> for user experience, and <strong>metrics</strong> for observability</li>
+</ul>"}}
 
 {{table "Real-World Circuit Breaker Implementations" (rows
   (row "System" "Library or Approach" "Notes")
