@@ -23,18 +23,46 @@
 </head>
 <body>
     <div class="app">
-        <!-- Mobile header -->
-        <header class="app-header">
-            <button class="sidebar-toggle" onclick="document.querySelector('.app').classList.toggle('sidebar-open')">
-                <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-            </button>
-                        <button class="book-mode-toggle" id="book-toggle" onclick="window.toggleBookMode && window.toggleBookMode()" title="Toggle Book View (B)" >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
-                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+        <!-- Top navigation bar -->
+        <header class="app-header" id="app-header">
+            <!-- LEFT: sidebar/menu toggle -->
+            <button class="header-nav-btn sidebar-toggle" id="header-sidebar-btn"
+                    onclick="document.querySelector('.app').classList.toggle('sidebar-open')"
+                    title="Navigation menu">
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+                    <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                 </svg>
             </button>
-            <h1 class="app-title">System Design Prep</h1>
+
+            <!-- CENTER: stage nav (teleported here by JS) or app title -->
+            <div class="header-center">
+                <div id="header-stage-nav"></div>
+                <span class="header-app-title" id="header-app-title">System Design Prep</span>
+            </div>
+
+            <!-- RIGHT: more options dropdown -->
+            <div class="header-actions" id="header-actions">
+                <button class="header-nav-btn header-more-btn" id="header-more-btn"
+                        title="More options"
+                        onclick="document.getElementById('header-dropdown').classList.toggle('open')">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="5" r="1.2" fill="currentColor" stroke="none"/>
+                        <circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/>
+                        <circle cx="12" cy="19" r="1.2" fill="currentColor" stroke="none"/>
+                    </svg>
+                </button>
+                <div class="header-dropdown" id="header-dropdown">
+                    <button class="header-dropdown-item" id="book-toggle"
+                            onclick="window.toggleBookMode && window.toggleBookMode(); document.getElementById('header-dropdown').classList.remove('open')">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                        </svg>
+                        <span id="book-toggle-label">Book View</span>
+                        <kbd class="dropdown-shortcut">B</kbd>
+                    </button>
+                </div>
+            </div>
         </header>
 
         <!-- Sidebar -->
@@ -128,6 +156,11 @@
             }
             if (!e.target.closest('.hint-trigger')) {
                 document.querySelectorAll('.hint-popup.show').forEach(el => el.classList.remove('show'));
+            }
+            // Close header dropdown when clicking outside
+            var dd = document.getElementById('header-dropdown');
+            if (dd && !e.target.closest('#header-more-btn') && !e.target.closest('#header-dropdown')) {
+                dd.classList.remove('open');
             }
         });
 
@@ -374,6 +407,27 @@
             });
         }
 
+        // ── Stage Nav teleport ────────────────────
+        // Moves .stage-nav from #detail into the header bar so it stays
+        // fixed at the top regardless of scroll position.
+        function teleportStageNav() {
+            var slot    = document.getElementById('header-stage-nav');
+            var titleEl = document.getElementById('header-app-title');
+            if (!slot) return;
+            while (slot.firstChild) slot.removeChild(slot.firstChild);
+            var detailEl = document.getElementById('detail');
+            if (!detailEl) return;
+            var nav = detailEl.querySelector('.stage-nav');
+            if (nav) {
+                slot.appendChild(nav);
+                slot.classList.add('has-nav');
+                if (titleEl) titleEl.style.display = 'none';
+            } else {
+                slot.classList.remove('has-nav');
+                if (titleEl) titleEl.style.display = '';
+            }
+        }
+
         // ── HTMX swap handler ─────────────────────
         document.addEventListener('htmx:afterSwap', function(e) {
             if (e.detail.target.id === 'detail') {
@@ -397,6 +451,7 @@
                 initSectionAnchors();
                 initNFRFilter();
                 requestAnimationFrame(function() {
+                    teleportStageNav();
                     var pref = localStorage.getItem(BOOK_PREF_KEY);
                     if (pref !== '0') {
                         initBook();
@@ -689,13 +744,15 @@
 
         // ── syncViewBtn ──────────────────────────────────────────────────────
         function syncViewBtn() {
-            var isBook  = book.active;
-            var label   = document.getElementById('sidebar-view-label');
-            var sideBtn = document.getElementById('sidebar-view-btn');
-            var hdrBtn  = document.getElementById('book-toggle');
-            if (label)   label.textContent = isBook ? 'Normal View' : 'Book View';
-            if (sideBtn) sideBtn.classList.toggle('book-view-active', isBook);
-            if (hdrBtn)  hdrBtn.classList.toggle('book-view-active', isBook);
+            var isBook   = book.active;
+            var label    = document.getElementById('sidebar-view-label');
+            var sideBtn  = document.getElementById('sidebar-view-btn');
+            var hdrBtn   = document.getElementById('book-toggle');
+            var hdrLabel = document.getElementById('book-toggle-label');
+            if (label)    label.textContent = isBook ? 'Normal View' : 'Book View';
+            if (hdrLabel) hdrLabel.textContent = isBook ? 'Exit Book View' : 'Book View';
+            if (sideBtn)  sideBtn.classList.toggle('book-view-active', isBook);
+            if (hdrBtn)   hdrBtn.classList.toggle('book-view-active', isBook);
         }
 
         window.toggleBookMode = function() {
@@ -1140,6 +1197,7 @@
         // Highlight must complete before initBook measures element heights
         requestAnimationFrame(function() {
             requestAnimationFrame(function() {
+                teleportStageNav();
                 initBookFromPref();
                 if (!book.active) initStageNav();
                 restoreScroll();
