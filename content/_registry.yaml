@@ -1353,77 +1353,157 @@ quick_categories:
       - number: 41
         question: "How do systems distribute limited coupons without overselling?"
         needed: "atomic DECR in Redis; reject when counter hits 0; fall back to DB compare-and-swap"
+        answer: "Initialize a Redis counter with the inventory count (e.g., SET coupon:1234:inventory 500). Each claim atomically DECRements: if the result is >= 0, the claim succeeds; if the result is -1 or less, increment back and reject. This is O(1) and atomic — no race conditions. Write the final inventory to the DB asynchronously. For extra safety, add a DB check-and-update as a reconciliation step."
+        tradeoff: "DB compare-and-swap (SELECT FOR UPDATE + UPDATE WHERE count > 0) works but serializes claims at the DB row level — a lock per row under high concurrency causes queueing and latency spikes. Redis DECR handles tens of thousands of claims per second on a single node."
+        caveat: "Redis DECR can go below zero if you're not careful — a DECR followed by a check is not atomic. Use a Lua script that combines the check and decrement in one atomic operation: DECR only if current value > 0, return 0 if already at zero."
+        watch: "Redis is in-memory — a crash can lose the inventory counter. Persist with RDB snapshots every 60 seconds or AOF (append-only file). For critical inventory, the DB is the source of truth; Redis is a fast gate that may briefly allow a few extra claims that the DB reconciliation corrects."
         related_fundamentals: [storage/redis]
       - number: 42
         question: "How do systems handle flash sale traffic spikes?"
         needed: "request queue to flatten spike, rate limiting at entry, pre-warm cache before sale"
+        answer: "At sale start, route all requests into a virtual waiting room — issue each user a queue position token, then meter them into the sale at a controlled rate (e.g., 10K users/minute). This prevents the 100K simultaneous users from hammering Redis. Pre-warm: seed Redis inventory counters and cache product data 5 minutes before sale start. Rate limit individual users at the entry point to prevent bot advantage."
+        tradeoff: "No queue + horizontal scaling is simpler but requires provisioning for peak load (100K concurrent requests) for a 10-minute event — very expensive. A queue lets you serve the same demand with 1/10th the infrastructure."
+        caveat: "The virtual waiting room is itself a target — don't let users hold queue positions without activity. Time out idle queue positions after 5 minutes and give them to the next user in line."
+        watch: "CDN caching doesn't help during flash sales for the claim step (it's a write operation), but it does protect the product listing pages — pre-cache the sale landing page on CDN to absorb 95% of the initial traffic before it hits your origin."
         related_problems: [rate-limiter]
         related_fundamentals: [storage/redis]
       - number: 43
         question: "How do you ensure one coupon per user?"
         needed: "user redemption table with unique(user_id, coupon_id) constraint; Redis SET NX as fast guard"
+        answer: "Use a two-layer approach: Redis SET NX (set if not exists) as a fast first check — SET user:1234:coupon:5678 1 NX EX 86400 returns 1 on first call and 0 on subsequent calls for the same user+coupon. On success, persist to a redemptions table with a unique(user_id, coupon_id) DB constraint as the durable guard. The DB constraint catches any race condition that slipped past Redis."
+        tradeoff: "DB unique constraint alone (without Redis) is the only correct solution — Redis SET NX can miss if Redis data is evicted or lost. The Redis layer is a performance optimization (sub-ms check) in front of the guaranteed DB constraint."
+        caveat: "Don't trust client-submitted user_id for the redemption check — derive user identity from the authenticated session. A user could submit a different user_id in the request body to bypass per-user limits."
+        watch: "Multi-account abuse: one person creates 10 accounts to get 10 coupons. One-per-user (enforced by user_id) doesn't stop this. Add one-per-device (device fingerprint) and one-per-payment-method as additional signals."
         related_fundamentals: [storage/redis]
       - number: 44
         question: "How do you prevent coupon abuse?"
         needed: "account age check, device fingerprinting, velocity limit (N redemptions per day per device)"
+        answer: "Layer multiple signals: account age (accounts less than 7 days old can't redeem high-value coupons), device fingerprint (max 2 redemptions per device per campaign), payment method binding (coupon is locked to the first payment method used), and velocity limit (max 3 coupon uses per hour per user). Score each redemption attempt and require manual review above a threshold."
+        tradeoff: "Hard blocks on new accounts stop most abuse but also block legitimate new users. Soft limits (lower coupon value for new accounts, not a block) are better UX while still reducing abuse impact."
+        caveat: "Don't reveal which signal triggered the rejection — 'This coupon is not available for your account' tells abusers what to change. A generic 'coupon cannot be applied' message forces them to guess."
+        watch: "Organized coupon abuse rings share device fingerprints and rotate them. Behavioral signals (how quickly they navigated to checkout, typing patterns) are harder to fake at scale than static fingerprints."
       - number: 45
         question: "How do you generate unique coupon codes?"
         needed: "cryptographically random base62 token (8–12 chars), check DB uniqueness before issuing"
+        answer: "Generate a cryptographically random 8–12 character base62 string (A–Z, a–z, 0–9) using os.urandom(). The code space for 8 chars is 62^8 = 218 trillion combinations — collision probability is negligible for millions of coupons. Check DB uniqueness on insert with a unique index; retry on collision (extremely rare). Store codes hashed in the DB to prevent enumeration from DB access."
+        tradeoff: "Sequential IDs (COUPON00001, COUPON00002) are guessable — attackers enumerate codes. Random base62 makes guessing infeasible. Checksum-embedded codes (Luhn algorithm variant) catch typos at the client before a DB lookup."
+        caveat: "8-character codes have 218T possibilities, but if attackers can test 1M codes/second against your API (no rate limiting), they'll find one valid code in ~60 hours. Rate limit code validation aggressively (10 per hour per IP)."
+        watch: "For mass distribution (email campaigns), generate codes in batches asynchronously before the send — don't generate on-demand during email send because DB uniqueness checks under load can cause send delays."
         related_problems: [url-shortener]
       - number: 46
         question: "How do systems expire coupons automatically?"
         needed: "TTL on Redis key for fast check; background job to mark expired in DB for audit trail"
+        answer: "Set a Redis TTL on the coupon's active key (SET coupon:1234:active 1 EX <seconds_until_expiry>). On redemption attempt, check if the key exists — absence means expired. Separately, run a background job every 15 minutes that queries the DB for coupons where expiry_at < NOW() and status = 'active', marks them expired, and emits an analytics event."
+        tradeoff: "Redis TTL alone is not durable — Redis eviction or restart can remove the key before actual expiry, making coupons look expired early. DB timestamp check is the source of truth; Redis TTL is a fast negative cache for already-expired coupons."
+        caveat: "Don't rely on Redis key expiry as the only expiry signal — Redis keyspace notification events (for expiry) can be missed under load. Always check expiry_at in the DB during the final redemption transaction."
+        watch: "Coupon expiry at midnight creates a race: a user starts checkout at 11:59 PM and completes payment at 12:01 AM. Decide and enforce the policy: expiry is checked at checkout start (timestamp when code entered) not at payment time — this is more user-friendly."
         related_fundamentals: [storage/redis]
       - number: 47
         question: "How do you track coupon usage in real time?"
         needed: "Redis counter per coupon; async flush to DB analytics table every 60 seconds"
+        answer: "Increment a Redis counter on each successful redemption: INCR coupon:1234:used_count. This gives sub-millisecond real-time usage count. A background job flushes the Redis count to a DB analytics table every 60 seconds using a compare-and-swap pattern. For campaign dashboards, also stream redemption events to Kafka for downstream analytics (Flink/Spark aggregations, daily conversion reports)."
+        tradeoff: "Writing directly to the DB analytics table on every redemption is safe but adds write latency to the checkout path — at 10K redemptions/second, that's 10K writes/second to analytics, potentially competing with transactional writes. Redis counter + async flush decouples analytics write load from the checkout path."
+        caveat: "Redis counter and DB count will briefly diverge — don't use the Redis count for financial reconciliation. Redis is for real-time display ('847 redeemed so far'); DB is for accurate reporting after flush."
+        watch: "Redis counter resets to 0 on restart unless you persist it. Use Redis persistence (AOF) for usage counters, or seed the Redis counter from the DB on startup with the last known count."
         related_fundamentals: [storage/redis]
       - number: 48
         question: "How do systems distribute coupons fairly?"
         needed: "FIFO queue at sale start; virtual waiting room with position tracking"
+        answer: "At campaign start, users join a virtual waiting room — each gets a position token (sequential integer from an atomic counter). A dispatcher processes the queue at a controlled rate (e.g., 5K positions/minute), allowing each user in order to complete their claim. Users see their queue position in real time via WebSocket or polling. Fairness is guaranteed by the FIFO order of position assignment."
+        tradeoff: "First-come-first-served FIFO favors users who can click fastest (bots, fast internet). A lottery model (random selection from all users who joined in the first 5 minutes) is fairer for high-demand items. Choose based on user expectations for your platform."
+        caveat: "Queue position tokens must be non-guessable and tied to a user session — otherwise a user can claim position 1 by guessing the token. Use signed tokens (HMAC) with user_id embedded."
+        watch: "Users will open the sale page on multiple devices simultaneously to get a better queue position — detect and consolidate multiple sessions per user into one queue position. Use user_id for queue dedup, not session ID."
       - number: 49
         question: "How do systems prevent bots during flash sales?"
         needed: "CAPTCHA challenge on queue entry, browser fingerprinting, behavioral analysis"
+        answer: "CAPTCHA on queue entry filters the easiest bots. Browser fingerprinting (canvas fingerprint, WebGL, screen resolution, font list) identifies automation frameworks. Behavioral signals (time-on-page before clicking, mouse movement entropy, scroll patterns) distinguish humans from scripts. Rate limit at the IP level and impose device-level limits (max 1 position per device per sale)."
+        tradeoff: "Invisible CAPTCHAs (reCAPTCHA v3 risk scores) add no user friction but advanced bots defeat them. Visible CAPTCHAs block more bots but hurt conversion. For high-value sales, visible challenges are worth the conversion cost."
+        caveat: "Browser fingerprinting degrades with privacy browsers (Firefox with resistance mode, Brave) and VPNs — these users look like bots but are legitimate. Don't hard-block on fingerprint alone; use it as one signal in a composite risk score."
+        watch: "CAPTCHA farms — services where humans solve CAPTCHAs for $2/1000 — defeat all CAPTCHA-based defenses. Time-based behavioral analysis (too fast from page load to click) catches both automated bots and CAPTCHA farms."
         related_problems: [rate-limiter]
       - number: 50
         question: "How do systems prioritize premium users in sales?"
         needed: "priority queue (Redis sorted set by tier + join time); premium users get lower score (higher priority)"
+        answer: "Use a Redis sorted set as a priority queue. Score = (tier_weight * -1) + join_timestamp_fractional. Premium users get a large negative tier_weight that dominates the score, so ZRANGEBYSCORE returns them first. Within each tier, users are ordered by join time (FIFO). This gives premium users early access without a separate queue — one sorted set handles all tiers."
+        tradeoff: "Separate queues per tier (premium, standard) are simpler to reason about and test but require more coordination code. A single sorted set with composite scores is elegant but the score calculation must be carefully designed to prevent overflow or ordering bugs."
+        caveat: "Publishing that premium users get early access is a UX decision — some users see it as fair (paid for the benefit), others see it as unfair (can't compete). Design with this tradeoff in mind and communicate the policy clearly."
+        watch: "Redis sorted set ZADD is O(log N) — at 1M concurrent users in the queue, insertion is ~20 comparisons, which is fine. At 10M+, the sorted set becomes the bottleneck; shard the queue by user cohort and merge on dispatch."
         related_fundamentals: [storage/redis]
       - number: 51
         question: "How do systems prevent duplicate coupon redemption?"
         needed: "unique constraint on (user_id, coupon_id) in DB; Redis SET NX as first line of defense"
+        answer: "Redis SET NX (atomic set-if-not-exists) is the fast first check — SET redemption:user:1234:coupon:5678 1 NX returns 1 on first call (success) and 0 on all subsequent calls (duplicate). If Redis returns success, proceed to the DB write. The DB has a unique(user_id, coupon_id) constraint as the final guard. If the DB INSERT fails with a duplicate key error, undo the Redis SET."
+        tradeoff: "DB unique constraint alone is correct but slower (~5ms DB write per check). Redis NX check is sub-ms. Two-layer approach: Redis guards 99.9% of duplicates at sub-ms, DB catches the rare Redis miss (eviction, restart)."
+        caveat: "If Redis SET NX succeeds but the DB INSERT fails (DB down, constraint violation due to Redis miss), you must UNSET the Redis key — otherwise that user can never redeem again on retry. Wrap the entire flow in error handling that cleans up Redis on DB failure."
+        watch: "Concurrent requests from the same user (double-click, network retry) race to Redis at the same microsecond. Redis is single-threaded — SET NX is atomic and one will win, one will get 0. This is why Redis NX is safe; application-layer SELECT-then-INSERT is not."
         related_fundamentals: [storage/redis]
       - number: 52
         question: "How do systems limit coupon redemption per day?"
         needed: "Redis counter with 24h TTL per (user, coupon_type); reset at midnight UTC"
+        answer: "Use a Redis counter keyed by user_id + coupon_type + date: INCR daily_redemptions:user:1234:percent_off:2024-01-15. Set EX to the number of seconds until midnight UTC. Check the counter before incrementing — if current value >= limit, reject. The TTL auto-resets the counter at midnight without a manual cleanup job."
+        tradeoff: "Midnight reset is predictable and exploitable — a user can redeem up to the limit just before midnight and again just after. A rolling 24-hour window (using a Redis sorted set with timestamps) is harder to game but more complex and uses more memory."
+        caveat: "Using a date string in the key (date:2024-01-15) requires consistent timezone handling — use UTC everywhere. If some services use local time, two services may generate different date strings for the same moment and get separate counters."
+        watch: "Per-day limits combined with a rolling 24h window give different behavior — a user who hits the daily limit at 11pm still has to wait until midnight, not 24 hours. Decide which behavior you want and communicate it clearly in the UI."
         related_fundamentals: [storage/redis]
       - number: 53
         question: "How do systems manage coupon campaigns?"
         needed: "campaign service: create, schedule, activate/deactivate campaigns; rules engine for eligibility"
+        answer: "Model campaigns as entities with: campaign_id, name, start_time, end_time, inventory, max_per_user, eligibility_rules (JSON), and status (draft/active/paused/ended). A scheduler activates campaigns at start_time by seeding Redis counters and publishing a CampaignActivated event. An eligibility rules engine (criteria like min_order_value, user_tier, product_category) evaluates each redemption attempt."
+        tradeoff: "Hard-coded eligibility logic in code is fast but requires a deployment for every rule change. A rules engine (JSON DSL evaluated at runtime) is flexible but adds eval overhead (~1ms) and more failure surface. Hybrid: simple rules (min amount, expiry) in code, complex rules (combo discounts, user segment) in the rules engine."
+        caveat: "Campaign data is read far more than written — cache active campaigns in Redis or application memory (updated on CampaignActivated events) to avoid DB reads on every checkout. Don't query the DB for campaign eligibility on every checkout request."
+        watch: "Campaign deactivation must be atomic with inventory close — if you deactivate the campaign first and then close the Redis counter separately, there's a window where the counter is open but the campaign appears inactive, allowing redemptions with no campaign to match."
       - number: 54
         question: "How do systems rollback coupons after order cancellation?"
         needed: "compensating transaction: restore coupon inventory in DB and Redis on order cancel event"
+        answer: "Order cancellation publishes an OrderCancelled event to Kafka. The coupon service consumes it and executes a compensating transaction: increment the Redis inventory counter (INCR coupon:1234:inventory), update the DB redemption record to status='cancelled', and decrement the redemptions_count on the coupon. This restores the inventory atomically. Make the compensation handler idempotent — duplicate events must not double-restore."
+        tradeoff: "Synchronous rollback (coupon service processes cancellation in the same DB transaction as order cancellation) is simpler but tightly couples two services. Async via Kafka is more resilient — if the coupon service is down, it catches up when it recovers."
+        caveat: "Don't restore inventory for fraudulent orders even if they're 'cancelled'. Mark the redemption record as fraud_cancelled and skip inventory restoration. Otherwise fraudsters cancel orders to recycle coupons."
+        watch: "Idempotency is critical here — Kafka delivers at least once. An idempotency check (has this order_id already been compensated?) must gate the inventory restore. Store compensated order IDs in a Redis set with 7-day TTL."
         related_fundamentals: [storage/redis]
       - number: 55
         question: "How do systems notify users of available coupons?"
         needed: "notification service: push (FCM/APNs), email, in-app; triggered by campaign scheduler"
+        answer: "When a campaign activates, publish a CampaignActivated event. The notification service consumes it, queries the eligible user segment, and fans out notifications: in-app notification (immediate, cheap), push notification via FCM (Android) / APNs (iOS), and email for high-value coupons. Use a queue with priority lanes — push notifications before email since push is time-sensitive."
+        tradeoff: "Sending to all users at campaign start creates a massive traffic spike as they all click through simultaneously. Stagger delivery: send to 10% of users 10 minutes before start, 30% at start, 60% over the next 30 minutes. Reduces spike, sacrifices fairness for some users."
+        caveat: "Notification fatigue: too many coupon notifications causes users to disable push permissions. Respect user notification preferences (set in their profile) — don't send marketing coupons to users who've opted out of marketing."
+        watch: "APNs and FCM delivery rates are not guaranteed — typical push delivery rates are 85-95%. Build an in-app notification inbox as the reliable fallback that users see when they open the app regardless of push delivery."
       - number: 56
         question: "How do systems support location-based coupons?"
         needed: "geo filter at redemption time: user lat/lng vs coupon geo-fence (PostGIS or bounding box)"
+        answer: "Attach a geo_fence to the coupon: either a radius (center lat/lng + radius in km) or a polygon (list of coordinates). At redemption time, check if the user's coordinates fall within the geo-fence using PostGIS ST_Contains (polygon) or ST_DWithin (radius). Index coupon locations with a spatial index (PostGIS GIST) for fast lookup. Accept GPS coordinates from the mobile client."
+        tradeoff: "Client-side geo check (JS in browser) is fast but the client can spoof coordinates. Server-side check is secure but requires the client to send coordinates with each redemption request. For high-value location coupons, server-side is mandatory."
+        caveat: "GPS coordinates have ~5–10m accuracy in open spaces but degrade significantly indoors and in urban canyons (tall buildings). For in-store coupons, a 50m radius is more reliable than a tight 10m fence. Never set geo-fence radius below 50m for consumer apps."
+        watch: "Location data is sensitive PII — don't log or store user coordinates beyond what's needed for the redemption check. Use it, check it, and discard it in the same request without persisting to the redemptions table."
       - number: 57
         question: "How do systems track coupon performance?"
         needed: "analytics pipeline: redemption events → Kafka → Spark/Flink → dashboard (impressions, conversions, revenue)"
+        answer: "Stream three event types to Kafka: CouponImpression (user sees the coupon), CouponApplied (user enters the code at checkout), CouponRedeemed (order completed with coupon). A Flink streaming job computes real-time metrics: impression-to-apply rate, apply-to-redeem rate, revenue impact, and average order value with vs. without coupon. A Spark batch job runs daily full analytics."
+        tradeoff: "Flink streaming gives real-time dashboards (sub-minute lag) but is operationally complex. Spark batch is simpler but has hourly or daily lag. For coupon performance tracking, batch is usually sufficient — you rarely need sub-minute coupon analytics."
+        caveat: "Don't track coupon impressions on every page load — it creates enormous event volume with low signal. Track only when the coupon is prominently displayed or when a user actively views a coupon offer page."
+        watch: "Attribution is tricky — a user may see a coupon on day 1 and redeem it on day 7. Use a 7-day attribution window (redemption credited to the last impression within 7 days) as the standard, matching how paid marketing attribution works."
         related_fundamentals: [messaging/kafka]
       - number: 58
         question: "How do systems apply coupons during checkout?"
         needed: "validation service checks eligibility, expiry, inventory atomically before applying discount"
+        answer: "Coupon application is a two-step flow: preview (validate and show discount amount before payment) and commit (apply discount atomically with the order creation). At preview, check: coupon exists, not expired, user is eligible, inventory > 0. Return the discount amount. At commit, re-validate all conditions and atomically decrement inventory + create the redemption record + create the order in one DB transaction."
+        tradeoff: "Reserving inventory at preview (locking it for 10 minutes) prevents selling the last coupon to two users, but requires a release mechanism if the user abandons checkout. Not reserving at preview means the coupon may show a discount at preview but be out of stock at commit."
+        caveat: "Never apply the discount before the payment succeeds — if payment fails and you've already discounted the order, you need a compensating transaction. Apply the coupon discount only after payment confirmation is received."
+        watch: "Coupon + sale price interaction: if an item is already discounted 30% and the coupon adds another 20%, is the coupon applied to the original price or the sale price? Define the stacking policy explicitly — ambiguity here causes customer disputes and revenue leakage."
       - number: 59
         question: "How do systems prevent expired coupon use?"
         needed: "check expiry_at at redemption time; Redis TTL for fast rejection; DB as source of truth"
+        answer: "Three-layer expiry enforcement: Redis TTL (set to expire at coupon expiry_at, fast O(1) miss), application layer check (compare current UTC time to expiry_at field in cached coupon data), and DB constraint (final check within the redemption DB transaction). All three must pass. The Redis TTL check rejects 99% of expired coupons without a DB read."
+        tradeoff: "Redis TTL is not perfectly precise — Redis TTL resolution is 1 second, and lazy expiry means a key may persist a few seconds past its TTL under low-frequency access. For coupons expiring at exactly midnight, add a 30-second buffer and rely on the DB timestamp as the authoritative check."
+        caveat: "Coupon expiry times are often stored in the local timezone of the business but processed in UTC. A coupon that 'expires Dec 31 at midnight EST' actually expires Jan 1 5:00 AM UTC. Always store expiry_at in UTC, never rely on local time."
+        watch: "Under high load, the Redis TTL check and DB check may see different times if system clocks drift. Synchronize all service clocks via NTP and use database NOW() (not application-layer time) as the authoritative time source for expiry checks."
         related_fundamentals: [storage/redis]
       - number: 60
         question: "How do systems handle millions of coupon requests simultaneously?"
         needed: "Redis atomic counters, horizontal scaling of validation service, queue to serialize final claim"
+        answer: "For millions of concurrent requests: Redis handles the atomic inventory check at ~100K ops/second per node. The validation service is stateless and horizontally scalable — add pods behind a load balancer. Final claim serialization uses Redis DECR (atomic, single-threaded at Redis level). At 1M req/s, use Redis Cluster with inventory sharded across nodes."
+        tradeoff: "Redis Cluster shards keys across nodes — a single coupon's inventory key lands on one shard, so you can't exceed ~100K DECR/second for a single coupon. For higher throughput, split inventory into buckets (coupon:1234:inventory:0 through :9) and distribute claims across buckets."
+        caveat: "Horizontal scaling the validation service doesn't help if all traffic converges on a single Redis key for a popular coupon. The Redis key for a viral single coupon is the bottleneck — not the validation service. Pre-split popular coupon inventory into shards."
+        watch: "At extreme concurrency (100K+ req/s on one coupon), even Redis becomes a bottleneck. Local in-process reservations (each pod holds a small batch of inventory, e.g., 10 units) dramatically reduce Redis pressure — only 1 Redis call per 10 claims instead of per claim."
         related_fundamentals: [storage/redis, networking/load-balancing]
 
   - slug: messaging
