@@ -2,12 +2,12 @@
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
-{{say "Let me clarify scope before designing:
+{{say `Let me clarify scope before designing:
 <ul>
   <li>Are we building <strong>just redirect</strong>, or also analytics, custom aliases, and expiration?</li>
   <li>Scale assumption: <span class='hl'>100M new URLs/day</span> (~bit.ly scale), <span class='hl'>10:1 read-to-write</span> ratio = ~1B redirects/day</li>
   <li>Walking through P0 first (shorten + redirect), then P1/P2 as time allows</li>
-</ul>"}}
+</ul>`}}
 
 {{hint "why scope first?" "Interviewers want to see you narrow the problem before solving it. A URL shortener could mean bit.ly (analytics-heavy, enterprise), TinyURL (simple redirect), or an internal tool (low scale, high reliability). Each leads to a fundamentally different architecture. Clarifying scope prevents over-engineering and shows product thinking."}}
 
@@ -53,12 +53,12 @@
 
 {{phase 2 "API Design" "5 min"}}
 
-{{say "Let me walk through the API contract:
+{{say `Let me walk through the API contract:
 <ul>
   <li><strong>P0</strong> — POST /api/v1/urls (shorten) and GET /{code} (redirect); everything else deferred</li>
   <li>Redirect path is <strong>versionless</strong> — it gets shared everywhere and must never change</li>
   <li>API paths are versioned (/api/v1/) so clients can handle breaking changes</li>
-</ul>"}}
+</ul>`}}
 
 {{diagram "url-api-design"}}
 
@@ -121,12 +121,12 @@ Status: 200 OK
 
 {{phase 3 "Data Model & Database Choice" "5 min"}}
 
-{{say "Core data model: <strong>short_code → long URL</strong>. The access pattern determines everything:
+{{say `Core data model: <strong>short_code → long URL</strong>. The access pattern determines everything:
 <ul>
   <li><span class='hl'>99%</span> of reads are single-key lookups by short_code — no joins, no aggregations</li>
   <li>Writes are single-row inserts with conditional uniqueness check</li>
   <li>This maps perfectly to a key-value store — <span class='hl-blue'>DynamoDB</span> over Postgres every time at this scale</li>
-</ul>"}}
+</ul>`}}
 
 {{compare "Database Choice" (options
   (best "DynamoDB" "Every read is a single-key lookup — DynamoDB's strong point. Auto-scales from 0 to millions of QPS with no manual sharding. Built-in TTL for URL expiration. On-demand pricing at low scale, provisioned with auto-scaling at high scale. Global Tables for multi-region. $0.25/M reads, $1.25/M writes.")
@@ -274,14 +274,14 @@ def base62_decode(s: str) -> int:
 
 {{phase 5 "High-Level Architecture" "8 min"}}
 
-{{say "Seven core components — each with a specific job:
+{{say `Seven core components — each with a specific job:
 <ul>
   <li><strong>CloudFront</strong> absorbs <span class='hl'>60%+</span> of redirects at the edge before reaching origin</li>
   <li><strong>ECS + ElastiCache</strong> handle the remaining reads — Redis absorbs <span class='hl'>95%</span> of origin hits</li>
   <li><strong>DynamoDB</strong> is the source of truth; only <span class='hl'>~5%</span> of peak traffic reaches it</li>
   <li><strong>KGS</strong> pre-generates keys in batches — zero collisions, decoupled from the write path</li>
   <li><strong>Kinesis + Lambda</strong> handle analytics async — redirect latency is never touched</li>
-</ul>"}}
+</ul>`}}
 
 {{hint "why ECS over Lambda?" "URL redirects need consistent sub-10ms speed. Lambda cold starts (100-500ms) hurt latency. ECS Fargate tasks are always running — no startup delay. Lambda works for analytics (which doesn't need to be fast) but not for the redirect hot path."}}
 
@@ -362,13 +362,13 @@ async def resolve_short_url(short_code: str) -> str:
 
 {{phase 7 "Scaling & Sharding" "5 min"}}
 
-{{say "Scaling works differently at each layer:
+{{say `Scaling works differently at each layer:
 <ul>
   <li><strong>Compute</strong> — ECS auto-scales on CPU/RPS; stateless, no coordination between tasks</li>
   <li><strong>Cache</strong> — ElastiCache cluster mode; partitions data automatically across shard nodes</li>
   <li><strong>Database</strong> — DynamoDB auto-shards by partition key; you <span class='hl-blue'>never touch sharding logic</span></li>
   <li>If you chose Postgres, you'd own sharding: <span class='hl-red'>consistent hashing or range-based with all the migration pain</span></li>
-</ul>"}}
+</ul>`}}
 
 {{diagram "url-scaling-strategy"}}
 
@@ -398,12 +398,12 @@ async def resolve_short_url(short_code: str) -> str:
 
 {{phase 8 "Availability & Reliability" "5 min"}}
 
-{{say "Three pillars of reliability — replication, failover, and geo-distribution:
+{{say `Three pillars of reliability — replication, failover, and geo-distribution:
 <ul>
   <li><strong>Replication</strong> — DynamoDB stores 3 copies across AZs automatically; Redis Multi-AZ promotes replica in <span class='hl'>30s</span></li>
   <li><strong>Failover</strong> — ALB health checks drain and replace failed ECS tasks in <span class='hl'>30s</span>; circuit breakers prevent retry storms</li>
   <li><strong>Geo-distribution</strong> — DynamoDB Global Tables + per-region Redis + CloudFront edge; <span class='hl-red'>multi-region is a 2.5x cost multiplier</span> — only justified for global latency or data residency</li>
-</ul>"}}
+</ul>`}}
 
 {{hint "why multi-AZ before multi-region?" "Multi-AZ within a single region gives you 99.99% availability with minimal complexity. Multi-region adds cross-region replication, conflict resolution, and DNS routing complexity. Start multi-AZ, only add multi-region when you need global latency reduction or regulatory compliance (data residency)."}}
 
@@ -472,14 +472,14 @@ async def resolve_short_url(short_code: str) -> str:
 
 {{phase 9 "Enhanced Security & Abuse Prevention" "8 min"}}
 
-{{say "Security is the existential concern — your domain's reputation is at stake. Five defense layers:
+{{say `Security is the existential concern — your domain's reputation is at stake. Five defense layers:
 <ul>
   <li><strong>Rate limiting</strong> — token bucket at ALB: <span class='hl'>100 creates/min</span> for auth'd users, <span class='hl'>10/min</span> anonymous</li>
   <li><strong>Link preview</strong> — show destination URL before redirect; reduces phishing click-through by <span class='hl'>85%</span></li>
   <li><strong>Domain reputation</strong> — Google Safe Browsing sync on creation, nightly re-scan for bait-and-switch attacks</li>
   <li><strong>Bot detection</strong> — JA3 TLS fingerprint + UA consistency check + creation velocity analysis</li>
   <li><strong>Custom alias validation</strong> — regex + reserved words + profanity + homoglyph + conditional DB write</li>
-</ul>"}}
+</ul>`}}
 
 {{diagram "url-edge-cases"}}
 
@@ -612,13 +612,13 @@ Error Responses:
 
 {{phase 10 "Analytics Deep Dive" "5 min"}}
 
-{{say "Analytics differentiates a production system from a toy. The key rule:
+{{say `Analytics differentiates a production system from a toy. The key rule:
 <ul>
   <li><span class='hl-red'>Never increment a counter on every redirect</span> — at <span class='hl'>57K RPS</span> that's a write hotspot and adds latency to the most critical path</li>
   <li>Instead: fire-and-forget to <strong>Kinesis</strong> on each redirect; Lambda consumer aggregates async</li>
   <li>Full pipeline: <strong>geo-location</strong> (MaxMind), <strong>device</strong> (UA parsing), <strong>referrer</strong> (domain extraction), <strong>bot filtering</strong> (JA3 + velocity)</li>
   <li>Analytics lag: <span class='hl'>1–2 minutes</span> — acceptable for dashboards, invisible to users</li>
-</ul>"}}
+</ul>`}}
 
 {{hint "why async over sync analytics?" "A synchronous DynamoDB counter increment on every redirect adds 5-10ms latency to the hot path and creates a write hotspot on popular URLs. Async streaming (Kinesis → Lambda → batch write) decouples analytics from redirect latency entirely. The trade-off: analytics lag by 1-2 minutes, which is acceptable for dashboards."}}
 
@@ -685,12 +685,12 @@ Error Responses:
 
 {{phase 11 "Monitoring, Observability & Cost" "5 min"}}
 
-{{say "Three monitoring concerns — SLOs, alerting, and cost:
+{{say `Three monitoring concerns — SLOs, alerting, and cost:
 <ul>
   <li><strong>SLO targets</strong>: <span class='hl'>99.99%</span> availability, <span class='hl'>p99 &lt;10ms</span> redirect latency, <span class='hl'>&gt;60%</span> cache hit ratio</li>
   <li><strong>Key alerts</strong>: redirect success rate &lt;99.9%, cache hit &lt;60%, DynamoDB throttles &gt;80% provisioned, any 5xx &gt;0.1%</li>
   <li><strong>Cost reality</strong>: CloudFront dominates at scale — <span class='hl'>35% of total cost</span> at 100K QPS</li>
-</ul>"}}
+</ul>`}}
 
 {{diagram "url-monitoring-slos"}}
 
