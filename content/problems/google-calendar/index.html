@@ -2,7 +2,12 @@
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
-{{say "Let me clarify scope before diving in. I'll focus on event CRUD, recurring events with RFC 5545 RRULE, calendar sharing with ACL, reminders and push notifications, and multi-device sync. I'll leave out smart scheduling and AI suggestions — those are separate services. Scale target: 500 million MAU, 2 billion events per day."}}
+{{say `Clarifying scope:
+<ul>
+  <li><strong>In scope:</strong> event CRUD, recurring events with <span class="hl-blue">RFC 5545 RRULE</span>, calendar sharing with ACL, reminders and push notifications, multi-device sync</li>
+  <li><strong>Out of scope:</strong> smart scheduling and AI suggestions — those are separate ML services</li>
+  <li><strong>Scale target:</strong> <span class="hl">500 million MAU</span>, <span class="hl">2 billion events per day</span></li>
+</ul>`}}
 
 {{diagram "gc-requirements"}}
 
@@ -24,7 +29,7 @@
   (how "status field" "event.status = CANCELLED with cancelled_at + cancelled_by. Never physically delete rows.")
 }}
 
-{{hint "why 99.99% availability?" "Calendar is a daily-driver app. 99.9% = 8.7h downtime/year — unacceptable for 500M users. 99.99% = 52 min/year. Achieve via multi-AZ PostgreSQL with read replicas and Redis caching for the hot read path."}}\
+{{hint "why 99.99% availability?" "Calendar is a daily-driver app. <span class='hl-red'>99.9% = 8.7h downtime/year</span> — unacceptable for 500M users. <span class='hl'>99.99% = 52 min/year</span>. Achieve via multi-AZ PostgreSQL with read replicas and Redis caching for the hot read path."}}
 
 {{hint "p99 latency target" "200ms p99 for event fetch covers the 'open calendar' interaction. 100ms for calendar view (list of events in a date range) is achievable with the right index — (calendar_id, start_utc) covering index hits the query directly without a heap fetch."}}
 
@@ -39,7 +44,12 @@
 
 {{phase 2 "API Design" "5 min"}}
 
-{{say "I'll design idempotent APIs — PUT for create and update, not POST. Mobile clients on unreliable connections may retry the same request; idempotency prevents duplicate events. The sync API uses a delta token so clients only download changes since last sync."}}
+{{say `Designing idempotent APIs — <strong>PUT for create and update, not POST</strong>:
+<ul>
+  <li>Mobile clients on unreliable connections may retry the same request; idempotency prevents duplicate events</li>
+  <li>Client generates the <strong>UUID before sending</strong> — retry with the same UUID hits upsert logic, not a duplicate insert</li>
+  <li>The sync API uses a <strong>delta token</strong> so clients only download changes since last sync — no full re-download on every open</li>
+</ul>`}}
 
 {{diagram "gc-api-design"}}
 
@@ -86,7 +96,7 @@ Response 204`}}
   (how "idempotency on retry" "Client generates event_id before the first request. On retry, same PUT with same event_id hits upsert logic. Server returns 200 with the existing event unchanged.")
 }}
 
-{{hint "ETag for optimistic locking" "If-Match: 'v5' prevents lost-update problem. Two clients both fetch event at v5, both try to PUT — the second gets 412 Precondition Failed and must re-fetch before retrying. Prevents silent overwrites in concurrent edit scenarios."}}\
+{{hint "ETag for optimistic locking" "<strong>If-Match: 'v5'</strong> prevents the lost-update problem: two clients both fetch event at v5, both try to PUT — the second gets <span class='hl-red'>412 Precondition Failed</span> and must re-fetch before retrying. Prevents silent overwrites in concurrent edit scenarios."}}
 
 {{hint "sync_token encoding" "Base64(JSON{last_modified_at: timestamp, calendar_id: string}). The server uses last_modified_at as a cursor in the events table. On 410 Gone (token too old), client does a full sync and gets a fresh token."}}
 
@@ -101,7 +111,12 @@ Response 204`}}
 
 {{phase 3 "Recurring Events" "6 min"}}
 
-{{say "Recurring events are the hardest part of calendar systems. The approach: store RRULE once on a master event row, expand occurrences on-the-fly when serving queries, and store exception rows only for modified or cancelled individual instances."}}
+{{say `Recurring events are the hardest part of calendar systems:
+<ul>
+  <li>Store <strong>RRULE once</strong> on the master event row — no pre-expansion into N rows</li>
+  <li><strong>Expand occurrences on-the-fly</strong> within the query window — weekly for 1 year = 52 occurrences at <span class="hl">~1μs each</span></li>
+  <li>Store <strong>exception rows</strong> only for modified or cancelled individual instances — lookup is O(1) per occurrence</li>
+</ul>`}}
 
 {{diagram "gc-recurring-events"}}
 
@@ -148,7 +163,7 @@ def get_events_in_window(calendar_id, window_start, window_end):
   (how "exception handling" "Two types of exceptions: EXDATE (cancelled instance) and modified instance. Store both in recurring_exceptions table keyed by (master_event_id, occurrence_date). Lookup is O(1) per occurrence.")
 }}
 
-{{hint "DTSTART timezone matters" "RRULE expansion must use the event's local timezone (e.g., America/New_York), not the UTC offset. A weekly Monday event at 9am ET expands to 9am local time after DST transitions — which is 14:00 UTC in winter and 13:00 UTC in summer. Expanding in UTC would produce wrong times 6 months of the year."}}\
+{{hint "DTSTART timezone matters" "RRULE expansion must use the event's <strong>local timezone</strong> (e.g., America/New_York), not the UTC offset. A weekly Monday event at 9am ET expands to 9am local time after DST transitions — <span class='hl'>14:00 UTC in winter</span> and <span class='hl'>13:00 UTC in summer</span>. <span class='hl-red'>Expanding in UTC produces wrong times for 6 months of the year.</span>"}}
 
 {{hint "recur_until index" "Index on (calendar_id, start_utc, recur_until) lets the query skip master events that ended before the window. Without this, every query would hit every recurring event ever created for that calendar."}}
 
@@ -161,7 +176,12 @@ def get_events_in_window(calendar_id, window_start, window_end):
 
 {{phase 4 "Architecture" "6 min"}}
 
-{{say "The architecture centers on the Calendar API Service backed by PostgreSQL as the source of truth. Redis handles the hot read path for free/busy queries and sync state. Kafka decouples notification delivery so reminder failures don't affect event writes."}}
+{{say `Three layers:
+<ul>
+  <li><strong>Calendar API Service</strong> — stateless, backed by PostgreSQL as source of truth; all writes go here</li>
+  <li><strong>Redis</strong> — hot read path for free/busy queries, ACL cache, and sync state; handles <span class="hl">&gt;95%</span> of reads</li>
+  <li><strong>Kafka</strong> — decouples notification delivery from event writes; reminder failures don't block event mutations</li>
+</ul>`}}
 
 {{diagram "gc-architecture"}}
 
@@ -171,7 +191,7 @@ def get_events_in_window(calendar_id, window_start, window_end):
   (how "read replicas" "All GET /events requests route to read replicas. PUT/DELETE route to primary. Replica lag is typically <100ms — acceptable since sync_token is based on primary's write timestamp.")
 }}
 
-{{hint "Kafka for notifications" "Writing to Kafka on event save is a fire-and-forget O(1) append. If we computed and enqueued reminders synchronously on event save, a user creating 100 recurring events would trigger 100 * 52 = 5,200 reminder inserts in the hot path. Kafka decouples this — the notification worker reads events and schedules reminders asynchronously."}}\
+{{hint "Kafka for notifications" "Writing to Kafka on event save is a fire-and-forget O(1) append. If we computed reminders synchronously on event save, a user creating 100 recurring events would trigger <span class='hl-red'>100 × 52 = 5,200 reminder inserts in the hot path</span>. Kafka decouples this — the notification worker reads events and schedules reminders asynchronously."}}
 
 {{hint "Calendar Sync Service" "Dedicated service maintains sync_token state and delta computation. Separating it from the API service allows independent scaling — sync load spikes when many users open the app simultaneously (e.g., Monday morning), while write load is more uniform."}}
 
@@ -184,7 +204,12 @@ def get_events_in_window(calendar_id, window_start, window_end):
 
 {{phase 5 "Conflict Detection" "4 min"}}
 
-{{say "Conflict detection — 'is this time slot available?' — is a core query. The key insight is that two events overlap when event_a.start < event_b.end AND event_a.end > event_b.start. This is the standard interval overlap predicate. Index both columns for fast range scans."}}
+{{say `Conflict detection — "is this time slot available?" — uses the <strong>interval overlap predicate</strong>:
+<ul>
+  <li>Two events overlap when: <code>event_a.start_utc &lt; event_b.end_utc AND event_a.end_utc &gt; event_b.start_utc</code></li>
+  <li>Index <strong>both columns</strong> together: <code>(calendar_id, start_utc, end_utc)</code> for fast range scans</li>
+  <li>Hot-path free/busy: Redis sorted set per user per day — <span class="hl-blue">ZRANGEBYSCORE</span> returns busy blocks in O(log N)</li>
+</ul>`}}
 
 {{diagram "gc-conflict-detection"}}
 
@@ -221,7 +246,7 @@ WHERE acl.user_id = ANY($1::text[])   -- array of attendee user_ids
   (whatIf "free/busy cache miss for a user with 100 attendees on their invite" "Fall back to PostgreSQL. Pre-warm cache asynchronously after the free/busy response. Subsequent queries within TTL hit Redis.")
 }}
 
-{{hint "all-day events" "All-day events (no time, just date) don't overlap the same way. Store as start=date 00:00:00 UTC end=date+1 00:00:00 UTC. The overlap predicate still works correctly. Flag them with is_all_day=true for display purposes only."}}\
+{{hint "all-day events" "All-day events (no time, just date) don't overlap the same way. Store as <code>start = date 00:00:00 UTC, end = date+1 00:00:00 UTC</code>. The overlap predicate still works correctly. Flag with <code>is_all_day=true</code> for display purposes only."}}
 
 {{hint "recurring conflict detection" "For recurring events, expand all occurrences in the query window first, then run overlap detection. Can't detect recurring conflicts against the master row alone — the RRULE must be materialized."}}
 
@@ -234,7 +259,13 @@ WHERE acl.user_id = ANY($1::text[])   -- array of attendee user_ids
 
 {{phase 6 "Data Model" "5 min"}}
 
-{{say "Four core tables: events for all event data including RRULE, recurring_exceptions for per-instance overrides, calendars for calendar metadata, and calendar_acl for the sharing permission model."}}
+{{say `Four core tables:
+<ul>
+  <li><strong>events</strong> — all event data including RRULE; single table covers both recurring and non-recurring</li>
+  <li><strong>recurring_exceptions</strong> — per-instance overrides keyed by <code>(master_event_id, occurrence_date)</code></li>
+  <li><strong>calendars</strong> — calendar metadata, owner, default timezone</li>
+  <li><strong>calendar_acl</strong> — sharing permissions: owner / writer / reader / freeBusyReader</li>
+</ul>`}}
 
 {{diagram "gc-data-model"}}
 
@@ -302,13 +333,23 @@ CREATE INDEX idx_acl_user             ON calendar_acl (user_id);              --
   (how "etag version control" "etag = MD5(updated_at + event_id). On PUT with If-Match, compare client etag to stored etag. Mismatch = 412. Update atomically sets new etag. Simple, stateless, no separate version counter needed.")
 }}
 
-{{hint "JSONB for attendees" "Attendees and reminders stored as JSONB arrays. No separate attendees table for calendar — the attendee list per event is small (<100 people), append-only in practice, and always read in full with the event. JSONB gives structured access without JOIN overhead. If you needed to query 'all events attendee X is on', you'd need a GIN index: CREATE INDEX ON events USING GIN(attendees)."}}\
+{{hint "JSONB for attendees" "Attendees and reminders stored as JSONB arrays — no separate attendees table:
+<ul>
+  <li>Attendee list per event is small (<strong>&lt;100 people</strong>), append-only, and always read in full with the event</li>
+  <li>JSONB gives structured access without JOIN overhead</li>
+  <li>To query 'all events attendee X is on': <code>CREATE INDEX ON events USING GIN(attendees)</code></li>
+</ul>"}}
 
 {{hint "recur_until denormalization" "recur_until is derived from the RRULE (UNTIL or COUNT * interval). Stored as a column so the index idx_events_calendar_time can skip master events with recur_until < window_start. Without this, every query scans all recurring masters regardless of whether they're still active."}}
 
 {{phase 7 "Notifications & Reminders" "4 min"}}
 
-{{say "Reminders use Redis sorted sets as a delay queue — score is the fire_at Unix timestamp. A worker pool calls ZPOPMIN every second to claim due reminders. Push delivery goes through FCM for Android and APNs for iOS. The design tolerates at-least-once delivery."}}
+{{say `Reminders use a <strong>Redis sorted set as a delay queue</strong>:
+<ul>
+  <li>Score = <code>fire_at</code> Unix timestamp — worker calls <span class="hl-blue">ZPOPMIN</span> every second to claim due reminders</li>
+  <li>Push delivery: <strong>FCM</strong> for Android, <strong>APNs</strong> for iOS</li>
+  <li>Design tolerates <strong>at-least-once delivery</strong> — a missed 10-minute reminder is annoying, not catastrophic</li>
+</ul>`}}
 
 {{diagram "gc-notification-system"}}
 
@@ -353,13 +394,19 @@ def reminder_worker():
   (how "timezone-aware fire_at calculation" "Always compute fire_at in UTC: fire_at_utc = start_utc - timedelta(minutes=N). Never subtract minutes from a local time — DST transitions would produce incorrect fire times.")
 }}
 
-{{hint "daily digest notifications" "Daily digest (7am local time) is a different pattern — use a cron job that runs at midnight UTC, computes 7am UTC for each user's timezone, and enqueues in the Redis sorted set with the correct epoch. Don't use a fixed UTC time for all users."}}\
+{{hint "daily digest notifications" "Daily digest (7am local time) is a different pattern — use a cron job that runs at midnight UTC, computes 7am UTC for each user's timezone, and enqueues in the Redis sorted set with the correct epoch. <span class='hl-red'>Don't use a fixed UTC time for all users</span> — that sends digests at random local times."}}
 
 {{hint "FCM vs APNs token management" "Push tokens expire and rotate. Store device tokens in a push_tokens table (user_id, platform, token, updated_at). On FCM/APNs registration failure, remove the stale token. Periodic cleanup of tokens not updated in 90 days."}}
 
 {{phase 8 "Timezone Handling" "4 min"}}
 
-{{say "Timezone handling is where calendar systems get subtly wrong. The rule: always store UTC in the database, always store the IANA timezone string alongside it, expand RRULE in local time, and convert to wall-clock time on read. Never store UTC offsets — they change with DST."}}
+{{say `Timezone handling is where calendar systems get subtly wrong. Three rules:
+<ul>
+  <li><strong>Always store UTC</strong> in the database — gives a precise instant for sorting and conflict detection</li>
+  <li><strong>Always store the IANA timezone name</strong> (e.g., <code>America/New_York</code>), not the UTC offset — offsets change with DST</li>
+  <li><strong>Expand RRULE in local time</strong>, not UTC — then convert each occurrence back to UTC</li>
+</ul>
+<span class="hl-red">Never store UTC offsets like -05:00</span> — they are point-in-time values that don't encode DST transition history.`}}
 
 {{diagram "gc-timezone-handling"}}
 
@@ -407,7 +454,7 @@ def expand_correct(master_start_utc, timezone_str, rrule_str, window_start, wind
   (how "floating events" "All-day events like birthdays have no timezone — they 'float' with the viewer's local date. Store is_all_day=true and start as midnight UTC. On read, display the date portion only, adjusted to user's local timezone. A birthday on March 9 shows March 9 whether viewed from Tokyo or New York.")
 }}
 
-{{hint "storing both UTC and timezone" "start_utc gives you a precise instant for sorting, conflict detection, and reminder scheduling. timezone gives you the wall-clock context for display and RRULE expansion. You need both — one without the other is incomplete."}}\
+{{hint "storing both UTC and timezone" "<strong>start_utc</strong> gives a precise instant for sorting, conflict detection, and reminder scheduling. <strong>timezone</strong> gives the wall-clock context for display and RRULE expansion. You need both — one without the other is incomplete."}}
 
 {{hint "test DST with America/Lord_Howe" "Lord Howe Island (Australia) has a 30-minute DST offset change — the most unusual DST rule. If your timezone handling passes Lord Howe Island tests, it handles all 400+ IANA timezones correctly."}}
 
@@ -418,7 +465,12 @@ def expand_correct(master_start_utc, timezone_str, rrule_str, window_start, wind
 
 {{phase 9 "Sync Protocol" "5 min"}}
 
-{{say "Sync is the hardest operational challenge. The key insight: a sync_token encodes 'last modified timestamp + calendar_id'. Delta sync returns only events changed since that timestamp. The token expires after 7 days — stale clients do a full sync. ETags on events handle concurrent edits."}}
+{{say `Sync is the hardest operational challenge:
+<ul>
+  <li><strong>sync_token</strong> encodes <code>last_modified_timestamp + calendar_id</code> — delta sync returns only events changed since that timestamp</li>
+  <li>Token expires after <span class="hl">7 days</span> — stale clients get <span class="hl-red">410 Gone</span> and do a full sync</li>
+  <li><strong>ETags</strong> on individual events handle concurrent edits — 412 Precondition Failed on conflict</li>
+</ul>`}}
 
 {{diagram "gc-sync-protocol"}}
 
@@ -474,7 +526,7 @@ def get_events_delta(calendar_id, sync_token=None, page_token=None):
   (how "CANCELLED events in delta sync" "Deleted events (status=CANCELLED) must appear in delta sync responses so clients know to remove them from local storage. If you filter them out, the client's local copy is stale forever. Include all status values in the delta query.")
 }}
 
-{{hint "ETag on GET responses" "Return ETag: 'v5' on every GET /events/{id}. Client stores it. On PUT, sends If-Match: 'v5'. If another device updated the event in between (etag now 'v6'), server returns 412. Client must re-fetch before retrying. Without ETag, concurrent edits silently overwrite each other."}}\
+{{hint "ETag on GET responses" "Return <code>ETag: 'v5'</code> on every GET /events/{id}. Client stores it. On PUT, sends <code>If-Match: 'v5'</code>. If another device updated the event in between (etag now 'v6'), server returns <span class='hl-red'>412 Precondition Failed</span>. Client must re-fetch before retrying. Without ETag, concurrent edits silently overwrite each other."}}
 
 {{hint "why not WebSockets for sync?" "WebSockets require persistent server-side connection state for 500M users — that's 500M TCP connections across the server fleet. Load balancers must be sticky. Stateless delta pull via HTTPS scales to any size without server-side state per connection."}}
 
@@ -487,7 +539,13 @@ def get_events_delta(calendar_id, sync_token=None, page_token=None):
 
 {{phase 10 "Scaling" "4 min"}}
 
-{{say "At 500M MAU and 2B events per day, we're looking at 23K write RPS and 230K read RPS. The data volume is roughly 2B events * 1KB average = 2TB per day of new event data. Primary scaling lever: shard the events table by user_id. Use Redis heavily for the read path."}}
+{{say `At <span class="hl">500M MAU</span> and <span class="hl">2B events/day</span>:
+<ul>
+  <li><span class="hl">46K write RPS</span> (peak), <span class="hl">460K read RPS</span> (peak at 10× write ratio)</li>
+  <li><span class="hl">2 TB/day</span> of new event data — 2B events × 1KB average</li>
+  <li>Primary scaling lever: <strong>shard events table by user_id</strong> — keeps all user events on one shard for single-shard sync queries</li>
+  <li>Use <strong>Redis heavily for the read path</strong> — 95% cache hit rate reduces PostgreSQL load to 23K RPS across 5 shards</li>
+</ul>`}}
 
 {{diagram "gc-scaling"}}
 
@@ -509,13 +567,20 @@ def get_events_delta(calendar_id, sync_token=None, page_token=None):
   (how "5 database shards" "shard_id = hash(user_id) % 5. At 2TB/day across 5 shards = 400GB/shard/day. Use PostgreSQL with 20TB NVMe SSDs per shard = 50 days of raw capacity. Hot data (last 90 days) stays on SSD; older data streams to S3 via pg_partman time partitioning.")
 }}
 
-{{hint "Cache hit rate is the primary scaling metric" "If 95% of calendar views are served from Redis, the PostgreSQL cluster handles only 5% of 460K RPS = 23K RPS — well within 5 shards' capacity. Monitor cache hit rate per shard. If it drops below 90%, increase Redis cluster memory or reduce TTL churn."}}\
+{{hint "Cache hit rate is the primary scaling metric" "If <span class='hl'>95%</span> of calendar views are served from Redis, PostgreSQL handles only 5% of 460K RPS = <span class='hl'>23K RPS</span> — well within 5 shards' capacity. Monitor cache hit rate per shard. If it drops below <span class='hl-red'>90%</span>, increase Redis cluster memory or reduce TTL churn."}}
 
 {{hint "CDN for static calendar assets" "The calendar UI (JS, CSS, locale data) is static. Serve from CloudFront with 1-year cache headers. Reduces origin load for the ~350K static asset requests per second at peak."}}
 
 {{phase 11 "Sharing & Permissions" "4 min"}}
 
-{{say "Calendar sharing uses a 4-level ACL: owner, writer, reader, and freeBusyReader. The calendar_acl table maps user_id to role per calendar. Delegation — an assistant managing an executive's calendar — is writer role on the executive's calendar with audit logging on every mutation."}}
+{{say `Calendar sharing uses a <strong>4-level ACL</strong>:
+<ul>
+  <li><strong>owner</strong> — full control, can grant/revoke access</li>
+  <li><strong>writer</strong> — create, edit, delete events; used for delegation (assistant managing exec's calendar)</li>
+  <li><strong>reader</strong> — view event details; no mutations</li>
+  <li><strong>freeBusyReader</strong> — see only busy/free blocks; no titles, no attendees, no descriptions</li>
+</ul>
+The <code>calendar_acl</code> table maps <code>(calendar_id, user_id) → role</code>. Every mutation includes <code>actor_id</code> for audit logging.`}}
 
 {{diagram "gc-sharing-permissions"}}
 
@@ -545,9 +610,9 @@ WHERE calendar_id IN (
   (whatIf "an assistant (writer) creates a recurring meeting on the exec's calendar and the assistant leaves the company" "The meeting was created on behalf of the exec (organizer_id = exec's user_id). Revoking the assistant's ACL doesn't affect the event — events are owned by the calendar, not the creator. The exec still owns the meeting.")
 }}
 
-{{hint "freeBusyReader role" "freeBusyReader can see only the busy/free blocks — no titles, no attendees, no descriptions. Used for cross-organization scheduling where you want to see someone's availability without exposing meeting content. Implemented by filtering event fields in the /freeBusy response based on the requester's ACL role."}}\
+{{hint "freeBusyReader role" "<strong>freeBusyReader</strong> can see only busy/free blocks — no titles, no attendees, no descriptions. Used for cross-organization scheduling where you want availability without exposing meeting content. Implemented by filtering event fields in the /freeBusy response based on the requester's ACL role — <strong>the DB returns full rows; the serializer strips fields.</strong>"}}
 
-{{hint "ACL cache invalidation" "Cache per-user ACL in Redis with TTL 5 minutes: acl:{user_id} → set of {calendar_id:role}. Invalidate on any calendar_acl write. 5-minute stale ACL is acceptable — a revoked user can still read for up to 5 minutes, which is a product decision not a security flaw (for strict security, TTL = 0 and always query DB)."}}
+{{hint "ACL cache invalidation" "Cache per-user ACL in Redis with <span class='hl'>TTL 5 minutes</span>: <code>acl:{user_id} → set of {calendar_id:role}</code>. Invalidate on any calendar_acl write. 5-minute stale ACL is a product decision not a security flaw — <span class='hl-red'>for strict security, TTL = 0 and always query the DB</span>."}}
 
 {{triggerQs "Sharing & Permissions Questions"
   "How do you implement 'view only the title, hide description and attendees' for reader role?"
@@ -558,7 +623,13 @@ WHERE calendar_id IN (
 
 {{phase 12 "Calendar View & Deep Dive Q&A" "10 min"}}
 
-{{say "The calendar view query — 'show me all events for March 2026' — hits the idx_events_calendar_time index and expands recurring events on-the-fly. The view is the synthesis of every design decision we've made. Let me walk through the critical interview questions."}}
+{{say `The calendar view query — "show me all events for March 2026" — synthesizes every design decision:
+<ul>
+  <li>Hits <code>idx_events_calendar_time</code> index with a single range scan</li>
+  <li>Expands recurring events on-the-fly within the month window</li>
+  <li>Merges exceptions from the <code>recurring_exceptions</code> table per occurrence</li>
+  <li>Returns sorted by <code>start_utc</code>, converted to user's local timezone for display</li>
+</ul>`}}
 
 {{diagram "gc-calendar-view"}}
 
