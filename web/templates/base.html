@@ -768,24 +768,29 @@
         }
 
         // ══════════════════════════════════════════════════════════════════════
-        // NFR Filter System
+        // Requirements Filter System  (FR × NFR intersection)
         //
-        // Visual design:
-        //   • Colored dots on every phase header show which NFRs it covers
-        //   • Colored pills on context cards show which NFRs that use covers
-        //   • Chips at top: all selected = normal view (no filter)
-        //   • Some deselected = filter mode:
-        //       – Matched phases/cards: full opacity + subtle left-border highlight
-        //       – Unmatched phases/cards: dim to 0.15 opacity
-        //       – NFR dots fade for deselected NFRs, stay bright for selected
-        //       – NFR pills on cards: fade or highlight by selection state
+        // Two chip rows:
+        //   "Function" chips — what feature you're designing (problem-specific)
+        //   "Quality"  chips — non-functional requirement (scalability, perf…)
+        //
+        // Filter logic (intersection):
+        //   A phase is shown if it matches the FR selection AND the NFR selection.
+        //   "Matches FR"  = no FR filter active  OR  phase has a matching FR tag
+        //   "Matches NFR" = no NFR filter active  OR  phase has a matching NFR tag
+        //   Untagged phases (no FR/NFR tags at all) always show.
+        //
+        // Within matching phases, key numbers/stats are highlighted with a
+        // warm amber background so the data points that matter stand out.
         // ══════════════════════════════════════════════════════════════════════
 
         var nfrState = {
-            phaseMap: {},   // "1" → ["scalability", "performance"]
-            useMap:   {}    // "storage/redis" → ["performance", "availability"]
+            phaseMap: {},   // "3" → ["scalability", "performance"]
+            useMap:   {},   // "storage/redis" → ["performance", "availability"]
+            frMap:    {}    // "3" → ["url-gen", "redirect"]
         };
 
+        // ── Helpers ───────────────────────────────────────────────────────────
         function getNFRColor(panel, nfr) {
             var chip = panel.querySelector('.nfr-chip[data-nfr="' + nfr + '"]');
             return chip ? chip.style.getPropertyValue('--nfr-color').trim() : '#6366F1';
@@ -795,8 +800,7 @@
             return chip ? chip.textContent.trim() : nfr;
         }
 
-        // Inject colored dots onto phase headers to show their NFR coverage.
-        // Idempotent — removes old dots before re-inserting.
+        // ── Dot injection (NFR circles on phase headers) ──────────────────────
         function injectNFRDots(panel) {
             document.querySelectorAll('.nfr-phase-dots').forEach(function(el) { el.remove(); });
 
@@ -822,8 +826,33 @@
             });
         }
 
-        // Inject colored pills onto context cards to show their NFR coverage.
-        // Idempotent — removes old pills before re-inserting.
+        // ── FR tag injection (small text tags on phase headers) ───────────────
+        function injectFRTags(panel) {
+            document.querySelectorAll('.fr-phase-tags').forEach(function(el) { el.remove(); });
+
+            Object.keys(nfrState.frMap).forEach(function(phaseNum) {
+                var frs = nfrState.frMap[phaseNum];
+                if (!frs || !frs.length) return;
+
+                document.querySelectorAll('.phase-header[data-phase="' + phaseNum + '"]').forEach(function(header) {
+                    var container = document.createElement('span');
+                    container.className = 'fr-phase-tags';
+
+                    frs.forEach(function(fr) {
+                        var chip = panel.querySelector('.fr-chip[data-fr="' + fr + '"]');
+                        var tag = document.createElement('span');
+                        tag.className = 'fr-phase-tag';
+                        tag.setAttribute('data-fr-tag', fr);
+                        tag.textContent = chip ? chip.textContent.trim() : fr;
+                        container.appendChild(tag);
+                    });
+
+                    header.appendChild(container);
+                });
+            });
+        }
+
+        // ── Pill injection (NFR pills on context cards) ───────────────────────
         function injectNFRPills(panel) {
             document.querySelectorAll('.nfr-card-pills').forEach(function(el) { el.remove(); });
 
@@ -853,23 +882,85 @@
             });
         }
 
+        // ── Number/stat highlighting ──────────────────────────────────────────
+        // Finds numeric values (costs, latency, throughput, percentages) in text
+        // nodes of a container and wraps them in <mark class="stat-highlight">.
+        var _SKIP_TAGS = {CODE:1, PRE:1, SCRIPT:1, STYLE:1, MARK:1, BUTTON:1};
+        var _NUM_RE = /\$[\d,]+(?:\.\d+)?[KMBTkmbt]?|\b\d[\d,]*(?:\.\d+)?\s*(?:[KMBTkmbt](?:B|b)?|ms\b|s\b|min\b|hr\b|hrs\b|[%x×]|RPS\b|WPS\b|QPS\b|TPS\b|req\/s)\b|\b\d[\d,]+\b/g;
+
+        function injectStatHighlights(container) {
+            if (container.dataset.statsHighlighted === '1') return;
+            container.dataset.statsHighlighted = '1';
+
+            var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+                acceptNode: function(node) {
+                    var el = node.parentElement;
+                    while (el && el !== container) {
+                        if (_SKIP_TAGS[el.tagName]) return NodeFilter.FILTER_REJECT;
+                        el = el.parentElement;
+                    }
+                    return /\d/.test(node.textContent) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+                }
+            });
+
+            var nodes = [];
+            while (walker.nextNode()) nodes.push(walker.currentNode);
+
+            nodes.forEach(function(node) {
+                _NUM_RE.lastIndex = 0;
+                if (!_NUM_RE.test(node.textContent)) return;
+                _NUM_RE.lastIndex = 0;
+
+                var text = node.textContent;
+                var frag = document.createDocumentFragment();
+                var last = 0, m;
+
+                while ((m = _NUM_RE.exec(text)) !== null) {
+                    if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+                    var mark = document.createElement('mark');
+                    mark.className = 'stat-highlight';
+                    mark.textContent = m[0];
+                    frag.appendChild(mark);
+                    last = m.index + m[0].length;
+                }
+                if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+
+                node.parentNode.replaceChild(frag, node);
+            });
+        }
+
+        function removeStatHighlights(container) {
+            if (container.dataset.statsHighlighted !== '1') return;
+            container.querySelectorAll('mark.stat-highlight').forEach(function(mark) {
+                var p = mark.parentNode;
+                while (mark.firstChild) p.insertBefore(mark.firstChild, mark);
+                p.removeChild(mark);
+            });
+            container.normalize();
+            delete container.dataset.statsHighlighted;
+        }
+
+        // ── Init ──────────────────────────────────────────────────────────────
         function initNFRFilter() {
             var panel = document.getElementById('nfr-panel');
             if (!panel) {
                 nfrState.phaseMap = {};
                 nfrState.useMap   = {};
+                nfrState.frMap    = {};
                 return;
             }
 
             try {
                 nfrState.phaseMap = JSON.parse(panel.dataset.nfrMap   || '{}');
                 nfrState.useMap   = JSON.parse(panel.dataset.useNfrMap || '{}');
+                nfrState.frMap    = JSON.parse(panel.dataset.frMap     || '{}');
             } catch(e) {
                 nfrState.phaseMap = {};
                 nfrState.useMap   = {};
+                nfrState.frMap    = {};
             }
 
-            // Wire chip clicks
+            // Wire NFR chip clicks
             panel.querySelectorAll('.nfr-chip').forEach(function(chip) {
                 chip.addEventListener('click', function() {
                     chip.classList.toggle('nfr-chip--selected');
@@ -877,35 +968,48 @@
                 });
             });
 
-            // "Select All" resets filter
+            // Wire FR chip clicks
+            panel.querySelectorAll('.fr-chip').forEach(function(chip) {
+                chip.addEventListener('click', function() {
+                    chip.classList.toggle('fr-chip--selected');
+                    updateNFRFilter();
+                });
+            });
+
+            // "Reset" — re-select all chips
             var allBtn = document.getElementById('nfr-select-all');
             if (allBtn) {
                 allBtn.addEventListener('click', function() {
-                    panel.querySelectorAll('.nfr-chip').forEach(function(c) {
-                        c.classList.add('nfr-chip--selected');
-                    });
+                    panel.querySelectorAll('.nfr-chip').forEach(function(c) { c.classList.add('nfr-chip--selected'); });
+                    panel.querySelectorAll('.fr-chip').forEach(function(c) { c.classList.add('fr-chip--selected'); });
                     updateNFRFilter();
                 });
             }
 
-            // Inject visible indicators, then render initial (no-filter) state
             injectNFRDots(panel);
+            injectFRTags(panel);
             injectNFRPills(panel);
             updateNFRFilter();
         }
 
+        // ── Update (runs on every chip toggle) ────────────────────────────────
         function updateNFRFilter() {
             var panel = document.getElementById('nfr-panel');
             if (!panel) return;
 
-            var selected = new Set();
-            panel.querySelectorAll('.nfr-chip.nfr-chip--selected').forEach(function(c) {
-                selected.add(c.dataset.nfr);
-            });
+            // Collect selected NFRs and FRs
+            var selectedNFR = new Set();
+            panel.querySelectorAll('.nfr-chip.nfr-chip--selected').forEach(function(c) { selectedNFR.add(c.dataset.nfr); });
+            var totalNFR = panel.querySelectorAll('.nfr-chip').length;
 
-            var totalChips = panel.querySelectorAll('.nfr-chip').length;
-            // Filter mode: at least one chip is deselected (and at least one selected)
-            var isFiltering = selected.size > 0 && selected.size < totalChips;
+            var selectedFR = new Set();
+            panel.querySelectorAll('.fr-chip.fr-chip--selected').forEach(function(c) { selectedFR.add(c.dataset.fr); });
+            var totalFR = panel.querySelectorAll('.fr-chip').length;
+
+            // Active filter = at least one chip of either type is deselected
+            var nfrFiltering = totalNFR > 0 && selectedNFR.size < totalNFR;
+            var frFiltering  = totalFR  > 0 && selectedFR.size  < totalFR;
+            var isFiltering  = nfrFiltering || frFiltering;
 
             panel.classList.toggle('nfr-filtering', isFiltering);
 
@@ -925,40 +1029,66 @@
 
                 sections.forEach(function(section) {
                     var phaseNum = section.header.getAttribute('data-phase');
-                    var nfrs     = phaseNum ? (nfrState.phaseMap[phaseNum] || []) : [];
-                    var hasTag   = nfrs.length > 0;
-                    // Untagged phases are always fully shown
-                    var matches  = !hasTag || !isFiltering || nfrs.some(function(n) { return selected.has(n); });
+                    var nfrs = phaseNum ? (nfrState.phaseMap[phaseNum] || []) : [];
+                    var frs  = phaseNum ? (nfrState.frMap[phaseNum]    || []) : [];
 
-                    section.header.classList.toggle('nfr-section-dim',  hasTag && !matches);
-                    section.header.classList.toggle('nfr-section-match', hasTag && isFiltering && matches);
+                    // Has any tag at all — untagged phases always show
+                    var hasAnyTag = nfrs.length > 0 || frs.length > 0;
+
+                    // NFR match: no NFR filter, or phase has no NFR tags, or at least one NFR matches
+                    var nfrMatch = !nfrFiltering || nfrs.length === 0 || nfrs.some(function(n) { return selectedNFR.has(n); });
+                    // FR match:  no FR filter,  or phase has no FR tags,  or at least one FR matches
+                    var frMatch  = !frFiltering  || frs.length  === 0 || frs.some(function(n)  { return selectedFR.has(n);  });
+
+                    var matches = nfrMatch && frMatch;
+
+                    section.header.classList.toggle('nfr-section-dim',   hasAnyTag && isFiltering && !matches);
+                    section.header.classList.toggle('nfr-section-match',  hasAnyTag && isFiltering &&  matches);
                     section.elements.forEach(function(el) {
-                        el.classList.toggle('nfr-section-dim', hasTag && !matches);
+                        var wasDim = el.classList.contains('nfr-section-dim');
+                        var nowDim = hasAnyTag && isFiltering && !matches;
+                        el.classList.toggle('nfr-section-dim',  nowDim);
+                        el.classList.toggle('nfr-section-match', hasAnyTag && isFiltering && matches);
+
+                        // Inject/remove stat highlights as match state changes
+                        if (!nowDim && isFiltering && matches) {
+                            injectStatHighlights(el);
+                        } else if (wasDim || !isFiltering) {
+                            removeStatHighlights(el);
+                        }
                     });
                 });
             }
 
             // ── Context cards ──────────────────────────────────────────────
             document.querySelectorAll('[data-fund-slug]').forEach(function(card) {
-                var nfrs    = (card.dataset.nfr || '').split(',').filter(Boolean);
+                var nfrs = (card.dataset.nfr || '').split(',').filter(Boolean);
                 if (!nfrs.length) return;
-                var matches = !isFiltering || nfrs.some(function(n) { return selected.has(n); });
-                card.classList.toggle('nfr-section-dim',  !matches);
-                card.classList.toggle('nfr-section-match', isFiltering && matches);
+                // Cards only filter by NFR (they don't have FR tags)
+                var matches = !nfrFiltering || nfrs.some(function(n) { return selectedNFR.has(n); });
+                card.classList.toggle('nfr-section-dim',   isFiltering && !matches);
+                card.classList.toggle('nfr-section-match',  isFiltering &&  matches);
             });
 
-            // ── Dot visibility ─────────────────────────────────────────────
+            // ── NFR dot visibility ─────────────────────────────────────────
             document.querySelectorAll('.nfr-dot').forEach(function(dot) {
                 var nfr = dot.getAttribute('data-nfr-dot');
-                dot.classList.toggle('nfr-dot--dim',    isFiltering && !selected.has(nfr));
-                dot.classList.toggle('nfr-dot--active', isFiltering &&  selected.has(nfr));
+                dot.classList.toggle('nfr-dot--dim',    isFiltering && !selectedNFR.has(nfr));
+                dot.classList.toggle('nfr-dot--active', isFiltering &&  selectedNFR.has(nfr));
             });
 
-            // ── Pill visibility ────────────────────────────────────────────
+            // ── FR tag visibility ──────────────────────────────────────────
+            document.querySelectorAll('.fr-phase-tag').forEach(function(tag) {
+                var fr = tag.getAttribute('data-fr-tag');
+                tag.classList.toggle('fr-tag--dim',    frFiltering && !selectedFR.has(fr));
+                tag.classList.toggle('fr-tag--active', frFiltering &&  selectedFR.has(fr));
+            });
+
+            // ── NFR pill visibility ────────────────────────────────────────
             document.querySelectorAll('.nfr-card-pill').forEach(function(pill) {
                 var nfr = pill.getAttribute('data-nfr-pill');
-                pill.classList.toggle('nfr-pill--dim',    isFiltering && !selected.has(nfr));
-                pill.classList.toggle('nfr-pill--active', isFiltering &&  selected.has(nfr));
+                pill.classList.toggle('nfr-pill--dim',    isFiltering && !selectedNFR.has(nfr));
+                pill.classList.toggle('nfr-pill--active', isFiltering &&  selectedNFR.has(nfr));
             });
         }
 

@@ -129,6 +129,16 @@ func (h *Handler) ProblemDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	useJSON, _ := json.Marshal(useNFRMap)
 
+	// Build phase→FR map (phase number string → []fr slug) for JS intersection filter
+	phaseFRMap := make(map[string][]string)
+	for _, fr := range problem.FRs {
+		for _, ph := range fr.Phases {
+			key := strconv.Itoa(ph)
+			phaseFRMap[key] = append(phaseFRMap[key], fr.Slug)
+		}
+	}
+	frJSON, _ := json.Marshal(phaseFRMap)
+
 	data := h.baseData()
 	data["Problem"] = problem
 	data["Content"] = content
@@ -136,6 +146,7 @@ func (h *Handler) ProblemDetail(w http.ResponseWriter, r *http.Request) {
 	data["PageType"] = "problem"
 	data["PhaseNFRMapJSON"] = template.JS(phaseJSON)
 	data["UseNFRMapJSON"] = template.JS(useJSON)
+	data["PhaseFRMapJSON"] = template.JS(frJSON)
 
 	if isHTMX(r) {
 		if err := h.templates.ExecuteTemplate(w, "detail_problem.html", data); err != nil {
