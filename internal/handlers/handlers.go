@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"encoding/json"
 	"html/template"
 	"io/fs"
 	"log"
 	"net/http"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -108,11 +110,32 @@ func (h *Handler) ProblemDetail(w http.ResponseWriter, r *http.Request) {
 	// Render content from HTML file
 	content := h.renderContent(problem.Path)
 
+	// Build phase→NFR map (phase number string → []nfr slug) for JS filter
+	phaseNFRMap := make(map[string][]string)
+	for _, nfr := range problem.NFRs {
+		for _, ph := range nfr.Phases {
+			key := strconv.Itoa(ph)
+			phaseNFRMap[key] = append(phaseNFRMap[key], nfr.Slug)
+		}
+	}
+	phaseJSON, _ := json.Marshal(phaseNFRMap)
+
+	// Build fundamental→NFR map for context card dimming
+	useNFRMap := make(map[string][]string)
+	for _, use := range problem.Uses {
+		if len(use.NFRs) > 0 {
+			useNFRMap[use.Fundamental] = use.NFRs
+		}
+	}
+	useJSON, _ := json.Marshal(useNFRMap)
+
 	data := h.baseData()
 	data["Problem"] = problem
 	data["Content"] = content
 	data["ActiveSlug"] = slug
 	data["PageType"] = "problem"
+	data["PhaseNFRMapJSON"] = template.JS(phaseJSON)
+	data["UseNFRMapJSON"] = template.JS(useJSON)
 
 	if isHTMX(r) {
 		if err := h.templates.ExecuteTemplate(w, "detail_problem.html", data); err != nil {

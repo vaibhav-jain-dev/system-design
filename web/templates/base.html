@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="/static/css/style.css">
     <script src="/static/js/htmx.min.js"></script>
     <script defer src="/static/js/alpine.min.js"></script>
+    <script defer src="/static/js/diagram-enhance.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/go.min.js"></script>
@@ -40,19 +41,50 @@
         <aside class="sidebar" x-data="{ openCats: {} }">
             <div class="sidebar-header">
                 <h2>System Design Prep</h2>
-                <button class="sidebar-view-toggle" id="sidebar-view-btn"
-                        onclick="window.toggleBookMode && window.toggleBookMode()"
-                        title="Toggle between Book View and Normal View">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
-                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
-                    </svg>
-                    <span id="sidebar-view-label">Book View</span>
-                </button>
+                <div class="sidebar-header-actions">
+                    <button class="sidebar-pin-btn" id="sidebar-pin-btn"
+                            onclick="window.toggleSidebarPin && window.toggleSidebarPin()"
+                            title="Pin sidebar open">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>
+                        </svg>
+                    </button>
+                    <button class="sidebar-view-toggle" id="sidebar-view-btn"
+                            onclick="window.toggleBookMode && window.toggleBookMode()"
+                            title="Toggle between Book View and Normal View">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                        </svg>
+                        <span id="sidebar-view-label">Book View</span>
+                    </button>
+                </div>
             </div>
 
             {{template "sidebar.html" .}}
         </aside>
+
+        <!-- Floating nav for book mode (replaces header when book-active) -->
+        <div id="book-float-nav" style="display:none">
+            <button class="book-float-btn" id="book-float-menu"
+                    onclick="document.querySelector('.app').classList.toggle('sidebar-open')"
+                    title="Navigation menu">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="3" y1="5"  x2="21" y2="5"/>
+                    <line x1="3" y1="9"  x2="21" y2="9"/>
+                    <line x1="3" y1="13" x2="21" y2="13"/>
+                    <line x1="3" y1="17" x2="21" y2="17"/>
+                </svg>
+            </button>
+            <button class="book-float-btn" id="book-float-exit"
+                    onclick="window.toggleBookMode && window.toggleBookMode()"
+                    title="Exit Book View">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                </svg>
+            </button>
+        </div>
 
         <!-- Overlay for mobile sidebar -->
         <div class="sidebar-overlay" onclick="document.querySelector('.app').classList.remove('sidebar-open')"></div>
@@ -312,7 +344,7 @@
                 }
 
                 h3.id = baseId;
-                h3.style.scrollMarginTop = '80px';
+                h3.style.scrollMarginTop = '86px';
 
                 var anchor = document.createElement('a');
                 anchor.className = 'section-anchor';
@@ -337,6 +369,11 @@
         // ── HTMX swap handler ─────────────────────
         document.addEventListener('htmx:afterSwap', function(e) {
             if (e.detail.target.id === 'detail') {
+                // Close sidebar after navigation unless pinned
+                if (localStorage.getItem(SIDEBAR_PIN_KEY) !== '1') {
+                    document.querySelector('.app').classList.remove('sidebar-open');
+                }
+
                 // HTMX replaced #detail's innerHTML with new page content.
                 // The old book-reader / srcNodes are gone. Reset state completely
                 // then re-init book mode if the user's preference is book mode.
@@ -350,6 +387,7 @@
                 highlightCode();
                 collapseSidebarSections();
                 initSectionAnchors();
+                initNFRFilter();
                 requestAnimationFrame(function() {
                     var pref = localStorage.getItem(BOOK_PREF_KEY);
                     if (pref !== '0') {
@@ -420,8 +458,9 @@
             pages:        [],   // pages[i] = array of original elements for page i
             srcNodes:     []    // saved childNodes for destroyBook restore
         };
-        var BOOK_MIN_WIDTH = 1024;
-        var BOOK_PREF_KEY  = 'sd-book-mode';
+        var BOOK_MIN_WIDTH  = 1024;
+        var BOOK_PREF_KEY   = 'sd-book-mode';
+        var SIDEBAR_PIN_KEY = 'sd-sidebar-pinned';
 
         // ── Layout constants ────────────────────────────────────────────────
         var BOOK_V_PAD  = 48;   // total top+bottom padding inside the spread area
@@ -439,15 +478,13 @@
             if (window.innerWidth < BOOK_MIN_WIDTH || d.querySelector('.welcome')) return;
 
             // ── Compute page geometry ──────────────────────────────────────
-            var headerEl  = document.querySelector('.app-header');
-            var sidebarEl = document.querySelector('.sidebar');
-            var headerH   = headerEl  ? headerEl.offsetHeight  : 54;
-            var sidebarW  = sidebarEl ? sidebarEl.offsetWidth  : 280;
-            var vw = window.innerWidth;
+            // Header is hidden in book mode → full vh available for reading.
+            // Use detail's actual rendered width — correctly accounts for sidebar
+            // being a fixed overlay vs a persistent panel without manual math.
             var vh = window.innerHeight;
 
-            var pageH = vh - headerH - BOOK_CTRL_H - BOOK_V_PAD;
-            var pageW = Math.floor((vw - sidebarW - BOOK_GAP - BOOK_H_PAD * 4) / 2);
+            var pageH = vh - BOOK_CTRL_H - BOOK_V_PAD;
+            var pageW = Math.floor((d.offsetWidth - BOOK_GAP - BOOK_H_PAD * 4) / 2);
             if (pageH < 150 || pageW < 150) return;
 
             // ── Collect elements ───────────────────────────────────────────
@@ -527,12 +564,10 @@
             var leftEl = document.createElement('div');
             leftEl.className  = 'book-page book-page-left';
             leftEl.id         = 'book-left';
-            leftEl.style.height = pageH + 'px';
 
             var rightEl = document.createElement('div');
             rightEl.className = 'book-page book-page-right';
             rightEl.id        = 'book-right';
-            rightEl.style.height = pageH + 'px';
 
             readerEl.appendChild(leftEl);
             readerEl.appendChild(rightEl);
@@ -552,6 +587,12 @@
 
             document.getElementById('book-prev').onclick = function() { bookGoSpread(book.spread - 1); };
             document.getElementById('book-next').onclick = function() { bookGoSpread(book.spread + 1); };
+
+            // Hide app header, show floating nav
+            var appHdr = document.querySelector('.app-header');
+            if (appHdr) appHdr.classList.add('book-hidden');
+            var floatNav = document.getElementById('book-float-nav');
+            if (floatNav) floatNav.style.display = 'flex';
 
             d.classList.add('book-active');
             book.active = true;
@@ -624,6 +665,12 @@
             book.spread       = 0;
             book.totalSpreads = 0;
 
+            // Restore header, hide floating nav
+            var appHdr = document.querySelector('.app-header');
+            if (appHdr) appHdr.classList.remove('book-hidden');
+            var floatNav = document.getElementById('book-float-nav');
+            if (floatNav) floatNav.style.display = 'none';
+
             syncViewBtn();
             localStorage.setItem(BOOK_PREF_KEY, '0');
         }
@@ -643,6 +690,21 @@
             if (book.active) destroyBook();
             else initBook();
         };
+
+        // ── Sidebar pin/lock ─────────────────────────────────────────────────
+        function syncPinBtn() {
+            var pinned = localStorage.getItem(SIDEBAR_PIN_KEY) === '1';
+            var btn = document.getElementById('sidebar-pin-btn');
+            if (btn) btn.classList.toggle('pinned', pinned);
+        }
+
+        window.toggleSidebarPin = function() {
+            var pinned = localStorage.getItem(SIDEBAR_PIN_KEY) === '1';
+            localStorage.setItem(SIDEBAR_PIN_KEY, pinned ? '0' : '1');
+            syncPinBtn();
+        };
+
+        syncPinBtn();
 
         // ── Keyboard navigation ──────────────────────────────────────────────
         document.addEventListener('keydown', function(e) {
@@ -705,10 +767,206 @@
             initBook();
         }
 
+        // ══════════════════════════════════════════════════════════════════════
+        // NFR Filter System
+        //
+        // Visual design:
+        //   • Colored dots on every phase header show which NFRs it covers
+        //   • Colored pills on context cards show which NFRs that use covers
+        //   • Chips at top: all selected = normal view (no filter)
+        //   • Some deselected = filter mode:
+        //       – Matched phases/cards: full opacity + subtle left-border highlight
+        //       – Unmatched phases/cards: dim to 0.15 opacity
+        //       – NFR dots fade for deselected NFRs, stay bright for selected
+        //       – NFR pills on cards: fade or highlight by selection state
+        // ══════════════════════════════════════════════════════════════════════
+
+        var nfrState = {
+            phaseMap: {},   // "1" → ["scalability", "performance"]
+            useMap:   {}    // "storage/redis" → ["performance", "availability"]
+        };
+
+        function getNFRColor(panel, nfr) {
+            var chip = panel.querySelector('.nfr-chip[data-nfr="' + nfr + '"]');
+            return chip ? chip.style.getPropertyValue('--nfr-color').trim() : '#6366F1';
+        }
+        function getNFRTitle(panel, nfr) {
+            var chip = panel.querySelector('.nfr-chip[data-nfr="' + nfr + '"]');
+            return chip ? chip.textContent.trim() : nfr;
+        }
+
+        // Inject colored dots onto phase headers to show their NFR coverage.
+        // Idempotent — removes old dots before re-inserting.
+        function injectNFRDots(panel) {
+            document.querySelectorAll('.nfr-phase-dots').forEach(function(el) { el.remove(); });
+
+            Object.keys(nfrState.phaseMap).forEach(function(phaseNum) {
+                var nfrs = nfrState.phaseMap[phaseNum];
+                if (!nfrs || !nfrs.length) return;
+
+                document.querySelectorAll('.phase-header[data-phase="' + phaseNum + '"]').forEach(function(header) {
+                    var container = document.createElement('span');
+                    container.className = 'nfr-phase-dots';
+
+                    nfrs.forEach(function(nfr) {
+                        var dot = document.createElement('span');
+                        dot.className = 'nfr-dot';
+                        dot.setAttribute('data-nfr-dot', nfr);
+                        dot.style.background = getNFRColor(panel, nfr);
+                        dot.title = getNFRTitle(panel, nfr);
+                        container.appendChild(dot);
+                    });
+
+                    header.appendChild(container);
+                });
+            });
+        }
+
+        // Inject colored pills onto context cards to show their NFR coverage.
+        // Idempotent — removes old pills before re-inserting.
+        function injectNFRPills(panel) {
+            document.querySelectorAll('.nfr-card-pills').forEach(function(el) { el.remove(); });
+
+            Object.keys(nfrState.useMap).forEach(function(slug) {
+                var nfrs = nfrState.useMap[slug];
+                if (!nfrs || !nfrs.length) return;
+
+                document.querySelectorAll('[data-fund-slug="' + slug + '"]').forEach(function(card) {
+                    card.dataset.nfr = nfrs.join(',');
+
+                    var container = document.createElement('div');
+                    container.className = 'nfr-card-pills';
+
+                    nfrs.forEach(function(nfr) {
+                        var pill = document.createElement('span');
+                        pill.className = 'nfr-card-pill';
+                        pill.setAttribute('data-nfr-pill', nfr);
+                        pill.style.setProperty('--pill-color', getNFRColor(panel, nfr));
+                        pill.textContent = getNFRTitle(panel, nfr);
+                        container.appendChild(pill);
+                    });
+
+                    var footer = card.querySelector('.context-card-footer');
+                    if (footer) card.insertBefore(container, footer);
+                    else card.appendChild(container);
+                });
+            });
+        }
+
+        function initNFRFilter() {
+            var panel = document.getElementById('nfr-panel');
+            if (!panel) {
+                nfrState.phaseMap = {};
+                nfrState.useMap   = {};
+                return;
+            }
+
+            try {
+                nfrState.phaseMap = JSON.parse(panel.dataset.nfrMap   || '{}');
+                nfrState.useMap   = JSON.parse(panel.dataset.useNfrMap || '{}');
+            } catch(e) {
+                nfrState.phaseMap = {};
+                nfrState.useMap   = {};
+            }
+
+            // Wire chip clicks
+            panel.querySelectorAll('.nfr-chip').forEach(function(chip) {
+                chip.addEventListener('click', function() {
+                    chip.classList.toggle('nfr-chip--selected');
+                    updateNFRFilter();
+                });
+            });
+
+            // "Select All" resets filter
+            var allBtn = document.getElementById('nfr-select-all');
+            if (allBtn) {
+                allBtn.addEventListener('click', function() {
+                    panel.querySelectorAll('.nfr-chip').forEach(function(c) {
+                        c.classList.add('nfr-chip--selected');
+                    });
+                    updateNFRFilter();
+                });
+            }
+
+            // Inject visible indicators, then render initial (no-filter) state
+            injectNFRDots(panel);
+            injectNFRPills(panel);
+            updateNFRFilter();
+        }
+
+        function updateNFRFilter() {
+            var panel = document.getElementById('nfr-panel');
+            if (!panel) return;
+
+            var selected = new Set();
+            panel.querySelectorAll('.nfr-chip.nfr-chip--selected').forEach(function(c) {
+                selected.add(c.dataset.nfr);
+            });
+
+            var totalChips = panel.querySelectorAll('.nfr-chip').length;
+            // Filter mode: at least one chip is deselected (and at least one selected)
+            var isFiltering = selected.size > 0 && selected.size < totalChips;
+
+            panel.classList.toggle('nfr-filtering', isFiltering);
+
+            // ── Phase sections ─────────────────────────────────────────────
+            var contentEl = document.querySelector('.detail-content');
+            if (contentEl) {
+                var sections = [];
+                var cur = null;
+                Array.from(contentEl.children).forEach(function(el) {
+                    if (el.classList.contains('phase-header')) {
+                        cur = { header: el, elements: [] };
+                        sections.push(cur);
+                    } else if (cur) {
+                        cur.elements.push(el);
+                    }
+                });
+
+                sections.forEach(function(section) {
+                    var phaseNum = section.header.getAttribute('data-phase');
+                    var nfrs     = phaseNum ? (nfrState.phaseMap[phaseNum] || []) : [];
+                    var hasTag   = nfrs.length > 0;
+                    // Untagged phases are always fully shown
+                    var matches  = !hasTag || !isFiltering || nfrs.some(function(n) { return selected.has(n); });
+
+                    section.header.classList.toggle('nfr-section-dim',  hasTag && !matches);
+                    section.header.classList.toggle('nfr-section-match', hasTag && isFiltering && matches);
+                    section.elements.forEach(function(el) {
+                        el.classList.toggle('nfr-section-dim', hasTag && !matches);
+                    });
+                });
+            }
+
+            // ── Context cards ──────────────────────────────────────────────
+            document.querySelectorAll('[data-fund-slug]').forEach(function(card) {
+                var nfrs    = (card.dataset.nfr || '').split(',').filter(Boolean);
+                if (!nfrs.length) return;
+                var matches = !isFiltering || nfrs.some(function(n) { return selected.has(n); });
+                card.classList.toggle('nfr-section-dim',  !matches);
+                card.classList.toggle('nfr-section-match', isFiltering && matches);
+            });
+
+            // ── Dot visibility ─────────────────────────────────────────────
+            document.querySelectorAll('.nfr-dot').forEach(function(dot) {
+                var nfr = dot.getAttribute('data-nfr-dot');
+                dot.classList.toggle('nfr-dot--dim',    isFiltering && !selected.has(nfr));
+                dot.classList.toggle('nfr-dot--active', isFiltering &&  selected.has(nfr));
+            });
+
+            // ── Pill visibility ────────────────────────────────────────────
+            document.querySelectorAll('.nfr-card-pill').forEach(function(pill) {
+                var nfr = pill.getAttribute('data-nfr-pill');
+                pill.classList.toggle('nfr-pill--dim',    isFiltering && !selected.has(nfr));
+                pill.classList.toggle('nfr-pill--active', isFiltering &&  selected.has(nfr));
+            });
+        }
+
         // ── Initial setup ────────────────────────────────────────────────────
         trackPage();
         collapseSidebarSections();
         initSectionAnchors();
+        initNFRFilter();
         if (typeof hljs !== 'undefined') {
             highlightCode();
         } else {

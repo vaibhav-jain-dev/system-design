@@ -10,6 +10,35 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// NFRDef defines the display properties of a standard non-functional requirement.
+type NFRDef struct {
+	Title string
+	Color string // CSS color value
+}
+
+// StandardNFRs is the canonical set of NFRs with display metadata.
+// Problems reference these by slug in their nfrs[] list.
+var StandardNFRs = map[string]NFRDef{
+	"scalability":   {Title: "Scalability", Color: "#6366F1"},
+	"performance":   {Title: "Performance", Color: "#2563EB"},
+	"availability":  {Title: "Availability", Color: "#059669"},
+	"consistency":   {Title: "Consistency", Color: "#D97706"},
+	"durability":    {Title: "Durability", Color: "#7C3AED"},
+	"security":      {Title: "Security", Color: "#DC2626"},
+	"cost":          {Title: "Cost", Color: "#64748B"},
+	"observability": {Title: "Observability", Color: "#0891B2"},
+}
+
+// ProblemNFR tags a problem with a standard NFR and the phase numbers where it's addressed.
+type ProblemNFR struct {
+	Slug   string `yaml:"slug"`
+	Phases []int  `yaml:"phases"`
+
+	// Resolved from StandardNFRs (populated after load)
+	Title string `yaml:"-"`
+	Color string `yaml:"-"`
+}
+
 // UsageLink represents a bidirectional link between a Problem and a Fundamental.
 type UsageLink struct {
 	// Forward: which fundamental is used
@@ -22,6 +51,8 @@ type UsageLink struct {
 	NotThis string `yaml:"not_this"`
 	Risk    string `yaml:"risk"`
 	Caveats string `yaml:"caveats"`
+	// NFR tags: which non-functional requirements this use addresses
+	NFRs []string `yaml:"nfrs"`
 
 	// Resolved references (populated after load)
 	FundamentalRef *Fundamental `yaml:"-"`
@@ -35,12 +66,13 @@ type DocMeta struct {
 }
 
 type Problem struct {
-	Slug        string      `yaml:"slug"`
-	Title       string      `yaml:"title"`
-	Description string      `yaml:"description"`
-	Path        string      `yaml:"path"`
-	Docs        []DocMeta   `yaml:"docs"`
-	Uses        []UsageLink `yaml:"uses"`
+	Slug        string       `yaml:"slug"`
+	Title       string       `yaml:"title"`
+	Description string       `yaml:"description"`
+	Path        string       `yaml:"path"`
+	Docs        []DocMeta    `yaml:"docs"`
+	NFRs        []ProblemNFR `yaml:"nfrs"`
+	Uses        []UsageLink  `yaml:"uses"`
 
 	// Algorithms used in this problem (auto-derived from Algorithm.UsedIn reverse)
 	Algorithms []*Algorithm `yaml:"-"`
@@ -191,6 +223,16 @@ func Load(fsys fs.FS, path string) (*Registry, error) {
 		p := &raw.Problems[i]
 		reg.Problems = append(reg.Problems, p)
 		reg.problemsBySlug[p.Slug] = p
+
+		// Resolve NFR display metadata from StandardNFRs
+		for j := range p.NFRs {
+			if def, ok := StandardNFRs[p.NFRs[j].Slug]; ok {
+				p.NFRs[j].Title = def.Title
+				p.NFRs[j].Color = def.Color
+			} else {
+				log.Printf("WARNING: problem %q references unknown NFR slug %q", p.Slug, p.NFRs[j].Slug)
+			}
+		}
 
 		for j := range p.Uses {
 			link := &p.Uses[j]
