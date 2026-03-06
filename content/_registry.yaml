@@ -1514,79 +1514,159 @@ quick_categories:
       - number: 61
         question: "How do systems deliver real-time chat messages?"
         needed: "WebSockets for persistent connection; message server fans out to recipient's connection"
+        answer: "Each client maintains a persistent WebSocket connection to a message server. When user A sends a message to user B, the message server looks up which server B is connected to (via a Redis hash: user_id → server_id), then forwards the message to that server via an internal pub/sub channel (Redis pub/sub or Kafka topic per server). That server pushes the message to B's open WebSocket connection."
+        tradeoff: "Long polling is a simpler fallback (no WebSocket infrastructure) but adds 1–3s latency per message and higher server load (HTTP overhead per poll). SSE (Server-Sent Events) is one-way only — works for notifications but not bidirectional chat. WebSockets are the right choice for real-time bidirectional messaging."
+        caveat: "WebSocket connections are stateful — load balancers must use sticky sessions (or consistent hashing by user_id) so reconnects land on the same server. If a server crashes, all its users must re-establish connections and sync missed messages."
+        watch: "WebSocket connections consume a file descriptor per connection — Linux's default limit is 1024, but it can be tuned to 1M+ per server with ulimit. Each server handles ~100K concurrent connections comfortably with async I/O (Node.js/Go)."
         related_problems: [chat-system]
       - number: 62
         question: "How do systems guarantee message delivery?"
         needed: "persistent message queue, client acknowledgment, retry on missing ack, at-least-once delivery"
+        answer: "Store every message in persistent storage (Cassandra/DynamoDB) before delivery attempt. After pushing the message to the recipient's WebSocket, wait for a client ACK (sent back on the same WebSocket). If no ACK within 5 seconds, retry up to 3 times. On reconnect, the client sends its last_seen_message_id; the server sends all messages since that ID."
+        tradeoff: "Exactly-once delivery is theoretically impossible across unreliable networks. At-least-once delivery (with client-side deduplication) is the practical solution. The client deduplicates by message UUID, so retried messages don't appear twice in the UI."
+        caveat: "Don't deliver messages from the transient WebSocket buffer only — if the server restarts before the client ACKs, those messages are lost. Persistence to the DB must happen before the delivery attempt, not after the ACK."
+        watch: "The 'last seen message_id' sync on reconnect must use a monotonically increasing ID (Snowflake ID or sequence number), not timestamps — two messages can have the same millisecond timestamp, causing one to be missed on sync."
         related_fundamentals: [messaging/kafka]
         related_problems: [chat-system]
       - number: 63
         question: "How do systems store chat history?"
         needed: "time-series store (Cassandra/DynamoDB) partitioned by conversation_id, sorted by timestamp"
+        answer: "Use DynamoDB or Cassandra with partition key = conversation_id and sort key = message_id (Snowflake ID, time-ordered). This allows efficient range queries: 'get messages in conversation X from timestamp T onwards'. Message IDs are Snowflake IDs (timestamp-embedded) so sort order matches creation order. Retain last 90 days in hot storage; archive older messages to S3."
+        tradeoff: "Relational DB (PostgreSQL) supports rich queries (search, reactions aggregation) but doesn't scale horizontally by conversation_id the way DynamoDB does. At 1B messages/day, DynamoDB's auto-sharding is critical. PostgreSQL needs manual sharding at that scale."
+        caveat: "Partition on conversation_id, not user_id — a group chat has many participants, and partitioning by user_id means writing the same message N times (once per participant). Store each message once and query by conversation."
+        watch: "DynamoDB sort keys must be globally unique within a partition — using timestamp as sort key alone causes collisions in active conversations (two messages in the same millisecond). Always use timestamp + sender_id + random suffix as a composite sort key."
         related_fundamentals: [storage/dynamodb]
         related_problems: [chat-system]
       - number: 64
         question: "How do systems handle offline users?"
         needed: "queue undelivered messages; on reconnect, sync from last seen message_id (cursor-based)"
+        answer: "Mark users as offline in Redis when their WebSocket disconnects. Messages sent to offline users are stored normally in the persistent message store. Simultaneously, send a push notification (FCM/APNs) to their device. On reconnect, the client sends its last_seen_message_id, and the server fetches all newer messages via a range query on the messages table. No special queue needed — the messages table IS the queue."
+        tradeoff: "Maintaining a separate 'undelivered messages' queue adds complexity without benefit — the persistent message store already holds all messages. Query it directly on reconnect with a cursor. A separate queue is only useful if the message store has no time-based query support."
+        caveat: "Don't send push notifications immediately on WebSocket disconnect — users often have brief interruptions (switching WiFi, opening another app). Wait 3–5 seconds before marking offline and sending push, to avoid flooding users with push notifications for split-second disconnects."
+        watch: "Large message backlogs on reconnect: a user offline for 24 hours in an active group chat may have 10K messages to sync. Page the sync in batches of 50 with cursor pagination — don't return 10K messages in one response."
         related_problems: [chat-system]
       - number: 65
         question: "How do systems avoid duplicate messages?"
-        needed: "client-generated message UUID; server deduplicates on insert; client dedups on display"
+        needed: "client-generated message UUID; server deduplicates on insert; server deduplicates on display"
+        answer: "Client generates a UUID (client_message_id) before sending. Server checks if this UUID already exists before inserting: DB unique constraint on client_message_id, or Redis SET NX check. If the UUID exists, return the existing stored message instead of inserting a duplicate. Client also deduplicates on display using the same client_message_id — if it receives the same ID twice, it renders it only once."
+        tradeoff: "Server-side deduplication via DB unique constraint is the reliable layer. Client-side deduplication is a UX optimization to prevent visible flicker when a message is delivered via both the WebSocket push and the reconnect sync simultaneously."
+        caveat: "Client-generated UUIDs must be random (UUID v4), not sequential or time-based — sequential IDs from different clients can collide. A user re-sending after a perceived failure must reuse the same client_message_id, not generate a new one."
+        watch: "Network retries create duplicates in two ways: client retries (sends the same message again after timeout) and server retries (server pushes the same message to the client twice). Both are solved by client_message_id deduplication — it's the universal dedup key."
         related_problems: [chat-system]
       - number: 66
         question: "How do systems send push notifications to millions of users?"
         needed: "fan-out to APNs (iOS) and FCM (Android) via notification service; batch + async"
+        answer: "Publish a NotificationRequested event to Kafka. Notification workers consume from the topic and call APNs (iOS) or FCM (Android) APIs. FCM supports sending to up to 500 device tokens per API call (multicast) — batch tokens by platform. APNs requires one API call per token. At 10M devices, 20K FCM calls (500 tokens each) or 10M APNs calls. Use connection pooling to the APNs/FCM gateways — HTTP/2 multiplexing allows 1,500 concurrent push streams per connection."
+        tradeoff: "Synchronous fan-out (push directly from the chat server) is simpler but blocks message processing and creates a bottleneck at the APNs/FCM API rate limits. Async via Kafka decouples message storage from notification delivery and allows the notification worker to scale independently."
+        caveat: "APNs and FCM silently drop notifications for devices with disabled notifications — there's no error, just no delivery. Don't assume push delivery is confirmed by a 200 response from APNs/FCM. Track push delivery rates separately from app open rates."
+        watch: "FCM's multicast endpoint (v1 API) is being deprecated — the new FCM HTTP v1 API requires one call per token (no batch). Plan for 10M individual calls for a global broadcast — this requires high-concurrency async workers."
       - number: 67
         question: "How do systems prioritize urgent notifications?"
         needed: "priority queue (Kafka topic per tier), high-priority lane bypasses batch queue"
+        answer: "Use separate Kafka topics per priority tier: notifications_critical (password reset, account security), notifications_transactional (order confirmation, payment receipt), notifications_marketing (promotions, newsletters). Each topic has a dedicated consumer group with different throughput targets. Critical and transactional use high-priority topics with more partitions and consumers; marketing uses a separate low-priority topic with rate limiting."
+        tradeoff: "Single topic with message priority headers (Kafka doesn't natively support priority queues) requires consumers to sort messages, which adds complexity and doesn't give low-priority messages a separate consumer group to fall behind independently. Separate topics are cleaner."
+        caveat: "Don't make every notification 'critical' — if all notifications share the critical lane, there's no priority differentiation. Enforce classification at the producer level with clear rules: only auth events and payment alerts are 'critical'."
+        watch: "Marketing notifications are the highest volume but lowest priority — if your notification service is overloaded, marketing must shed first. Implement explicit load shedding in the marketing consumer: drop messages if consumer lag > 10,000 events rather than letting lag grow unbounded."
         related_fundamentals: [messaging/kafka]
       - number: 68
         question: "How do systems retry failed notifications?"
         needed: "exponential back-off (1s, 5s, 30s), max 3 retries, dead-letter queue for manual inspection"
+        answer: "On APNs/FCM delivery failure, publish a RetryNotification event with retry_count and next_retry_at (computed as exponential back-off: 1s, 5s, 30s). A retry scheduler picks up events where next_retry_at <= now. After 3 failures, route to a dead-letter queue (DLQ) and alert the engineering team. Categorize failures: device_unregistered (don't retry, clean up token), rate_limited (retry), server_error (retry with back-off)."
+        tradeoff: "Infinite retries with back-off cause notifications to arrive very late — a password reset email arriving 4 hours later is useless. Set maximum retry windows per notification type: security notifications retry for 30 minutes max; marketing notifications retry for 1 hour then discard."
+        caveat: "APNs error code 410 (BadDeviceToken) means the app was uninstalled — stop sending to that device immediately and delete the token from your DB. Continuing to send to unregistered tokens wastes API calls and may trigger APNs rate limiting."
+        watch: "Device token churn: users reinstall apps, replace phones, and get new tokens. Implement token refresh: when APNs or FCM returns an updated token in the response, immediately update your stored token. Stale tokens cause silent delivery failures."
         related_fundamentals: [messaging/kafka]
       - number: 69
         question: "How do systems manage notification preferences?"
         needed: "user settings store (per channel: push/email/SMS, per type: marketing/transactional)"
+        answer: "Store preferences as a user_settings record with per-channel, per-type toggles: {push: {marketing: false, transactional: true, security: true}, email: {marketing: true, transactional: true}, sms: {security: true}}. Before sending any notification, check the user's preference for that channel + type combination. Cache preferences in Redis (TTL 5 minutes) to avoid DB reads on every notification dispatch."
+        tradeoff: "Fine-grained preferences (toggle per notification subtype) give users control but create a complex settings UI. Coarse preferences (just 'marketing on/off') are simpler but frustrate users who want some marketing emails but not SMS."
+        caveat: "Transactional notifications (password reset, payment confirmation) must always be sent regardless of preferences — they're required for account security and legal compliance. Don't allow users to opt out of transactional notifications."
+        watch: "Preference changes must propagate before the next notification — if a user opts out of marketing at 2 PM and a marketing email is queued for 2:05 PM, it should respect the opt-out. Cache TTL of 5 minutes means a 5-minute window where preferences are stale — use a publish/invalidate pattern to force immediate cache refresh on preference change."
       - number: 70
         question: "How do systems prevent notification spam?"
         needed: "rate limit per user per channel (e.g. max 5 marketing pushes/day), digest mode option"
+        answer: "Apply rate limits per user per channel per type: max 1 security alert per 10 minutes, max 5 marketing pushes per day, max 2 marketing emails per week. Store counts in Redis with appropriate TTL windows. When the limit is hit, buffer remaining notifications into a daily digest (one email with all missed notifications) rather than discarding them."
+        tradeoff: "Hard drop (discard over-limit notifications) is simpler but means users miss information. Digest mode batches them — users get one email instead of 10. Digest adds a batching job but dramatically improves user satisfaction."
+        caveat: "Don't apply the same rate limit to security notifications — a user receiving 10 login alerts in 10 minutes needs to see all of them; this is exactly when rate limiting would harm them most. Security and transactional notifications are exempt from spam controls."
+        watch: "Push notification opt-out rates increase sharply above 5-7 push notifications per week per app. Track opt-out rates by notification type — if marketing push opt-outs spike, you're sending too many. Optimize for long-term channel health, not short-term send volume."
         related_problems: [rate-limiter]
       - number: 71
         question: "How do systems support group chats?"
         needed: "group membership table; fan-out on write to each member's message queue on send"
+        answer: "Store group membership in a group_members table (group_id, user_id, joined_at). On message send, look up all current members, then fan out the message to each member's message queue or WebSocket connection. For groups up to 1K members, fan-out-on-write is efficient. For larger groups (thousands of members), fan-out-on-read (store once, each member queries on demand) is better."
+        tradeoff: "Fan-out-on-write (copy message to each member's queue): fast reads, expensive writes — at 500 members and 100 messages/second, that's 50K writes/second. Fan-out-on-read (store once): cheap writes, more expensive reads (every member reads from the same place). Choose based on read/write ratio — most chat systems read far more than they write."
+        caveat: "Member list changes (joins, leaves) during an active message send can cause partial delivery — a user who joined between fan-out start and finish receives the message; a user who left between fan-out start and finish also receives it. Use a snapshot of the member list at message creation time."
+        watch: "Very large groups (Discord servers, broadcast channels with 100K+ members) must use fan-out-on-read — the write amplification of fan-out-on-write is impractical. Segment 'chat groups' (fan-out-on-write, max ~1K) from 'channels/broadcasts' (fan-out-on-read, unlimited)."
         related_problems: [chat-system]
       - number: 72
         question: "How do systems show 'user is typing'?"
         needed: "ephemeral WebSocket signal (no persistence); debounced emit every 2s; auto-clear after 5s"
+        answer: "Client emits a typing_start event via WebSocket when the user begins typing, debounced to at most one event every 2 seconds (prevents flooding the server). Server broadcasts it to all other participants in the conversation via their WebSocket connections. Server sets a 5-second TTL on the typing state in Redis; if no typing_start arrives before the TTL, broadcast a typing_stop. No DB persistence — it's purely ephemeral."
+        tradeoff: "Client-emitted typing_stop event (sent when user stops typing or sends the message) is more precise but relies on reliable delivery. TTL-based auto-clear (clear after 5s of no typing_start) is simpler and handles client disconnects — if the user closes the app, the typing indicator clears automatically after 5 seconds."
+        caveat: "Don't store typing events in the message history DB — they're ephemeral state, not messages. Persisting them wastes space and pollutes the message log."
+        watch: "Typing indicators for large group chats (>20 members) create a noisy UI and excessive WebSocket traffic — suppress typing indicators for groups above a configurable threshold (e.g., 20+ members), or show a generalized '3 people are typing' aggregation."
         related_problems: [chat-system]
       - number: 73
         question: "How do systems sync messages across devices?"
         needed: "message offset per device, on connect sync from last seen offset; server stores all messages"
+        answer: "Each device maintains a last_seen_message_id per conversation. On app open or WebSocket reconnect, the client sends its last_seen_message_id for each active conversation. The server responds with all messages in those conversations with ID > last_seen_message_id, paginated in batches of 50. The server stores all messages centrally — devices don't store the canonical copy, they cache it."
+        tradeoff: "Per-device cursors (separate last_seen_message_id per device per conversation) enable independent sync. A single cursor shared across devices means reading on one device marks messages as read on all — often the desired behavior, but not always."
+        caveat: "Message IDs must be monotonically increasing within a conversation for cursor-based sync to work reliably. Time-ordered Snowflake IDs work. Non-sequential IDs (random UUIDs) don't — you'd need to query by timestamp, which is less precise."
+        watch: "A user with 50 active conversations on reconnect would trigger 50 sync queries simultaneously — batch these into a single request: send all cursor states at once, get a single paged response for all conversations. This reduces reconnect latency significantly."
         related_problems: [chat-system]
       - number: 74
         question: "How do systems encrypt messages end-to-end?"
         needed: "Signal Protocol: X3DH key agreement, Double Ratchet for forward secrecy; server sees ciphertext only"
+        answer: "Signal Protocol provides end-to-end encryption: X3DH (Extended Triple Diffie-Hellman) establishes a shared secret between two parties without the server knowing the key. Double Ratchet advances the encryption key after every message, providing forward secrecy (past messages can't be decrypted even if current keys leak). The server stores and routes ciphertext only — it cannot read message content."
+        tradeoff: "End-to-end encryption breaks server-side features: message search is impossible (server can't index ciphertext), spam/content moderation requires client-side scanning, and message backup requires the user to manage key backups. These are fundamental tradeoffs, not implementation choices."
+        caveat: "Key backup is the hardest part of E2E encryption UX — if the user loses their device and their key backup, their message history is permanently unrecoverable. Signal allows optional encrypted backup to the cloud; the backup key is the user's responsibility."
+        watch: "Forward secrecy means even if an attacker records all your ciphertext today and later steals your private key, they still can't decrypt past messages — because each message used a different derived key that was discarded after use. This is the primary security advantage of Double Ratchet over simple public-key encryption."
       - number: 75
         question: "How do systems support message search?"
         needed: "full-text index on message content (Elasticsearch); index only after delivery to avoid blocking"
+        answer: "After message delivery, emit a MessageDelivered event. An async indexing consumer writes the message content to Elasticsearch with fields: conversation_id, sender_id, timestamp, and full-text content. Search queries filter by conversation_id (the user's conversations) and use Elasticsearch's BM25 full-text match. Index personal messages only for the participants — access-control at the Elasticsearch level via conversation_id filter."
+        tradeoff: "Full-text search in the primary message DB (DynamoDB full-scan or PostgreSQL LIKE '%term%') doesn't scale. Elasticsearch provides inverted index search at O(1) vs. O(N) for full-scans. The async indexing introduces a lag of 1–5 seconds between message delivery and searchability."
+        caveat: "End-to-end encrypted messages can't be indexed on the server — the server only sees ciphertext. For E2E encrypted systems, message search must be done client-side in the local message cache. Server-side search is only possible for non-E2E-encrypted systems."
+        watch: "Elasticsearch indices grow indefinitely — implement index rollover: one index per month, with aliases. Search only the last 12 months by default. Messages older than 12 months require an explicit 'search all time' with a warning about slower performance."
       - number: 76
         question: "How do systems delete messages?"
         needed: "soft delete: mark deleted_at, filter in queries; 'delete for everyone' propagates tombstone"
+        answer: "Soft delete: set deleted_at on the message record. Queries filter out deleted messages. 'Delete for me' sets a user-specific hide flag (user_message_hides table) that the sender's client uses to filter. 'Delete for everyone' sets deleted_at on the message itself and broadcasts a MessageDeleted tombstone event to all participants' WebSocket connections, which remove the message from their local displays."
+        tradeoff: "Physical deletion removes the data permanently but breaks conversations — missing messages create gaps in chat history that are confusing. Soft deletion with tombstone records maintains thread continuity while hiding content."
+        caveat: "Soft-deleted message content is still on disk — if a data breach occurs, deleted message content is exposed. Encrypt message content at rest and physically purge the content column after a retention period (e.g., 30 days after deletion), keeping only the tombstone metadata."
+        watch: "Delete for everyone has a time limit on most messaging platforms (e.g., 1 hour on WhatsApp). After the limit, deletion is not possible — the recipient may have already read and screenshotted the message. Enforce the time limit at the API layer."
         related_problems: [chat-system]
       - number: 77
         question: "How do systems show read receipts?"
         needed: "client sends ack with message_id on display; server stores read_at per (user, message)"
+        answer: "Client sends a MessageRead event via WebSocket when a message scrolls into view (Intersection Observer API). Server stores read_at = NOW() in a message_reads table: (message_id, user_id, read_at). On the sender's side, the server pushes a ReadReceipt event with the reader's user_id. For group chats, the sender's client shows 'Read by 3' based on the count of message_reads for that message_id."
+        tradeoff: "Sending a read receipt for every individual message generates enormous write traffic in active conversations. Optimize by sending only one read receipt per conversation per 'viewing session' (the highest message_id currently visible), not per message."
+        caveat: "Read receipts are privacy-sensitive — some users don't want to reveal when they've read messages. Expose a user preference toggle that disables outgoing read receipts. If disabled, don't store read_at for that user's reads."
+        watch: "Message reads table grows extremely fast in active chat systems — a 1:1 conversation with 1K messages between two users generates 2K rows (one per user per message). Archive old read receipts after 30 days; nobody checks whether a message from last month was 'read' at 3:45 PM."
         related_problems: [chat-system]
       - number: 78
         question: "How do systems support media sharing in chat?"
         needed: "upload to object storage (S3), store URL in message, CDN for serving"
+        answer: "Generate a pre-signed S3 upload URL for the client (valid for 15 minutes), which uploads directly from the client to S3 — bypassing your servers. On upload complete, the client sends a message with the S3 key. The message server generates a CDN URL (CloudFront URL from the S3 key) and stores it in the message record. Clients load media via CDN, not directly from S3."
+        tradeoff: "Direct upload from client to S3 (via pre-signed URL) offloads your servers — you're not proxying gigabytes of media uploads. Server-side upload (client → your server → S3) gives you full control (virus scan, content moderation) before storing but costs you bandwidth and CPU."
+        caveat: "Pre-signed URLs for uploads must be short-lived (15 minutes) and single-use. A leaked pre-signed URL lets anyone upload to your S3 bucket. Also, never expose raw S3 URLs to clients — always use CDN URLs so you can invalidate and control access."
+        watch: "Video files require additional processing before sharing: transcode to web-compatible formats (H.264/MP4), generate a thumbnail, and create adaptive bitrate streams. The client should show a 'processing' state and receive the final playback URL via a webhook when transcoding completes."
         related_fundamentals: [networking/cdn]
       - number: 79
         question: "How do systems moderate chat content?"
         needed: "async scan via ML model (hate speech, CSAM) after delivery; action on violation (remove, ban)"
+        answer: "Deliver first, scan asynchronously: after message delivery, emit a ContentSubmitted event. A moderation consumer passes the content through an ML classifier (hate speech, spam, CSAM detection using PhotoDNA for images). The scan completes in 50–500ms. On violation, take automated action: soft-delete the message, issue a warning or ban to the sender, and alert the trust-and-safety team."
+        tradeoff: "Pre-delivery moderation (scan before delivery, hold if suspicious) eliminates harmful content but adds 200–500ms latency for every message. Post-delivery (scan after) has near-zero latency impact but means harmful content is briefly visible. Most consumer chat platforms use post-delivery; legal exceptions apply for CSAM."
+        caveat: "CSAM detection (PhotoDNA hash matching) should be synchronous and pre-delivery — legal obligations require immediate reporting and removal, not eventual moderation. All other content types can use post-delivery async moderation."
+        watch: "ML moderation models have false positive rates — innocent messages flagged as violations. Build a human review queue for borderline cases (confidence score 60–90%) and auto-action only on high-confidence violations (>90%). Track false positive rates weekly and retrain when they spike."
       - number: 80
         question: "How do systems scale messaging to millions of concurrent users?"
         needed: "partitioned WebSocket servers (consistent hash user → server), Kafka for cross-server fan-out"
+        answer: "Use consistent hashing to assign users to WebSocket servers: user_id hashes to a server slot. All users in a conversation are likely on different servers. When a message arrives, the receiving server looks up all recipients, determines which servers they're on (Redis hash: user_id → server_id), and publishes the message to each server's Kafka topic. Each server subscribes to its own topic and pushes to connected clients."
+        tradeoff: "Redis pub/sub for cross-server fan-out is simpler than Kafka (no offset management) but doesn't persist messages — if a server restarts mid-delivery, messages in transit are lost. Kafka persists messages with replay; critical for reliability. Use Redis pub/sub for typing indicators; Kafka for messages."
+        caveat: "Consistent hashing rebalancing on server scale-out reassigns ~1/N of all users to new servers — all those users' WebSocket connections break and reconnect. Smooth this with a warm-up period: new servers join gradually and handle new connections first, while existing connections drain naturally."
+        watch: "At 1M concurrent WebSocket connections, plan for 10 servers × 100K connections each. Each connection consumes ~50KB memory (send/receive buffers) — 100K connections = 5GB RAM per server. Size your instances accordingly: a c5.2xlarge has 16GB, leaving 11GB for headroom and application state."
         related_fundamentals: [messaging/kafka, distributed/consistent-hashing]
         related_problems: [chat-system]
 
