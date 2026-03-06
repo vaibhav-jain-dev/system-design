@@ -5997,3 +5997,189 @@ pre  mark.stat-highlight { background: transparent; font-weight: inherit; }
         display: none;
     }
 }
+
+/* ═══════════════════════════════════════════
+   Fix: Book-mode horizontal overflow / scroll
+   Fixes 3 bug types found across all topics:
+     A) Diagram panel boxes overflow inside .book-page columns
+     B) Section title column too narrow (char-by-char wrap)
+     C) Comparison table columns crushed too narrow
+   ═══════════════════════════════════════════ */
+
+/* ── Bug Type A: Diagram panels overflowing in book pages ─────────────
+   Root cause: inner .d-cols children use minmax(210px, 1fr) which
+   forces a minimum 210px per column — wider than the ~300px page
+   half when 2-3 columns are present. Also .d-box has white-space:nowrap
+   which prevents any text wrapping inside panels.
+   Fix: constrain all flex/grid children with min-width:0 so they
+   can shrink below their content size, and allow text to wrap.
+─────────────────────────────────────────────────────────────────────── */
+
+/* All direct children inside book pages: allow shrinking */
+.book-page .diagram-container {
+    overflow-x: auto; /* scroll at diagram level if truly needed */
+}
+
+/* d-cols: override the 210px min so columns can compress */
+.book-page .d-cols {
+    grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+    min-width: 0;
+}
+
+/* Every grid/flex child: must be able to shrink below content width */
+.book-page .d-cols > *,
+.book-page .d-col,
+.book-page .d-group,
+.book-page .d-branch,
+.book-page .d-branch-arm {
+    min-width: 0;
+    overflow: hidden; /* clip instead of scroll at child level */
+    word-break: break-word;
+    overflow-wrap: break-word;
+}
+
+/* d-box: allow text to wrap (was white-space:nowrap causing overflow) */
+.book-page .d-box {
+    white-space: normal;
+    word-break: break-word;
+    overflow-wrap: break-word;
+    min-width: 0;
+}
+
+/* d-tag chips inside boxes: allow wrapping too */
+.book-page .d-tag {
+    white-space: normal;
+    word-break: break-word;
+}
+
+/* d-flow rows: allow wrapping so boxes stack instead of scroll */
+.book-page .d-flow {
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+/* d-row: same */
+.book-page .d-row {
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+/* d-row and d-flow children */
+.book-page .d-flow > *,
+.book-page .d-row > * {
+    min-width: 0;
+    flex-shrink: 1;
+}
+
+/* d-number stat callouts */
+.book-page .d-number {
+    min-width: 0;
+    word-break: break-word;
+}
+
+/* Entity boxes */
+.book-page .d-entity {
+    min-width: 0;
+    overflow: hidden;
+}
+
+.book-page .d-entity-body {
+    word-break: break-word;
+    overflow-wrap: break-word;
+}
+
+/* code-block inside book pages: horizontal scroll is acceptable
+   (code should not be word-broken) */
+.book-page .code-block pre {
+    overflow-x: auto;
+    white-space: pre; /* keep code formatting */
+    word-break: normal;
+}
+
+/* styled-table inside book pages */
+.book-page .styled-table {
+    overflow-x: auto;
+}
+
+.book-page .styled-table table {
+    min-width: 0; /* allow table to shrink */
+    word-break: break-word;
+}
+
+.book-page .styled-table th,
+.book-page .styled-table td {
+    word-break: break-word;
+    overflow-wrap: break-word;
+    min-width: 40px; /* prevent total column collapse */
+    white-space: normal;
+}
+
+/* ── Bug Type B: Section title column too narrow (char stacking) ───────
+   Root cause: .phase-title inside a very narrow flex container gets
+   squeezed — each character wraps to its own line.
+   Fix: ensure .phase-title has a reasonable min-width and wraps words
+   rather than characters.
+─────────────────────────────────────────────────────────────────────── */
+
+.book-page .phase-title {
+    word-break: break-word;
+    overflow-wrap: break-word;
+    hyphens: auto;
+    min-width: 0; /* allow flex shrink */
+    flex: 1;      /* take remaining space, not zero */
+}
+
+.book-page .phase-header {
+    flex-wrap: wrap; /* let title wrap to next line if space is tiny */
+    gap: 8px;
+}
+
+.book-page .phase-number {
+    flex-shrink: 0; /* number badge never shrinks */
+}
+
+/* ── Bug Type C: Comparison table columns crushed ──────────────────────
+   Root cause: tables with many columns (e.g. DB comparison) get
+   compressed below readability — column headers become single chars.
+   Fix: enforce a minimum readable column width and allow word-wrap.
+─────────────────────────────────────────────────────────────────────── */
+
+/* Wrap the table in a scroll container as primary fix */
+.book-page table {
+    min-width: 0;
+    table-layout: auto;
+    word-break: break-word;
+}
+
+.book-page th,
+.book-page td {
+    min-width: 48px;       /* minimum readable column */
+    word-break: break-word;
+    overflow-wrap: break-word;
+    white-space: normal;
+    hyphens: auto;
+}
+
+/* Outer wrapper for raw tables not inside .styled-table */
+.book-page .diagram-container table,
+.book-page .styled-table table {
+    overflow-x: auto;
+    display: block; /* allow block-level overflow-x */
+    max-width: 100%;
+}
+
+/* But .styled-table already wraps — restore inline-table for it */
+.book-page .styled-table table {
+    display: table;
+}
+
+/* ── Overflow sentinel: last-resort catch-all for book pages ───────────
+   Any element that would still overflow horizontally gets clipped
+   at the page boundary. Users can still scroll within .diagram-container
+   which has overflow-x: auto.
+─────────────────────────────────────────────────────────────────────── */
+
+.book-page > * {
+    max-width: 100%;
+    box-sizing: border-box;
+}
