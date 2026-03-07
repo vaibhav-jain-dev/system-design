@@ -508,6 +508,18 @@ def base62_decode(s: str) -> int:
   "At 57K RPS peak, a monolith couples redirect latency to write/analytics processing. A slow analytics query could starve redirect threads. Separating the redirect path (stateless, cached) from the write path (KGS, DynamoDB) and analytics path (Kinesis, Lambda) gives independent scaling and fault isolation."
 }}
 
+{{think "The read path is the hot path — 10x more reads than writes. Every architectural decision optimizes for read latency: CDN for static redirects, Redis for hot URL lookup, and database reads only on cache miss."
+  (whyNot "putting the redirect logic behind an API gateway" "API gateways add 5-15ms per hop for auth, logging, and routing. A redirect service is a thin lookup — key to value, then 301/302. Adding gateway overhead to every redirect increases p99 from 10ms to 25ms. At 100K redirects/sec, that is 1.5 billion unnecessary milliseconds per day.")
+  (whatIf "the Redis cache goes down during peak traffic" "All reads fall through to the database. At 100K reads/sec, a single Postgres primary cannot handle the load — it tops out at ~10K simple reads/sec. Mitigation: multiple read replicas behind PgBouncer, plus a local in-memory LRU cache (Caffeine/Guava) on each app server for the top 1K URLs, which covers ~30% of traffic.")
+}}
+
+{{triggerQs "Architecture Questions"
+  "Why not use a single serverless function (Lambda) for the redirect?"
+  "Lambda cold starts add <span class='hl'>100-500ms</span> latency on first invocation. For a URL shortener where p99 must be <span class='hl'>&lt;50ms</span>, cold starts are unacceptable. Provisioned concurrency fixes this but costs <span class='hl'>$15/month per 100 concurrent invocations</span> — at 100K req/sec, that is prohibitively expensive vs a simple container fleet."
+  "How do you handle the read/write split in the architecture?"
+  "Writes go to the primary database and invalidate the Redis cache. Reads check Redis first (cache-aside pattern), then fall through to read replicas on miss. The 10:1 read:write ratio means <span class='hl'>90%</span> of traffic never touches the primary. Read replicas can be scaled horizontally — add more replicas as read traffic grows."
+}}
+
 {{phase 6 "Caching Deep Dive" "5 min"}}
 
 {{say "Caching is the single most impactful optimization. The Pareto principle applies here: roughly 20% of URLs receive 80% of all traffic."}}

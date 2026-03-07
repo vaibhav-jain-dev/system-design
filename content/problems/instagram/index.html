@@ -790,6 +790,11 @@ class ShardedCounter:
   "DynamoDB Global Tables replicate in under 1 second. For that brief window, the feed may not include the latest post. This is acceptable because social media feeds are eventually consistent by design."
 }}
 
+{{think "Multi-region is the most expensive decision — 3x infrastructure cost for a problem most systems never have. Only deploy multi-region when user latency exceeds 200ms from the nearest region or when compliance requires data residency."
+  (whyNot "serving all traffic from us-east-1" "Users in India see 250ms latency to US-East. At 200M+ Indian users, that is 50 billion high-latency requests per day. CDN helps for static assets, but feed computation and write paths cannot be cached — they must run in a nearby region.")
+  (whatIf "replication lag causes a user to not see their own post" "Route each user's reads to their home region using a region cookie. Writes always go to the home region first, then replicate. This guarantees read-your-writes consistency within the home region while allowing eventual consistency for cross-region followers.")
+}}
+
 {{triggerQs "Multi-region scaling questions"
   "How do you handle a region failover if us-east-1 goes down?"
   "Route 53 health checks detect the outage within 30 seconds and reroute traffic to eu-west-1. DynamoDB Global Tables already have a full replica there. The feed Redis cache is cold in the failover region — expect degraded latency for 5-10 minutes while caches warm. S3 Cross-Region Replication ensures media is available, though images uploaded in the last 15 minutes may be missing until replication catches up."
@@ -797,6 +802,13 @@ class ShardedCounter:
   "A centralized counter service adds a cross-region round trip (100-300ms) on every like. At 100K likes/sec globally, that is 100K cross-region calls/sec — expensive and fragile. G-Counter CRDTs let each region increment locally with zero coordination. The trade-off is eventual consistency: a like in ap-south-1 takes <1s to propagate to us-east-1. For social media counters, this staleness is invisible to users."
   "How do you decide which region owns a user's data?"
   "At signup, assign the user to the nearest region based on IP geolocation. Store the home region in a global routing table (DynamoDB Global Table with user_id → region mapping). All writes for that user go to their home region. If a user permanently relocates, a migration job re-shards their data to the new region — but this is rare enough to handle as a manual operations task."
+}}
+
+{{triggerQs "Global Scale Questions"
+  "How do you handle cross-region data conflicts in DynamoDB Global Tables?"
+  "DynamoDB Global Tables use <strong>last-writer-wins</strong> conflict resolution based on timestamps. For counters (likes, views), this causes lost writes — two regions incrementing simultaneously means one increment is dropped. Fix: use <span class='hl-blue'>CRDT counters</span> (grow-only) that merge by taking the max per shard. For user profile updates, last-writer-wins is acceptable because profile edits are rare and user-initiated."
+  "What is the latency impact of multi-region deployment?"
+  "Intra-region reads: <span class='hl'>1-5ms</span>. Cross-region replication lag: <span class='hl'>200-500ms</span> for DynamoDB Global Tables, <span class='hl'>up to 15 minutes</span> for S3 CRR. Users reading their own data use <strong>read-your-writes consistency</strong> by routing to their home region. Cross-region follows (Indian user following US user) see eventual consistency — the feed may lag by 1-5 seconds, which is acceptable."
 }}
 
 {{phase 9 "Security & Content Moderation" "8 min"}}
@@ -913,7 +925,7 @@ async def mark_viewed(story_id: str, user_id: int):
 
 {{phase 10 "Analytics & Monitoring" "5 min"}}
 
-{{say "Observability has three pillars: <strong>metrics</strong> (Prometheus + Grafana for latency/error-rate dashboards), <strong>logging</strong> (structured JSON logs → Kafka → Elasticsearch), and <strong>tracing</strong> (distributed request tracing via OpenTelemetry across all microservices)."}}
+{{say "Three observability pillars at Instagram scale: <strong>Prometheus + Grafana</strong> for latency/error-rate dashboards, <strong>structured JSON logs → Kafka → Elasticsearch</strong> for searchable logging, and <strong>OpenTelemetry</strong> for distributed tracing across all microservices."}}
 
 <h3>Explore & Search</h3>
 
@@ -988,6 +1000,13 @@ async def mark_viewed(story_id: str, user_id: int):
 }}
 
 {{hint "why separate SLOs per feature?" "Feed availability matters more than explore availability — users tolerate explore being slow but not their feed. Upload success matters more than notification delivery — a lost photo is unrecoverable but a delayed notification is just annoying. Different SLOs let you prioritize engineering effort on what matters most to users."}}
+
+{{triggerQs "Analytics & Monitoring Questions"
+  "How do you detect a silent degradation where feeds load but are stale?"
+  "Monitor the <strong>cache age distribution</strong> in Redis. If the median sorted set age exceeds <span class='hl'>30 seconds</span> (normal is <span class='hl'>2-5 seconds</span>), the fan-out pipeline is falling behind. Alert on <span class='hl-blue'>Kafka consumer lag</span> for the feed-fanout consumer group — lag above <span class='hl'>100K messages</span> means feeds are going stale."
+  "What SLOs would you set for Instagram's core features?"
+  "Feed load: <span class='hl'>p99 &lt; 200ms</span>. Image upload to CDN-available: <span class='hl'>p99 &lt; 10 seconds</span>. Like confirmation: <span class='hl'>p99 &lt; 100ms</span> (optimistic UI, actual write can be async). Story view: <span class='hl'>p99 &lt; 150ms</span>. Explore page: <span class='hl'>p99 &lt; 500ms</span> (ML ranking is compute-heavy). Monitor SLO burn rate — if you're burning through your monthly error budget in a week, escalate."
+}}
 
 {{phase 11 "Bottlenecks & Trade-offs" "8 min"}}
 
