@@ -229,12 +229,28 @@ spec:
   (row "MSK cost" "~$8,400/month" "3× m5.4xlarge + EBS + data transfer")
 )}}
 
+{{table "Kafka Sizing Reference" (rows
+  (row "Producer Throughput" "Brokers Needed" "EBS Volume Type" "MSK Instance Type" "Monthly Cost (est.)")
+  (row "10K msgs/sec (10 MB/sec)" "3× brokers" "gp3 – 300GB each" "m5.xlarge × 3" "~$1,400/mo")
+  (row "100K msgs/sec (100 MB/sec)" "3× brokers" "gp3 – 4TB each" "m5.4xlarge × 3" "~$8,400/mo")
+  (row "1M msgs/sec (1 GB/sec)" "6–9× brokers" "NVMe local (i3en.2xlarge)" "i3en.2xlarge × 6" "~$28,000/mo")
+)}}
+
+{{hint "S3 Tiered Storage cuts Kafka costs 70%" "Kafka's <span class=\"hl-blue\">S3 Tiered Storage</span> (MSK, Confluent Cloud, Redpanda) offloads older log segments to S3 at <span class=\"hl\">$0.023/GB</span> vs <span class=\"hl\">$0.08/GB</span> for EBS. For 30-day retention at 100K msgs/sec, tiered storage reduces broker EBS from 180TB to ~25TB (hot data only — the last 7 days). That's a <span class=\"hl\">70% reduction in storage cost</span> with no change to consumer behavior — Kafka transparently fetches cold segments from S3 on demand."}}
+
 {{hint "EBS vs local NVMe for Kafka" "AWS MSK uses EBS (gp3) by default — durable but limited to ~1GB/sec per volume. For >500MB/sec write throughput per broker, consider MSK with provisioned throughput or self-managed Kafka on i3en.xlarge instances (NVMe local storage at 2.5GB/sec)."}}
 
 {{think "Real companies run Kafka at a scale most engineers don't appreciate."
   (how "LinkedIn's scale" "Kafka was created at LinkedIn. They run 7 trillion messages/day across thousands of brokers. That's ~80M msgs/sec sustained.")
   (how "Uber's scale" "Uber uses Kafka for ride events (driver locations, trip state). ~1 trillion messages/day. They run 4000+ Kafka brokers across multiple data centers.")
   (whyNot "one large cluster for everything" "Blast radius. A misconfigured producer can saturate a shared cluster. Isolate by domain: payments cluster, analytics cluster, logging cluster.")
+}}
+
+{{triggerQs "Sizing Questions"
+  "How do you calculate Kafka storage requirements?"
+  "Formula: <code>daily_msgs × avg_msg_size_bytes × retention_days × replication_factor</code>. Example: <span class=\"hl\">100K msgs/sec</span> × <span class=\"hl\">1KB</span> × 86,400 s × 7 days × 3 RF = <span class=\"hl\">181 TB</span>. Use gp3 EBS volumes at <span class=\"hl\">$0.08/GB</span> = <span class=\"hl\">~$14,500/mo</span> for storage alone. This is why Kafka retention is set to <strong>7 days (not 30)</strong> for high-throughput topics — 30-day retention would multiply that cost 4×. Use <span class=\"hl-blue\">S3 Tiered Storage</span> if you need longer retention without paying EBS prices."
+  "When does Kafka cost more than SQS?"
+  "<span class=\"hl-blue\">SQS Standard</span> pricing: <span class=\"hl\">$0.40 per million messages</span>. At <span class=\"hl\">100K msgs/sec</span> = 8.64 billion msgs/day = <span class=\"hl\">$3,456/day = $103K/month</span>. <span class=\"hl-blue\">MSK</span> with 3 m5.4xlarge brokers = <span class=\"hl\">~$8,400/month</span>. Break-even is around <span class=\"hl\">20–30K msgs/sec</span> — above that, self-managed Kafka is cheaper. Below that, SQS is simpler and cheaper. <span class=\"hl-red\">Never use SQS for high-throughput event streaming</span> — the per-message cost scales linearly and becomes prohibitive."
 }}
 
 {{triggerQs "Phase 7 Interview Questions"
