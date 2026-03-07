@@ -70,6 +70,8 @@ This decision is driven by your business requirements — specifically, the cost
   "If no new writes occur, all replicas will converge to the same value. It gives no bound on how long convergence takes — in practice, Cassandra converges in <span class='hl'>milliseconds to seconds</span> under normal load."
 }}
 
+{{qa "How do you choose CP vs AP for a specific feature?" "Map the cost of inconsistency. Ask: what happens if two users see different values for 10 seconds? For a bank balance, inconsistency means potential overdraft — choose CP. For a social media like count, showing 4,999 instead of 5,000 has zero business cost — choose AP. Most production systems are hybrid: CP for writes to the user table, AP for the activity feed." "Can a single system use both CP and AP?" "Yes. DynamoDB lets you choose strongly consistent reads (CP) for login flows and eventually consistent reads (AP) for product listings — same database, different consistency per query. The system is not globally CP or AP; each operation chooses its own tradeoff."}}
+
 {{phase 3 "Partition Tolerance Reality" "4 min"}}
 
 {{say "Partitions are not rare events. Google's Chubby paper reported they experienced partitions affecting multiple datacenters <span class='hl'>every month</span>. Design for partitions as a first-class concern — not an edge case."}}
@@ -182,6 +184,8 @@ session.execute(
   "A <strong>Conflict-free Replicated Data Type</strong> is a data structure where concurrent updates can always be merged without conflicts. Counters, sets with add-only semantics, and Last-Write-Wins registers are CRDTs. Use them when you need AP with automatic convergence — real-time collaborative editing, distributed counters, shopping cart merges."
 }}
 
+{{qa "What is the danger of last-write-wins conflict resolution?" "LWW relies on wall-clock timestamps, and distributed clocks drift by <span class='hl'>50-100ms</span> via NTP. Write A at T=100ms on node 1 may have a lower timestamp than write B at T=50ms on node 2 if node 2's clock is fast — the genuinely newer write is silently discarded. LWW is safe only for idempotent, non-critical data like analytics counters — never for inventory or account balances." "How do you detect conflicts if LWW silently drops writes?" "Use <strong>vector clocks</strong> or <strong>version vectors</strong>. Each node increments its own counter on writes. On read, if two versions have divergent vectors (neither dominates the other), the system surfaces both versions for application-level resolution. DynamoDB Streams and Cassandra lightweight transactions provide similar conflict detection."}}
+
 {{phase 6 "PACELC Model" "4 min"}}
 
 {{say `PACELC extends CAP to cover normal operation, not just partition scenarios:
@@ -269,6 +273,8 @@ def get_user_after_create(user_id):
   "What consistency does a payment system need?"
   "<strong>Linearizable</strong> for balance reads and writes. You need to know the exact current balance before authorizing a transaction. Anything weaker risks overdraft. Stripe and most payment processors use single-leader replication with synchronous writes — CP, slightly higher latency, always correct."
 }}
+
+{{qa "What is the difference between strong consistency and read-your-writes?" "Strong consistency (linearizability) guarantees every client sees the latest write globally — if user A updates their profile, user B immediately sees it too. Read-your-writes only guarantees that <strong>you</strong> see your own writes — user B might still see the old value. Read-your-writes is cheaper: route your reads to the node that processed your write, no global consensus needed." "How do you implement read-your-writes without strong consistency?" "Two approaches: <strong>sticky sessions</strong> — route all of a user's reads to the same replica that processed their writes (simple but creates hot spots); or <strong>version tracking</strong> — after a write, the client receives a version token, and on reads sends it so the system routes to a replica that has caught up. DynamoDB's ConsistentRead=true does this by always reading from the leader."}}
 
 {{phase 8 "Interview Summary" "3 min"}}
 
