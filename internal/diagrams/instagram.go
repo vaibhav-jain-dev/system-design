@@ -91,7 +91,7 @@ func registerInstagram(r *Registry) {
     <div class="d-flow-v">
       <div class="d-box blue" data-tip="Mobile-first. iOS and Android clients use HTTP/2. Web uses React SPA. Client prefetches feed on app launch to hide latency."><span class="d-step">1</span> Client (iOS / Android / Web)</div>
       <div class="d-arrow-down">&#8595;</div>
-      <div class="d-box purple" data-tip="Caches static assets (JS, CSS, images) at 400+ PoPs. Cache-Control: max-age=31536000 for immutable assets. Reduces origin load by 90%."><span class="d-step">2</span> CloudFront (CDN) <span class="d-metric latency">&lt;50ms</span></div>
+      <div class="d-box purple" data-tip="Caches static assets (JS, CSS, images) at 750+ PoPs. Cache-Control: max-age=31536000 for immutable assets. Reduces origin load by 90%."><span class="d-step">2</span> CloudFront (CDN) <span class="d-metric latency">&lt;50ms</span></div>
       <div class="d-arrow-down">&#8595;</div>
       <div class="d-box purple" data-tip="Layer 7 load balancer. Round-robin across ECS tasks. Health checks every 10s. Connection draining 30s on deploys. Terminates TLS."><span class="d-step">3</span> ALB (Load Balancer) <span class="d-metric latency">1ms</span></div>
       <div class="d-arrow-down">&#8595;</div>
@@ -149,7 +149,7 @@ func registerInstagram(r *Registry) {
       <div class="d-group-title">Media &amp; Delivery</div>
       <div class="d-flow-v">
         <div class="d-box amber" data-tip="S3 Standard: 11 nines durability. Pre-signed URL upload bypasses app server. Use Intelligent-Tiering at &gt;10TB to move cold objects to cheaper tiers.">S3 Standard &#8212; <span class="d-metric cost">$23/TB/mo</span> <div class="d-tag blue">S3</div></div>
-        <div class="d-box purple" data-tip="$85/10TB outbound from edge. 400+ PoPs. Origin Shield adds ~$10/TB but cuts origin load by 90%. Cache-Control: max-age=31536000 for immutable assets.">CloudFront CDN &#8212; <span class="d-metric cost">$85/10TB</span></div>
+        <div class="d-box purple" data-tip="$85/10TB outbound from edge. 750+ PoPs. Origin Shield adds ~$10/TB but cuts origin load by 90%. Cache-Control: max-age=31536000 for immutable assets.">CloudFront CDN &#8212; <span class="d-metric cost">$85/10TB</span></div>
       </div>
     </div>
   </div>
@@ -428,7 +428,7 @@ func registerInstagram(r *Registry) {
         <div class="d-flow-v">
           <div class="d-box purple" data-tip="One Origin Shield per region collapses all edge PoP misses into a single origin fetch. Reduces S3 GET requests by 90%. Costs ~$10/TB but saves far more."><span class="d-step">5</span> CloudFront Origin Shield (regional cache) <span class="d-metric latency">5-10ms</span></div>
           <div class="d-arrow-down">&#8595;</div>
-          <div class="d-box purple" data-tip="400+ PoPs worldwide. Cache-Control: max-age=31536000 means images are cached at edge indefinitely. TTL reset only on CDN invalidation."><span class="d-step">6</span> CloudFront Edge PoPs (400+ locations) <span class="d-metric latency">&lt;20ms</span></div>
+          <div class="d-box purple" data-tip="750+ PoPs worldwide. Cache-Control: max-age=31536000 means images are cached at edge indefinitely. TTL reset only on CDN invalidation."><span class="d-step">6</span> CloudFront Edge PoPs (400+ locations) <span class="d-metric latency">&lt;20ms</span></div>
           <div class="d-arrow-down">&#8595;</div>
           <div class="d-box blue" data-tip="Browser receives image in under 50ms globally for cached content. HTTP/2 multiplexing loads multiple images simultaneously."><span class="d-step">7</span> User device <span class="d-metric latency">&lt;50ms globally</span> <span class="d-status active"></span></div>
         </div>
@@ -772,7 +772,7 @@ func registerInstagram(r *Registry) {
       <div class="d-group">
         <div class="d-group-title">Layer 1: Absorb</div>
         <div class="d-flow-v">
-          <div class="d-box purple" data-tip="Pre-warm CDN before known events (Super Bowl). Push popular content to all 400+ PoPs 30 min before kickoff. Eliminates cold-cache miss spike."><span class="d-step">1</span> CDN pre-warming (push to all PoPs) <div class="d-tag green">proactive</div></div>
+          <div class="d-box purple" data-tip="Pre-warm CDN before known events (Super Bowl). Push popular content to all 750+ PoPs 30 min before kickoff. Eliminates cold-cache miss spike."><span class="d-step">1</span> CDN pre-warming (push to all PoPs) <div class="d-tag green">proactive</div></div>
           <div class="d-box purple" data-tip="Token bucket: 100 req/min per user_id. Implemented at ALB WAF level. Returns 429 with Retry-After header. Protects origin from burst."><span class="d-step">2</span> Rate limiter (100 req/min per user) <span class="d-metric throughput">blocks 80% of burst</span></div>
           <div class="d-box purple" data-tip="ECS auto-scales on CPU&gt;70%. Scale-out completes in ~3 min. Pre-scale for known events: set min tasks to 3x normal 30 min before."><span class="d-step">3</span> Auto-scaling ECS (CPU/memory triggers) <span class="d-metric latency">3 min scale-out</span></div>
         </div>
@@ -879,7 +879,7 @@ func registerInstagram(r *Registry) {
       <div class="d-group">
         <div class="d-group-title">us-east-1 (Americas) <div class="d-tag blue">primary</div></div>
         <div class="d-flow-v">
-          <div class="d-box purple" data-tip="400+ PoPs in Americas. All US media requests served from CloudFront edge — never hits S3 origin for cached content.">CloudFront <span class="d-metric latency">&lt;20ms US</span></div>
+          <div class="d-box purple" data-tip="750+ PoPs in Americas. All US media requests served from CloudFront edge — never hits S3 origin for cached content.">CloudFront <span class="d-metric latency">&lt;20ms US</span></div>
           <div class="d-arrow-down">&#8595;</div>
           <div class="d-box purple" data-tip="WAF rules, rate limiting, path-based routing to microservices. TLS termination.">ALB <span class="d-metric latency">1ms</span></div>
           <div class="d-arrow-down">&#8595;</div>

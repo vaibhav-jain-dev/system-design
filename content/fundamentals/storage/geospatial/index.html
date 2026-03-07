@@ -66,6 +66,8 @@
   "Store the GeoHash string as a VARCHAR column with a B-tree index. For a 5km search at precision-6, compute the target cell and its 8 neighbors, then do a WHERE geohash_6 IN (...9 values...). This is a 9-row index lookup with exact distance post-filter — no full scan."
 }}
 
+{{qa "How does Uber find nearby drivers?" "Uber uses Google S2 cells. Each driver's location is mapped to an S2 cell at a specific level. Finding nearby drivers means querying adjacent cells at that level. Drivers update their cell every few seconds via WebSocket. The matching service queries Redis with the rider's cell and neighboring cells to find candidates within 5km." "Why not just use a SQL query with latitude/longitude range?" "A bounding box query (lat BETWEEN x-0.05 AND x+0.05) works for small datasets but doesn't use spatial indexes efficiently. At 1M active drivers, you need a purpose-built spatial index (GeoHash, S2, or R-tree) to avoid full table scans."}}
+
 {{phase 3 "S2 Cells" "4 min"}}
 
 {{say `<span class="hl-blue">S2</span> is Google's geometry library — the right tool when you need polygon operations, not just point lookup:
@@ -195,6 +197,8 @@ if stale:
   "Redis GEO uses a 52-bit GeoHash which gives ~0.6 meter accuracy. For ride-sharing, this is more than sufficient — drivers are matched within 2-5km and dispatched to street-level addresses. The 0.6m error is imperceptible. Precision only matters if you are doing centimeter-scale surveying, not application-level location matching."
 }}
 
+{{qa "How do food delivery apps show nearby restaurants?" "Pre-compute restaurant GeoHash at onboarding and store it in Redis. When a user opens the app, compute their GeoHash prefix, query Redis GEORADIUS within 5km, and return sorted by distance. The restaurant list is relatively static (thousands, not millions), so this is a simple GEORADIUS call — not the complex driver-matching problem." "What about geofencing (e.g., 'user entered zone X')?" "Geofencing checks if a point is inside a polygon, not proximity search. Use S2 or H3 to cover the polygon with cells, then check if the user's cell overlaps the polygon's cell set. Redis doesn't support polygon queries natively — use PostGIS ST_Contains or a dedicated geofencing service."}}
+
 {{phase 6 "PostGIS & Fallback" "4 min"}}
 
 {{say `<span class="hl-blue">PostGIS</span> is PostgreSQL's spatial extension — the right choice when you need durability, SQL joins, or historical queries:
@@ -297,6 +301,8 @@ def find_nearby_drivers(lng: float, lat: float, radius_m: int = 5000, limit: int
   (how "Uber's actual stack" "Redis GEO for real-time dispatch (sub-ms). H3 for surge pricing computed every 30s (equal-area aggregation). PostGIS for historical trip data, driver earnings, and audit. S2 for geofence containment checks at airport zones and restricted areas.")
   (whatIf "Redis GEO cluster goes down during peak hours" "Fall back to PostGIS for dispatch. Accept 10ms vs 0.5ms latency. At 1,000 match requests/sec, PostGIS can handle this with 2 read replicas. Pre-test the failover path — it should be automatic via your location service circuit breaker.")
 }}
+
+{{qa "How accurate is geospatial matching for ride-sharing vs delivery?" "Ride-sharing needs 100m accuracy for driver matching (which driver is closest?) but street-level accuracy for pickup (navigate to exact address). GeoHash precision-7 gives ~150m cells — good for matching. Final navigation uses exact coordinates. Delivery needs POI-level accuracy — which restaurant is closest to the user? GeoHash precision-6 (~600m) is sufficient." "Should I use DynamoDB for geospatial queries?" "DynamoDB doesn't have native geospatial indexes. You'd need to implement GeoHash-based queries manually: store GeoHash as sort key, query with begins_with for prefix matching. The geo-library-dynamodb library does this. For simple proximity queries it works; for complex spatial queries (polygon, radius with distance sort), use Redis GEO or PostGIS."}}
 
 {{phase 8 "Interview Summary" "2 min"}}
 

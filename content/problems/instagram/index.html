@@ -2,7 +2,13 @@
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
-{{say "Let me clarify the scope. Are we designing Instagram's full platform or focusing on specific features? I'll scope it to the core: photo/video sharing with a feed, stories, likes, comments, and explore. Here are the functional and non-functional requirements."}}
+{{say "Let me clarify scope before diving in:
+<ul>
+  <li>Designing <strong>Instagram's core platform</strong> — photo/video upload, news feed, stories, likes, comments, and explore</li>
+  <li>Not covering Reels, Shopping, DMs, Live, or ads — those are extensions I can discuss later</li>
+  <li>The hard problems are <strong>fan-out strategy</strong> for the feed, the <strong>media processing pipeline</strong>, and <strong>scaling counters</strong> (likes) under write contention</li>
+  <li>I'll start with functional and non-functional requirements, then walk through each scaling stage</li>
+</ul>"}}
 
 {{hint "why scope matters for Instagram?" "Instagram has 20+ features: Reels, Shopping, DMs, Live, IGTV, AR filters, ads. A 45-minute interview cannot cover all of them. Scoping to core features (post, feed, stories, likes, comments, explore) lets you go deep on the hard problems: fan-out, media pipeline, feed ranking. Mention the others as future extensions to show awareness without derailing the design."}}
 
@@ -482,7 +488,13 @@ LIMIT 20;
 
 {{phase 4 "Stage 1: Upload Flow (Hop-by-Hop)" "5 min"}}
 
-{{say "I'll walk through the upload flow hop by hop — each service, its purpose, failure modes, and cost."}}
+{{say "The upload flow has four hops:
+<ul>
+  <li><strong>Client → API Gateway</strong> — auth, rate limiting, pre-signed URL generation</li>
+  <li><strong>Client → S3</strong> — direct upload via pre-signed URL, bypassing app servers</li>
+  <li><strong>S3 → Lambda</strong> — event-triggered image processing (resize to 4 variants, EXIF strip, WebP conversion)</li>
+  <li><strong>Lambda → CDN</strong> — processed images pushed to CloudFront for edge delivery</li>
+</ul>"}}
 
 {{diagram "ig-upload-read-flow"}}
 
@@ -493,6 +505,15 @@ LIMIT 20;
 {{diagram "ig-cdn-media-pipeline"}}
 
 {{hint "why pre-signed URLs for upload?" "Pre-signed URLs let clients upload directly to S3, bypassing your application servers entirely. This avoids the bottleneck of proxying multi-MB image files through your API tier, reduces server CPU and bandwidth costs, and lets S3 handle the heavy lifting of multipart uploads with built-in retry."}}
+
+{{triggerQs "Upload flow questions"
+  "What happens if Lambda image processing fails after upload?"
+  "S3 event notification triggers Lambda. If Lambda fails, configure a dead-letter queue (SQS DLQ) with 3 retries. The original image is already safely in S3 — only the resized variants are missing. A separate retry worker polls the DLQ and reprocesses. The client sees the original image until variants are ready."
+  "Why not proxy uploads through your API servers instead of pre-signed URLs?"
+  "A 5MB image upload ties up an API server thread for 1-3 seconds on a typical connection. At 1,000 concurrent uploads, that is 1,000 threads blocked on I/O — consuming memory and exhausting connection pools. Pre-signed URLs offload this entirely to S3, which is purpose-built for high-throughput object writes with multipart upload support."
+  "How do you prevent abuse of the upload endpoint?"
+  "Rate limit pre-signed URL generation to 10/minute per user. Set a max Content-Length header on the pre-signed URL (e.g., 50MB). S3 rejects uploads exceeding this. Add a post-upload Lambda that checks file type via magic bytes — reject non-image/video files and delete the S3 object."
+}}
 
 {{phase 5 "Stage 2: Growing (1M-50M users)" "8 min"}}
 
@@ -611,7 +632,7 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
 
 {{phase 6 "Stage 3: Scaling (50M-500M users)" "8 min"}}
 
-{{say "At 50M+ users, Postgres becomes the bottleneck. We need to shard the database, move to microservices, and add proper message queuing for async processing."}}
+{{say "At 50M+ users, Postgres becomes the bottleneck. We need to shard the database, move to microservices, and add Kafka for async event processing."}}
 
 {{table "Microservices Split" (rows
   (row "Service"            "Owns"                                "Database"                           "Why This DB")
@@ -769,9 +790,30 @@ class ShardedCounter:
   "DynamoDB Global Tables replicate in under 1 second. For that brief window, the feed may not include the latest post. This is acceptable because social media feeds are eventually consistent by design."
 }}
 
+{{think "Multi-region is the most expensive decision — 3x infrastructure cost for a problem most systems never have. Only deploy multi-region when user latency exceeds 200ms from the nearest region or when compliance requires data residency."
+  (whyNot "serving all traffic from us-east-1" "Users in India see 250ms latency to US-East. At 200M+ Indian users, that is 50 billion high-latency requests per day. CDN helps for static assets, but feed computation and write paths cannot be cached — they must run in a nearby region.")
+  (whatIf "replication lag causes a user to not see their own post" "Route each user's reads to their home region using a region cookie. Writes always go to the home region first, then replicate. This guarantees read-your-writes consistency within the home region while allowing eventual consistency for cross-region followers.")
+}}
+
+{{triggerQs "Multi-region scaling questions"
+  "How do you handle a region failover if us-east-1 goes down?"
+  "Route 53 health checks detect the outage within 30 seconds and reroute traffic to eu-west-1. DynamoDB Global Tables already have a full replica there. The feed Redis cache is cold in the failover region — expect degraded latency for 5-10 minutes while caches warm. S3 Cross-Region Replication ensures media is available, though images uploaded in the last 15 minutes may be missing until replication catches up."
+  "Why CRDTs instead of a centralized counter service for multi-region likes?"
+  "A centralized counter service adds a cross-region round trip (100-300ms) on every like. At 100K likes/sec globally, that is 100K cross-region calls/sec — expensive and fragile. G-Counter CRDTs let each region increment locally with zero coordination. The trade-off is eventual consistency: a like in ap-south-1 takes <1s to propagate to us-east-1. For social media counters, this staleness is invisible to users."
+  "How do you decide which region owns a user's data?"
+  "At signup, assign the user to the nearest region based on IP geolocation. Store the home region in a global routing table (DynamoDB Global Table with user_id → region mapping). All writes for that user go to their home region. If a user permanently relocates, a migration job re-shards their data to the new region — but this is rare enough to handle as a manual operations task."
+}}
+
+{{triggerQs "Global Scale Questions"
+  "How do you handle cross-region data conflicts in DynamoDB Global Tables?"
+  "DynamoDB Global Tables use <strong>last-writer-wins</strong> conflict resolution based on timestamps. For counters (likes, views), this causes lost writes — two regions incrementing simultaneously means one increment is dropped. Fix: use <span class='hl-blue'>CRDT counters</span> (grow-only) that merge by taking the max per shard. For user profile updates, last-writer-wins is acceptable because profile edits are rare and user-initiated."
+  "What is the latency impact of multi-region deployment?"
+  "Intra-region reads: <span class='hl'>1-5ms</span>. Cross-region replication lag: <span class='hl'>200-500ms</span> for DynamoDB Global Tables, <span class='hl'>up to 15 minutes</span> for S3 CRR. Users reading their own data use <strong>read-your-writes consistency</strong> by routing to their home region. Cross-region follows (Indian user following US user) see eventual consistency — the feed may lag by 1-5 seconds, which is acceptable."
+}}
+
 {{phase 9 "Security & Content Moderation" "8 min"}}
 
-{{say "Security at Instagram scale means content moderation, spam prevention, bot detection, and account safety. Each is a system design problem on its own."}}
+{{say "Security at Instagram scale covers four areas: content moderation (ML classifiers + human review), spam prevention (behavioral signals + rate limiting), bot detection (device fingerprinting + CAPTCHA), and account safety (2FA + session management)."}}
 
 {{diagram "ig-security-layers"}}
 
@@ -883,7 +925,7 @@ async def mark_viewed(story_id: str, user_id: int):
 
 {{phase 10 "Analytics & Monitoring" "5 min"}}
 
-{{say "At Instagram scale, observability is not optional. I'll cover the SLOs, analytics pipelines, and monitoring stack."}}
+{{say "Three observability pillars at Instagram scale: <strong>Prometheus + Grafana</strong> for latency/error-rate dashboards, <strong>structured JSON logs → Kafka → Elasticsearch</strong> for searchable logging, and <strong>OpenTelemetry</strong> for distributed tracing across all microservices."}}
 
 <h3>Explore & Search</h3>
 
@@ -959,6 +1001,13 @@ async def mark_viewed(story_id: str, user_id: int):
 
 {{hint "why separate SLOs per feature?" "Feed availability matters more than explore availability — users tolerate explore being slow but not their feed. Upload success matters more than notification delivery — a lost photo is unrecoverable but a delayed notification is just annoying. Different SLOs let you prioritize engineering effort on what matters most to users."}}
 
+{{triggerQs "Analytics & Monitoring Questions"
+  "How do you detect a silent degradation where feeds load but are stale?"
+  "Monitor the <strong>cache age distribution</strong> in Redis. If the median sorted set age exceeds <span class='hl'>30 seconds</span> (normal is <span class='hl'>2-5 seconds</span>), the fan-out pipeline is falling behind. Alert on <span class='hl-blue'>Kafka consumer lag</span> for the feed-fanout consumer group — lag above <span class='hl'>100K messages</span> means feeds are going stale."
+  "What SLOs would you set for Instagram's core features?"
+  "Feed load: <span class='hl'>p99 &lt; 200ms</span>. Image upload to CDN-available: <span class='hl'>p99 &lt; 10 seconds</span>. Like confirmation: <span class='hl'>p99 &lt; 100ms</span> (optimistic UI, actual write can be async). Story view: <span class='hl'>p99 &lt; 150ms</span>. Explore page: <span class='hl'>p99 &lt; 500ms</span> (ML ranking is compute-heavy). Monitor SLO burn rate — if you're burning through your monthly error budget in a week, escalate."
+}}
+
 {{phase 11 "Bottlenecks & Trade-offs" "8 min"}}
 
 {{table "Key Trade-offs" (rows
@@ -981,7 +1030,7 @@ async def mark_viewed(story_id: str, user_id: int):
   (row "CDN cache miss storm"        "Origin S3/ALB overloaded"        "TTL expiry causes all PoPs to refetch"          "Origin Shield (single regional cache) + stale-while-revalidate header")
 )}}
 
-{{say "Two critical interview topics deserve a deeper dive: distributed ID generation and counter collision prevention. These are the follow-up questions that separate senior candidates."}}
+{{say "Two critical interview topics deserve a deeper dive: distributed ID generation and counter collision prevention."}}
 
 {{qa
   "How does the database generate IDs and ensure no collisions at scale?"
@@ -1001,7 +1050,7 @@ async def mark_viewed(story_id: str, user_id: int):
 
 {{diagram "ig-scaling-timeline"}}
 
-{{say "At 500M+ DAU, Instagram is not one system but a constellation of specialized systems communicating through event streams, each optimized for its specific access pattern."}}
+{{say "At 500M+ DAU, Instagram is not one system but 7+ microservices (User, Post, Feed, Media, Engagement, Notification, Search) communicating through Kafka event streams, each with its own database optimized for its access pattern."}}
 
 {{diagram "ig-distributed-system"}}
 

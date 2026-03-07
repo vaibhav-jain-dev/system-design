@@ -56,6 +56,10 @@
   (whatIf "you use fewer hash functions than optimal (e.g., k=3)" "Fewer hash functions per insert means fewer bits set, but each lookup checks fewer positions. With k=3 and 9.6 bits/element, the FP rate rises from 1% to about 1.9%. A deliberate trade-off if hash computation is expensive.")
 }}
 
+{{hint "why 1% is the default FP rate" "Halving the false positive rate from 1% to 0.5% costs <span class='hl'>1.44 extra bits per element</span> — that is a 15% memory increase for a 50% FP reduction. Going from 1% to 0.1% costs <span class='hl'>4.8 extra bits</span> (50% more memory). 1% is the sweet spot: false positives are rare enough to be cheap (one unnecessary DB query per 100 lookups), and memory stays at ~10 bits/element."}}
+
+{{hint "why bits-per-element is constant" "The formula m/n = -1.44 * log2(p) depends only on the target FP rate p, not on n. This means a Bloom filter for <span class='hl'>1 million</span> elements and one for <span class='hl'>1 billion</span> elements both use <span class='hl'>~9.6 bits per element</span> at 1% FP. Memory scales perfectly linearly — double the elements, double the memory, same accuracy."}}
+
 {{table "Practical Sizing Guide" (rows
   (row "Elements (n)"   "FP Rate (p)"   "Bits (m)"        "Hash Functions (k)"  "Total Memory")
   (row "1 million"       "1%"            "9.6M bits"       "7"                   "1.2 MB")
@@ -145,6 +149,15 @@ print("FP rate: {:.3f}% (expected: {:.3f}%)".format(
 
 {{hint "double hashing" "The _hashes method runs only 2 MD5 computations regardless of k. It derives all k positions from h1 and h2 using the formula (h1 + i*h2) % m. This is mathematically equivalent to k independent hash functions and is the standard production technique — not a shortcut."}}
 
+{{hint "why MD5 and not a faster hash?" "MD5 is used here for clarity — in production, use <span class='hl-blue'>MurmurHash3</span> or <span class='hl-blue'>xxHash</span>. MurmurHash3 runs at <span class='hl'>~3 GB/s</span> vs MD5's ~600 MB/s — a 5x speedup. Cryptographic security is irrelevant; we only need uniform distribution across the bit array. At <span class='hl'>k=7</span> hash positions per lookup, hash speed directly impacts throughput."}}
+
+{{triggerQs "Implementation questions"
+  "Why use bytearray instead of a list of booleans?"
+  "A Python list of booleans uses 28 bytes per element due to object overhead. A bytearray packs 8 bits per byte — that is a 224x memory difference. For 1 billion elements at 9.6 bits each: bytearray = 1.2 GB, list of booleans = 268 GB. The bytearray is mandatory at scale."
+  "How would you implement this in a distributed system with Redis?"
+  "Use Redis SETBIT and GETBIT commands on a single key. Redis strings support up to 512 MB (4 billion bits), enough for ~400 million elements at 1% FP. For larger filters, partition the bit array across multiple keys using the formula key = bit_position // (512 * 1024 * 1024 * 8), offset = bit_position % (512 * 1024 * 1024 * 8). All k GETBIT calls can be pipelined in a single round trip."
+}}
+
 {{think "Using bytearray for the bit array is a deliberate choice. It packs 8 bits per byte, giving 9.6 bits/element theoretical efficiency at ~10 bits/element actual. A Python list of booleans would use 28 bytes per element — 22x worse. In production, use Redis BITSET or a native C extension (pybloom_live) for billion-element filters."
   (whatIf "you need the filter to persist across process restarts" "Serialize self.bits with pickle or write the bytearray directly to disk. The filter is just a fixed-size byte array. Store self.m, self.k, and self.count alongside the bytes so you can reconstruct the BloomFilter object.")
 }}
@@ -164,6 +177,8 @@ print("FP rate: {:.3f}% (expected: {:.3f}%)".format(
 )}}
 
 {{diagram "algo-bloom-filter-cache-layer"}}
+
+{{hint "why Bloom filter sits before the DB, not before the cache" "The Bloom filter protects the <strong>most expensive</strong> operation. A cache miss costs <span class='hl'>1-5ms</span> (network hop to Redis). A DB miss on absent keys costs <span class='hl'>5-50ms</span> and burns disk I/O. The filter eliminates DB lookups for keys that definitely do not exist — this is the dominant cost in write-heavy workloads like URL shorteners where most generated codes are new."}}
 
 {{think "Cassandra's SSTable Bloom filters are the canonical production example. Each SSTable file has its own Bloom filter. A read request for a key must check potentially dozens of SSTables — without Bloom filters, this means dozens of disk seeks. With Bloom filters, most SSTables are skipped in O(k) memory operations. Cassandra stores these filters in memory permanently for this reason."
   (whatIf "the Bloom filter is too large to fit in memory" "For Cassandra SSTables, each file's filter is sized proportionally to its row count. A 1 GB SSTable with 10 million rows needs only 12 MB for its filter at 1% FP. Total filter memory across all SSTables is typically 1-5% of raw data size.")
@@ -198,6 +213,15 @@ print("FP rate: {:.3f}% (expected: {:.3f}%)".format(
   (row "Scalable Bloom"          "No"              "~10 bits + overhead" "Approximate"     "Complex")
 )}}
 
+{{hint "why Cuckoo filters use only ~12 bits per element" "A Cuckoo filter stores <span class='hl-blue'>fingerprints</span> (short hashes, typically 8-12 bits) in buckets with 4 slots each. With 4 slots per bucket and 95% occupancy, overhead is minimal. A Counting Bloom Filter replaces each 1-bit position with a <span class='hl'>4-bit counter</span>, quadrupling the base cost from 10 to 40 bits/element. Cuckoo's fingerprint approach is fundamentally more space-efficient for deletable sets."}}
+
+{{triggerQs "Variant selection questions"
+  "When would you pick a Scalable Bloom Filter over sizing for 3x growth?"
+  "When the element count is truly unpredictable — web crawler URLs, for example. A Scalable Bloom Filter adds new layers with tighter FP rates (each layer uses p * r^i where r = 0.5). The combined FP rate converges to p / (1 - r). Downside: lookups must check all layers, so query cost grows as O(L * k) where L is the number of layers."
+  "Can you convert a standard Bloom filter to a Counting Bloom filter after deployment?"
+  "No. A standard filter stores only bits — the count information is irreversibly lost. You must rebuild from the source data. This is why the variant choice must be made upfront. If there is any chance you will need deletion, start with a Cuckoo filter — it uses only 12 bits/element vs 40 for Counting Bloom, with the same deletion capability."
+}}
+
 {{think "Cuckoo filters beat Counting Bloom Filters on almost every metric: same or lower FP rate, 3x less memory (12 vs 40 bits/element), and deletion support. The only reason to choose a Counting Bloom Filter today is existing code or library constraints."
   (whyNot "Counting Bloom Filter over Cuckoo Filter" "4-bit counters use 40 bits/element vs 12 bits for Cuckoo. Cuckoo also has better cache performance due to denser packing. Unless your team already has a Counting Bloom Filter in production, Cuckoo is the right choice for deletable filters.")
   (how "does deletion work in a Cuckoo filter?" "A Cuckoo filter stores fingerprints (short hashes of items) rather than setting bits. To delete, remove the fingerprint from one of its two candidate buckets. Unlike bits, a specific fingerprint can be removed without affecting other items that happened to set the same bits.")
@@ -221,9 +245,13 @@ print("FP rate: {:.3f}% (expected: {:.3f}%)".format(
   "No. A standard Bloom filter only tracks presence. Use a Count-Min Sketch for frequency estimation — it uses multiple hash functions with counters and returns the minimum count across all positions, which is an upper bound on the true count."
 }}
 
+{{hint "Redis SETBIT/GETBIT for distributed Bloom filters" "Redis supports bit-level operations natively: <span class='hl-blue'>SETBIT key offset 1</span> and <span class='hl-blue'>GETBIT key offset</span> operate on a single string key up to <span class='hl'>512 MB</span> (4 billion bits — enough for ~400M elements at 1% FP). Pipeline all k GETBIT calls in one round trip for <span class='hl'>~0.2ms</span> total latency. For larger filters, shard the bit array across multiple keys: key = 'bf:' + str(bit_position // 2^32), offset = bit_position % 2^32."}}
+
 {{followup "How would you implement a distributed Bloom filter?" "Two approaches: 1) Partitioned — split the bit array across Redis nodes using consistent hashing. Each query may hit multiple nodes. 2) Replicated — each app server holds a full local copy, updates broadcast asynchronously. Replicated is simpler and faster for read-heavy workloads like URL deduplication. Use Redis BITSET commands (SETBIT, GETBIT) for the storage layer."}}
 
 {{phase 8 "Interview Checklist" "2 min"}}
+
+{{say "The Bloom filter interview tests three things: can you explain the space-accuracy trade-off, can you calculate optimal parameters, and do you know where false positives are acceptable versus dangerous."}}
 
 {{checklist
   "Bloom filter: definitely-not-in-set or possibly-in-set (no false negatives)"

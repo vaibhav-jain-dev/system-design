@@ -51,7 +51,26 @@
 
 {{hint "conditional chaining for routing" "The classify-then-route pattern is extremely powerful. Run a fast, cheap model to classify the input type (billing question, technical issue, sales inquiry), then route to a specialized chain with domain-specific context. This beats a single chain that tries to handle all cases because each specialized chain can be tuned for its specific domain."}}
 
+{{think "Sequential chaining is the safest default — each step validates its input from the previous step. Parallel chaining cuts latency but requires all branches to be truly independent — if branch B needs output from branch A, you must use sequential."
+  (whyNot "always running steps in parallel" "Parallel execution only works for independent subtasks. If step B needs output from step A, running them in parallel means B starts with no input and fails. Most pipelines have at least one dependency chain.")
+  (whatIf "one step in a sequential chain fails" "The chain aborts at the failure point. Each step should have a validator that checks output format and content before passing downstream. Retry the failed step 2-3 times with a format reminder before aborting the entire chain.")
+}}
+
+{{triggerQs "Questions about chaining patterns"
+  "How do you handle error propagation in a chain?"
+  "Each step returns a structured result with a status field (success/failure) and the output. The orchestrator checks status before invoking the next step. On failure: retry the step up to 3 times, then abort the chain and return an error indicating which step failed. Never silently pass bad output downstream — errors compound through the chain."
+  "When do you add a gate (quality check) between steps?"
+  "Add a gate when the next step is expensive or irreversible. For example: before sending a generated email (cannot unsend), before writing to a database (hard to undo), or before calling a paid API. The gate can be a simple format check (JSON valid?), an LLM judge (is this response appropriate?), or a deterministic rule (does output contain required fields?)."
+}}
+
 {{phase 3 "Chaining Framework Implementation" "10 min"}}
+
+{{think "The framework must enforce strict boundaries between steps. Each step receives a string and returns a string — no shared mutable state. This forces clean interfaces and makes steps independently testable. The alternative — passing a shared context object that steps mutate — creates hidden coupling where step 3 silently depends on a field that step 1 sometimes sets."
+  (whyNot "shared mutable context object" "Steps become implicitly coupled. Step 3 reads a field set by step 1, but step 2 sometimes overwrites it. Debugging requires tracing the full mutation history. String-in/string-out with an immutable context dict eliminates this class of bugs entirely.")
+  (whatIf "a step needs output from a non-adjacent step" "The context dict holds all previous step outputs keyed by step name. Step 4 can reference {extract} directly without step 3 forwarding it. This is the context accumulation pattern — each step adds to the dict but never modifies previous entries.")
+}}
+
+{{hint "why temperature 0.1 for chain steps" "Chain steps need deterministic, repeatable outputs. Temperature 0.1 gives near-deterministic results while allowing minimal variation to avoid degenerate repetition. At temperature 0.7+, extraction steps produce inconsistent JSON structures across runs, breaking downstream parsers <span class='hl'>30-40%</span> more often."}}
 
 {{say `A reusable chaining framework needs to handle five concerns:
 <ul>
@@ -339,6 +358,8 @@ print("Total tokens:", result.total_tokens)
 print("Total latency: {:.0f}ms".format(result.total_latency_ms))
 `}}
 
+{{hint "why validate_response uses rules, not LLM" "Rule-based validation (length checks, placeholder detection) runs in <span class='hl'>&lt;1ms</span> with zero token cost. An LLM judge for the same checks would add <span class='hl'>~400ms</span> and <span class='hl'>~200 tokens</span> per call. Reserve LLM-as-judge for subjective criteria (tone, empathy, coherence) that rules cannot evaluate."}}
+
 {{think "Use cheap models for extraction and classification, expensive models for generation. Extract and classify are essentially structured output tasks — they follow rules. Generation requires nuance, empathy, and judgment. GPT-4o-mini handles the first two at 1/15th the cost of GPT-4o. The quality difference only matters for the writing step."
   (whyNot "gpt-4o-mini for the generation step" "The cost savings are real — about 15x. But customer-facing responses are where quality directly impacts satisfaction and retention. Run both models on a sample of 50 emails and have humans rate the responses. If mini is indistinguishable, switch. If reviewers prefer GPT-4o, the cost is justified.")
   (how "measure quality by step" "Log tokens, latency, and success rate per step. High failure rates on extract (JSON parse errors) indicate unclear output instructions — add format examples. High failure rates on validate indicate the generation step produces inconsistent quality — add more specific criteria or increase retries.")
@@ -422,6 +443,11 @@ chain.add_step(
 )
 `}}
 
+{{think "Gates add latency and cost but prevent the most expensive failure mode: a confident, well-formatted, completely wrong response that reaches the user. Without gates, a chain that misextracts a customer's issue will generate a polished but irrelevant response — the user sees competent-looking nonsense."
+  (whyNot "skipping gates to save latency" "A 4-step chain without gates runs in ~3 seconds. Adding 2 gate checks adds ~800ms. But a single bad response reaching a customer costs far more than 800ms of latency — it costs trust. Gates are insurance: cheap per-request, invaluable when they catch a failure.")
+  (how "decide which steps need gates" "Gate the steps whose failures are hardest to detect downstream. Extraction errors are invisible to the generation step — it will confidently write based on wrong data. Classification errors route to the wrong handler. These two steps need gates. The final generation step's quality is visible to the user, so a human review queue may replace the gate.")
+}}
+
 {{key "The gate pattern is the most important reliability technique for prompt chains. Without gates, errors compound: a bad extraction leads to a bad classification which leads to a bad response. Gates catch errors early and either retry or abort, preventing garbage from propagating through the chain."}}
 
 {{hint "LLM-as-judge uses gpt-4o-mini" "The judge only needs to classify pass/fail and give a brief reason. GPT-4o-mini handles this at 1/15th the cost of GPT-4o. Using the same expensive model for both generation and judging doubles cost with no quality benefit for the judging task."}}
@@ -491,6 +517,13 @@ async def parallel_chain(
 # ))
 `}}
 
+{{think "Parallel chains trade simplicity for latency. A 3-step sequential chain at 800ms per step takes 2.4 seconds. The same 3 steps in parallel take 800ms — a 3x improvement. But parallelization introduces failure correlation: if all 3 steps share a rate limit, they can all fail simultaneously."
+  (whyNot "always parallelize independent steps" "Parallel calls multiply instantaneous API load. 10 parallel chains with 3 parallel steps each = 30 simultaneous API calls. Most API rate limits are per-minute, not per-second, but burst limits exist. Add an asyncio.Semaphore(10) to cap concurrency and prevent 429 cascades.")
+  (whatIf "one parallel branch fails but others succeed" "By default, asyncio.gather propagates the first exception and cancels remaining tasks. Use return_exceptions=True to collect all results including exceptions. Then decide: retry the failed branch, proceed with partial results, or abort. For summarization tasks, partial results are often acceptable. For data validation, all branches must succeed.")
+}}
+
+{{hint "merge step is the bottleneck" "The merge step receives all parallel outputs concatenated — for <span class='hl'>3 branches</span> each producing <span class='hl'>~1K tokens</span>, the merge prompt is <span class='hl'>~3K tokens</span> of input. At 5+ branches, the merge step's context window becomes the limiting factor. Consider hierarchical merging: merge pairs first, then merge the merged results."}}
+
 {{table "Sequential vs Parallel Execution" (rows
   (row "Approach"      "Latency (3 steps)"            "Total Tokens"    "When to Use")
   (row "Sequential"    "Step1 + Step2 + Step3"         "Same"            "Steps depend on each other")
@@ -551,6 +584,13 @@ async def parallel_chain(
 {{think "The key optimization: use cheap models (GPT-4o-mini, Claude Haiku) for extraction and classification, expensive model (GPT-4o, Claude Sonnet) only for the final generation step. Classification rarely needs the most powerful model, but writing a nuanced customer response does. This cuts costs 50-70% while maintaining output quality."
   (whyNot "cheap model for all steps" "The generation step is where quality matters most — it is what the user sees. GPT-4o-mini produces noticeably worse writing quality for long-form responses, nuanced explanations, and empathetic customer communication. Benchmark your specific use case but plan to use the expensive model for any step that requires synthesis, creativity, or judgment.")
   (how "find the optimal model per step" "Build a 50-example test set with human quality ratings. Run each step independently with both models. Calculate per-step quality delta and cost delta. Steps where the quality delta is under 5% justify switching to the cheap model. Steps where quality delta exceeds 10% warrant keeping the expensive model.")
+}}
+
+{{triggerQs "Questions this phase could trigger"
+  "How do you decide which model to use for each step?"
+  "Build a 50-example test set with human ratings. Run each step with both cheap and expensive models. If quality delta is under 5%, use the cheap model. Extraction and classification almost always pass this test — they are structured tasks with clear right/wrong answers. Generation steps that require nuance, empathy, or creativity typically show a 10-20% quality gap favoring the expensive model."
+  "What is the total cost difference between all-expensive and mixed-model chains?"
+  "A 4-step all-GPT-4o chain costs roughly <span class='hl'>$0.04</span> per request. Mixed-model (3 steps mini + 1 step 4o) costs <span class='hl'>$0.013</span> — a <span class='hl'>67% reduction</span>. At 100K requests/day, that is $2,700/day saved. The quality difference is measurable only on the generation step, which still uses the expensive model."
 }}
 
 {{code "python" `# Cost-optimized chain: cheap models for simple steps,
@@ -614,6 +654,13 @@ chain.add_step(
   (row "Rate limit"              "Too many concurrent chains"             "API returns 429"                    "Retry with exponential backoff")
 )}}
 
+{{think "Context overflow is the silent killer of long chains. Each step adds its output to the context dict, and later steps template in multiple previous outputs. A 6-step chain where each step produces 500 tokens means step 6 receives ~3K tokens of prior context plus its own system prompt. At step 8-10, you exceed most models' effective attention span even if you are within the context window."
+  (how "prevent context overflow" "Summarize intermediate outputs before passing them forward. After step 3, add a compression step that distills the context dict into the 5-10 key facts needed by remaining steps. This keeps the per-step prompt under <span class='hl'>2K tokens</span> regardless of chain length.")
+  (whyNot "just using a model with 128K context" "Large context windows do not mean the model attends equally to all positions. Studies show accuracy degrades for information in the middle of long contexts — the lost-in-the-middle effect. Keeping prompts concise ensures the model focuses on what matters for that specific step.")
+}}
+
+{{hint "per-step timeouts prevent chain stalls" "Set a <span class='hl'>10-second</span> timeout per step. Without timeouts, a single slow API response (network issue, model overload) blocks the entire chain indefinitely. A 4-step chain with 10s per-step timeout guarantees worst-case completion in <span class='hl'>40 seconds</span> — the user gets an error message instead of an infinite spinner."}}
+
 {{avoid "Do not pass raw LLM output from one step directly into the next without parsing. LLMs often add conversational fluff around structured output. Always use an output parser that extracts the structured data (JSON, key fields) before feeding it to the next step. This prevents prompt pollution where one step's chatty text confuses the next step."}}
 
 {{table "Common Chain Patterns" (rows
@@ -624,6 +671,15 @@ chain.add_step(
   (row "Classify-Route"       "Classify intent, route to specialized chain" "Customer support, multi-domain QA")
   (row "Translate-Verify"     "Translate text, back-translate to verify"   "High-quality translation")
 )}}
+
+{{triggerQs "Questions this phase could trigger"
+  "How do you monitor a prompt chain in production?"
+  "Log 4 metrics per step: input tokens, output tokens, latency, and pass/fail status. Aggregate into per-step dashboards. Alert on step failure rate exceeding <span class='hl'>5%</span> (prompt drift or model update broke something) and p99 latency exceeding <span class='hl'>3x baseline</span> (API degradation). Store full chain traces for failed requests to enable replay debugging."
+  "How do you handle model version updates breaking chain steps?"
+  "Pin model versions (gpt-4o-2024-08-06 not gpt-4o) and run the 50-example test set before upgrading. Model updates change output formatting — a step that returned clean JSON on the old version may add markdown fences on the new one. Output parsers absorb minor format changes, but prompt rewrites may be needed for major version jumps."
+  "What is the maximum practical chain length?"
+  "5-6 steps. Beyond that, cumulative latency exceeds <span class='hl'>10 seconds</span>, error probability compounds past <span class='hl'>15%</span> (at 97% per-step success, 6 steps = 83% chain success), and context overflow forces compression steps that add more cost. If you need more than 6 steps, consider an agent or restructure as parallel sub-chains with a merge."
+}}
 
 {{say "The most common prompt chaining interview questions probe debugging, latency, and partial failure handling — interviewers want to know you have operated chains in production."}}
 

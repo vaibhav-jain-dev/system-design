@@ -101,6 +101,8 @@ def handle_payment_charged(event):
   "Only if stateful and single-instance. A stateless orchestrator with state in Postgres or DynamoDB survives crashes. Run 2+ orchestrator instances with leader election or idempotent workers."
 }}
 
+{{qa "What is a pivot transaction in a saga?" "A pivot transaction is a step that cannot be compensated once completed — like sending a physical package or triggering an external payment settlement. All steps before the pivot must be compensatable. All steps after the pivot must always succeed (or be retriable)." "How do you design around a pivot?" "Place the pivot as late as possible in the saga. Validate everything (inventory, payment auth, fraud check) before the pivot. The pivot itself commits the irreversible action. Steps after it are confirmations that must succeed via retry."}}
+
 {{phase 4 "Compensating Transactions" "5 min"}}
 
 {{say "Every saga step must have a compensating transaction — the business-level undo. Compensations are not rollbacks: they run after the step committed. They must account for side effects that already happened in the real world."}}
@@ -221,6 +223,8 @@ def charge_customer_idempotent(saga_id: str, customer_id: str, amount: float):
   "A timeout means no response received within the deadline — the step may have succeeded or failed. Retry with idempotency key — the idempotent handler returns the prior result if it already ran. A saga failure means the step returned an explicit error — trigger compensations."
 }}
 
+{{qa "How do you handle concurrent sagas modifying the same resource?" "Use semantic locks: when a saga step begins, mark the resource as 'PENDING' in its own table. Other sagas check this flag and either wait, skip, or fail. Release the flag when the saga completes or compensates. This provides application-level isolation without distributed locks." "What if a saga reads stale data from a step that hasn't completed yet?" "This is the dirty read problem. You can accept it (eventual consistency), use semantic locks (block reads of PENDING resources), or design business logic to tolerate it (e.g., show 'processing' status to users instead of confirmed)."}}
+
 {{phase 7 "Saga vs 2PC" "4 min"}}
 
 {{say "Two-phase commit (2PC) achieves distributed atomicity through a prepare/commit protocol with a coordinator. Every participant locks resources during the prepare phase. Saga achieves eventual consistency through local commits and compensations — no distributed locks, no coordinator."}}
@@ -262,6 +266,8 @@ def charge_customer_idempotent(saga_id: str, customer_id: str, amount: float):
   (row "AWS Step Functions" "Multi-service order workflows" "Managed orchestration, built-in retry and error handling")
   (row "Temporal.io" "Financial transactions, onboarding" "Cadence successor, popular in fintech")
 )}}
+
+{{qa "When should I use AWS Step Functions vs building my own orchestrator?" "Step Functions for sagas with fewer than 10 steps and simple compensation logic — it handles state persistence, retries, and error handling out of the box. Build your own for complex compensation rules, custom retry policies, or when you need sub-second step latency (Step Functions adds ~100ms overhead per state transition)." "What about Temporal.io?" "Temporal is the best open-source option for complex sagas. It provides durable execution (survives crashes mid-saga), built-in retry with backoff, and workflow versioning. The trade-off is operational complexity of running Temporal's cluster (or paying for Temporal Cloud)."}}
 
 {{avoid "Saying 'Saga provides isolation.' It does not. Two concurrent sagas can read each other's intermediate state. This is the most common interview mistake. The fix is semantic locks: mark a resource as 'pending' so other sagas skip it, or design business logic to tolerate temporary inconsistency."}}
 

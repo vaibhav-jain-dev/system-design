@@ -125,6 +125,73 @@ fundamentals:
         path: fundamentals/category/slug/child
 ```
 
+---
+
+## Content Quality Standards
+
+All content must meet these standards before merging. These ensure consistency, accuracy, and interview-readiness across the knowledge base.
+
+### Structure Requirements
+
+| Content Type | Phases | stageNav | deepQA (Phase 12) |
+|-------------|--------|----------|--------------------|
+| **Problem** | 12 | Required | Required (5 items, 3-level nesting) |
+| **Fundamental** | 8 | Not used | Not used |
+| **Algorithm** | 8 | Not used | Not used |
+
+### Required Macros Per Content Type
+
+**Problems (12 phases):**
+- `{{stageNav}}` linking all 12 phases
+- Every phase opens with `{{say "..."}}` (interview speech)
+- `{{hint}}` on every design decision (2-3 per phase minimum)
+- `{{think}}` with at least 1 `whyNot` or `whatIf` chain per usage
+- `{{triggerQs}}` on 5-6 key phases with 2-3 Q&A pairs each
+- `{{diagram "slug"}}` for every visual (never inline HTML diagrams)
+- `{{compare}}` for technology/algorithm selection decisions
+- `{{table}}` for structured data (requirements, estimates)
+- `{{checklist}}` for section summaries
+- `{{key}}` as closing takeaway
+- Phase 12: `{{deepQA}}` with exactly 5 items, each with 3-level nesting
+
+**Fundamentals / Algorithms (8 phases):**
+- `{{hint}}` 1-2 per phase
+- `{{think}}` with reasoning chains
+- `{{triggerQs}}` on 3-4 phases
+- `{{qa}}` inline throughout
+- `{{table}}` for structured comparisons
+- `{{diagram "slug"}}` for visuals
+- `{{checklist}}` and `{{key}}` at end
+
+### Language and Formatting Rules
+
+1. **Bullet points over paragraphs** — any paragraph with 3+ connected ideas becomes a bullet list with sub-bullets
+2. **Bold key terms** with `<strong>` on first use and for important numbers
+3. **Highlight classes:**
+   - `<span class="hl">` (amber) — key numbers, thresholds, capacities
+   - `<span class="hl-blue">` — concepts, algorithm names
+   - `<span class="hl-red">` — warnings, anti-patterns, failure modes
+4. **`<small>` for caveats** — cost notes, side details
+5. **No filler** — no "great question", no "let me think", no "there are several approaches". Start with the answer.
+6. **No subjective ratings** — replace "fair", "excellent" with actual numbers
+7. **Q&A answers: fact first** — open with the technical answer, then justify
+
+### Factual Accuracy
+
+- All cloud service metrics (PoP counts, pricing, limits) must be verified against current documentation
+- Cost estimates must specify pricing model (on-demand vs reserved)
+- Performance numbers must cite the source or measurement conditions
+- When a claim cannot be verified, mark it with `<small>(approximate)</small>`
+
+### Diagram Standards
+
+- All diagrams registered in `internal/diagrams/` Go files — never inline HTML in content
+- Slug prefix matches domain (`rl-`, `ig-`, `url-`, `algo-`, `fund-`, `pat-`)
+- Each problem should have diagrams for: requirements, architecture, data model, and key algorithms
+- Each fundamental should have at least 2 diagrams
+
+---
+
 ### PDF Layout Rules
 
 | Property | Value |

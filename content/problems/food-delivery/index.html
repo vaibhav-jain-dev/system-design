@@ -794,9 +794,10 @@ CREATE TABLE order_events (
 
 {{avoid "Don't call the state 'stuck' in an interview. Say 'the order is in an indeterminate state pending escalation.' Engineers say stuck; system designers say 'pending escalation with a defined timeout and fallback.'"}}
 
-{{thought "Rider offline mid-delivery: the 60s Redis TTL fires, the order transitions to PARTNER_UNREACHABLE. We cannot reassign because the food is with the partner. Auto-escalate to human ops after 5 minutes. If unresolved in 20 minutes, auto-refund and flag partner account. This is correct — never auto-reassign a PICKED_UP order."}}
-
-{{thought "Payment gateway outage: order is ACCEPTED, restaurant is preparing, but payment is pending. Use a circuit breaker pattern: if payment service error rate > 10% in 60s, open the circuit — stop accepting new orders temporarily and show 'payment processing unavailable' in the app. Queue in-flight payment retries with exponential backoff (1s, 2s, 4s, 8s, up to 3 attempts). If all retries fail, cancel the order and issue a credit (not a refund — credits are instant, refunds take 3–5 days)."}}
+{{think "Two critical failure modes define the edge cases for order state management."
+  (whatIf "rider goes offline mid-delivery" "60s Redis TTL fires → order transitions to PARTNER_UNREACHABLE. Cannot reassign because food is physically with the partner. Auto-escalate to human ops after 5 minutes. If unresolved in 20 minutes, auto-refund and flag partner account. Never auto-reassign a PICKED_UP order.")
+  (whatIf "payment gateway outage while order is ACCEPTED" "Restaurant is preparing but payment is pending. Circuit breaker: if error rate > 10% in 60s, open circuit — stop accepting new orders, show 'payment processing unavailable.' Queue retries with exponential backoff (1s, 2s, 4s, 8s, up to 3 attempts). All retries fail → cancel order and issue credit (instant) not refund (3–5 days).")
+}}
 
 {{compare "Startup vs Enterprise ETA Architecture" (options
   (best "Enterprise: Kafka + Flink streaming ETA" "Real-time stream processing: driver location events → Flink job → dynamic ETA update every 10 seconds. OSRM routing engine cluster for sub-50ms route calculation. Handles 500K concurrent orders. Complex to operate.")
@@ -869,6 +870,8 @@ CREATE TABLE order_events (
 }}
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
+
+{{say "These questions stress-test the core design: partner matching under high demand, order state machine edge cases, and ETA accuracy when real-time data is incomplete."}}
 
 {{deepQA "Critical Interview Questions" `
 <div class="dqa-item">

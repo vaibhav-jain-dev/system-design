@@ -152,6 +152,8 @@ print(ring.get_nodes("user:12345", 3))  # ["node-2", "node-1", "node-3"] (replic
   (how "this scales to millions of keys?" "The ring metadata is tiny: 10 nodes × 150 vnodes = 1500 entries, each an integer and a string. The entire ring fits in a few KB of RAM. It's rebuilt in memory on startup from cluster membership gossip.")
 }}
 
+{{qa "What's the time complexity of consistent hashing operations?" "Lookup: O(log V×N) binary search on sorted tokens — with 10 nodes and 150 vnodes, that's ~11 comparisons. Add/remove node: O(V × log(V×N)) to insert/remove V tokens. Both are sub-millisecond for any realistic cluster size." "Does the ring metadata need to be replicated?" "Yes. Every client or coordinator must have the same ring view. In client-side hashing (Memcached), the ring is computed locally from the server list. In server-side systems (Cassandra), ring state propagates via Gossip protocol — converges in seconds after a topology change."}}
+
 {{phase 5 "Hotspot Mitigation" "4 min"}}
 
 {{say "Consistent hashing distributes keys uniformly — but if one key receives 10x the traffic of all others, virtual nodes don't help. The hot key still maps to one node. The fix is write sharding: split the hot key into N shards and scatter-gather on read."}}
@@ -209,6 +211,8 @@ def get_counter(redis_client, key: str) -> int:
   "The 2022 DynamoDB paper describes moving to a fixed partition space with auto-splitting partitions. Consistent hashing worked but created 'hot partition' problems when a single physical server happened to own adjacent tokens for different popular tables. Fixed partitions allow more predictable isolation."
 }}
 
+{{qa "How does consistent hashing handle data replication?" "Each key is replicated to the next R distinct physical nodes clockwise from its primary. 'Distinct physical' is key — you skip vnodes belonging to the same physical server. With RF=3, three physical machines hold each key." "What happens if two replicas disagree on a value?" "That's a consistency problem, not a hashing problem. The system uses read repair (Cassandra), version vectors (DynamoDB), or quorum reads (W+R > N) to resolve conflicts. Consistent hashing determines WHERE data lives; the consistency protocol determines WHICH version wins."}}
+
 {{phase 7 "Failure Scenarios" "4 min"}}
 
 {{say "When a node dies, consistent hashing automatically routes its keys to the next node clockwise. Without virtual nodes, one successor absorbs the entire dead node's traffic. With 150 virtual nodes, that load spreads across many successors."}}
@@ -246,6 +250,8 @@ def get_counter(redis_client, key: str) -> int:
   (alt "Fixed pre-sharding (Redis Cluster style)" "When ring complexity is unwanted and shard count is known upfront; simpler to reason about")
   (nofit "Single-node or small cluster" "Overhead not justified below ~5 nodes; simple modulo or random is fine")
 )}}
+
+{{qa "Why doesn't Redis Cluster use consistent hashing?" "Redis Cluster uses 16384 fixed hash slots — closer to pre-sharding. slot = CRC16(key) % 16384. Slots are explicitly assigned to nodes. This is simpler: no ring, no vnodes, no binary search. The trade-off is that adding a node requires manually (or auto) resharding slots, not automatic ring geometry." "Is consistent hashing or fixed slots better?" "Consistent hashing scales better for dynamic clusters where nodes frequently join/leave. Fixed slots are simpler for stable clusters with planned scaling. DynamoDB started with consistent hashing and moved toward fixed partitions — simplicity won at their scale."}}
 
 {{avoid "Don't conflate consistent hashing (solves hot RING SEGMENTS from uneven node distribution) with hot KEY mitigation (requires write sharding). These are different problems. Interviewers specifically test for this distinction."}}
 

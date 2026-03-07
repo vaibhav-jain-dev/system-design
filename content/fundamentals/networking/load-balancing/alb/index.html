@@ -24,6 +24,15 @@
 
 {{hint "ALB is the correct default for HTTP" "Start every HTTP workload with ALB. The L7 features (path routing, WAF, auth) are too valuable to give up without a specific reason."}}
 
+{{qa "What are the limits of ALB?" "Key limits: <span class='hl'>100 rules per listener</span>, <span class='hl'>100 target groups per ALB</span>, <span class='hl'>1,000 targets per target group</span>. These are soft limits — request an increase via AWS support. For most architectures, 100 rules per listener is more than enough for path-based microservice routing." "How does ALB differ from API Gateway?" "ALB routes HTTP requests to compute targets (EC2, ECS, Lambda). API Gateway adds API management: throttling, API keys, request/response transformation, SDK generation, and usage plans. For internal microservices, ALB is simpler and cheaper. For public APIs with partner access, API Gateway provides the management layer."}}
+
+{{triggerQs "ALB Fundamentals"
+  "When would you choose API Gateway over ALB?"
+  "API Gateway when you need: API key management, request throttling per client, request/response transformation, SDK auto-generation, or WebSocket APIs with connection management. ALB when you need: simple HTTP routing, WAF, Cognito auth, or targets that are EC2/ECS tasks. ALB is <span class='hl'>~80% cheaper</span> than API Gateway at high request volumes."
+  "Can ALB route to targets in different VPCs?"
+  "Yes, using IP targets (not instance targets). Register IP addresses from peered VPCs, on-premises servers via Direct Connect, or even other AWS accounts. Target type must be set to <span class='hl-blue'>ip</span> instead of <span class='hl-blue'>instance</span> when creating the target group."
+}}
+
 {{phase 2 "Routing Rules Deep Dive" "5 min"}}
 
 {{say "ALB listener rules are evaluated in <strong>priority order — first match wins</strong>. A single ALB can serve dozens of microservices using path and host conditions, with no need for a separate ALB per service."}}
@@ -151,6 +160,34 @@ resource "aws_lb_target_group" "api" {
   (how "How does WebSocket sticky session work?" "WebSocket connections are inherently sticky once established — the TCP connection persists to one target. The issue is reconnections. Enable sticky sessions so reconnecting clients return to the same backend.")
 }}
 
+{{code "python" `# WebSocket health check — ALB routes upgrade requests normally
+# Set ALB idle timeout to 3600s for WebSocket connections
+
+# Server-side WebSocket handler (Python + FastAPI)
+from fastapi import FastAPI, WebSocket
+
+app = FastAPI()
+
+@app.websocket("/ws/{room_id}")
+async def websocket_endpoint(websocket: WebSocket, room_id: str):
+    await websocket.accept()
+    # ALB passes the upgrade request through transparently
+    # Connection persists on the same target until close
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await websocket.send_text(f"Room {room_id}: {data}")
+    except Exception:
+        await websocket.close()
+
+# gRPC health check — ALB requires gRPC health check protocol
+# Target group: protocol version = gRPC
+# Health check: gRPC, path = /grpc.health.v1.Health/Check`}}
+
+{{qa "Does ALB add latency to WebSocket connections?" "ALB adds <span class='hl'>~1ms</span> latency to the initial HTTP upgrade handshake. After the upgrade, ALB passes WebSocket frames with no additional processing — it is effectively a TCP proxy at that point. The ongoing latency overhead is negligible (<span class='hl'>&lt;100µs</span> per frame)." "What is the maximum WebSocket connection duration on ALB?" "ALB idle timeout applies — default <span class='hl'>60 seconds</span>, max <span class='hl'>4,000 seconds</span>. If no data is sent for longer than the idle timeout, ALB closes the connection. Send application-level pings every <span class='hl'>30 seconds</span> to keep the connection alive. Set idle timeout to <span class='hl'>3600 seconds</span> for WebSocket workloads."}}
+
+{{hint "gRPC requires HTTP/2 end-to-end" "ALB supports gRPC natively but the target group protocol version must be set to <span class='hl-blue'>gRPC</span>, not HTTP2. This enables proper gRPC health checks and response code mapping. ALB translates gRPC status codes to HTTP status codes in access logs — <span class='hl-blue'>gRPC OK (0)</span> maps to HTTP 200, <span class='hl-blue'>gRPC UNAVAILABLE (14)</span> maps to HTTP 503."}}
+
 {{phase 4 "WAF and Authentication" "3 min"}}
 
 {{say "ALB integrates with <strong>AWS WAF</strong> for security and supports built-in authentication via <strong>Cognito</strong> or any OIDC provider — your backend never sees unauthenticated or malicious requests."}}
@@ -179,6 +216,42 @@ resource "aws_lb_target_group" "api" {
 {{hint "Auth at ALB = zero auth code in your app" "Cognito integration at ALB means your Lambda or ECS task receives only authenticated requests with the JWT claims in headers. No auth middleware to write or maintain."}}
 
 {{diagram "fund-alb-security-layers"}}
+
+{{code "yaml" `# AWS WAF — minimum production config (CloudFormation snippet)
+WebACL:
+  Type: AWS::WAFv2::WebACL
+  Properties:
+    Scope: REGIONAL  # Use REGIONAL for ALB, CLOUDFRONT for CloudFront
+    DefaultAction:
+      Allow: {}
+    Rules:
+      # Block common web exploits (SQL injection, XSS, etc.)
+      - Name: AWSManagedRulesCommonRuleSet
+        Priority: 1
+        Statement:
+          ManagedRuleGroupStatement:
+            VendorName: AWS
+            Name: AWSManagedRulesCommonRuleSet
+        OverrideAction:
+          None: {}
+        VisibilityConfig:
+          SampledRequestsEnabled: true
+          CloudWatchMetricsEnabled: true
+          MetricName: CommonRuleSet
+
+      # Rate-based rule: block IPs exceeding 2000 req/5min
+      - Name: RateLimit
+        Priority: 2
+        Statement:
+          RateBasedStatement:
+            Limit: 2000
+            AggregateKeyType: IP
+        Action:
+          Block: {}
+        VisibilityConfig:
+          SampledRequestsEnabled: true
+          CloudWatchMetricsEnabled: true
+          MetricName: RateLimit`}}
 
 {{key "ALB + WAF + Cognito auth means your application code never handles unauthenticated requests, SQL injection, or known bad IPs. These are all blocked before reaching your ECS tasks. This is defense in depth."}}
 
@@ -209,7 +282,16 @@ resource "aws_lb_target_group" "api" {
 
 {{avoid "Do not create one ALB per microservice. Use path-based routing rules on a single ALB. Each additional ALB costs $16.43/mo base fee. With 10 microservices, that is $164/mo wasted. One ALB with 10 routing rules costs the same $16.43 base."}}
 
+{{qa
+  "What is the most common LCU cost surprise?"
+  "Rule evaluations. At <span class='hl'>10K RPS</span> with <span class='hl'>10 routing rules</span>, rule evaluations = 100K/s = <span class='hl'>100 LCU</span>. That is <span class='hl'>$58/mo</span> in LCU charges alone — dominating new connections (20 LCU) and processed bytes (0.5 LCU). Consolidate rules and remove unused ones."
+  "How do I reduce ALB costs for low-traffic services?"
+  "Consolidate behind one ALB using path-based routing. Each ALB base fee is <span class='hl'>$16.43/mo</span> regardless of traffic. Ten low-traffic services on separate ALBs cost <span class='hl'>$164/mo</span> in base fees. One ALB with 10 rules costs <span class='hl'>$16.43/mo</span> base plus negligible LCU."
+}}
+
 {{phase 6 "Best Practices" "3 min"}}
+
+{{say "Three configuration mistakes cause most ALB production incidents: wrong deregistration delay, outdated TLS policy, and skipping slow start for JVM services. Get these right upfront."}}
 
 {{triggerQs "ALB Configuration Checklist"
   "What deregistration delay should I set?" "Match your longest request duration. Default 300s is too long for APIs with 5s timeouts. Set 30-60s for APIs, longer for file upload or video processing."
@@ -230,12 +312,37 @@ resource "aws_lb_target_group" "api" {
   "Monitor: 5XX rate, target response time, active connection count"
 }}
 
+{{hint "deregistration delay is the most-missed ALB setting" "Default is <span class='hl'>300 seconds</span> — during deploys, ALB keeps sending requests to draining targets for 5 minutes. For APIs with <span class='hl'>5-second</span> timeouts, set it to <span class='hl'>30-60 seconds</span>. For file uploads or long-running requests, match your maximum expected request duration."}}
+
 {{qa
   "When should I NOT use ALB?"
   "Four scenarios: 1) You need a static IP (use NLB). 2) Non-HTTP protocol like raw TCP or UDP (use NLB). 3) You need TLS passthrough without termination (use NLB). 4) Ultra-low latency under 100 microseconds (use NLB)."
   "Can ALB handle 1 million requests per second?"
   "ALB auto-scales, but it needs time to ramp up. For sudden spikes, pre-warm by contacting AWS support. For predictable high traffic, the ALB learns your traffic pattern and pre-scales. Sustained 1M RPS is served across multiple ALB nodes in multiple AZs."
 }}
+
+{{compare "Deployment Strategy Behind ALB" (options
+  (best "Rolling deployment" "Replace targets in batches. ALB drains connections from old targets, routes to new. Zero-downtime with 5% blast radius per batch. Use with CodeDeploy or ECS rolling update.")
+  (alt "Blue-green deployment" "Run two full environments. Switch ALB target group from blue to green atomically. Instant rollback by switching back. Doubles infrastructure cost during deploy window.")
+  (nofit "Big-bang deployment" "Replace all targets simultaneously. If new version has bugs, 100% of users are affected. Only acceptable for non-production environments.")
+)}}
+
+{{code "bash" `# Blue-green deployment with ALB — switch target groups
+# Step 1: Deploy new version to "green" target group
+aws ecs update-service --cluster prod --service api-green \
+  --task-definition api:42 --desired-count 4
+
+# Step 2: Wait for all green targets to be healthy
+aws elbv2 wait target-in-service \
+  --target-group-arn $GREEN_TG_ARN
+
+# Step 3: Switch ALB listener rule to green target group
+aws elbv2 modify-rule --rule-arn $RULE_ARN \
+  --actions Type=forward,TargetGroupArn=$GREEN_TG_ARN
+
+# Step 4: If issues — instant rollback to blue
+aws elbv2 modify-rule --rule-arn $RULE_ARN \
+  --actions Type=forward,TargetGroupArn=$BLUE_TG_ARN`}}
 
 {{phase 7 "Monitoring & Troubleshooting" "4 min"}}
 

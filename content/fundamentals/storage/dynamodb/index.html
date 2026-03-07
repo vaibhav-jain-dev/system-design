@@ -29,10 +29,10 @@
 }}
 
 {{qa
-  "When should you use DynamoDB vs Postgres?"
-  "DynamoDB when: access patterns are known and key-based, you need unlimited horizontal scale, or you want zero operational overhead. Postgres when: you need complex queries with JOINs, access patterns are not yet known, or you need strong consistency by default."
-  "What is the biggest mistake teams make with DynamoDB?"
-  "Treating it like a relational database. No JOINs, no ad-hoc queries. Design your table around access patterns first. If you do not know your access patterns, use Postgres until you do."
+  "What is the 400 KB item size limit and how do you work around it?"
+  "Each DynamoDB item (row) cannot exceed 400 KB including attribute names and values. For large objects like images or documents, store the binary in S3 and keep only the S3 key in DynamoDB. For items approaching the limit, compress JSON attributes with gzip before storing — typically achieves 3-5x compression on structured data."
+  "How does DynamoDB differ from MongoDB?"
+  "DynamoDB is fully managed — zero server provisioning, patching, or replica set management. MongoDB (self-hosted or Atlas) gives you a richer query language with aggregation pipelines, but you own operational complexity: compaction tuning, replica elections, and connection management. DynamoDB wins on operational simplicity; MongoDB wins on query flexibility."
 }}
 
 {{phase 2 "Data Modeling: Keys and Indexes" "5 min"}}
@@ -101,6 +101,10 @@ items = response['Items']
   (whatIf "two different entities end up sharing the same PK" "Items coexist in the same partition, which is actually the point of single-table design. The sort key differentiates them. The concern is hot partitions if one entity gets enormous traffic — design the SK to spread that load or add a shard suffix.")
 }}
 
+{{hint "GSI vs LSI — when to use each" "GSI (Global Secondary Index): different partition key, eventually consistent, has its own provisioned capacity. Use for completely different access patterns (e.g., lookup by email when PK is user_id). LSI (Local Secondary Index): same partition key, different sort key, strongly consistent. Use when you need an alternative sort order within the same partition. LSI must be created at table creation time — cannot be added later."}}
+
+{{hint "why composite sort key over separate attributes" "A composite sort key like <code>ORDER#2024-01-15#O456</code> encodes multiple dimensions into one sortable string. DynamoDB only supports <span class='hl'>one sort key per table</span> — you cannot filter on two separate attributes in a Query. Embedding date + ID into the sort key lets you range-query by date (<code>BETWEEN ORDER#2024-01 AND ORDER#2024-02</code>) while maintaining uniqueness via the trailing ID. Separate attributes would require a Scan with FilterExpression — <span class='hl-red'>full table scan, O(N) cost</span>."}}
+
 {{phase 3 "Indexes: GSI and LSI" "5 min"}}
 
 {{say "<span class=\"hl-blue\">Global Secondary Indexes (GSIs)</span> enable alternative access patterns — like separate tables DynamoDB maintains for you, with their own partition and sort keys. <span class=\"hl-blue\">Local Secondary Indexes (LSIs)</span> provide alternative sort keys within the same partition. <small>LSIs must be defined at table creation; GSIs can be added any time.</small>"}}
@@ -149,6 +153,22 @@ response = table.query(
 
 {{avoid "Never create a GSI with a <span class=\"hl-blue\">low-cardinality</span> partition key (like <code>status</code> with 3 values: PENDING, SHIPPED, DELIVERED). All PENDING orders land on one partition, creating a <span class=\"hl-red\">hot partition</span> — one shard absorbs all traffic while others sit idle. Instead, add a shard suffix: PENDING#0 through PENDING#9 and <span class=\"hl-blue\">scatter-gather</span> across 10 shards."}}
 
+{{triggerQs "GSI and LSI Design Decisions"
+  "How do you decide between adding a GSI vs creating a separate table?"
+  "GSI when the data is the same but the access pattern differs — e.g., query orders by status instead of by user. Separate table when the entity has independent scaling needs or a fundamentally different key schema. Each GSI adds <span class='hl'>1x WCU overhead</span> per write, so a table with <strong>5 GSIs</strong> costs <span class='hl'>6x writes</span>. Beyond 3-4 GSIs, evaluate whether a separate table is cheaper."
+  "Why can LSIs only be created at table creation time?"
+  "LSIs share the base table's partition — DynamoDB physically co-locates LSI data with the partition key's data. Retrofitting this after data exists would require rewriting every partition. GSIs are separate physical storage, so they can be backfilled asynchronously. LSIs also impose a <span class='hl'>10 GB per partition key</span> limit — if any single partition key's data exceeds 10 GB, writes to that key fail."
+}}
+
+{{triggerQs "Questions about DynamoDB capacity"
+  "What is the difference between on-demand and provisioned capacity?"
+  "On-demand: no capacity planning, pay per request ($1.25/M writes, $0.25/M reads), scales instantly to any traffic level. Provisioned: you set WCU/RCU, auto-scaling adjusts within bounds, 5-7x cheaper at steady-state. Start on-demand for new workloads, switch to provisioned once traffic patterns stabilize — typically after 2-4 weeks of production data."
+  "What causes DynamoDB throttling and how do you fix it?"
+  "Throttling occurs when requests exceed the partition's capacity: 3,000 RCU or 1,000 WCU per partition. Causes: hot partition key (one key receives disproportionate traffic), under-provisioned capacity, or burst traffic exceeding on-demand's initial throughput. Fixes: improve partition key cardinality, enable adaptive capacity, use write sharding for hot keys, or add a DAX cache for reads."
+}}
+
+{{qa "When should I use DynamoDB vs PostgreSQL?" "DynamoDB for key-value or key-sortkey access patterns at any scale — no schema migrations, no connection pooling, no replica management. PostgreSQL for complex queries: joins, aggregations, full-text search, ad-hoc analytics. If your access patterns are known and simple, DynamoDB. If you need SQL flexibility, PostgreSQL." "Can I do transactions in DynamoDB?" "Yes. TransactWriteItems supports up to 100 items across tables in a single ACID transaction. Cost is 2x the WCU (each item is written to a transaction log first). Use for coordinated writes like transferring a balance between two accounts. For simple single-item writes, skip transactions — every DynamoDB write is already atomic at the item level."}}
+
 {{phase 4 "Capacity Modes and Scaling" "5 min"}}
 
 {{say `DynamoDB offers two capacity modes:
@@ -194,6 +214,8 @@ Most teams start on-demand and switch to provisioned once traffic patterns are p
 
 {{phase 5 "Advanced Features" "5 min"}}
 
+{{say "DynamoDB has six features that come up repeatedly in interviews: TTL for auto-expiry, Streams for event-driven architecture, DAX for microsecond reads, Global Tables for multi-region, Transactions for ACID, and PITR for backup."}}
+
 {{table "Advanced DynamoDB Features" (rows
   (row "Feature"          "What It Does"                                    "Use Case"                              "Cost Impact")
   (row "TTL" "Auto-delete items after expiry timestamp"         "Session tokens, temp data, event logs"  "Free (no WCU charge for TTL deletes)")
@@ -237,6 +259,32 @@ def lambda_handler(event, context):
                     ExpressionAttributeValues={':inc': 1}
                 )
 `}}
+
+{{think "TTL, Streams, and DAX serve three different operational concerns — expiration, event propagation, and read acceleration"
+  (whyNot "using a scheduled Lambda to delete expired items instead of TTL" "TTL is free — zero WCU cost for deletions. A Lambda scan costs read capacity proportional to table size: a 50 GB table scan consumes <span class='hl'>~12.5M RCUs</span>. TTL's only downside is eventual deletion (up to 48 hours late), which matters only if strict expiry is required.")
+  (whatIf "DynamoDB Streams consumer falls behind" "The IteratorAge metric increases — records older than <span class='hl'>24 hours</span> are permanently lost. Monitor IteratorAge and alarm at 1 minute. Scale Lambda concurrency or add more Kinesis shards. For critical pipelines, write to both DynamoDB and an SQS dead-letter queue as a fallback.")
+}}
+
+{{triggerQs "TTL, Streams, and DAX Interview Questions"
+  "DAX only supports eventually consistent reads. How do you handle use cases that need strong consistency?"
+  "Route strong-consistency reads directly to DynamoDB, bypassing DAX. The DynamoDB SDK supports both DAX and direct clients simultaneously. In practice, <span class='hl'>fewer than 5%</span> of reads in most applications need strong consistency — account balance checks, inventory decrements. The other <strong>95%</strong> go through DAX at microsecond latency."
+  "How do you prevent DynamoDB Streams from processing the same event twice?"
+  "Streams guarantees at-least-once delivery — duplicates are possible during shard splits or Lambda retries. Make the consumer idempotent: use a conditional write with <code>attribute_not_exists(processed_id)</code> or store a deduplication key with a <span class='hl'>TTL of 24 hours</span>. Cost of dedup storage is negligible compared to the cost of processing duplicates."
+}}
+
+{{triggerQs "Questions about DynamoDB advanced features"
+  "How do DynamoDB Streams work and when would you use them?"
+  "DynamoDB Streams captures a time-ordered sequence of item-level changes (insert, update, delete) and retains them for 24 hours. Each stream record contains the old and new item image. Use cases: trigger Lambda on data changes (event-driven architecture), replicate data to Elasticsearch for search, maintain materialized views, and implement CDC pipelines. Cost: $0.02 per 100,000 read requests."
+  "When should you use DynamoDB TTL vs manual expiration?"
+  "TTL: set an expires_at attribute (Unix epoch seconds) and DynamoDB deletes expired items automatically within 48 hours — zero cost, zero code. Manual: run a scheduled Lambda that scans and deletes items. Use TTL for best-effort cleanup (session tokens, cache entries). Use manual when you need exact-time deletion or need to trigger side effects on expiration."
+}}
+
+{{qa
+  "How do DynamoDB transactions differ from SQL transactions?"
+  "DynamoDB TransactWriteItems supports up to 100 actions in a single ACID transaction — all succeed or all fail. But it is limited to the same table or tables within the same region, and costs 2x standard write capacity. Unlike SQL transactions, there is no isolation level choice (it is always serializable) and no long-running transactions — each transaction must complete in a single API call. Use for operations like transferring credits between two user accounts where partial completion would be a bug."
+  "What is DAX and when should you use it?"
+  "DynamoDB Accelerator (DAX) is an in-memory cache that sits between your application and DynamoDB. It provides microsecond read latency for cached items. Use DAX when: read-heavy workloads (above 80% reads), you need sub-millisecond latency, and access patterns are repetitive (same keys queried frequently). Do not use DAX for write-heavy workloads or when strong consistency is required — DAX serves eventually consistent reads only."
+}}
 
 {{phase 6 "Hot Partition Problem" "5 min"}}
 
@@ -300,7 +348,11 @@ def get_total_likes(post_id):
 
 {{key "Write sharding trades write simplicity for read complexity. Writes go to random shard (O(1)). Reads scatter-gather across all shards (O(N)). Cache the aggregated total in Redis to avoid scatter-gather on every read."}}
 
+{{qa "How does DynamoDB handle automatic scaling?" "On-demand mode: DynamoDB instantly adapts to any traffic level with no capacity planning. You pay per request ($0.25/M reads, $1.25/M writes). Provisioned mode: you set WCU/RCU and auto-scaling adjusts within your min/max range based on CloudWatch metrics. Provisioned is 5-7x cheaper at steady-state but risks throttling during sudden spikes." "What happens when a DynamoDB partition splits?" "DynamoDB auto-splits a partition when it exceeds 10GB or 3000 RCU / 1000 WCU. Splits are transparent — no downtime, no data loss. The partition key space is divided and data migrates to the new partition in the background. This is why choosing a high-cardinality partition key matters: if all data has the same partition key, it can't split effectively."}}
+
 {{phase 7 "Cost Estimates" "3 min"}}
+
+{{say "DynamoDB pricing has two modes — on-demand charges per request, provisioned charges per capacity unit. On-demand costs 5-7x more per request but requires zero capacity planning. Start on-demand, switch to provisioned once traffic patterns stabilize."}}
 
 {{table "DynamoDB Monthly Cost Examples" (rows
   (row "Workload"                    "Writes/sec"  "Reads/sec"  "Storage"     "On-Demand Cost"   "Provisioned Cost")
@@ -327,6 +379,13 @@ def get_total_likes(post_id):
   (row "DAX for read-heavy"               "Variable"      "Cache hits avoid RCU charges entirely")
   (row "Export to S3 for analytics"       "90%+"          "Export does not consume RCU. Athena queries S3.")
 )}}
+
+{{triggerQs "Cost Interview Questions"
+  "DynamoDB on-demand costs $1.25/M writes. At what scale does provisioned become clearly cheaper?"
+  "At <span class='hl'>~500 writes/sec</span> sustained, on-demand costs <span class='hl'>~$1,700/mo</span>. Provisioned with auto-scaling at the same rate costs <span class='hl'>~$750/mo</span> — a <strong>56% savings</strong>. Below 100 writes/sec the absolute difference is small enough that on-demand's operational simplicity wins. Above 500 writes/sec, provisioned savings compound and reserved capacity (1-year commit) drops costs another <strong>53%</strong>."
+  "How do you estimate DynamoDB costs before launching?"
+  "Calculate item size in KB (round up to nearest 1 KB for writes, 4 KB for reads). Multiply by requests/sec to get WCU and RCU. On-demand: WCU x 2.628M seconds/month x $1.25/M. Provisioned: WCU x 720 hours x $0.00065/hr. Add storage at <span class='hl'>$0.25/GB/month</span>. Add GSI write overhead (1x WCU per GSI per write). A <strong>10 KB item</strong> at <strong>1,000 writes/sec</strong> costs <span class='hl'>10 WCU per write = 10,000 WCU</span>."
+}}
 
 {{phase 8 "Failure Scenarios & Interview Q&A" "5 min"}}
 
