@@ -16,7 +16,7 @@
 
 {{think "The trie's superpower is that all words sharing a prefix share nodes. 'google', 'gmail', 'go' share the 'g'→'o' path. Navigating to the 'go' node instantly locates all ~500K English words starting with 'go' — no scanning needed."
   (whyNot "a sorted array of strings with binary search" "Binary search finds the insertion point for a prefix in O(log N). Then you scan forward to collect all matches — O(K) where K is the number of results. For 100M prefixes, log N = 27 comparisons, each comparing a full string O(L). Trie walk to prefix node is O(L) regardless of N.")
-  (how "tries enable autocomplete in O(L + K)" "L = length of the query prefix, K = number of matching completions to return. The O(L) walk reaches the prefix node. Then a bounded DFS collects the top-K ranked completions. With 100M words, a hash map scan is O(100M), a trie walk is still O(7) for 'search-' prefix.")
+  (how "tries enable <a class=\"dqa-link\" href=\"/problem/search-autocomplete\">autocomplete</a> in O(L + K)" "L = length of the query prefix, K = number of matching completions to return. The O(L) walk reaches the prefix node. Then a bounded DFS collects the top-K ranked completions. With 100M words, a hash map scan is O(100M), a trie walk is still O(7) for 'search-' prefix.")
 }}
 
 {{hint "why dict not array[26] for children?" "An array of 26 pointers costs &lt;span class='hl'>208 bytes per node&lt;/span> regardless of fill rate. Typical English trie nodes have only 2-4 children on average — meaning 85% of those slots are null. A dict (hash map) uses ~64 bytes for 3 entries. At &lt;span class='hl'>10M nodes&lt;/span>, that's 2 GB vs 640 MB."}}
@@ -95,7 +95,7 @@ class Trie:
 
 {{think "The naive DFS for autocomplete visits the entire subtree. For a trie with 1M words under 'th', that's 1M node visits to find the first 5. The fix: pre-compute top-K at every node."
   (how "pre-computing top-K at every node works" "On insert, walk to the prefix node and maintain a sorted top-K list at every node along the path. Each node's top_k always contains the K highest-scored completions in its subtree. Autocomplete becomes O(L) total — walk to prefix node, return its top_k list. Zero DFS needed.")
-  (whatIf "a score changes for a word (popularity update)" "Must re-walk the path to the word and update top_k at every ancestor node — O(L × K log K) for heapq maintenance. At high update rates (Twitter trending), this becomes a bottleneck. Batch updates or periodic rebuild solve this.")
+  (whatIf "a score changes for a word (popularity update)" "Must re-walk the path to the word and update top_k at every ancestor node — O(L × K log K) for heapq maintenance. At high update rates (<a class=\"dqa-link\" href=\"/problem/twitter-feed\">Twitter</a> trending), this becomes a bottleneck. Batch updates or periodic rebuild solve this.")
 }}
 
 {{hint "use a heap not a sorted list for top-K" "Maintain a min-heap of size K at each node. When inserting a new completion: if heap size &lt; K, push. If new score > heap min, pop min and push new. Top-K maintenance per insert is O(log K). For K=5 and L=10, that's 50 heap operations per insert."}}
@@ -120,9 +120,9 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
   (row "HAT-Trie" "Near-radix" "Complex" "Cache-efficient hash + trie hybrid")
 )}}
 
-{{think "In practice, at search-autocomplete scale, the trie is kept in Redis sorted sets (for hot prefixes) or in memory as a serialized radix tree. The on-disk representation uses a Finite State Transducer (FST) — a compiled, minimal DFA that encodes all completions in a compressed binary format. Lucene and Elasticsearch's completion suggester use FSTs."
+{{think "In practice, at search-autocomplete scale, the trie is kept in Redis sorted sets (for hot prefixes) or in memory as a serialized radix tree. The on-disk representation uses a Finite State Transducer (FST) — a compiled, minimal DFA that encodes all completions in a compressed binary format. Lucene and <a class="dqa-link" href="/fund/storage/elasticsearch">Elasticsearch</a>'s completion suggester use FSTs."
   (how "FST differs from a trie" "A trie is a DAG (directed acyclic graph) without sharing of suffixes. A FST shares both prefixes AND suffixes. For the words 'mop', 'mom', 'top', 'tom', a trie has 7 nodes. The FST merges the common 'op' and 'om' suffixes — only 5 states. The minimal FST is the most compact possible representation.")
-  (whyNot "a standard trie at Elasticsearch scale" "Elasticsearch indexes billions of documents. A standard trie for all unique terms would use ~200 bytes/node × billions of nodes — terabytes of RAM. An FST compresses the same vocabulary into a few GB because suffix sharing reduces node count by 10-50x. That's why Lucene's term dictionary is an FST, not a trie.")
+  (whyNot "a standard trie at Elasticsearch scale" "<a class=\"dqa-link\" href=\"/fund/storage/elasticsearch\">Elasticsearch</a> indexes billions of documents. A standard trie for all unique terms would use ~200 bytes/node × billions of nodes — terabytes of RAM. An FST compresses the same vocabulary into a few GB because suffix sharing reduces node count by 10-50x. That's why Lucene's term dictionary is an FST, not a trie.")
 }}
 
 {{hint "why radix tree over standard trie for production?" "English words average &lt;span class='hl'>10 characters&lt;/span> but share long prefixes — 'international', 'interview', 'internet' share 'inter'. A standard trie creates 5 single-child nodes for that prefix. A radix tree collapses them into one edge labeled &lt;code>inter&lt;/code>, reducing node count by &lt;span class='hl'>4-8x&lt;/span> and improving cache locality."}}
@@ -136,10 +136,10 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
 
 {{phase 4 "Distributed Trie for Search Autocomplete" "5 min"}}
 
-{{say `A single-machine trie for 100M+ query strings doesn't fit in RAM. The production approach:
+{{say `A single-machine trie for 100M+ query strings (as in <a class="dqa-link" href="/problem/search-autocomplete">Search Autocomplete</a>) doesn't fit in RAM. The production approach:
 <ul>
   <li><strong>Shard by prefix</strong> — all queries starting with 'a' go to shard 0, 'b' to shard 1, etc.</li>
-  <li><strong>Hot prefix cache in Redis</strong> — top 1000 prefixes cached as sorted sets</li>
+  <li><strong>Hot prefix cache in <a class="dqa-link" href="/fund/storage/redis">Redis</a></strong> — top 1000 prefixes cached as sorted sets</li>
   <li><strong>Offline rebuild</strong> — trie rebuilt from query logs every hour, not updated in real-time</li>
 </ul>`}}
 
@@ -148,17 +148,17 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
 {{table "Scaling Layers for Autocomplete" (rows
   (row "Layer" "Data" "Latency" "Size")
   (row "CDN cache" "Top 100 prefix results" "&lt; 10ms (edge)" "Small")
-  (row "Redis sorted sets" "Top 1000 prefixes × top-10 suggestions" "&lt; 1ms" "~1 GB")
+  (row "<a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> sorted sets" "Top 1000 prefixes × top-10 suggestions" "&lt; 1ms" "~1 GB")
   (row "In-memory trie (per shard)" "All prefixes ≤ 10 chars" "~5ms" "~10 GB total")
-  (row "Elasticsearch completion suggester" "All indexed content (fallback)" "~20ms" "Full index")
+  (row "<a class=\"dqa-link\" href=\"/fund/storage/elasticsearch\">Elasticsearch</a> completion suggester" "All indexed content (fallback)" "~20ms" "Full index")
 )}}
 
 {{think "The trie is rebuilt offline from query logs rather than updated on every keystroke."
-  (whyNot "updating the trie in real-time on every search" "At 10K queries/second, 10K trie updates/second with top-K propagation to all ancestor nodes creates massive write contention. The trie becomes a hot lock. Instead, aggregate query counts in Redis for 1 hour, batch into a job that rebuilds the trie offline, swap the new trie atomically.")
+  (whyNot "updating the trie in real-time on every search" "At 10K queries/second, 10K trie updates/second with top-K propagation to all ancestor nodes creates massive write contention. The trie becomes a hot lock. Instead, aggregate query counts in <a class="dqa-link" href="/fund/storage/redis">Redis</a> for 1 hour, batch into a job that rebuilds the trie offline, swap the new trie atomically.")
   (how "atomic trie swap works" "Keep two tries: active and standby. Rebuild standby from fresh query log batch. When ready, swap an atomic pointer. Requests read from new trie immediately. Old trie garbage-collected. Zero downtime, zero inconsistency.")
 }}
 
-{{hint "why shard by first character not consistent hashing?" "Autocomplete queries always start from the first character — &lt;code>t&lt;/code> routes to one shard deterministically. Consistent hashing on the full query string would scatter prefixes across all shards, requiring a broadcast to every shard for prefix lookups. First-character sharding keeps all completions for a prefix co-located on &lt;span class='hl'>1 shard&lt;/span>, enabling O(L) lookup with a single network hop."}}
+{{hint "why shard by first character not <a class=\"dqa-link\" href=\"/algo/consistent-hashing\">consistent hashing</a>?" "Autocomplete queries always start from the first character — &lt;code>t&lt;/code> routes to one shard deterministically. Consistent hashing on the full query string would scatter prefixes across all shards, requiring a broadcast to every shard for prefix lookups. First-character sharding keeps all completions for a prefix co-located on &lt;span class='hl'>1 shard&lt;/span>, enabling O(L) lookup with a single network hop."}}
 
 {{think "Sharding by first character creates uneven load — 't' and 's' handle 15-20% of English queries each, while 'x' and 'z' handle &lt;1%."
   (whyNot "equal-size range sharding (aa-az on shard 0, ba-bz on shard 1...)" "This distributes data evenly but breaks prefix locality. A query for 'th' might span two shards if the boundary splits 'tg' and 'th'. Every prefix query could become a multi-shard fan-out, adding latency and complexity.")
@@ -250,7 +250,7 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
   (row "Hash map (all prefixes)" "~500 MB" "O(1) exact, O(N) prefix" "1M words × 10 prefixes each = 10M entries")
   (row "Standard Trie" "~200 MB" "O(L + K)" "Alphabet-array nodes; poor cache locality")
   (row "Compressed Trie (Radix)" "~50 MB" "O(L + K)" "Collapsed chains; better memory efficiency")
-  (row "Redis Sorted Sets (hot prefixes)" "~1 GB for 10K prefixes × 10 suggestions" "O(log N)" "Production: cache only top-N hot prefixes")
+  (row "<a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> Sorted Sets (hot prefixes)" "~1 GB for 10K prefixes × 10 suggestions" "O(log N)" "Production: cache only top-N hot prefixes")
 )}}
 
 {{triggerQs "Complexity Questions"
@@ -262,12 +262,12 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
 
 {{phase 7 "Production Autocomplete Architecture" "3 min"}}
 
-{{say `Putting it together — the production search autocomplete system:
+{{say `Putting it together — the production <a class="dqa-link" href="/problem/search-autocomplete">Search Autocomplete</a> system:
 <ol>
-  <li>Query log aggregator: batch query counts from Kafka every hour</li>
+  <li>Query log aggregator: batch query counts from <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> every hour</li>
   <li>Trie builder: rebuild compressed trie with pre-computed top-K from fresh counts</li>
   <li>Trie sharded by prefix first character: 26 shards (a-z)</li>
-  <li>Hot prefix cache: top 5000 prefix→suggestions in Redis sorted set</li>
+  <li>Hot prefix cache: top 5000 prefix→suggestions in <a class="dqa-link" href="/fund/storage/redis">Redis</a> sorted set</li>
   <li>API path: Redis miss → trie shard → return top-5</li>
   <li>CDN: cache top-1000 prefix results at edge (60s TTL)</li>
 </ol>`}}
@@ -280,7 +280,7 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
 {{hint "why 60s TTL on CDN not longer?" "Autocomplete results change as query popularity shifts. A &lt;span class='hl'>60s TTL&lt;/span> balances freshness against cache hit rate. At 100K QPS with 40% hitting top-1000 prefixes, that's &lt;span class='hl'>40K cache hits/sec&lt;/span>. Increasing TTL to 5 minutes only adds ~2% more hits but delays trending updates by 5x."}}
 
 {{qa "How do you keep autocomplete suggestions fresh for breaking news or trending topics?"
-  "Two mechanisms: (1) &lt;strong>Real-time trending overlay&lt;/strong> — maintain a separate Redis sorted set for queries in the last 15 minutes, weighted heavily; merge with trie results on the fly. (2) &lt;strong>Faster rebuild cycle&lt;/strong> — reduce batch rebuild from hourly to 15-minute cycles for trending detection. The trie itself does not need to update in real-time — the trending overlay covers the gap."
+  "Two mechanisms: (1) &lt;strong>Real-time trending overlay&lt;/strong> — maintain a separate <a class="dqa-link" href="/fund/storage/redis">Redis</a> sorted set for queries in the last 15 minutes, weighted heavily; merge with trie results on the fly. (2) &lt;strong>Faster rebuild cycle&lt;/strong> — reduce batch rebuild from hourly to 15-minute cycles for trending detection. The trie itself does not need to update in real-time — the trending overlay covers the gap."
   "What happens when the trie shard for 't' receives 10× traffic vs 'z'?"
   "Trie shards are stateless and read-only between rebuilds — add more replicas for the 't' shard. Alternatively, sub-shard by second character: 'ta', 'te', 'th', 'ti', 'to', 'tr' each get their own replica. Monitor query distribution per prefix shard and auto-scale replicas based on CPU."}}
 
@@ -290,9 +290,9 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
 
 {{table "When to Mention Trie in System Design" (rows
   (row "Problem" "Where Trie Appears" "Alternative Mentioned")
-  (row "Search Autocomplete" "Core data structure for prefix lookup" "Redis sorted sets for hot prefixes, ES for fallback")
-  (row "Twitter/X Feed" "Hashtag autocomplete when composing tweet" "Same hot/cold split as search autocomplete")
-  (row "Spell Checker" "Word validation + edit-distance traversal" "Bloom filter for fast 'word exists' check")
+  (row "<a class=\"dqa-link\" href=\"/problem/search-autocomplete\">Search Autocomplete</a>" "Core data structure for prefix lookup" "<a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> sorted sets for hot prefixes, <a class=\"dqa-link\" href=\"/fund/storage/elasticsearch\">ES</a> for fallback")
+  (row "<a class=\"dqa-link\" href=\"/problem/twitter-feed\">Twitter/X Feed</a>" "Hashtag autocomplete when composing tweet" "Same hot/cold split as search autocomplete")
+  (row "Spell Checker" "Word validation + edit-distance traversal" "<a class=\"dqa-link\" href=\"/algo/bloom-filter\">Bloom filter</a> for fast 'word exists' check")
   (row "DNS Resolution" "Longest-prefix matching for routing" "Patricia trie (compressed binary trie)")
   (row "IP Routing" "CIDR prefix lookup (longest match wins)" "Patricia trie or B-tree on sorted CIDR ranges")
   (row "File System" "Path component tree" "Direct inode tree (OS-specific)")
@@ -303,8 +303,8 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
   "Pre-compute top-K at every node for O(1) autocomplete retrieval after prefix walk"
   "Compressed trie (radix tree) reduces memory 4-8x vs standard trie"
   "Shard by first character for distributed scaling; add replicas for hot-letter shards"
-  "Rebuild offline from query logs hourly; real-time trending via Redis overlay"
+  "Rebuild offline from query logs hourly; real-time trending via <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> overlay"
   "Fuzzy matching via Levenshtein DFS — prune branches where min edit distance > threshold"
 }}
 
-{{key "A trie enables O(L + K) prefix search regardless of vocabulary size — where L is prefix length and K is result count. Pre-compute top-K completions at every node, shard by prefix character, and cache the hottest prefixes in Redis. Rebuild offline from query logs; never update the trie in real-time."}}
+{{key "A trie enables O(L + K) prefix search regardless of vocabulary size — where L is prefix length and K is result count. Pre-compute top-K completions at every node, shard by prefix character, and cache the hottest prefixes in Redis. Rebuild offline from query logs; never update the trie in real-time. Core algorithm for <a class=\"dqa-link\" href=\"/problem/search-autocomplete\">Search Autocomplete</a>."}}

@@ -1,6 +1,6 @@
 {{phase 1 "What Is Redis?" "3 min"}}
 
-{{say "Redis is an in-memory key-value store. &lt;span class=\"hl-blue\">Sub-millisecond&lt;/span> reads — responses arrive in microseconds. Used as a cache, session store, rate limiter, &lt;span class=\"hl-blue\">pub/sub broker&lt;/span>, and distributed lock."}}
+{{say "Redis is an in-memory key-value store. &lt;span class=\"hl-blue\">Sub-millisecond&lt;/span> reads — responses arrive in microseconds. Used as a cache, session store, &lt;a class=\"dqa-link\" href=\"/fund/distributed/rate-limiting\">rate limiter&lt;/a>, &lt;span class=\"hl-blue\">pub/sub broker&lt;/span>, and distributed lock."}}
 
 {{triggerQs "Before You Dive In"
   "Why would you reach for Redis instead of just caching in your application process?"
@@ -166,7 +166,7 @@ async def delete_user_cache(user_id: int):
   "What is the thundering herd problem?"
   "When a popular cache key expires, all concurrent requests miss simultaneously. Imagine if 10,000 users all ask 'what's the current user count?' at the exact same millisecond, and you have to query the DB 10,000 times in parallel. Fix: one request rebuilds the cache, others wait. This technique is called a 'distributed lock'."
   "How do you prevent stale cache?"
-  "Set TTL based on staleness tolerance: URL shortener redirects can be 24h, user profiles 5-15 min, stock prices 1s or no cache. On writes, immediately delete or update the cache key. The delete approach (cache invalidation) is safer — a missed write leaves a stale entry for at most TTL seconds rather than indefinitely."
+  "Set TTL based on staleness tolerance: &lt;a class='dqa-link' href='/problem/url-shortener'>URL shortener&lt;/a> redirects can be 24h, user profiles 5-15 min, stock prices 1s or no cache. On writes, immediately delete or update the cache key. The delete approach (cache invalidation) is safer — a missed write leaves a stale entry for at most TTL seconds rather than indefinitely."
 }}
 
 {{triggerQs "Caching Strategy Decisions"
@@ -237,7 +237,7 @@ auth-token: <token>               # Require password
 {{hint "why appendfsync everysec instead of always" "appendfsync always fsyncs after every write — maximum durability but 10-100x write latency overhead. appendfsync everysec batches writes and fsyncs once per second, limiting potential data loss to 1 second. For a cache that backs a database, losing 1 second of cache writes on a crash is acceptable. Use always only when Redis is your primary store and data loss is truly unacceptable."}}
 
 {{qa
-  "How do you size an ElastiCache cluster for a URL shortener caching 200M hot URLs?"
+  "How do you size an ElastiCache cluster for a &lt;a class='dqa-link' href='/problem/url-shortener'>URL shortener&lt;/a> caching 200M hot URLs?"
   "Average URL record: ~500 bytes (short_code + long_url + metadata). 200M × 500B = 100 GB. An r6g.2xlarge has 52 GB RAM. With cluster mode enabled: 2 shards × 52 GB = 104 GB usable. Add 1 replica per shard for failover = 6 nodes total. Cost: 6 × $0.504/hr = ~$2,200/mo. Over-provision by 20-30% to account for Redis overhead (data structure metadata, fragmentation)."
   "When should you use Redis Cluster mode vs a single node with replicas?"
   "Single node + replicas: simpler, supports all multi-key operations (MGET, Lua scripts across keys), sufficient when dataset fits in one node's memory (under ~50 GB). Cluster mode: data sharded across multiple primaries, required when dataset exceeds single-node memory or write throughput exceeds ~100K ops/s. Trade-off: cluster mode restricts multi-key operations to keys in the same hash slot."
@@ -299,7 +299,7 @@ auth-token: <token>               # Require password
 {{hint "why RDB causes latency spikes" "RDB snapshots use fork() to create a child process that writes the snapshot. On Linux, fork() uses copy-on-write — the parent and child share pages until either modifies them. On a write-heavy Redis instance with 20GB of data, the dirty pages cause significant memory pressure and can cause 10-100ms latency spikes during snapshot creation. This is why RDB-only is not recommended for latency-sensitive workloads at large memory sizes."}}
 
 {{think "Choosing persistence strategy based on use case"
-  (whyNot "persistence for a pure URL shortener cache" "The DB is the source of truth. A cold cache after restart just means cache misses hit the DB until the working set warms up. At 50K RPS with a 99% hit ratio, a cold start sends 50K RPS to the DB for a few minutes — that might be acceptable if the DB can handle it temporarily. Saving and loading 10GB of cache data on every restart has its own latency cost and is not worth it when the DB is the canonical store.")
+  (whyNot "persistence for a pure &lt;a class='dqa-link' href='/problem/url-shortener'>URL shortener&lt;/a> cache" "The DB is the source of truth. A cold cache after restart just means cache misses hit the DB until the working set warms up. At 50K RPS with a 99% hit ratio, a cold start sends 50K RPS to the DB for a few minutes — that might be acceptable if the DB can handle it temporarily. Saving and loading 10GB of cache data on every restart has its own latency cost and is not worth it when the DB is the canonical store.")
   (whatIf "AOF log grows unboundedly on a write-heavy instance" "AOF rewrite (BGREWRITEAOF) compacts the log by rewriting the current state as a minimal set of commands. Redis triggers this automatically based on aof-rewrite-percentage and aof-rewrite-min-size thresholds. If you disable auto-rewrite, the AOF file can grow to be many times larger than your dataset, causing very slow restarts as Redis replays the entire log history.")
   (how "does RDB + AOF recovery work on restart" "Redis uses AOF for recovery when both are enabled, because AOF has finer granularity. RDB is used for backups and for seeding replicas efficiently. On restart, Redis loads the AOF file and replays all commands. This is slower than loading an RDB snapshot but guarantees at most 1 second of data loss vs. potentially minutes with RDB alone.")
 }}
@@ -319,7 +319,7 @@ auth-token: <token>               # Require password
   (row "Pattern"                "Redis Feature"         "Example")
   (row "Cache-aside"            "GET/SET + TTL"         "Cache DB query results")
   (row "Distributed lock"       "SET NX EX"             "Prevent thundering herd")
-  (row "Rate limiting"          "Sorted Set + ZADD"     "Sliding window rate limiter")
+  (row "&lt;a class='dqa-link' href='/fund/distributed/rate-limiting'>Rate limiting&lt;/a>"          "Sorted Set + ZADD"     "&lt;a class='dqa-link' href='/problem/rate-limiter'>Sliding window rate limiter&lt;/a>")
   (row "Leaderboard"            "Sorted Set + ZREVRANGE" "Top-N players by score")
   (row "Session store"          "Hash + EXPIRE"         "User session data")
   (row "Feed timeline"          "Sorted Set + ZADD"     "Fan-out-on-write feed")
@@ -386,7 +386,7 @@ def is_rate_limited(user_id: str, limit: int, window_sec: int) -> bool:
 }}
 
 {{triggerQs "Interview Pattern Application"
-  "Design a rate limiter that allows 100 requests per minute per user. Walk me through the Redis implementation."
+  "Design a &lt;a class='dqa-link' href='/problem/rate-limiter'>rate limiter&lt;/a> that allows 100 requests per minute per user. Walk me through the Redis implementation."
   "Use a sorted set keyed by user ID. On each request: (1) ZREMRANGEBYSCORE to remove timestamps older than now minus 60 seconds, (2) ZADD the current timestamp as both member and score, (3) ZCARD to get the count, (4) EXPIRE the key for 60 seconds. If ZCARD exceeds 100, reject the request. Wrap steps 1-3 in a Lua script for atomicity. This is an O(log N) operation where N is the number of requests in the current window."
   "You need to store 50M user sessions, each 500 bytes. Can Redis handle this?"
   "50M sessions x 500 bytes = 25GB of data plus Redis overhead of roughly 30-50 bytes per key = roughly 27-30GB total. A single cache.r6g.2xlarge (52GB) can hold this comfortably. Alternatively, 2x cache.r6g.xlarge nodes in cluster mode splits the keyspace. Use Hash type for session data rather than JSON strings to enable field-level updates without deserializing the whole session."
