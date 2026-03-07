@@ -5,10 +5,10 @@
 {{table "CDN at a Glance" (rows
   (row "Property"           "Detail")
   (row "Purpose"            "Serve content from the nearest edge location to reduce latency")
-  (row "How it works"       "Cache static/dynamic content at 400+ PoPs (Points of Presence) worldwide")
+  (row "How it works"       "Cache static/dynamic content at 750+ PoPs (Points of Presence) worldwide")
   (row "Latency reduction"  "200ms origin -> 5-20ms from edge")
   (row "Bandwidth savings"  "70-95% of requests served from cache, not origin")
-  (row "DDoS protection"                                        "Distributed edge network absorbs attack traffic across 400+ PoPs")
+  (row "DDoS protection"                                        "Distributed edge network absorbs attack traffic across 750+ PoPs")
   (row "<span class='hl-blue'>TLS termination</span>"           "Edge terminates TLS, reducing handshake latency to origin")
 )}}
 
@@ -158,7 +158,7 @@ location /api/user/profile {
 
 {{table "CDN Providers" (rows
   (row "Provider"     "Edge Locations"  "Pricing Model"               "Best For"                         "Key Feature")
-  (row "CloudFront"   "400+ PoPs"       "Pay per GB + requests"       "AWS-native apps, S3 origins"      "Lambda@Edge, OAC, Origin Shield")
+  (row "CloudFront"   "750+ PoPs"       "Pay per GB + requests"       "AWS-native apps, S3 origins"      "Lambda@Edge, OAC, Origin Shield")
   (row "Cloudflare"   "300+ PoPs"       "Free tier, flat-rate plans"  "DDoS protection, Workers"        "Unlimited bandwidth on paid plans")
   (row "Fastly"       "90+ PoPs"        "Pay per GB + requests"       "Real-time purge, edge compute"   "VCL config, instant purge (<150ms)")
   (row "Akamai"       "4,000+ PoPs"     "Enterprise contracts"        "Enterprise, media, gaming"        "Largest network, EdgeWorkers")
@@ -201,18 +201,35 @@ location /api/user/profile {
   (row "Cache stampede"             "Origin overwhelmed after purge"      "Origin Shield + request collapsing"      "Minutes")
 )}}
 
+{{think "Cache stampede is the most dangerous CDN failure — it looks like a DDoS from your own infrastructure."
+  (whyNot "invalidate all cached content at once during a deploy" "If you purge everything, all 750+ edge PoPs simultaneously request fresh content from origin. If your site serves 100K unique URLs, that is 100K concurrent requests hitting origin in seconds. This can overwhelm even well-provisioned infrastructure.")
+  (whatIf "your origin goes down while the CDN cache is populated" "With stale-if-error configured, the CDN continues serving cached responses even with a dead origin. Users see slightly stale content instead of error pages. This is why aggressive CDN caching is a resilience strategy, not just a performance optimization.")
+  (how "prevent cache stampede after a mass purge" "Three defenses: 1) Origin Shield — consolidates edge misses through one regional cache; origin sees one request per object instead of 750+. 2) Request collapsing — CDN holds duplicate requests and serves them all from a single origin fetch. 3) Staggered invalidation — purge by URL prefix in batches with short delays between each batch.")
+}}
+
+{{hint "stale-if-error is your CDN safety net" "The Cache-Control: stale-if-error=86400 directive tells the CDN to serve stale cached content for up to 24 hours if the origin returns 5xx errors. This converts an origin outage from 'broken site' to 'slightly stale site' — a dramatically better user experience."}}
+
 {{phase 8 "Interview Q&A" "3 min"}}
 
-{{say "Here are the most common CDN interview questions — security, when not to use a CDN, and Origin Shield."}}
+{{say "The most common CDN interview questions focus on security, when to avoid CDNs, cache debugging, and Origin Shield."}}
 
 {{qa
   "How does a CDN improve security?"
-  "Four ways: 1) DDoS absorption at edge (400+ PoPs absorb volumetric attacks). 2) TLS termination at edge (faster handshake, modern ciphers). 3) WAF at edge (block malicious requests before they reach origin). 4) Origin hiding (origin IP never exposed, all traffic goes through CDN)."
+  "Four ways: 1) DDoS absorption — 750+ PoPs distribute and absorb volumetric attacks before they reach origin. 2) TLS termination at edge — faster handshake, origin never exposes its own certificates. 3) WAF rules at edge — block SQL injection, XSS, and bot traffic before reaching your servers. 4) Origin hiding — origin IP is never exposed publicly; all traffic routes through the CDN."
   "When would you NOT use a CDN?"
-  "Three cases: 1) Highly personalized content unique to each user (cannot cache effectively). 2) Real-time data that changes every request (WebSocket, live scores). 3) Internal services where users are in the same region as origin (CDN adds latency for local requests)."
+  "Three cases: 1) Highly personalized content unique to each user — user A's dashboard cannot be cached and served to user B. 2) Real-time data that changes every request — WebSocket connections, live sports scores, stock tickers. 3) Internal services where all users are in the same region as origin — CDN adds a network hop without improving latency."
 }}
 
-{{followup "What is Origin Shield?" "An additional caching layer between edge PoPs and your origin. Without it, each of 400+ PoPs makes independent requests to origin on cache miss. With Origin Shield, all PoPs route misses through a single regional cache, reducing origin requests by 90%+. CloudFront charges $0.009 per 10K requests for Origin Shield."}}
+{{qa
+  "How do you debug a CDN caching issue — content not updating for users?"
+  "Check three things in order: 1) Response headers from origin — is Cache-Control set correctly? Use curl -I to inspect. 2) The CDN cache key — is Vary or query string causing different cache entries than expected? 3) CloudFront's x-cache header — 'Hit from cloudfront' means cached, 'Miss from cloudfront' means origin fetch. If content is stale, check whether max-age is too long or whether invalidation failed."
+  "What is the difference between CDN edge cache and a regional cache like Redis?"
+  "CDN edge cache is geographically distributed (750+ PoPs, physically close to users) and caches HTTP responses. Redis/ElastiCache is a centralized regional cache in your VPC that caches application-level data (database query results, computed values). CDN reduces latency through geographic proximity; Redis reduces database load by avoiding repeated queries. They operate at different layers and complement each other."
+}}
+
+{{followup "What is Origin Shield?" "An additional caching layer between edge PoPs and your origin. Without Origin Shield, each of 750+ edge locations independently requests content from origin on cache miss. With Origin Shield, all edge misses route through a single regional cache first — if the Shield has the content, edges get it without touching your origin. This reduces origin requests by 90%+. CloudFront charges $0.009 per 10K requests for Origin Shield."}}
+
+{{hint "the CDN interview differentiator" "Most candidates can explain what a CDN does. The differentiator is knowing: 1) the exact Cache-Control headers for different content types, 2) why versioned URLs beat invalidation, 3) cache stampede prevention via Origin Shield, and 4) when a CDN hurts rather than helps (personalized content, WebSockets)."}}
 
 {{checklist
   "Use CDN for all static assets (images, CSS, JS, fonts)"
