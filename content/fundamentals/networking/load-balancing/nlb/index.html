@@ -195,6 +195,13 @@ resource "aws_vpc_endpoint_service" "main" {
 
 {{avoid "Cross-zone load balancing on NLB is disabled by default. If your backends are unevenly distributed across AZs, enable it. But be aware: cross-AZ traffic costs $0.01/GB. At high throughput this adds up fast."}}
 
+{{hint "NLB is cheaper per unit but watch data transfer" "NLCUs cost <span class='hl'>$0.006/hr</span> vs ALB LCUs at <span class='hl'>$0.008/hr</span> — 25% cheaper per unit. But NLB's cross-AZ data transfer at <span class='hl'>$0.01/GB</span> each direction can dwarf the NLCU savings. At <span class='hl'>1 TB/day</span> bidirectional, cross-AZ alone is <span class='hl'>$600/mo</span> — more than 10x the base fee."}}
+
+{{triggerQs "NLB Cost Questions"
+  "How does NLB cost compare to ALB for the same traffic?" "Base fee is identical at <strong>$0.0225/hr</strong> ($16.43/mo). NLCUs are <span class='hl'>25% cheaper</span> than ALB LCUs ($0.006 vs $0.008). NLB is typically cheaper for raw throughput, but cross-AZ data transfer can reverse that if cross-zone LB is enabled."
+  "When does cross-zone load balancing become too expensive?" "Calculate your daily cross-AZ data volume. At <span class='hl'>100 GB/day</span> bidirectional, cross-AZ costs ~$60/mo — manageable. At <span class='hl'>1 TB/day</span>, it hits $600/mo. If targets are evenly distributed across AZs, disable cross-zone and let per-AZ routing handle it."
+}}
+
 {{phase 6 "NLB vs ALB Summary" "2 min"}}
 
 {{say "The <strong>NLB vs ALB</strong> decision comes down to protocol requirements and specific constraints. The matrix below covers every common scenario."}}
@@ -233,6 +240,13 @@ resource "aws_vpc_endpoint_service" "main" {
   "Yes. NLB can target an ALB. Pattern: NLB (static IP + PrivateLink) -> ALB (L7 routing + WAF). NLB forwards TCP to ALB. You get static IPs and L7 features. Additional cost: ~$16/mo for the NLB plus cross-LB data transfer."
   "How does NLB handle sudden traffic spikes?"
   "NLB scales instantly with no pre-warming needed. It is designed for millions of requests per second from the start. L4 forwarding is far simpler than L7 inspection — AWS pre-provisions NLB capacity at scale."
+}}
+
+{{hint "NLB vs ALB is a protocol decision, not a performance decision" "For HTTP workloads, ALB's <span class='hl'>~1ms</span> added latency is irrelevant — your backend adds <span class='hl'>10-100ms</span>. Pick NLB only when you need static IPs, non-HTTP protocols, TLS passthrough, or PrivateLink. If you need both static IPs and L7 routing, chain NLB -> ALB for <span class='hl'>~$16/mo</span> extra."}}
+
+{{triggerQs "NLB vs ALB Decision Questions"
+  "My service is HTTP but a partner requires a static IP — NLB or ALB?" "Use the <strong>NLB -> ALB chain</strong>. NLB provides static Elastic IPs for the partner's firewall rules. ALB behind it provides path routing, WAF, and authentication. Extra cost is <span class='hl'>~$16/mo</span> for the NLB base fee."
+  "Does NLB support security groups?" "Yes, since <strong>August 2023</strong>. NLB now supports security groups directly, simplifying network rules. Previously you had to manage NACLs and target security groups separately to control access."
 }}
 
 {{phase 7 "Monitoring & Troubleshooting" "4 min"}}

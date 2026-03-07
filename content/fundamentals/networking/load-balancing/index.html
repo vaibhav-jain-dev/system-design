@@ -100,6 +100,8 @@ class ConsistentHashRing:
 
 {{followup "When would you NOT use round-robin?" "When request processing time varies wildly. If Server A is processing a 30s video transcode while Server B is idle, round-robin still sends the next request to A. Least-connections would correctly pick B."}}
 
+{{qa "How many virtual nodes should I use in consistent hashing?" "Start with <span class='hl'>150 virtual nodes per server</span>. This brings standard deviation of load distribution below <span class='hl'>5%</span>. Fewer than 100 vnodes creates hot spots; more than 500 wastes memory with diminishing returns." "Does consistent hashing work with weighted nodes?" "Yes — assign virtual nodes proportional to weight. A server with 2x capacity gets <span class='hl'>300 virtual nodes</span> instead of 150. The hash ring naturally routes twice the traffic to it without any algorithm change."}}
+
 {{key "Consistent hashing minimizes redistribution when nodes are added or removed. Without it, adding a server reshuffles all keys. With it, only 1/N keys move."}}
 
 {{phase 3 "Health Checks" "3 min"}}
@@ -156,6 +158,8 @@ async def health_deep():
 
 {{avoid "Never put expensive operations in the load balancer health check. If /health queries your database, one slow query makes the LB think your server is dead and removes it from rotation. Use a shallow check for LB, deep check for monitoring only."}}
 
+{{qa "Should health checks use GET or HEAD?" "<strong>GET</strong> is standard — ALB health checks only support GET. Return a <span class='hl'>200</span> with a small JSON body (<span class='hl'>&lt;1KB</span>). The body lets you include metadata (version, uptime) for debugging without adding latency." "How do you health-check a gRPC service?" "Use the <span class='hl-blue'>gRPC Health Checking Protocol</span> (grpc.health.v1.Health). ALB natively supports it — configure the health check as gRPC type with path <code>/grpc.health.v1.Health/Check</code>. Returns SERVING, NOT_SERVING, or UNKNOWN."}}
+
 {{key "Health check interval x threshold = detection time. Default: 30s interval x 3 failures = 90s. For critical services, use 10s x 2 = 20s detection."}}
 
 {{phase 4 "AWS ALB vs NLB Comparison" "5 min"}}
@@ -203,6 +207,8 @@ async def health_deep():
   (alt "NLB" "Choose when you need: static IPs (firewall rules), TLS passthrough, ultra-low latency, non-HTTP protocols, or AWS PrivateLink.")
   (nofit "Both (NLB in front of ALB)" "Only when you need NLB static IP + ALB L7 features. Adds cost and complexity. Rare use case.")
 )}}
+
+{{qa "Can ALB handle WebSocket and gRPC natively?" "Yes. ALB upgrades HTTP/1.1 connections to WebSocket via the <span class='hl-blue'>Upgrade</span> header automatically — no extra config. For gRPC, ALB routes HTTP/2 frames and supports gRPC health checks natively. <span class='hl-red'>NLB cannot inspect HTTP/2 frames</span> — it treats gRPC as raw TCP." "What happens if I need TLS passthrough?" "Use <strong>NLB with TCP listener</strong>. The TLS handshake terminates at your backend, not the LB. ALB always terminates TLS — it must decrypt to inspect HTTP headers. TLS passthrough is required for mutual TLS (mTLS) or when compliance mandates end-to-end encryption."}}
 
 {{phase 5 "Multi-AZ and High Availability" "5 min"}}
 
@@ -285,6 +291,13 @@ async def health_deep():
   (how "What drives LCU cost up unexpectedly?" "Rule evaluations. Many listener rules multiplied by high RPS can dominate your LCU bill. At 10K RPS with 10 rules = 100K rule evaluations/s, which is 100 LCU worth.")
 }}
 
+{{hint "consolidate ALBs to cut base costs" "Each ALB costs <span class='hl'>$16.43/mo</span> base regardless of traffic. Ten microservices on ten ALBs = <span class='hl'>$164/mo</span> in base fees alone. One ALB with path-based rules (<code>/service-a/*</code>, <code>/service-b/*</code>) serves all ten for <span class='hl'>$16.43/mo</span> base. Only split into separate ALBs when teams need independent deployment or different security groups."}}
+
+{{triggerQs "Cost Optimization"
+  "How do I reduce cross-AZ data transfer costs?" "Deploy targets evenly across AZs and disable cross-zone load balancing on NLB. For internal service-to-service calls, use AZ-local internal ALBs — each service calls the ALB in its own AZ. At <span class='hl'>1 TB/day</span> cross-AZ, this saves <span class='hl'>$600/mo</span>."
+  "When does NLB become cheaper than ALB?" "At very high throughput with simple routing. NLB NLCU is <span class='hl'>$0.006/hr</span> vs ALB LCU at <span class='hl'>$0.008/hr</span>, and NLB has no rule-evaluation dimension. At <span class='hl'>100K RPS</span> with 20+ routing rules, ALB LCU costs can be 3-4x higher than NLB NLCU."
+}}
+
 {{phase 8 "Interview Q&A" "5 min"}}
 
 {{say "Common interview questions about load balancing — sticky sessions, connection draining, and traffic spikes:"}}
@@ -317,3 +330,5 @@ async def health_deep():
   "Pre-warm ALB before known traffic events (contact AWS support)"
   "Never deploy to all targets at once: use rolling or blue-green"
 }}
+
+{{key "ALB is the default for web workloads — L7 routing, WAF, and gRPC support at ~$27/mo. Switch to NLB only for static IPs, TLS passthrough, or sub-100µs latency. The real cost is cross-AZ transfer at $0.01/GB, not the LB itself."}}

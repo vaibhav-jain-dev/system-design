@@ -122,6 +122,13 @@ resource "aws_cloudfront_distribution" "main" {
 }
 `}}
 
+{{qa
+  "How do CloudFront behaviors handle routing conflicts?"
+  "CloudFront evaluates behaviors in order — most specific path pattern wins. /api/v1/* matches before /api/*. The default behavior (/*) is a catch-all. Up to 25 ordered behaviors per distribution, each with its own origin, cache policy, and edge function associations."
+  "What happens if I forward too many headers in my cache policy?"
+  "Each unique header combination creates a separate cache entry. Forwarding User-Agent (with thousands of variants) effectively disables caching — your cache hit rate drops to near 0%. Only include headers that genuinely change the response: Accept-Encoding, Accept-Language, and custom headers like X-Locale."
+}}
+
 {{key "Always use Origin Access Control (OAC), not the legacy Origin Access Identity (OAI). OAC supports SSE-KMS encryption and S3 bucket policies. OAI is being deprecated."}}
 
 {{phase 3 "Lambda@Edge vs CloudFront Functions" "5 min"}}
@@ -318,6 +325,13 @@ Enables <strong>request collapsing</strong>: concurrent misses for the same obje
 
 {{diagram "fund-cloudfront-origin-shield"}}
 
+{{qa
+  "Does Origin Shield add latency to cache hits?"
+  "No. Origin Shield only adds a hop on cache misses — when the edge PoP doesn't have the object, it checks Origin Shield before going to origin. On cache hits at the edge, the request never reaches Origin Shield. The added latency on misses is <span class='hl'>5-20ms</span> (intra-AWS regional hop), which is negligible compared to the origin round-trip it replaces for redundant fetches."
+  "Can I use Origin Shield with a non-AWS origin?"
+  "Yes. Origin Shield works with any custom origin (your own data center, another cloud provider). Pick the Shield region closest to your origin's physical location. The benefit is the same — collapsed requests and a warm regional cache layer between 750+ PoPs and your origin."
+}}
+
 {{phase 6 "Cost Optimization" "3 min"}}
 
 {{say "CloudFront pricing is tiered by volume. The biggest savings come from choosing <strong>S3 over EC2</strong> as your origin — S3-to-CloudFront transfer is <span class=\"hl\">free</span>, while EC2-to-CloudFront costs <span class=\"hl\">$0.09/GB</span>."}}
@@ -349,6 +363,20 @@ Enables <strong>request collapsing</strong>: concurrent misses for the same obje
 }}
 
 {{hint "why price classes matter for cost control" "CloudFront has three price classes: <strong>PriceClass_All</strong> (all 750+ PoPs), <strong>PriceClass_200</strong> (US, EU, Asia, Middle East, Africa), and <strong>PriceClass_100</strong> (US, EU, Asia only). Data transfer in South America costs <span class='hl'>$0.110/GB</span> vs <span class='hl'>$0.085/GB</span> in US/EU. If your users are concentrated in US/EU, PriceClass_100 saves up to 30% — users in excluded regions still get served, just routed to the nearest included PoP with slightly higher latency."}}
+
+{{triggerQs "CloudFront Cost Questions"
+  "How do I estimate my CloudFront bill before deploying?"
+  "Multiply expected monthly bandwidth (GB) by $0.085 (US/EU tier 1) plus request count / 10,000 * $0.01 for HTTPS. A site serving 1TB/month with 10M requests costs approximately $85 + $10 = $95/month. Add Lambda@Edge or CloudFront Functions costs if using edge compute."
+  "Does CloudFront charge for cache hits?"
+  "Yes. CloudFront charges data transfer for every byte delivered to viewers regardless of whether it was a cache hit or miss. The savings from caching come from reduced origin egress and compute — not from CloudFront waiving its own transfer fees."
+}}
+
+{{qa
+  "How does CloudFront billing compare to serving directly from ALB?"
+  "ALB charges <span class='hl'>$0.008/LCU-hour</span> plus <span class='hl'>$0.09/GB</span> data transfer. CloudFront charges <span class='hl'>$0.085/GB</span> with no LCU costs and absorbs request processing at the edge. For cacheable content, CloudFront reduces ALB LCU usage by the cache hit ratio — a 90% hit rate means 10x fewer ALB requests and 10x lower LCU cost."
+  "When is CloudFront more expensive than not using a CDN?"
+  "When your traffic is low (<span class='hl'>&lt;100 GB/month</span>) and users are in a single region near your origin. The added per-GB cost of CloudFront provides minimal latency benefit. Below ~50GB/month, the cost difference is under $5, so the decision is usually about latency, not cost."
+}}
 
 {{key "The biggest CloudFront cost mistake: serving media from EC2 instead of S3. EC2-to-CloudFront costs $0.09/GB. S3-to-CloudFront is free. Move static assets to S3 first."}}
 
@@ -398,6 +426,13 @@ resource "aws_cloudfront_distribution" "main" {
   }
 }
 `}}
+
+{{qa
+  "What CloudWatch metrics should I alarm on for CloudFront?"
+  "<span class='hl'>4xxErrorRate</span> above <span class='hl'>5%</span> and <span class='hl'>5xxErrorRate</span> above <span class='hl'>1%</span> are the two critical alarms. Also monitor <span class='hl'>OriginLatency</span> p99 — if it exceeds your origin timeout setting (default <span class='hl'>30s</span>), requests are failing silently. CacheHitRate below <span class='hl'>80%</span> indicates a misconfigured cache policy, not a failure, but worth investigating."
+  "How long does CloudFront cache a 503 error from the origin?"
+  "By default, CloudFront caches error responses for <span class='hl'>10 seconds</span> (error_caching_min_ttl). This prevents a failing origin from being hammered with retries. You can override this per error code — set it to <span class='hl'>30-60 seconds</span> for 503s to give your origin time to recover, but keep 404s shorter since they may resolve quickly after a deployment."
+}}
 
 {{phase 8 "Interview Q&A" "3 min"}}
 

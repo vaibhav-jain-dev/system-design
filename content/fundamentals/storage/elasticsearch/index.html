@@ -52,7 +52,7 @@ The result: full-text search across millions of documents in <span class='hl'>< 
 )}}
 
 {{think "Shard count is fixed at index creation time — a critical capacity planning decision."
-  (whyNot "using a single shard for simplicity" "One shard means one Lucene reader on one node — zero query parallelism. At 100 GB, queries take 500ms+ because there is no fan-out across multiple shards.")
+  (whyNot "using a single shard" "One shard means one Lucene reader on one node — zero query parallelism. At 100 GB, queries take 500ms+ because there's no fan-out.")
   (whatIf "you create an index with 1 shard and it grows to 500 GB" "Lucene has a practical limit of ~50 GB per shard for good query performance. A 500 GB single-shard index forces all searches through one Lucene reader on one node — no parallelism. You must reindex into a new index with more shards, which requires downtime or complex alias switching.")
   (how "replicas help with read scalability" "A shard with 2 replicas = 3 total copies (1 primary + 2 replicas). ES load-balances GET requests across all 3. For read-heavy workloads, adding replicas is the scaling lever. Replicas also provide fault tolerance — losing a node does not lose data if at least one replica survives.")
 }}
@@ -235,6 +235,11 @@ The result: full-text search across millions of documents in <span class='hl'>< 
   "For <span class='hl'>< 1M</span> completion terms, Redis sorted sets (<code>ZRANGEBYLEX</code>) are simpler and faster — no ES dependency. For <span class='hl'>> 1M</span> terms or when you need fuzzy matching and category-filtered suggestions, ES completion suggester is the right choice. Many production systems use a <strong>hybrid</strong>: Redis for trending/recent queries (hot path), ES for long-tail content search (cold path)."
 }}
 
+{{think "The core autocomplete design decision is FST-based prefix completion vs n-gram infix matching — they optimize for different query patterns."
+  (whyNot "n-grams for all autocomplete" "N-gram fields index every substring: 'redis' → ['re','red','redi','redis']. A 10M document index with 3 text fields generates ~500M n-gram tokens — index size grows 5-8x. The FST completion suggester stores the same terms in ~200 MB of heap with sub-ms lookups. Use n-grams only when infix matching is a hard requirement.")
+  (whatIf "the product requires both prefix and infix autocomplete" "Use a two-tier approach: completion suggester for the fast prefix path (keystroke 1-2, < 1ms) and search_as_you_type as a fallback for infix matches (keystroke 3+, ~10ms). Query both in a single multi-search request and merge results client-side, deduplicating by document ID.")
+}}
+
 {{qa "How do you handle autocomplete for multi-language content?"
   "Use separate analyzers per language — each language has different tokenization and stemming rules. Create a <code>title_suggest_en</code> and <code>title_suggest_ja</code> field, each with its own analyzer. At query time, detect the user's language (from browser locale or explicit setting) and target the correct field. For CJK languages, use the <span class='hl-blue'>ICU tokenizer</span> — standard tokenizer splits Chinese characters incorrectly."
   "What about typo-tolerant autocomplete?"
@@ -292,6 +297,15 @@ The result: full-text search across millions of documents in <span class='hl'>< 
   "What is the trade-off of adding Elasticsearch?"
   "Operational complexity: another system to monitor, another failure domain. Indexing lag (~1s) — search results are slightly stale. Cost: ES nodes are memory-hungry. The trade-off is worth it when search is a core feature. If search is a minor feature used by 5% of users, a Postgres GIN trigram index may suffice."}}
 
+{{hint "ES is not a general-purpose database" "In system design interviews, always position ES as a <strong>secondary derived index</strong>. The pattern is: primary DB (Postgres/DynamoDB) → CDC stream → ES. Never propose ES as the sole data store — it lacks transactions, has a <span class='hl'>1-second indexing lag</span>, and can lose up to <span class='hl'>5 seconds</span> of writes on a node crash (translog flush interval)."}}
+
+{{triggerQs "Common ES Patterns Questions"
+  "How would you use ES in a product search system with faceted filtering?"
+  "Index products with <strong>keyword</strong> sub-fields for every filterable attribute (brand, category, color). Use <code>bool.filter</code> for facets (cacheable bitsets) and <code>bool.must</code> for the text query. Run a <code>terms</code> aggregation on each facet field to compute counts. At <span class='hl'>50M products</span>, this returns results + facet counts in <span class='hl'>< 50ms</span> — impossible with SQL GROUP BY across multiple dimensions."
+  "When should you denormalize data into ES vs use nested or parent-child documents?"
+  "Denormalize whenever possible — it is the fastest query path. Use <strong>nested</strong> only when you need to query inner objects independently (e.g., 'find products where a review by user X has rating > 4'). Nested documents are stored as hidden Lucene documents — a product with <span class='hl'>100 reviews</span> becomes <span class='hl'>101 Lucene docs</span>. Parent-child (join field) is the slowest option: <span class='hl'>5-10x slower</span> than denormalized queries. Use it only when child documents change independently and reindexing the parent is too expensive."
+}}
+
 {{phase 8 "Trade-offs & Edge Cases" "3 min"}}
 
 {{table "ES Limitations" (rows
@@ -323,6 +337,18 @@ The result: full-text search across millions of documents in <span class='hl'>< 
   "ES stops indexing when disk usage exceeds the <strong>flood-stage watermark</strong> (default <span class='hl'>95%</span>). Before that: (1) delete old indices — time-series data older than retention period. (2) Force merge cold indices to reduce segment count and reclaim deleted document space. (3) Add data nodes to redistribute shards. (4) Move cold indices to cheaper storage (warm/cold ILM tiers). Never increase the watermark threshold — it exists to prevent the node from crashing."
   "What is the biggest operational risk when upgrading Elasticsearch versions?"
   "Index compatibility. ES can only read indices created in the <strong>previous major version</strong>. Upgrading from 6.x → 8.x requires reindexing all 6.x indices first (6.x → 7.x → reindex → 8.x). Skipping this step makes indices unreadable. Always check the <code>_cat/indices</code> API for the <code>creation.date.string</code> column to identify old indices before upgrading. Use the rolling upgrade process — never stop the whole cluster at once."
+}}
+
+{{qa "How do you size an Elasticsearch cluster for a new project?"
+  "Start with data volume: <span class='hl'>raw data size × 1.5</span> (indexing overhead + replicas). Divide by <span class='hl'>30-50 GB</span> per shard to get shard count. Each data node handles <span class='hl'>~500 GB</span> of shards comfortably. For a <span class='hl'>2 TB</span> dataset: ~3 TB with replicas → 60-100 shards → 6-8 data nodes. Add 3 dedicated master nodes and 2 coordinating nodes for production. Memory: <span class='hl'>64 GB RAM</span> per data node (31 GB heap + 33 GB file cache)."
+  "What is the cost of running a production ES cluster?"
+  "A minimal production cluster (3 master r5.large + 3 data r5.xlarge) costs roughly <span class='hl'>$1,200/mo</span> on AWS. Each additional data node adds <span class='hl'>~$180/mo</span>. EBS storage (gp3) adds <span class='hl'>$0.08/GB/mo</span>. A 5 TB cluster with 10 data nodes runs approximately <span class='hl'>$2,600/mo</span>. AWS OpenSearch Service adds ~30% premium over self-managed but eliminates operational burden."}}
+
+{{triggerQs "Trade-offs & Edge Cases Questions"
+  "How do you handle ES cluster recovery after a full outage?"
+  "ES persists data to disk via Lucene segments + translog. On restart, each node recovers its local shards from disk. The master waits for a quorum of data nodes (<code>gateway.recover_after_nodes</code>) before starting shard allocation. Full recovery of a <span class='hl'>1 TB</span> cluster takes <span class='hl'>5-15 minutes</span> depending on segment count. The translog replays uncommitted operations — at most <span class='hl'>5 seconds</span> of writes may be lost (configurable via <code>translog.durability: request</code> for zero loss at the cost of write latency)."
+  "What happens when ES runs out of JVM heap?"
+  "The JVM triggers aggressive garbage collection — stop-the-world pauses of <span class='hl'>10-30 seconds</span>. During GC pauses, the node appears dead to the cluster. If the pause exceeds the master's failure detection timeout (<span class='hl'>30s default</span>), the master removes the node and starts reallocating its shards — causing a cascade. Fix: keep heap below <span class='hl'>75%</span>, use circuit breakers (<code>indices.breaker.total.limit: 70%</code>), and avoid fielddata on high-cardinality text fields."
 }}
 
 {{checklist
