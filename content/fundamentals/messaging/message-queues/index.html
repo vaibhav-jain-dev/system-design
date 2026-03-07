@@ -10,7 +10,7 @@
   (whatIf "the queue itself goes down" "Kafka replicates partitions across brokers. Losing one broker doesn't lose data if replication factor ≥ 2.")
 }}
 
-{{hint "why not just a database as a queue?" "Databases work at small scale but polling adds latency, rows-as-queue creates lock contention, and there's no built-in fan-out or replay. Kafka's log structure is purpose-built for this."}}
+{{hint "why not just a database as a queue?" "Databases work at small scale but polling adds latency, rows-as-queue creates lock contention, and there's no built-in fan-out or replay. Kafka's log structure is purpose-built for this. Use case: <a class=\"dqa-link\" href=\"/problem/instagram\">Instagram</a> post fan-out to 1M followers requires Kafka's multi-consumer log, not a DB queue."}}
 
 {{table "Messaging Patterns" (rows
   (row "Pattern" "Direction" "Consumers" "Use Case")
@@ -71,7 +71,7 @@ auto.offset.reset=earliest  # Start from beginning on new group`}}
 
 {{phase 3 "Kafka vs Alternatives" "5 min"}}
 
-{{say "The right queue depends on your ordering, replay, and throughput needs. Kafka is not always the answer — SQS is simpler for Lambda pipelines, RabbitMQ is better for complex routing, Redis Streams work for small-scale fan-out."}}
+{{say "The right queue depends on your ordering, replay, and throughput needs. Kafka is not always the answer — SQS is simpler for Lambda pipelines, RabbitMQ is better for complex routing, <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> Streams work for small-scale fan-out."}}
 
 {{compare "Message Queue Choice" (options
   (best "Kafka" "Ordered replay, high throughput (1M+ msgs/sec), multi-consumer groups, log compaction. Best for event sourcing, audit logs, stream processing.")
@@ -85,7 +85,7 @@ auto.offset.reset=earliest  # Start from beginning on new group`}}
   (row "RabbitMQ" "Per queue" "No (deleted on ack)" "~50K msgs/sec" "128MB" "No" "Self-hosted")
   (row "SQS Standard" "No guarantee" "No" "Unlimited" "256KB" "No" "Yes (AWS)")
   (row "SQS FIFO" "Per group ID" "No" "3K msgs/sec" "256KB" "Yes" "Yes (AWS)")
-  (row "Redis Streams" "Per stream" "Yes (ID-based)" "~100K msgs/sec" "512MB" "No" "ElastiCache")
+  (row "<a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> Streams" "Per stream" "Yes (ID-based)" "~100K msgs/sec" "512MB" "No" "ElastiCache")
   (row "Google Pub/Sub" "No" "Yes (ack deadline)" "~1M msgs/sec" "10MB" "No" "Yes (GCP)")
 )}}
 
@@ -207,7 +207,7 @@ spec:
 
 {{triggerQs "Phase 6 Interview Questions"
   "What happens when producer.buffer.memory is full?"
-  "The producer call blocks for up to max.block.ms (default 60,000ms). If the buffer doesn't free in that time, a TimeoutException is thrown. This is the back-pressure signal propagating to the application layer. The app can then slow down ingestion, queue requests internally, or return 429 to the upstream caller."
+  "The producer call blocks for up to max.block.ms (default 60,000ms). If the buffer doesn't free in that time, a TimeoutException is thrown. This is the back-pressure signal propagating to the application layer. The app can then slow down ingestion, queue requests internally, or return <a class=\"dqa-link\" href=\"/algo/token-bucket\">429</a> to the upstream caller."
   "How do you prevent consumer lag from growing indefinitely?"
   "Three levers: 1) Increase consumer parallelism (more pods, up to partition count). 2) Increase partition count at topic creation time. 3) Reduce per-message processing time (optimize the consumer logic, batch DB writes). Monitor lag via Kafka consumer group metrics in Prometheus — alert when lag growth rate > 0 for > 5 minutes."
 }}
@@ -229,6 +229,15 @@ spec:
   (row "MSK cost" "~$8,400/month" "3× m5.4xlarge + EBS + data transfer")
 )}}
 
+{{table "Kafka Sizing Reference" (rows
+  (row "Producer Throughput" "Brokers Needed" "EBS Volume Type" "MSK Instance Type" "Monthly Cost (est.)")
+  (row "10K msgs/sec (10 MB/sec)" "3× brokers" "gp3 – 300GB each" "m5.xlarge × 3" "~$1,400/mo")
+  (row "100K msgs/sec (100 MB/sec)" "3× brokers" "gp3 – 4TB each" "m5.4xlarge × 3" "~$8,400/mo")
+  (row "1M msgs/sec (1 GB/sec)" "6–9× brokers" "NVMe local (i3en.2xlarge)" "i3en.2xlarge × 6" "~$28,000/mo")
+)}}
+
+{{hint "S3 Tiered Storage cuts Kafka costs 70%" "Kafka's <span class=\"hl-blue\">S3 Tiered Storage</span> (MSK, Confluent Cloud, Redpanda) offloads older log segments to S3 at <span class=\"hl\">$0.023/GB</span> vs <span class=\"hl\">$0.08/GB</span> for EBS. For 30-day retention at 100K msgs/sec, tiered storage reduces broker EBS from 180TB to ~25TB (hot data only — the last 7 days). That's a <span class=\"hl\">70% reduction in storage cost</span> with no change to consumer behavior — Kafka transparently fetches cold segments from S3 on demand."}}
+
 {{hint "EBS vs local NVMe for Kafka" "AWS MSK uses EBS (gp3) by default — durable but limited to ~1GB/sec per volume. For >500MB/sec write throughput per broker, consider MSK with provisioned throughput or self-managed Kafka on i3en.xlarge instances (NVMe local storage at 2.5GB/sec)."}}
 
 {{think "Real companies run Kafka at a scale most engineers don't appreciate."
@@ -237,14 +246,21 @@ spec:
   (whyNot "one large cluster for everything" "Blast radius. A misconfigured producer can saturate a shared cluster. Isolate by domain: payments cluster, analytics cluster, logging cluster.")
 }}
 
+{{triggerQs "Sizing Questions"
+  "How do you calculate Kafka storage requirements?"
+  "Formula: <code>daily_msgs × avg_msg_size_bytes × retention_days × replication_factor</code>. Example: <span class=\"hl\">100K msgs/sec</span> × <span class=\"hl\">1KB</span> × 86,400 s × 7 days × 3 RF = <span class=\"hl\">181 TB</span>. Use gp3 EBS volumes at <span class=\"hl\">$0.08/GB</span> = <span class=\"hl\">~$14,500/mo</span> for storage alone. This is why Kafka retention is set to <strong>7 days (not 30)</strong> for high-throughput topics — 30-day retention would multiply that cost 4×. Use <span class=\"hl-blue\">S3 Tiered Storage</span> if you need longer retention without paying EBS prices."
+  "When does Kafka cost more than SQS?"
+  "<span class=\"hl-blue\">SQS Standard</span> pricing: <span class=\"hl\">$0.40 per million messages</span>. At <span class=\"hl\">100K msgs/sec</span> = 8.64 billion msgs/day = <span class=\"hl\">$3,456/day = $103K/month</span>. <span class=\"hl-blue\">MSK</span> with 3 m5.4xlarge brokers = <span class=\"hl\">~$8,400/month</span>. Break-even is around <span class=\"hl\">20–30K msgs/sec</span> — above that, self-managed Kafka is cheaper. Below that, SQS is simpler and cheaper. <span class=\"hl-red\">Never use SQS for high-throughput event streaming</span> — the per-message cost scales linearly and becomes prohibitive."
+}}
+
 {{triggerQs "Phase 7 Interview Questions"
   "How many partitions should a topic have?"
-  "Rule of thumb: target throughput ÷ per-partition throughput. If you need 200MB/sec and each partition handles 20MB/sec, you need 10 partitions. Add 2-3x headroom. More partitions = more parallelism but more file handles and leader elections. Start at 10-20 for most topics, 100+ for high-throughput analytics topics."
+  "Rule of thumb: target throughput ÷ per-partition throughput. If you need 200MB/sec and each partition handles 20MB/sec, you need 10 partitions. Add 2-3x headroom. More partitions = more parallelism but more file handles and leader elections. Start at 10-20 for most topics, 100+ for high-throughput analytics topics. For <a class=\"dqa-link\" href=\"/problem/url-shortener\">URL Shortener</a> click analytics, a single topic with 10-20 partitions handles millions of redirects/sec."
   "What instance type would you choose for Kafka brokers?"
   "For medium workloads (100MB/sec), m5.4xlarge with gp3 EBS (1GB/sec provisioned). For high throughput (500MB/sec+), i3en.xlarge or i3en.2xlarge with NVMe local storage — ~2.5GB/sec sequential write at lower cost per MB/sec than EBS. Always use dedicated instances, not burstable (T series) for Kafka."
 }}
 
-{{qa "Should I use Kafka or SQS for a new project?" "SQS for simple task queues where you need at-least-once delivery without managing infrastructure. Kafka for event streaming where you need replay, multiple independent consumers, or high throughput (100K+ msg/sec). SQS maxes out at ~3K msg/sec per queue without batching. SQS is fully managed; Kafka requires cluster management (or use MSK/Confluent Cloud)." "What about Redis Streams vs Kafka?" "Redis Streams work well for lightweight streaming with <10K msg/sec and short retention. Kafka is for production event pipelines: it handles millions of msg/sec, multi-day retention, and has a mature ecosystem (Connect, Schema Registry, ksqlDB). Redis Streams lack built-in replication across clusters."}}
+{{qa "Should I use Kafka or SQS for a new project?" "SQS for simple task queues where you need at-least-once delivery without managing infrastructure. Kafka for event streaming where you need replay, multiple independent consumers, or high throughput (100K+ msg/sec). SQS maxes out at ~3K msg/sec per queue without batching. SQS is fully managed; Kafka requires cluster management (or use MSK/Confluent Cloud)." "What about <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> Streams vs Kafka?" "Redis Streams work well for lightweight streaming with &lt;10K msg/sec and short retention. Kafka is for production event pipelines: it handles millions of msg/sec, multi-day retention, and has a mature ecosystem (Connect, Schema Registry, ksqlDB). Redis Streams lack built-in replication across clusters."}}
 
 {{phase 8 "Interview Summary" "3 min"}}
 
@@ -252,15 +268,18 @@ spec:
 
 {{avoid "Don't say 'Kafka guarantees exactly-once' without qualification. Kafka's idempotent producer + transactions prevent broker-level duplicates. End-to-end exactly-once requires idempotent consumer writes too. State both halves or your answer is incomplete."}}
 
-{{avoid "Don't say RabbitMQ supports replay. It doesn't. Messages are deleted on ack. If the interviewer asks about replay for RabbitMQ, clarify that it's the wrong tool — use Kafka or Redis Streams."}}
+{{avoid "Don't say RabbitMQ supports replay. It doesn't. Messages are deleted on ack. If the interviewer asks about replay for RabbitMQ, clarify that it's the wrong tool — use Kafka or <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> Streams."}}
+
+{{avoid "Don't call Kafka a message queue — it's a <strong>distributed log</strong>. Queues destroy messages after consumption; Kafka retains them by offset and lets any consumer group read independently at its own pace. Saying 'Kafka is a message queue' signals a surface-level understanding. The correct framing: 'Kafka is an append-only, partitioned, replicated log. Consumer groups track their own offset — messages are never deleted on read, only on retention expiry.'"}}
 
 {{table "Real Company Usage" (rows
   (row "Company" "System" "Scale")
   (row "LinkedIn" "Kafka (created it)" "7 trillion msgs/day, audit + activity feeds")
-  (row "Uber" "Kafka" "Ride events, driver location, 4000+ brokers")
-  (row "Twitter/X" "Kafka" "Tweet fan-out, event sourcing")
+  (row "<a class=\"dqa-link\" href=\"/problem/ride-hailing\">Uber</a>" "Kafka" "Ride events, driver location, 4000+ brokers")
+  (row "<a class=\"dqa-link\" href=\"/problem/twitter-feed\">Twitter/X</a>" "Kafka" "Tweet fan-out, event sourcing")
   (row "Netflix" "Kafka + Flink" "Playback events, stream processing")
   (row "AWS" "SQS" "Lambda triggers, decoupled microservices")
+  (row "<a class=\"dqa-link\" href=\"/problem/instagram\">Instagram</a>" "Kafka" "Photo upload fan-out, notification pipeline")
   (row "Slack" "Kafka" "Message persistence, notification fan-out")
 )}}
 

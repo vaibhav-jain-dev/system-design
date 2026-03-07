@@ -323,7 +323,7 @@
 
 {{compare "Database Choice" (options
   (best "DynamoDB" "Every read is a single-key lookup — DynamoDB's strong point. Auto-scales from 0 to millions of QPS with no manual sharding. Built-in TTL for URL expiration. On-demand pricing at low scale, provisioned with auto-scaling at high scale. Global Tables for multi-region. $0.25/M reads, $1.25/M writes.")
-  (alt "Postgres" "Works at MVP (< 10K QPS). ACID transactions help analytics. But at 50K+ QPS, manual sharding needed. Connection pooling (PgBouncer) required. Read replicas help reads but writes bottleneck on primary.")
+  (alt "Postgres" "Works at MVP (&lt; 10K QPS). ACID transactions help analytics. But at 50K+ QPS, manual sharding needed. Connection pooling (PgBouncer) required. Read replicas help reads but writes bottleneck on primary.")
   (nofit "Cassandra" "Handles writes well but operational complexity is high: compaction tuning, repair cycles, JVM garbage collection pauses. DynamoDB gives the same key-value performance without the ops burden.")
   (nofit "MongoDB" "Replica set management, config servers, mongos routing. No advantage over DynamoDB for simple key-value lookups. WiredTiger storage engine adds unnecessary complexity.")
 )}}
@@ -341,12 +341,12 @@
 
 {{table "DynamoDB Access Patterns & Indexes" (rows
   (row "Access Pattern"        "Table/Index"        "Key Condition"                        "Complexity"  "Expected Latency")
-  (row "Redirect lookup"       "urls (primary)"     "GetItem(PK=short_code)"               "O(1)"       "<5ms")
-  (row "Create URL"            "urls (primary)"     "PutItem (idempotent)" "O(1)"    "<5ms")
-  (row "User's URLs (dashboard)" "GSI: user-urls-index" "Query(PK=user_id, SK=created_at DESC)" "O(n)"  "<10ms, paginated")
-  (row "Delete URL"            "urls (primary)"     "DeleteItem(PK=short_code)"            "O(1)"       "<5ms")
+  (row "Redirect lookup"       "urls (primary)"     "GetItem(PK=short_code)"               "O(1)"       "&lt;5ms")
+  (row "Create URL"            "urls (primary)"     "PutItem (idempotent)" "O(1)"    "&lt;5ms")
+  (row "User's URLs (dashboard)" "GSI: user-urls-index" "Query(PK=user_id, SK=created_at DESC)" "O(n)"  "&lt;10ms, paginated")
+  (row "Delete URL"            "urls (primary)"     "DeleteItem(PK=short_code)"            "O(1)"       "&lt;5ms")
   (row "Expired cleanup"       "N/A (automatic)"    "DynamoDB TTL auto-deletes"            "O(0)"       "Zero-cost, zero-code")
-  (row "Analytics increment"   "click_analytics"    "UpdateItem atomic ADD"                "O(1)"       "<5ms")
+  (row "Analytics increment"   "click_analytics"    "UpdateItem atomic ADD"                "O(1)"       "&lt;5ms")
 )}}
 
 {{think "The index projection matters for cost. Using ALL projection (full item copy) means the user dashboard query returns all fields in a single read. KEYS_ONLY would require a follow-up lookup per URL, turning one read into many reads."
@@ -389,12 +389,12 @@ CREATE INDEX idx_urls_expires ON urls(expires_at) WHERE expires_at IS NOT NULL;
 
 {{phase 4 "Key Generation Deep Dive" "8 min"}}
 
-{{say "Short code generation is the most important design decision — three approaches, each with different collision risk, guessability, and coordination overhead:
+{{say `Short code generation is the most important design decision — three approaches, each with different collision risk, guessability, and coordination overhead:
 <ul>
   <li><strong>Counter + Base62</strong> — zero collisions but sequential (guessable) and needs a centralized counter</li>
   <li><strong>MD5/SHA hash truncation</strong> — deterministic per input but Birthday paradox makes collisions frequent at scale</li>
   <li><strong>Key Generation Service (KGS)</strong> — pre-generates unique random keys in batches, zero collisions, non-guessable</li>
-</ul>"}}
+</ul>`}}
 
 {{hint "why key generation matters most" "Key generation determines collision risk, guessability, coordination overhead, and failure modes. Get it wrong and you either lose data (collisions), expose private URLs (guessable sequences), or create a single point of failure (centralized counter). This is the section interviewers dig deepest into."}}
 
@@ -488,7 +488,7 @@ def base62_decode(s: str) -> int:
 {{table "Component Responsibilities" (rows
   (row "Component"              "Purpose"                                           "Why This Choice"                                   "Failure Behavior")
   (row "Route 53"               "DNS resolution, latency-based routing"             "AWS-native, health checks, failover support"       "DNS cache serves stale (safe)")
-  (row "CloudFront (CDN)"       "Cache 301 redirects at 750+ edge PoPs"             "60%+ of reads absorbed. <5ms for cached URLs."    "Edge miss &#8594; origin. Higher latency but still works.")
+  (row "CloudFront (CDN)"       "Cache 301 redirects at 750+ edge PoPs"             "60%+ of reads absorbed. &lt;5ms for cached URLs."    "Edge miss &#8594; origin. Higher latency but still works.")
   (row "ALB"                    "L7 load balancing, TLS termination, health checks" "Path routing, WebSocket support if needed"          "Multi-AZ, auto-heals. AZ failure handled.")
   (row "API Servers (ECS)"      "Shorten URLs, resolve redirects"                   "Stateless, auto-scaling on CPU/RPS"                "Unhealthy task drained + replaced in 30s")
   (row "ElastiCache Redis"      "L3 regional cache for URL lookups"                 "Sub-ms reads. 95% cache hit rate."                 "Multi-AZ failover to replica in 30s")
@@ -515,9 +515,9 @@ def base62_decode(s: str) -> int:
 
 {{triggerQs "Architecture Questions"
   "Why not use a single serverless function (Lambda) for the redirect?"
-  "Lambda cold starts add <span class='hl'>100-500ms</span> latency on first invocation. For a URL shortener where p99 must be <span class='hl'>&lt;50ms</span>, cold starts are unacceptable. Provisioned concurrency fixes this but costs <span class='hl'>$15/month per 100 concurrent invocations</span> — at 100K req/sec, that is prohibitively expensive vs a simple container fleet."
+  "Lambda cold starts add &lt;span class='hl'>100-500ms&lt;/span> latency on first invocation. For a URL shortener where p99 must be &lt;span class='hl'>&lt;50ms&lt;/span>, cold starts are unacceptable. Provisioned concurrency fixes this but costs &lt;span class='hl'>$15/month per 100 concurrent invocations&lt;/span> — at 100K req/sec, that is prohibitively expensive vs a simple container fleet."
   "How do you handle the read/write split in the architecture?"
-  "Writes go to the primary database and invalidate the Redis cache. Reads check Redis first (cache-aside pattern), then fall through to read replicas on miss. The 10:1 read:write ratio means <span class='hl'>90%</span> of traffic never touches the primary. Read replicas can be scaled horizontally — add more replicas as read traffic grows."
+  "Writes go to the primary database and invalidate the Redis cache. Reads check Redis first (cache-aside pattern), then fall through to read replicas on miss. The 10:1 read:write ratio means &lt;span class='hl'>90%&lt;/span> of traffic never touches the primary. Read replicas can be scaled horizontally — add more replicas as read traffic grows."
 }}
 
 {{phase 6 "Caching Deep Dive" "5 min"}}
@@ -630,8 +630,8 @@ async def resolve_short_url(short_code: str) -> str:
 
 {{table "Reliability Patterns" (rows
   (row "Pattern"                "Implementation"                           "What It Handles"                       "Recovery Time")
-  (row "Multi-AZ deployment"   "ECS tasks across 3 AZs"                   "Single AZ failure (33% capacity lost)" "< 1 minute (ALB auto-routes)")
-  (row "Database replication"  "DynamoDB: 3 replicas across AZs (built-in)" "Node failure, data corruption"       "Transparent (< 1 second)")
+  (row "Multi-AZ deployment"   "ECS tasks across 3 AZs"                   "Single AZ failure (33% capacity lost)" "&lt; 1 minute (ALB auto-routes)")
+  (row "Database replication"  "DynamoDB: 3 replicas across AZs (built-in)" "Node failure, data corruption"       "Transparent (&lt; 1 second)")
   (row "Cache failover"        "ElastiCache Multi-AZ auto-failover"       "Redis primary crash"                   "10-30 seconds (promote replica)")
   (row "Circuit breaker"       "Resilience4j on DynamoDB calls"                "DB throttling or latency spikes"       "Immediate (serve from cache)")
   (row "Retry with jitter"     "Exponential backoff + random jitter"      "Transient failures"                    "Prevents thundering herd on recovery")
@@ -642,8 +642,8 @@ async def resolve_short_url(short_code: str) -> str:
 {{table "Failure Scenarios" (rows
   (row "Failure"                     "Impact"                          "Mitigation"                                    "Recovery Time")
   (row "Single ECS task crash"       "Slight latency spike"            "ALB health check detects, drains, replaces"    "30 seconds")
-  (row "Entire AZ failure"           "33% capacity lost"               "ALB routes to remaining 2 AZs automatically"  "< 1 minute")
-  (row "ElastiCache node failure"    "Cache miss spike, DB load rises" "Multi-AZ failover to replica"                  "< 30 seconds")
+  (row "Entire AZ failure"           "33% capacity lost"               "ALB routes to remaining 2 AZs automatically"  "&lt; 1 minute")
+  (row "ElastiCache node failure"    "Cache miss spike, DB load rises" "Multi-AZ failover to replica"                  "&lt; 30 seconds")
   (row "DynamoDB throttling"         "Write failures for new URLs"     "On-demand mode auto-scales, or SQS buffer"    "1-2 minutes")
   (row "CloudFront outage"           "All redirects hit origin"        "ALB handles directly, higher latency"          "Rare, minutes")
   (row "KGS service down"           "Cannot generate new short codes" "App servers use local batch (1000 keys &#8776; 15 min)" "Minutes")
@@ -746,7 +746,7 @@ Behavior:
   (row "Check"                   "When"              "API/Source"                    "Latency"    "Action on Failure")
   (row "Google Safe Browsing"    "On creation (sync)" "Safe Browsing Lookup API v4"   "~50ms"     "HTTP 422 Reject")
   (row "URIBL/SURBL Blacklists" "On creation (async)" "DNS-based lookup"             "~10ms"     "Flag for review")
-  (row "Domain Age (WHOIS)"     "On creation (async)" "WHOIS API"                    "~200ms"    "New domain <30 days → auto-flag")
+  (row "Domain Age (WHOIS)"     "On creation (async)" "WHOIS API"                    "~200ms"    "New domain &lt;30 days → auto-flag")
   (row "Reverse DNS Check"      "On creation (async)" "DNS PTR record"               "~5ms"      "No rDNS → increase risk score")
   (row "Periodic Re-scan"       "Nightly batch"       "All 4 sources above"          "Batch"     "Disable flagged URLs (410 Gone)")
 )}}
@@ -816,7 +816,7 @@ Error Responses:
   (row "Use Cases"      "Print marketing, event posters, business cards, restaurant menus")
 )}}
 
-{{hint "why Lambda@Edge for QR codes?" "QR codes are static images determined entirely by the short URL. Generating them at the edge (Lambda@Edge) means the QR code is computed once and cached at 400+ CloudFront PoPs. Subsequent requests from any region get <10ms response. Generating on the origin would mean every QR request traverses the internet to your server. At $0.00006 per 10K requests, the cost is negligible."}}
+{{hint "why Lambda@Edge for QR codes?" "QR codes are static images determined entirely by the short URL. Generating them at the edge (Lambda@Edge) means the QR code is computed once and cached at 400+ CloudFront PoPs. Subsequent requests from any region get &lt;10ms response. Generating on the origin would mean every QR request traverses the internet to your server. At $0.00006 per 10K requests, the cost is negligible."}}
 
 {{triggerQs "Questions about security"
   "How do you handle URL shortener abuse for SEO spam?"
@@ -824,7 +824,7 @@ Error Responses:
   "Should you validate that the destination URL actually exists before shortening?"
   "No for the default case. HEAD-requesting every destination URL adds 100-2000ms latency on creation and breaks URLs behind auth walls, VPNs, or firewalls your server cannot reach. Instead, validate URL format (valid scheme, hostname, no javascript: URIs) synchronously, and check Google Safe Browsing asynchronously. Only do existence checks as a premium feature for enterprise customers."
   "How do you implement real-time URL reputation scoring?"
-  "On creation, extract features: domain age (WHOIS), URL entropy, path depth, IP vs domain, homoglyph detection. Feed into a pre-trained logistic regression model (~1ms inference). Score >80: reject. Score 50-80: serve via 302 (retain ability to block). Score <50: normal 301. Re-score all URLs weekly as threat intel updates. Catches ~85% of zero-day phishing at creation time."
+  "On creation, extract features: domain age (WHOIS), URL entropy, path depth, IP vs domain, homoglyph detection. Feed into a pre-trained logistic regression model (~1ms inference). Score >80: reject. Score 50-80: serve via 302 (retain ability to block). Score &lt;50: normal 301. Re-score all URLs weekly as threat intel updates. Catches ~85% of zero-day phishing at creation time."
 }}
 
 {{phase 10 "Analytics Deep Dive" "5 min"}}
@@ -883,12 +883,12 @@ Error Responses:
 
 {{table "Analytics Query Examples" (rows
   (row "Query"                          "DynamoDB Operation"                                        "Latency")
-  (row "Total clicks today"             "GetItem(PK='Ab3xK9#2024-03-05', SK='total')"              "<5ms")
-  (row "Clicks by country"              "Query(PK='Ab3xK9#2024-03-05', SK begins_with 'country#')" "<10ms")
-  (row "Clicks by device"               "Query(PK='Ab3xK9#2024-03-05', SK begins_with 'device#')"  "<10ms")
-  (row "Click heatmap (by hour)"        "Query(PK='Ab3xK9#2024-03-05', SK begins_with 'hour#')"    "<10ms")
-  (row "Top referrers"                  "Query(PK='Ab3xK9#2024-03-05', SK begins_with 'referrer#')" "<10ms")
-  (row "30-day trend"                   "BatchGetItem across 30 date PKs, SK='total'"              "<50ms")
+  (row "Total clicks today"             "GetItem(PK='Ab3xK9#2024-03-05', SK='total')"              "&lt;5ms")
+  (row "Clicks by country"              "Query(PK='Ab3xK9#2024-03-05', SK begins_with 'country#')" "&lt;10ms")
+  (row "Clicks by device"               "Query(PK='Ab3xK9#2024-03-05', SK begins_with 'device#')"  "&lt;10ms")
+  (row "Click heatmap (by hour)"        "Query(PK='Ab3xK9#2024-03-05', SK begins_with 'hour#')"    "&lt;10ms")
+  (row "Top referrers"                  "Query(PK='Ab3xK9#2024-03-05', SK begins_with 'referrer#')" "&lt;10ms")
+  (row "30-day trend"                   "BatchGetItem across 30 date PKs, SK='total'"              "&lt;50ms")
 )}}
 
 {{hint "why DynamoDB over a time-series DB for analytics?" "DynamoDB with composite keys gives us O(1) lookups for any dimension slice. A time-series DB (InfluxDB, TimescaleDB) would be better for arbitrary range queries but adds another database to operate. Since our queries are known upfront (by country, device, referrer, hour), DynamoDB's key-value model is sufficient and we avoid operational complexity."}}
@@ -914,18 +914,18 @@ Error Responses:
 {{table "Service Level Objectives (SLOs)" (rows
   (row "Metric"            "Target"               "Measurement"                              "Error Budget")
   (row "Availability"      "99.99%"               "Successful responses / total requests"    "52 min downtime/year")
-  (row "Redirect Latency"  "p99 < 10ms, p50 < 5ms" "CloudFront + origin combined"           "Alert if p99 > 50ms for 5 min")
-  (row "Write Success"     "99.9%"                "Successful creates / total create attempts" "Alert if < 99.5% for 5 min")
-  (row "Cache Hit Ratio"   "> 60%"                "CloudFront cache hits / total requests"   "Alert if < 50% (misconfiguration)")
+  (row "Redirect Latency"  "p99 &lt; 10ms, p50 &lt; 5ms" "CloudFront + origin combined"           "Alert if p99 > 50ms for 5 min")
+  (row "Write Success"     "99.9%"                "Successful creates / total create attempts" "Alert if &lt; 99.5% for 5 min")
+  (row "Cache Hit Ratio"   "> 60%"                "CloudFront cache hits / total requests"   "Alert if &lt; 50% (misconfiguration)")
 )}}
 
 {{table "Key CloudWatch Metrics & Alerts" (rows
   (row "Metric"                     "Source"               "Alert Threshold"                    "Action")
-  (row "Redirect Success Rate"      "ALB 2xx+3xx / total"  "< 99.9% for 5 minutes"             "Page on-call engineer")
-  (row "Cache Hit Ratio"            "CloudFront"           "< 60% for 15 minutes"               "Check TTL config, cache invalidation bugs")
+  (row "Redirect Success Rate"      "ALB 2xx+3xx / total"  "&lt; 99.9% for 5 minutes"             "Page on-call engineer")
+  (row "Cache Hit Ratio"            "CloudFront"           "&lt; 60% for 15 minutes"               "Check TTL config, cache invalidation bugs")
   (row "DynamoDB Throttles"         "CloudWatch"           "ConsumedRCU > 80% of provisioned"   "Scale up capacity or enable auto-scaling")
   (row "API Latency (p99)"          "ALB"                  "> 50ms for 5 minutes"               "Check Redis connection pool, DB latency")
-  (row "KGS Key Exhaustion"        "Custom metric"        "Remaining keys < 1 million"          "Trigger KGS batch generation")
+  (row "KGS Key Exhaustion"        "Custom metric"        "Remaining keys &lt; 1 million"          "Trigger KGS batch generation")
   (row "Error Rate (5xx)"          "ALB"                  "> 0.1% for 5 minutes"                "Check ECS task health, DB connectivity")
 )}}
 

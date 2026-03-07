@@ -34,7 +34,7 @@
 
 {{table "Input Guardrail Types" (rows
   (row "Guardrail"            "What It Detects"                      "Technique"                          "Latency"    "Action on Trigger")
-  (row "Length limits"         "Extremely long inputs (cost attack)"  "Token count check"                  "< 1ms"      "Truncate or reject")
+  (row "Length limits"         "Extremely long inputs (cost attack)"  "Token count check"                  "&lt; 1ms"      "Truncate or reject")
   (row "PII detection"        "Names, emails, SSNs, credit cards"    "Regex + NER model (Presidio)"       "5-20ms"     "Mask PII before LLM")
   (row "Prompt injection"     "Attempts to override system prompt"    "Classifier model + heuristics"      "50-100ms"   "Block request, log attempt")
   (row "Topic filtering"      "Off-topic or disallowed subjects"     "Classifier or keyword list"          "10-50ms"    "Redirect to allowed topics")
@@ -44,12 +44,12 @@
 {{hint "cheap checks first" "Ordering guardrails cheapest-to-most-expensive means most requests see only the fast regex/length checks. An expensive LLM classifier that costs $0.001 per call and runs on every request costs $100/day at 100K requests/day. Running it only when heuristics flag uncertainty (5-10% of traffic) costs $5-10/day. The fan-out approach saves 90% of guardrail cost."}}
 
 {{think "Input guardrails must be ordered by cost and latency — cheap deterministic checks first, expensive probabilistic checks last. This is not just an optimization; it is a correctness concern. If you run the LLM classifier first, a cost attacker sending 1M garbage requests burns through your classifier budget before any regex even fires."
-  (whyNot "running all checks in parallel" "Parallel execution wastes resources on inputs that would be caught by the cheapest check. A 100KB input fails the length check in <1ms — there is no reason to also run PII detection and the injection classifier on it. Sequential short-circuiting saves <span class='hl'>95%</span> of guardrail compute on average.")
-  (whatIf "a new attack bypasses all regex patterns" "The LLM classifier is the safety net. It runs on the <span class='hl'>10-20%</span> of inputs where heuristic confidence is low. For truly novel attacks, add the pattern to the regex list post-incident — regex updates deploy in seconds, model retraining takes hours.")
+  (whyNot "running all checks in parallel" "Parallel execution wastes resources on inputs that would be caught by the cheapest check. A 100KB input fails the length check in &lt;1ms — there is no reason to also run PII detection and the injection classifier on it. Sequential short-circuiting saves &lt;span class='hl'>95%&lt;/span> of guardrail compute on average.")
+  (whatIf "a new attack bypasses all regex patterns" "The LLM classifier is the safety net. It runs on the &lt;span class='hl'>10-20%&lt;/span> of inputs where heuristic confidence is low. For truly novel attacks, add the pattern to the regex list post-incident — regex updates deploy in seconds, model retraining takes hours.")
   (how "PII masking instead of blocking" "Masking replaces PII with tokens like [EMAIL_REDACTED] and lets the request proceed. The LLM can still answer the question without seeing raw PII. Blocking would reject the entire request, frustrating users who innocently include their email in a support question.")
 }}
 
-{{hint "why mask PII instead of rejecting?" "Most users who send PII are not attackers — they are asking legitimate questions that happen to include personal data. Masking lets the LLM answer the question while keeping PII out of logs, model context, and any downstream storage. At <span class='hl'>100K requests/day</span>, expect <span class='hl'>5-15%</span> to contain at least one PII pattern."}}
+{{hint "why mask PII instead of rejecting?" "Most users who send PII are not attackers — they are asking legitimate questions that happen to include personal data. Masking lets the LLM answer the question while keeping PII out of logs, model context, and any downstream storage. At &lt;span class='hl'>100K requests/day&lt;/span>, expect &lt;span class='hl'>5-15%&lt;/span> to contain at least one PII pattern."}}
 
 {{code "python" `import re
 from typing import List, Tuple, Optional
@@ -219,7 +219,7 @@ class InputGuardrails:
 
 {{table "Output Guardrail Types" (rows
   (row "Guardrail"            "What It Checks"                        "Technique"                          "Latency"       "Action on Trigger")
-  (row "Format validation"    "Expected JSON, markdown, etc."          "Schema validation (jsonschema)"     "< 1ms"         "Retry with format instructions")
+  (row "Format validation"    "Expected JSON, markdown, etc."          "Schema validation (jsonschema)"     "&lt; 1ms"         "Retry with format instructions")
   (row "PII in output"        "LLM leaking PII from context"          "Same PII detector as input"         "5-20ms"        "Mask before returning to user")
   (row "Content safety"       "Offensive, harmful, biased content"    "Content classifier (moderation API)" "100-200ms"    "Block and retry with safer prompt")
   (row "Hallucination check"  "Claims not supported by context"       "LLM-as-judge or NLI model"          "500-1000ms"   "Flag unsupported claims")
@@ -227,11 +227,11 @@ class InputGuardrails:
 )}}
 
 {{think "Output guardrails are harder than input guardrails because the LLM output space is unbounded. You cannot anticipate every harmful response with regex — you need a content classifier. The key trade-off is retry budget: how many times do you re-prompt before giving up?"
-  (whyNot "blocking on first output failure without retrying" "LLM outputs are non-deterministic. A response that fails content safety on the first attempt often passes on retry with temperature=0. Blocking without retry wastes the user's time and the input guardrail compute you already spent. Two retries catch <span class='hl'>95%</span> of transient failures.")
-  (whatIf "the hallucination check itself hallucinates" "Use a smaller, cheaper model (gpt-4o-mini) as the judge and set temperature=0 for deterministic evaluation. Cross-validate by checking if key claims appear verbatim in the source context using string matching — this catches the <span class='hl'>80%</span> of hallucinations that are fabricated facts not present in any retrieved document.")
+  (whyNot "blocking on first output failure without retrying" "LLM outputs are non-deterministic. A response that fails content safety on the first attempt often passes on retry with temperature=0. Blocking without retry wastes the user's time and the input guardrail compute you already spent. Two retries catch &lt;span class='hl'>95%&lt;/span> of transient failures.")
+  (whatIf "the hallucination check itself hallucinates" "Use a smaller, cheaper model (gpt-4o-mini) as the judge and set temperature=0 for deterministic evaluation. Cross-validate by checking if key claims appear verbatim in the source context using string matching — this catches the &lt;span class='hl'>80%&lt;/span> of hallucinations that are fabricated facts not present in any retrieved document.")
 }}
 
-{{hint "why is content safety free but hallucination checking expensive?" "The OpenAI Moderation API is a pre-trained classifier optimized for toxicity categories — it runs as a single forward pass and OpenAI provides it free to reduce platform abuse. Hallucination checking requires a full LLM inference pass that compares the answer against source context, consuming <span class='hl'>~300-500 input tokens</span> per check at standard API pricing."}}
+{{hint "why is content safety free but hallucination checking expensive?" "The OpenAI Moderation API is a pre-trained classifier optimized for toxicity categories — it runs as a single forward pass and OpenAI provides it free to reduce platform abuse. Hallucination checking requires a full LLM inference pass that compares the answer against source context, consuming &lt;span class='hl'>~300-500 input tokens&lt;/span> per check at standard API pricing."}}
 
 {{code "python" `import json
 import openai
@@ -527,9 +527,9 @@ class PromptInjectionDetector:
   "Should injection detection fail open or fail closed?"
   "Fail closed — block the request if the detector cannot determine safety. A false positive (blocking a safe input) costs one user retry. A false negative (allowing an injection) can leak data, execute unintended actions, or cause reputation damage. The asymmetry strongly favors fail-closed. Log all blocks so you can tune thresholds and reduce false positives over time."
   "How do you handle multi-turn prompt injection?"
-  "Analyze the full conversation history, not just the latest message. An attacker may spread an injection across 5-10 messages that individually look benign. Concatenate the last N messages and run the injection detector on the combined text. Set N based on your context window — typically the last <span class='hl'>5 turns</span> or <span class='hl'>2000 tokens</span>, whichever is smaller."
+  "Analyze the full conversation history, not just the latest message. An attacker may spread an injection across 5-10 messages that individually look benign. Concatenate the last N messages and run the injection detector on the combined text. Set N based on your context window — typically the last &lt;span class='hl'>5 turns&lt;/span> or &lt;span class='hl'>2000 tokens&lt;/span>, whichever is smaller."
   "What accuracy do injection classifiers achieve in practice?"
-  "State-of-the-art LLM-based classifiers reach <span class='hl'>~95% true positive rate</span> with a <span class='hl'>~3% false positive rate</span> on standard benchmarks. Regex heuristics alone catch <span class='hl'>~70-80%</span> of known patterns but miss novel attacks. The multi-layer approach (regex + LLM) achieves <span class='hl'>~98% detection</span> at the cost of higher latency on suspicious inputs."
+  "State-of-the-art LLM-based classifiers reach &lt;span class='hl'>~95% true positive rate&lt;/span> with a &lt;span class='hl'>~3% false positive rate&lt;/span> on standard benchmarks. Regex heuristics alone catch &lt;span class='hl'>~70-80%&lt;/span> of known patterns but miss novel attacks. The multi-layer approach (regex + LLM) achieves &lt;span class='hl'>~98% detection&lt;/span> at the cost of higher latency on suspicious inputs."
 }}
 
 {{phase 5 "Complete Guardrail Pipeline" "8 min"}}
@@ -676,15 +676,15 @@ class GuardedLLM:
 `}}
 
 {{think "The retry loop is the most critical design decision in the pipeline. Retrying with the same prompt rarely fixes content safety failures — you need to add explicit instructions like 'Do not include any harmful content' to the retry prompt. But retries also multiply latency and cost linearly."
-  (whyNot "unlimited retries" "Each retry costs a full LLM inference pass — at <span class='hl'>$0.01-0.03</span> per call for GPT-4o, 5 retries means 5x cost. Worse, if the model consistently fails guardrails on a topic, infinite retries create a latency spike and a cost attack vector. Cap at <span class='hl'>2 retries</span>, then return a safe fallback message.")
-  (how "make retries more effective" "Append the specific violation to the retry prompt: 'Your previous response was flagged for [violation]. Regenerate without [specific issue].' This targeted feedback improves retry success rate from <span class='hl'>~50%</span> (blind retry) to <span class='hl'>~85%</span> (informed retry).")
+  (whyNot "unlimited retries" "Each retry costs a full LLM inference pass — at &lt;span class='hl'>$0.01-0.03&lt;/span> per call for GPT-4o, 5 retries means 5x cost. Worse, if the model consistently fails guardrails on a topic, infinite retries create a latency spike and a cost attack vector. Cap at &lt;span class='hl'>2 retries&lt;/span>, then return a safe fallback message.")
+  (how "make retries more effective" "Append the specific violation to the retry prompt: 'Your previous response was flagged for [violation]. Regenerate without [specific issue].' This targeted feedback improves retry success rate from &lt;span class='hl'>~50%&lt;/span> (blind retry) to &lt;span class='hl'>~85%&lt;/span> (informed retry).")
 }}
 
-{{hint "why log all guardrail decisions, not just blocks?" "Logging passes gives you the denominator for rate calculations and lets you detect drift. If your input block rate suddenly drops from 5% to 0.1%, that is suspicious — it may mean attackers found a bypass, not that attacks stopped. At <span class='hl'>100K requests/day</span>, guardrail logs add roughly <span class='hl'>500MB/day</span> of structured JSON — negligible storage cost for critical security observability."}}
+{{hint "why log all guardrail decisions, not just blocks?" "Logging passes gives you the denominator for rate calculations and lets you detect drift. If your input block rate suddenly drops from 5% to 0.1%, that is suspicious — it may mean attackers found a bypass, not that attacks stopped. At &lt;span class='hl'>100K requests/day&lt;/span>, guardrail logs add roughly &lt;span class='hl'>500MB/day&lt;/span> of structured JSON — negligible storage cost for critical security observability."}}
 
 {{triggerQs "Questions this phase could trigger"
   "How do you handle output guardrail failures in a streaming response?"
-  "Buffer the stream. Accumulate tokens until you have enough content to run safety checks — typically after each sentence or every <span class='hl'>50-100 tokens</span>. If a check fails mid-stream, stop the stream and replace with a safe fallback. For latency-sensitive applications, run a lightweight check on each chunk and a full check on the complete response."
+  "Buffer the stream. Accumulate tokens until you have enough content to run safety checks — typically after each sentence or every &lt;span class='hl'>50-100 tokens&lt;/span>. If a check fails mid-stream, stop the stream and replace with a safe fallback. For latency-sensitive applications, run a lightweight check on each chunk and a full check on the complete response."
   "What happens when guardrails disagree with each other?"
   "Use a priority hierarchy: content safety overrides format validation, and injection detection overrides everything. If the injection detector says block but the content safety classifier says safe, block the request — injection is the higher-severity threat. Log disagreements for human review to improve the weaker classifier."
 }}
@@ -705,11 +705,11 @@ class GuardedLLM:
 
 {{think "Indirect injection is the hardest attack to defend because the adversarial payload is not in the user's input — it is in a document, email, or web page the LLM retrieves. Your input guardrails never see it because it arrives via the retrieval pipeline, not the user."
   (whyNot "scanning only user input for injection" "Indirect injection embeds instructions in documents the LLM fetches — a malicious PDF in your RAG corpus or a crafted email in a support inbox. Input guardrails only see the user's query, not the retrieved context. You must also scan retrieved chunks before including them in the prompt.")
-  (whatIf "an attacker plants a malicious document in your RAG index" "Run the injection detector on every chunk at indexing time, not just at query time. Flag suspicious chunks and quarantine them for human review. At query time, use XML delimiters like <code>&lt;context&gt;...&lt;/context&gt;</code> so the model treats retrieved text as data, not instructions.")
-  (how "separate data from instructions" "Use a structured prompt with explicit delimiters: system instructions first, then a separator like <code>--- BEGIN USER DATA ---</code>, then user input and retrieved context. Instruct the model that everything after the separator is data and must not be interpreted as commands. This reduces successful indirect injection by <span class='hl'>~70%</span> in benchmarks.")
+  (whatIf "an attacker plants a malicious document in your RAG index" "Run the injection detector on every chunk at indexing time, not just at query time. Flag suspicious chunks and quarantine them for human review. At query time, use XML delimiters like &lt;code>&lt;context&gt;...&lt;/context&gt;&lt;/code> so the model treats retrieved text as data, not instructions.")
+  (how "separate data from instructions" "Use a structured prompt with explicit delimiters: system instructions first, then a separator like &lt;code>--- BEGIN USER DATA ---&lt;/code>, then user input and retrieved context. Instruct the model that everything after the separator is data and must not be interpreted as commands. This reduces successful indirect injection by &lt;span class='hl'>~70%&lt;/span> in benchmarks.")
 }}
 
-{{hint "why XML delimiters reduce indirect injection" "LLMs trained with XML-style tags in their instruction data learn to treat content within <code>&lt;context&gt;</code> tags as passive data rather than actionable instructions. Benchmarks show that wrapping retrieved content in explicit delimiter tags reduces successful indirect injection attacks by <span class='hl'>60-70%</span> compared to raw concatenation."}}
+{{hint "why XML delimiters reduce indirect injection" "LLMs trained with XML-style tags in their instruction data learn to treat content within &lt;code>&lt;context&gt;&lt;/code> tags as passive data rather than actionable instructions. Benchmarks show that wrapping retrieved content in explicit delimiter tags reduces successful indirect injection attacks by &lt;span class='hl'>60-70%&lt;/span> compared to raw concatenation."}}
 
 {{avoid "Never rely on the system prompt alone for safety. System prompts can be overridden by prompt injection. The system prompt is a first line of defense, not the only one. Always combine it with runtime guardrails that check both inputs and outputs independently of what the model was instructed to do."}}
 
@@ -731,13 +731,13 @@ class GuardedLLM:
 
 {{table "Guardrail Cost and Latency Budget" (rows
   (row "Guardrail"              "Technique"               "Latency Added"   "Cost per 1K Requests"   "Run When")
-  (row "Length check"           "Token count"              "< 1ms"           "$0"                     "Always (first)")
+  (row "Length check"           "Token count"              "&lt; 1ms"           "$0"                     "Always (first)")
   (row "PII detection"          "Regex + Presidio"         "5-20ms"          "$0 (local)"             "Always")
-  (row "Injection heuristic"    "Regex patterns"           "< 1ms"           "$0 (local)"             "Always")
+  (row "Injection heuristic"    "Regex patterns"           "&lt; 1ms"           "$0 (local)"             "Always")
   (row "Topic filter"           "Keyword + classifier"     "10-50ms"         "$0 (local)"             "Always")
   (row "Injection LLM"          "GPT-4o-mini classifier"   "200-500ms"       "$0.10"                  "When heuristic is uncertain")
   (row "Content safety"         "OpenAI Moderation API"    "100-200ms"       "$0 (free API)"          "Always on output")
-  (row "Format validation"      "JSON schema check"        "< 1ms"           "$0 (local)"             "When format required")
+  (row "Format validation"      "JSON schema check"        "&lt; 1ms"           "$0 (local)"             "When format required")
   (row "Hallucination check"    "LLM-as-judge"             "500-1000ms"      "$0.50"                  "RAG applications only")
 )}}
 

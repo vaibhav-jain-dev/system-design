@@ -1,6 +1,6 @@
 {{phase 1 "What Is a CDN?" "3 min"}}
 
-{{say "A Content Delivery Network is a globally distributed network of servers that cache content close to end users. Instead of every request hitting your origin in us-east-1, requests are served from the nearest <span class=\"hl-blue\">edge location</span>, reducing latency from 200ms to under 20ms."}}
+{{say "A Content Delivery Network is a globally distributed network of servers that cache content close to end users. Instead of every request hitting your origin in us-east-1, requests are served from the nearest &lt;span class=\"hl-blue\">edge location&lt;/span>, reducing latency from 200ms to under 20ms."}}
 
 {{table "CDN at a Glance" (rows
   (row "Property"           "Detail")
@@ -9,7 +9,7 @@
   (row "Latency reduction"  "200ms origin -> 5-20ms from edge")
   (row "Bandwidth savings"  "70-95% of requests served from cache, not origin")
   (row "DDoS protection"                                        "Distributed edge network absorbs attack traffic across 750+ PoPs")
-  (row "<span class='hl-blue'>TLS termination</span>"           "Edge terminates TLS, reducing handshake latency to origin")
+  (row "&lt;span class='hl-blue'>TLS termination&lt;/span>"           "Edge terminates TLS, reducing handshake latency to origin")
 )}}
 
 {{think "Does my app actually need a CDN?"
@@ -46,6 +46,10 @@
 )}}
 
 {{diagram "fund-cdn-request-flow"}}
+
+{{diagram "fund-cloudfront-event-hooks"}}
+
+{{hint "Vary header fragmentation silently kills your cache hit ratio" "If you set <strong>Vary: Accept-Encoding</strong>, the CDN stores separate cache entries for gzip and brotli. That is fine — two copies. But <span class='hl-red'>Vary: Cookie</span> means a separate cache entry per unique cookie value. Most users have different session cookies, so the CDN stores millions of one-hit entries and your hit ratio drops to near zero. Audit your <strong>Vary</strong> headers on any response with <span class='hl-blue'>s-maxage</span> — a single misconfigured header can wipe out all CDN benefit."}}
 
 {{table "Cache-Control Headers" (rows
   (row "Header"                         "Effect"                                     "Example Use Case")
@@ -130,6 +134,10 @@ location /api/user/profile {
 
 {{avoid "Never rely on CDN invalidation as your primary cache refresh strategy. Invalidation is slow (1-2 min), has API limits, and can fail silently. Use versioned URLs for static assets and short TTLs for dynamic content."}}
 
+{{diagram "fund-cloudfront-origin-shield"}}
+
+{{hint "Versioned URLs are free; explicit invalidation has a cost" "CloudFront gives you <span class='hl'>1,000 free invalidation paths per month</span>. Beyond that, each path costs <span class='hl'>$0.005</span>. For a team that deploys 10x/day across 50 changed asset paths, that is 5,000 chargeable paths per month — <span class='hl'>$20/mo</span> just in invalidation fees. Versioning costs nothing: when the filename hash changes, the CDN sees a new URL, fetches fresh content immediately, and the old URL expires naturally after <strong>max-age</strong>. Versioning is strictly better unless you cannot control asset filenames."}}
+
 {{phase 4 "Push vs Pull CDN" "3 min"}}
 
 {{say "Two CDN architectures — pull fetches content from origin on demand, push uploads content to edge storage ahead of time. Pull is the default for web apps; push is for large files where cold cache misses are unacceptable."}}
@@ -142,24 +150,28 @@ location /api/user/profile {
 
 {{think "Should I pre-warm my CDN cache before a launch?"
   (whyNot "Relying on organic traffic to warm the cache" "The first users after launch hit origin. For a high-traffic launch event, those cold misses spike origin load exactly when you need capacity most.")
-  (whatIf "I pre-warm by hitting all edge locations before launch" "Possible but complex. You must know CloudFront's edge IP ranges and make requests from each. A simpler alternative: <span class=\"hl-blue\">Origin Shield</span> ensures that even if all edges are cold, only one request reaches origin per object.")
+  (whatIf "I pre-warm by hitting all edge locations before launch" "Possible but complex. You must know CloudFront's edge IP ranges and make requests from each. A simpler alternative: &lt;span class=\"hl-blue\">Origin Shield&lt;/span> ensures that even if all edges are cold, only one request reaches origin per object.")
   (how "How does Origin Shield help with cache warming?" "All cold edge misses route through Origin Shield first. If Shield has the object cached, edges get it from Shield without touching origin. One origin request warms all 400+ edges.")
 }}
 
+{{diagram "fund-cloudfront-multi-origin"}}
+
 {{hint "Pull CDN is the default for web apps" "CloudFront is a pull CDN. Push behavior (pre-warming) is possible via scripted requests to edge PoPs but is rarely necessary when Origin Shield is enabled."}}
+
+{{hint "Origin failover handles primary-origin outages automatically" "CloudFront supports <strong>origin groups</strong> with a primary and a failover origin. If the primary returns a <span class='hl-red'>5xx error</span> (or times out), CloudFront automatically retries the same request against the failover origin — transparent to the user. Configure your <a class='dqa-link' href='/fund/networking/load-balancing'>Load Balancer</a> as primary and a static S3 bucket (pre-rendered fallback page) as failover. This gives you a graceful degradation path without client-side retry logic."}}
 
 {{triggerQs "Push vs Pull CDN"
   "When would you choose a push CDN over pull?"
-  "Large pre-rendered files (video segments, software installers, game patches) that are <span class='hl'>10GB+</span> per object. Pull CDN would cause a slow first request and high origin load on release day. Push lets you upload to edge storage ahead of time — users download immediately at launch with zero cache misses."
+  "Large pre-rendered files (video segments, software installers, game patches) that are &lt;span class='hl'>10GB+&lt;/span> per object. Pull CDN would cause a slow first request and high origin load on release day. Push lets you upload to edge storage ahead of time — users download immediately at launch with zero cache misses."
   "What is the cold-start problem with pull CDNs?"
-  "The first request to each PoP is a cache miss that hits origin. With <span class='hl'>750+ PoPs</span>, a viral URL generates 750+ simultaneous origin requests. <span class='hl-blue'>Origin Shield</span> collapses these into <strong>1 origin request</strong> — all edges fetch from the Shield cache instead."
+  "The first request to each PoP is a cache miss that hits origin. With &lt;span class='hl'>750+ PoPs&lt;/span>, a viral URL generates 750+ simultaneous origin requests. &lt;span class='hl-blue'>Origin Shield&lt;/span> collapses these into &lt;strong>1 origin request&lt;/strong> — all edges fetch from the Shield cache instead."
 }}
 
 {{qa
   "Can you combine push and pull CDN strategies?"
   "Yes. Use push for large, known-ahead-of-time assets (video, software updates) uploaded to S3 behind CloudFront. Use pull for dynamic web content where the CDN fetches from your API origin on demand. CloudFront supports multiple origins per distribution — one S3 (push-like) and one ALB (pull)."
   "How does Origin Shield differ from a regional cache?"
-  "Origin Shield is a single designated regional cache that all edge PoPs route through on cache miss. Without it, each of <span class='hl'>750+ edges</span> independently hits origin. With it, origin sees at most <strong>1 request per object</strong> regardless of how many edges need it. Cost: <span class='hl'>$0.009 per 10K requests</span>."
+  "Origin Shield is a single designated regional cache that all edge PoPs route through on cache miss. Without it, each of &lt;span class='hl'>750+ edges&lt;/span> independently hits origin. With it, origin sees at most &lt;strong>1 request per object&lt;/strong> regardless of how many edges need it. Cost: &lt;span class='hl'>$0.009 per 10K requests&lt;/span>."
 }}
 
 {{phase 5 "CDN Provider Comparison" "3 min"}}
@@ -176,7 +188,7 @@ location /api/user/profile {
   (row "Provider"     "Edge Locations"  "Pricing Model"               "Best For"                         "Key Feature")
   (row "CloudFront"   "750+ PoPs"       "Pay per GB + requests"       "AWS-native apps, S3 origins"      "Lambda@Edge, OAC, Origin Shield")
   (row "Cloudflare"   "300+ PoPs"       "Free tier, flat-rate plans"  "DDoS protection, Workers"        "Unlimited bandwidth on paid plans")
-  (row "Fastly"       "90+ PoPs"        "Pay per GB + requests"       "Real-time purge, edge compute"   "VCL config, instant purge (<150ms)")
+  (row "Fastly"       "90+ PoPs"        "Pay per GB + requests"       "Real-time purge, edge compute"   "VCL config, instant purge (&lt;150ms)")
   (row "Akamai"       "4,000+ PoPs"     "Enterprise contracts"        "Enterprise, media, gaming"        "Largest network, EdgeWorkers")
   (row "AWS Global Accelerator" "90+ PoPs" "Fixed + data transfer"    "Non-HTTP TCP/UDP acceleration"   "Anycast IP, NLB integration")
 )}}
@@ -186,6 +198,8 @@ location /api/user/profile {
   (alt "Cloudflare" "Better DDoS protection. Free unlimited bandwidth on Pro plan ($20/mo). Workers for serverless edge compute. Adds complexity with dual DNS management.")
   (nofit "Self-hosted CDN" "Running your own Nginx/Varnish at edge is expensive, complex, and geographically limited. Only viable with extreme customization requirements.")
 )}}
+
+{{hint "CloudFront vs Cloudflare: when to switch for an AWS-native stack" "Default to <strong>CloudFront</strong> if your origin is AWS (S3, ALB, API Gateway): free S3-to-CloudFront transfer, <span class='hl-blue'>OAC</span> for private S3 access, Lambda@Edge runs in your AWS regions, and everything bills under one AWS account. Switch to <strong>Cloudflare</strong> when: (1) bandwidth is the dominant cost and you exceed <span class='hl'>~235 GB/month</span> — Cloudflare Pro's flat <span class='hl'>$20/mo</span> beats CloudFront's per-GB pricing at that threshold; (2) you need sub-150ms cache purge (Cloudflare instant vs CloudFront 1–2 min); or (3) you need stronger out-of-the-box DDoS protection without paying for <span class='hl-blue'>AWS Shield Advanced</span> (<span class='hl'>$3,000/mo</span>). The tradeoff: Cloudflare requires managing a second DNS layer and loses the native AWS IAM and S3 OAC integration."}}
 
 {{qa
   "How do you decide the right TTL for different content types?"
@@ -216,16 +230,16 @@ location /api/user/profile {
 
 {{triggerQs "CDN Cost Optimization"
   "How do I reduce CloudFront costs without switching providers?"
-  "Three levers: 1) <strong>PriceClass_100</strong> limits PoPs to US/EU — saves <span class='hl'>~30%</span> on data transfer. 2) <strong>Compress everything</strong> — enable Gzip/Brotli to reduce bytes transferred by <span class='hl'>60-80%</span>. 3) <strong>Increase TTLs</strong> — longer cache means fewer origin fetches and fewer request charges."
+  "Three levers: 1) &lt;strong>PriceClass_100&lt;/strong> limits PoPs to US/EU — saves &lt;span class='hl'>~30%&lt;/span> on data transfer. 2) &lt;strong>Compress everything&lt;/strong> — enable Gzip/Brotli to reduce bytes transferred by &lt;span class='hl'>60-80%&lt;/span>. 3) &lt;strong>Increase TTLs&lt;/strong> — longer cache means fewer origin fetches and fewer request charges."
   "At what traffic level should I switch from CloudFront to Cloudflare?"
-  "At <span class='hl'>235GB/month</span> of data transfer, Cloudflare Pro ($20/mo flat) becomes cheaper than CloudFront's per-GB pricing. At <span class='hl'>10TB/month</span>, the savings are <strong>$905/mo</strong>. The tradeoff: you lose native AWS integration (OAC, Lambda@Edge, free S3 transfer)."
+  "At &lt;span class='hl'>235GB/month&lt;/span> of data transfer, Cloudflare Pro ($20/mo flat) becomes cheaper than CloudFront's per-GB pricing. At &lt;span class='hl'>10TB/month&lt;/span>, the savings are &lt;strong>$905/mo&lt;/strong>. The tradeoff: you lose native AWS integration (OAC, Lambda@Edge, free S3 transfer)."
 }}
 
 {{qa
   "Why is CloudFront sometimes cheaper than serving directly from S3?"
-  "S3 egress to the internet costs <span class='hl'>$0.09/GB</span>. CloudFront charges <span class='hl'>$0.085/GB</span> for the first 10TB — and S3-to-CloudFront transfer is <strong>free</strong>. With a <span class='hl'>90%+ cache hit ratio</span>, CloudFront also eliminates most S3 request charges ($0.0004 per GET). At any meaningful volume, CDN is cheaper than direct S3."
+  "S3 egress to the internet costs &lt;span class='hl'>$0.09/GB&lt;/span>. CloudFront charges &lt;span class='hl'>$0.085/GB&lt;/span> for the first 10TB — and S3-to-CloudFront transfer is &lt;strong>free&lt;/strong>. With a &lt;span class='hl'>90%+ cache hit ratio&lt;/span>, CloudFront also eliminates most S3 request charges ($0.0004 per GET). At any meaningful volume, CDN is cheaper than direct S3."
   "How do request charges compare to data transfer charges?"
-  "At <span class='hl'>100M requests/month</span>, CloudFront HTTPS request charges are <strong>~$75</strong> vs <strong>~$850</strong> for 10TB data transfer. Requests are <span class='hl'>~8%</span> of total cost. Optimize data transfer first (compression, smaller assets) — it has 10x more impact than reducing request count."
+  "At &lt;span class='hl'>100M requests/month&lt;/span>, CloudFront HTTPS request charges are &lt;strong>~$75&lt;/strong> vs &lt;strong>~$850&lt;/strong> for 10TB data transfer. Requests are &lt;span class='hl'>~8%&lt;/span> of total cost. Optimize data transfer first (compression, smaller assets) — it has 10x more impact than reducing request count."
 }}
 
 {{hint "free S3-to-CloudFront transfer is the hidden cost saver" "AWS charges $0.09/GB for S3 egress to the internet, but $0.00/GB from S3 to CloudFront. This means putting CloudFront in front of S3 is not just a performance win — it literally costs less than serving S3 directly, even before counting the cache hit ratio benefit."}}
@@ -254,16 +268,16 @@ location /api/user/profile {
 
 {{triggerQs "CDN Failure Handling"
   "What is cache poisoning and how do you prevent it?"
-  "An attacker manipulates the cache key (via query string, headers, or Host header) to store malicious content at a legitimate URL. Prevention: <strong>normalize cache keys</strong> by stripping unknown query parameters, lock the Host header, and restrict <span class='hl-blue'>Vary</span> to only known headers (Accept-Encoding). CloudFront's cache policy lets you whitelist exactly which headers and query strings affect the cache key."
+  "An attacker manipulates the cache key (via query string, headers, or Host header) to store malicious content at a legitimate URL. Prevention: &lt;strong>normalize cache keys&lt;/strong> by stripping unknown query parameters, lock the Host header, and restrict &lt;span class='hl-blue'>Vary&lt;/span> to only known headers (Accept-Encoding). CloudFront's cache policy lets you whitelist exactly which headers and query strings affect the cache key."
   "How does request collapsing prevent origin overload?"
-  "When <span class='hl'>1,000 concurrent requests</span> arrive at an edge for the same uncached URL, the CDN sends <strong>1 request</strong> to origin and holds the other 999. Once the origin responds, all 999 waiting requests are served from the fresh cache entry. Without collapsing, origin sees 1,000x the load on every cache miss."
+  "When &lt;span class='hl'>1,000 concurrent requests&lt;/span> arrive at an edge for the same uncached URL, the CDN sends &lt;strong>1 request&lt;/strong> to origin and holds the other 999. Once the origin responds, all 999 waiting requests are served from the fresh cache entry. Without collapsing, origin sees 1,000x the load on every cache miss."
 }}
 
 {{qa
   "What happens when a CDN edge PoP goes down?"
-  "DNS-based failover routes users to the next nearest PoP within <span class='hl'>seconds</span>. Users experience a brief latency increase (next PoP might be 50ms away instead of 10ms) but no downtime. CloudFront uses anycast routing — the BGP route to the failed PoP is withdrawn and traffic automatically flows to the next closest."
+  "DNS-based failover routes users to the next nearest PoP within &lt;span class='hl'>seconds&lt;/span>. Users experience a brief latency increase (next PoP might be 50ms away instead of 10ms) but no downtime. CloudFront uses anycast routing — the BGP route to the failed PoP is withdrawn and traffic automatically flows to the next closest."
   "How do you detect a CDN serving stale content without users reporting it?"
-  "Monitor the <span class='hl-blue'>x-cache</span> and <span class='hl-blue'>Age</span> response headers. Set up alerts when <strong>Age</strong> exceeds your expected max-age by more than <span class='hl'>2x</span> — this means stale-while-revalidate or stale-if-error kicked in and origin may be unhealthy. Also monitor origin <span class='hl'>5xx rate</span> alongside CDN cache hit ratio — a spike in hit ratio combined with origin errors means the CDN is masking an outage."
+  "Monitor the &lt;span class='hl-blue'>x-cache&lt;/span> and &lt;span class='hl-blue'>Age&lt;/span> response headers. Set up alerts when &lt;strong>Age&lt;/strong> exceeds your expected max-age by more than &lt;span class='hl'>2x&lt;/span> — this means stale-while-revalidate or stale-if-error kicked in and origin may be unhealthy. Also monitor origin &lt;span class='hl'>5xx rate&lt;/span> alongside CDN cache hit ratio — a spike in hit ratio combined with origin errors means the CDN is masking an outage."
 }}
 
 {{phase 8 "Interview Q&A" "3 min"}}
@@ -280,8 +294,8 @@ location /api/user/profile {
 {{qa
   "How do you debug a CDN caching issue — content not updating for users?"
   "Check three things in order: 1) Response headers from origin — is Cache-Control set correctly? Use curl -I to inspect. 2) The CDN cache key — is Vary or query string causing different cache entries than expected? 3) CloudFront's x-cache header — 'Hit from cloudfront' means cached, 'Miss from cloudfront' means origin fetch. If content is stale, check whether max-age is too long or whether invalidation failed."
-  "What is the difference between CDN edge cache and a regional cache like Redis?"
-  "CDN edge cache is geographically distributed (750+ PoPs, physically close to users) and caches HTTP responses. Redis/ElastiCache is a centralized regional cache in your VPC that caches application-level data (database query results, computed values). CDN reduces latency through geographic proximity; Redis reduces database load by avoiding repeated queries. They operate at different layers and complement each other."
+  "What is the difference between CDN edge cache and a regional cache like <a class="dqa-link" href="/fund/storage/redis">Redis</a>?"
+  "CDN edge cache is geographically distributed (750+ PoPs, physically close to users) and caches HTTP responses. <a class="dqa-link" href="/fund/storage/redis">Redis</a>/ElastiCache is a centralized regional cache in your VPC that caches application-level data (database query results, computed values). CDN reduces latency through geographic proximity; <a class="dqa-link" href="/fund/storage/redis">Redis</a> reduces database load by avoiding repeated queries. They operate at different layers and complement each other."
 }}
 
 {{followup "What is Origin Shield?" "An additional caching layer between edge PoPs and your origin. Without Origin Shield, each of 750+ edge locations independently requests content from origin on cache miss. With Origin Shield, all edge misses route through a single regional cache first — if the Shield has the content, edges get it without touching your origin. This reduces origin requests by 90%+. CloudFront charges $0.009 per 10K requests for Origin Shield."}}
@@ -289,14 +303,17 @@ location /api/user/profile {
 {{hint "the CDN interview differentiator" "Most candidates can explain what a CDN does. The differentiator is knowing: 1) the exact Cache-Control headers for different content types, 2) why versioned URLs beat invalidation, 3) cache stampede prevention via Origin Shield, and 4) when a CDN hurts rather than helps (personalized content, WebSockets)."}}
 
 {{checklist
-  "Use CDN for all static assets (images, CSS, JS, fonts)"
-  "Versioned URLs for static assets: app.abc123.js with max-age=1year"
-  "Short TTL + stale-while-revalidate for API responses"
-  "Set Cache-Control on every response from origin"
-  "Enable Origin Shield to reduce origin load by 90%+"
-  "Never cache user-specific or sensitive data at CDN edge"
-  "Use Vary header correctly to prevent cache key collisions"
-  "Monitor cache hit ratio: target 90%+ for static content"
-  "CloudFront is default for AWS stacks (free S3 transfer)"
-  "DDoS protection is a built-in CDN benefit at no extra cost"
+  "Target 90%+ cache hit ratio for static content, 60%+ for semi-dynamic"
+  "Versioned URLs for static assets: app.abc123.js with max-age=1year — invalidation is free"
+  "Short TTL + stale-while-revalidate for API responses (s-maxage=60, stale-while-revalidate=3600)"
+  "Set explicit Cache-Control on every origin response — undefined behavior otherwise"
+  "Enable Origin Shield to reduce origin load by 90%+ and prevent cache stampede"
+  "Never cache user-specific or sensitive data at CDN edge (private, no-store)"
+  "Avoid Vary: Cookie on cacheable responses — it fragments your cache to near-zero hit rate"
+  "Monitor cache hit ratio: drops below 50% indicate a misconfigured cache key"
+  "CloudFront is default for AWS stacks (free S3 transfer, OAC, Lambda@Edge)"
+  "DDoS protection is a built-in CDN benefit — 750+ PoPs absorb volumetric attacks"
+  "CDNs do not support WebSocket persistent connections — route WebSocket traffic directly to origin"
 }}
+
+{{key "A CDN moves bytes closer to users, but its real value is removing origin load: versioned URLs eliminate invalidation complexity, Origin Shield prevents cache stampedes, and stale-if-error converts origin outages into degraded-but-live responses."}}
