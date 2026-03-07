@@ -277,27 +277,36 @@
                 }
             }
 
-            // Scroll active nav item to the left of the nav strip,
-            // leaving ~48 px of the previous item peeking in so the user
-            // can see where they came from and what comes next.
+            // Scroll active nav item to the left of the strip.
+            // Uses getBoundingClientRect so the calculation is correct even
+            // after the nav has been teleported into the header (where
+            // item.offsetLeft is relative to .stage-nav, not the scrollable
+            // .stage-nav-inner, and would give a wrong target).
             function scrollNavToActive(item) {
                 var inner = item.closest('.stage-nav-inner');
-                if (inner) {
-                    var targetLeft = Math.max(0, item.offsetLeft - 48);
-                    inner.scrollTo({ left: targetLeft, behavior: 'smooth' });
-                }
+                if (!inner) return;
+                var itemRect  = item.getBoundingClientRect();
+                var innerRect = inner.getBoundingClientRect();
+                // Current scroll position of the item inside the container
+                var currentPos = inner.scrollLeft + (itemRect.left - innerRect.left);
+                // Leave ~48 px so the previous item's number badge peeks in
+                var targetLeft = Math.max(0, currentPos - 48);
+                inner.scrollTo({ left: targetLeft, behavior: 'smooth' });
             }
 
-            // Wire scroll + wheel listeners on .stage-nav-inner
+            // Wire scroll listener on .stage-nav-inner
             var navInner = document.querySelector('.stage-nav-inner');
             if (navInner) {
                 navInner.addEventListener('scroll', function() {
                     updateArrow(navInner);
                 }, { passive: true });
 
-                // Convert vertical wheel events into horizontal scroll so the
-                // user can navigate the strip by scrolling up/down over the bar.
-                navInner.addEventListener('wheel', function(e) {
+                // Attach wheel → horizontal scroll on the whole .stage-nav so
+                // scrolling anywhere over the header bar (including over the
+                // arrow button or items) moves the strip left/right.
+                var navEl = navInner.closest('.stage-nav');
+                var wheelTarget = navEl || navInner;
+                wheelTarget.addEventListener('wheel', function(e) {
                     if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
                         e.preventDefault();
                         navInner.scrollLeft += e.deltaY;
@@ -305,7 +314,9 @@
                     }
                 }, { passive: false });
 
-                updateArrow(navInner); // init state
+                // Init: mark right-fade state immediately
+                // (give layout a frame to settle after teleport)
+                requestAnimationFrame(function() { updateArrow(navInner); });
             }
 
             var currentActive = null;
