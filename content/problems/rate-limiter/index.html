@@ -294,6 +294,12 @@ Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</
   </div><!-- /detailed -->
 </div>
 
+{{think "Rate limit headers are not just courtesy — they are a core part of the system's traffic shaping strategy."
+  (whyNot "only return headers on 429 rejections" "Without headers on successful responses, clients have no visibility into their remaining quota. They send at full speed until they hit 429, then retry aggressively — creating a second spike. With X-RateLimit-Remaining on every response, well-behaved SDKs slow down proactively at 10% remaining. This converts a thundering herd of retries into smooth self-throttling.")
+  (whatIf "the client does not read rate headers at all" "The server-side enforcement still runs regardless. But the client experience degrades: they get hard 429 rejections instead of gradual slowdown. For B2B APIs, publish an SDK that reads headers automatically. For public APIs, include headers anyway — sophisticated consumers will use them.")
+  (how "the IETF draft standardizes rate limit headers" "The draft RateLimit header standard defines RateLimit-Limit, RateLimit-Remaining, and RateLimit-Reset as official HTTP headers. X-RateLimit-* prefixed headers are the current convention (used by GitHub, Stripe, Twitter). Adopt the X- prefix now and plan to support the IETF standard when it is finalized.")
+}}
+
 {{hint "why rate headers on every response?" "Without headers, clients have no visibility into their quota — they blast until <span class='hl'>429</span>, then retry aggressively, creating a second spike. With <strong>X-RateLimit-Remaining</strong>, well-behaved SDKs (Stripe, AWS) slow down proactively at <span class='hl'>10% remaining</span>. This turns a thundering herd of retries into smooth self-throttling — same traffic, zero retry storms."}}
 
 {{triggerQs "Questions about rate headers"
@@ -315,7 +321,7 @@ Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</
 
 {{phase 4 "Algorithm Deep Dive" "10 min"}}
 
-{{say "Four algorithms — each trades accuracy, memory, and burst tolerance differently. Visually:"}}
+{{say "Four algorithms to compare — each trades off accuracy, memory usage, and burst tolerance differently:"}}
 
 {{diagram "rl-algorithm-comparison"}}
 
@@ -482,7 +488,7 @@ class SlidingWindowCounter:
 
 {{phase 5 "Architecture (Hop-by-Hop)" "8 min"}}
 
-{{say "The rate limiter sits in the request path. Three placement options — each with a different latency/flexibility trade-off:"}}
+{{say "The rate limiter sits directly in the request path. There are three placement options, each with a different latency and flexibility trade-off:"}}
 
 {{hint "why middleware vs sidecar vs gateway — and when to use each?" `
 <ul>
@@ -537,7 +543,12 @@ async def rate_limit_middleware(request: Request, call_next):
     return response
 `}}
 
-{{key "The rate limiter must add < 1ms latency. Using Redis Lua scripts makes the check atomic and avoids multiple round trips. A single Lua eval replaces what would be 3 separate Redis commands."}}
+{{think "Placement of the rate limiter affects both latency overhead and control granularity. The closer to the edge, the lower the blast radius but the less context you have about the request."
+  (whyNot "rate limit only at the API gateway" "Gateway-only rate limiting lacks context about account state — it cannot distinguish a free-tier user from an enterprise user making the same request. It also cannot enforce per-endpoint limits that differ based on business logic. Gateway catches DDoS; application code enforces business rules.")
+  (whatIf "the middleware adds more than 1ms per request" "At 500K req/s, 1ms overhead consumes 500 CPU-seconds per second across the fleet. At 5ms overhead, that's 2,500 CPU-seconds — equivalent to roughly 40 additional vCPUs. Keep the middleware under 1ms by using Lua scripts (single round trip) and connection pooling to Redis.")
+}}
+
+{{key "The rate limiter must add under 1ms latency. Redis Lua scripts make the check atomic and avoid multiple round trips. A single Lua eval replaces what would be 3 separate Redis commands."}}
 
 {{hint "why include rate headers on allowed responses, not just 429s?" "A well-behaved SDK reads <strong>X-RateLimit-Remaining</strong> and slows down when it drops below <span class='hl'>10%</span>. This prevents the retry storm that follows a 429 wave — a storm that itself causes another wave of 429s. Headers on successful responses are what make smooth self-throttling possible."}}
 
@@ -657,6 +668,11 @@ return {1, limit - count - 1, 0}
 
 {{diagram "rl-data-model"}}
 
+{{think "The choice of Redis data structure directly maps to the algorithm's memory and performance characteristics. Each algorithm has a natural data structure fit."
+  (whyNot "use a single data structure for all algorithms" "Token bucket needs two fields (tokens, last_refill) — a hash is natural. Sliding window counter needs two counters per window — simple strings with INCR. Sliding window log needs time-ordered entries — a sorted set. Using a sorted set for token bucket wastes memory; using a string for sliding window log loses time ordering. Match the data structure to the access pattern.")
+  (whatIf "you switch algorithms for an endpoint after deployment" "Old keys in Redis have the wrong data structure. Two options: let old keys expire naturally (within one window duration), or run a migration script that deletes keys matching the old pattern. In practice, rate limit keys have short TTLs (60-120s), so simply switching the algorithm and waiting one window duration is sufficient.")
+}}
+
 {{hint "why sorted set for sliding window log?" "Sorted set stores members with a float64 score. Using <strong>timestamp-in-milliseconds as the score</strong>, <span class='hl-blue'>ZRANGEBYSCORE</span> can count all requests in [now − window, now] efficiently. The score-as-timestamp design is what makes time-window queries natural — but at <span class='hl-red'>O(N) memory per key</span>, it only works for very low rate limits like <strong>5 login attempts per 15 min</strong>."}}
 
 {{hint "why string counter for sliding window counter?" "The sliding window counter needs only two integers: current window count and previous window count. <span class='hl-blue'>INCR</span> is <span class='hl'>O(1)</span> and uses <span class='hl'>~50 bytes per key</span>. Sorted sets cost <span class='hl-red'>O(log N) per operation</span> and <strong>~50 bytes per request</strong>. For <strong>50M active users × 10 endpoints</strong>: sliding window counter = <span class='hl'>~50 GB</span>; sorted set log at 100 req/min = <span class='hl-red'>250 GB</span>. Strings win at scale."}}
@@ -717,6 +733,11 @@ activedefrag: yes                 # Defragment memory proactively
 # 13 GB per node x 3 shards = 39 GB total (7.8x headroom)
 # 100K ops/sec per node x 3 shards = 300K ops/sec
 `}}
+
+{{think "Redis configuration for rate limiting is fundamentally different from Redis used as a cache or as a primary data store. The key insight: rate limit counters are ephemeral by design."
+  (whyNot "enable AOF persistence for durability" "Rate limit counters reset every window duration (typically 60s). If Redis restarts, counters rebuild naturally from incoming requests within one window. AOF adds disk I/O on every write — at 500K writes/sec, that is 500K fsyncs/sec, adding 1-5ms latency. You gain nothing because the data is already ephemeral.")
+  (whatIf "you need to preserve rate limit state across Redis restarts" "You generally don't — counters self-heal within one window. But if you need it (e.g., for billing-related rate limits with long windows like monthly quotas), use RDB snapshots every 60 seconds instead of AOF. RDB is a background fork that doesn't block the event loop.")
+}}
 
 {{avoid "Do not enable Redis persistence (<span class='hl-blue'>RDB</span> snapshots or <span class='hl-blue'>AOF</span> log) for rate limiting. Rate limit counters are ephemeral — persistence adds disk I/O latency with zero benefit. Counters reset on window expiry anyway, and if Redis restarts, they rebuild naturally from incoming requests."}}
 
@@ -808,7 +829,7 @@ activedefrag: yes                 # Defragment memory proactively
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 
-{{say "Here are the questions an interviewer would drill into about this design."}}
+{{say "These are the questions interviewers drill deepest into — each probes a different layer of the design."}}
 
 {{deepQA "Rate Limiting Algorithms & Trade-offs" `
 <div class="dqa-item">
