@@ -448,6 +448,13 @@ def dequeue_batch(show_id: str, batch_size=1000):
 
 {{hint "~15% of locks expire" "Empirically: 15% of users who successfully acquire a seat lock abandon before completing payment. These seats return to the pool after 10 minutes. If there's a waitlist, waitlisted users get push notifications. This is why showing 'only 3 seats left' with a queue model is tricky — 15% of those 'taken' seats will return."}}
 
+{{triggerQs "Questions about rush handling"
+  "What happens if the queue system itself becomes a bottleneck?"
+  "The queue is backed by Redis INCR (atomic counter) which handles 1M+ ops/sec per node. The real bottleneck is the downstream booking service, not the queue. If Redis itself fails, degrade to direct rate limiting at the API gateway — less fair (no FIFO ordering) but still prevents service overload."
+  "How do you prevent queue position manipulation or users jumping the queue?"
+  "Queue position is server-side only — the client gets a position number but cannot modify it. The dequeue process runs server-side and emits 'your turn' notifications based on position order. There is no client-side trust in the queue logic. Additionally, one user_id gets one queue position — duplicate entries are rejected via the Redis SETNX pattern."
+}}
+
 {{phase 7 "Payment Flow" "5 min"}}
 
 {{say `Payment is <strong>async and webhook-driven</strong>:
@@ -520,6 +527,13 @@ def handle_payment_webhook(request):
 
 {{hint "why check lock again in webhook handler" "The webhook might arrive after the 10-minute lock TTL expires. If User B locked the same seat in the gap, confirming User A's booking would double-book. The re-check guards this edge case. If it happens, auto-refund is the correct outcome — never double-book."}}
 
+{{triggerQs "Questions about payment"
+  "What happens if the payment webhook is never received?"
+  "The seat lock has a 10-minute TTL. If the webhook never arrives (gateway outage, network failure), the lock expires and the seat returns to the pool. No orphaned bookings. For the user: the booking service polls the payment gateway every 60 seconds for pending bookings. If the gateway confirms payment but the webhook was lost, the polling mechanism catches it and completes the booking. If the gateway shows no payment, the booking is abandoned."
+  "How do you handle partial refunds for multi-seat bookings where one seat became unavailable?"
+  "Never partially book. If any seat in a multi-seat booking is unavailable at confirmation time, refund the entire payment. The user re-books with available seats. This avoids the complexity of partial orders and ensures the user gets the seats they want together. The auto-refund happens in under 5 seconds — most users don't notice."
+}}
+
 {{phase 8 "Real-Time Seats" "4 min"}}
 
 {{say `Real-time seat map uses <strong>Redis Pub/Sub</strong> to fan out seat state changes:
@@ -584,6 +598,13 @@ Redis is sharded by <strong>show_id</strong> (hash tags) so one popular show doe
 )}}
 
 {{hint "shard Redis by show_id" "Redis Cluster shards keys by hash slot. If all seat locks for all shows hash to the same slot, one Redis shard handles all rush traffic. Force all locks for a show onto one shard by using hash tags: key = {show_id}:seat:{seat_id}. All locks for one show are on one shard, enabling atomic multi-seat lock operations within a show."}}
+
+{{triggerQs "Questions about scaling"
+  "How do you prevent a single popular show from overwhelming the entire system?"
+  "Redis hash tags ({show_id}:seat:{seat_id}) isolate one show's seat locks onto a single shard. A viral show overloads one shard, not the whole cluster. The virtual queue further limits concurrent lock attempts to 1K/sec regardless of demand. Other shows on other shards are unaffected. For extreme cases (Taylor Swift-level demand), spin up a dedicated Redis cluster for that single show."
+  "What is the maximum number of concurrent bookings the system can handle?"
+  "The bottleneck is PostgreSQL write throughput for booking confirmations. A tuned Postgres primary on db.r6g.2xlarge handles approximately 2,000 confirmed writes/sec with connection pooling. At 2 seats per booking, that is 4,000 seats confirmed per second. For events larger than this, batch multiple seat confirmations into a single transaction or use DynamoDB for the confirmation layer."
+}}
 
 {{phase 10 "QR Generation" "3 min"}}
 
