@@ -112,6 +112,188 @@ Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</
 
 {{diagram "rl-rules-config"}}
 
+<div class="api-doc">
+  <div class="api-view-tabs">
+    <button class="api-view-tab active" data-view="quick">Quick</button>
+    <button class="api-view-tab" data-view="detailed">Detailed</button>
+  </div>
+
+  <!-- ── QUICK VIEW ── -->
+  <div class="api-view-pane active" data-view="quick">
+    <div class="api-quick">
+      <div class="api-quick-block">
+        <div class="api-quick-section"># Middleware contract — headers on EVERY response</div>
+        <div class="api-quick-row">
+          <span class="api-method GET">200</span>
+          <span class="api-quick-path">X-RateLimit-Limit / Remaining / Reset</span>
+          <span class="api-quick-comment"># added to all allowed responses</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method DELETE">429</span>
+          <span class="api-quick-path">Retry-After + X-RateLimit-Reset</span>
+          <span class="api-quick-comment"># returned when quota exceeded</span>
+        </div>
+      </div>
+      <div class="api-quick-block">
+        <div class="api-quick-section"># Admin API — rule management (internal only)</div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/admin/v1/rules</span>
+          <span class="api-quick-comment"># Create a rate limit rule for a key pattern</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/admin/v1/rules</span>
+          <span class="api-quick-comment"># List all active rules (priority ordered)</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method DELETE">DELETE</span>
+          <span class="api-quick-path">/admin/v1/rules/<span class="pp">{rule_id}</span></span>
+          <span class="api-quick-comment"># Delete rule; takes effect within 30 s (Redis TTL)</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/admin/v1/quotas/<span class="pp">{key}</span></span>
+          <span class="api-quick-comment"># Inspect current token count for any key</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── DETAILED VIEW ── -->
+  <div class="api-view-pane" data-view="detailed">
+
+    {{/* ── 200 OK — allowed request ── */}}
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method GET">200 OK</span>
+          <span class="api-path">ANY <span class="pq">/{protected_path}</span></span>
+          <span class="api-desc">Request allowed — quota headers always present</span>
+        </div>
+      </div>
+      <div class="api-card-body">
+        <div class="api-responses">
+          <div class="api-tabs"><span class="api-tab s2 active" data-code="200">Response Headers</span></div>
+          <div class="api-response-body active" data-code="200"><div class="api-resp-headers">
+  <span class="hk">X-RateLimit-Limit:</span>     <span class="hv">100</span>           <span class="hc">// configured quota for this key</span>
+  <span class="hk">X-RateLimit-Remaining:</span>  <span class="hv">67</span>            <span class="hc">// tokens left — SDK uses this to self-throttle</span>
+  <span class="hk">X-RateLimit-Reset:</span>      <span class="hv">1704067260</span>    <span class="hc">// Unix epoch; window resets at this timestamp</span>
+  <span class="hk">X-RateLimit-Policy:</span>     <span class="hv">"100;w=60"</span>    <span class="hc">// IETF draft: limit;w=window_seconds</span>
+</div></div>
+        </div>
+        <div class="api-card-note">Present on <strong>every</strong> response, not just rejections. SDKs like Stripe/AWS slow down proactively at <strong>10% remaining</strong> — no thundering herd on retry.</div>
+      </div>
+    </div>
+
+    {{/* ── 429 — rejected request ── */}}
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method DELETE">429</span>
+          <span class="api-path">ANY <span class="pq">/{protected_path}</span></span>
+          <span class="api-desc">Too Many Requests — quota exceeded</span>
+        </div>
+      </div>
+      <div class="api-card-body">
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s4 active" data-code="429h">Response Headers</span>
+            <span class="api-tab s4" data-code="429b">Response Body</span>
+          </div>
+          <div class="api-response-body active" data-code="429h"><div class="api-resp-headers">
+  <span class="hk">X-RateLimit-Limit:</span>     <span class="hv">100</span>
+  <span class="hk">X-RateLimit-Remaining:</span>  <span class="hv">0</span>
+  <span class="hk">X-RateLimit-Reset:</span>      <span class="hv">1704067260</span>
+  <span class="hk">Retry-After:</span>           <span class="hv">45</span>   <span class="hc">// relative seconds — client MUST wait this long</span>
+</div></div>
+          <div class="api-response-body" data-code="429b"><span class="jp">{</span>
+  <span class="jk">"error"</span><span class="jp">:</span>      <span class="jv">"rate_limit_exceeded"</span><span class="jp">,</span>
+  <span class="jk">"limit"</span><span class="jp">:</span>      <span class="jn">100</span><span class="jp">,</span>
+  <span class="jk">"window_sec"</span><span class="jp">:</span> <span class="jn">60</span><span class="jp">,</span>
+  <span class="jk">"retry_after"</span><span class="jp">:</span><span class="jn">45</span>
+<span class="jp">}</span></div>
+        </div>
+        <div class="api-card-note">RFC 6585 status code. <code>Retry-After</code> in relative seconds; <code>X-RateLimit-Reset</code> in absolute Unix epoch — clients use Reset for clocks, Retry-After for backoff.</div>
+      </div>
+    </div>
+
+    {{/* ── POST /admin/v1/rules ── */}}
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>
+          <span class="api-path">/admin/v1/rules</span>
+          <span class="api-desc">Create a rate limit rule</span>
+        </div>
+        <span class="api-auth">🔑 Internal only</span>
+        <button class="api-copy-btn" data-path="/admin/v1/rules">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Request Body</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">key_pattern</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd"><code>ip:*</code>, <code>api_key:premium:*</code>, <code>path:/login</code></td></tr>
+              <tr><td><span class="rf">limit</span><span class="rbadge req">required</span></td><td><span class="rt">integer</span></td><td class="rd">Max requests per window</td></tr>
+              <tr><td><span class="rf">window_sec</span><span class="rbadge req">required</span></td><td><span class="rt">integer</span></td><td class="rd">Sliding window size in seconds</td></tr>
+              <tr><td><span class="rf">strategy</span><span class="rbadge opt">optional</span></td><td><span class="rt">string</span></td><td class="rd"><code>token_bucket</code> | <code>sliding_window</code> | <code>fixed_window</code> — default token_bucket</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="201">201 Created</span>
+            <span class="api-tab s4" data-code="409">409 Conflict</span>
+          </div>
+          <div class="api-response-body active" data-code="201"><span class="jp">{</span>
+  <span class="jk">"rule_id"</span><span class="jp">:</span>     <span class="jv">"rl_7aB3..."</span><span class="jp">,</span>
+  <span class="jk">"key_pattern"</span><span class="jp">:</span><span class="jv">"ip:*"</span><span class="jp">,</span>
+  <span class="jk">"limit"</span><span class="jp">:</span>      <span class="jn">50</span><span class="jp">,</span>
+  <span class="jk">"window_sec"</span><span class="jp">:</span> <span class="jn">60</span>
+<span class="jp">}</span></div>
+          <div class="api-response-body" data-code="409"><span class="jp">{</span>
+  <span class="jk">"error"</span><span class="jp">:</span> <span class="jv">"pattern_already_exists"</span>
+<span class="jp">}</span></div>
+        </div>
+        <div class="api-card-note">Rules are cached in Redis and evaluated in priority order: <code>api_key</code> → <code>user_id</code> → <code>ip</code>. New rules active within <strong>30 s</strong>.</div>
+      </div>
+    </div>
+
+    {{/* ── GET /admin/v1/quotas/{key} ── */}}
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method GET">GET</span>
+          <span class="api-path">/admin/v1/quotas/<span class="pp">{key}</span></span>
+          <span class="api-desc">Inspect current token count for any key</span>
+        </div>
+        <span class="api-auth">🔑 Internal only</span>
+        <button class="api-copy-btn" data-path="/admin/v1/quotas/{key}">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK</span>
+            <span class="api-tab s4" data-code="404">404 No rule</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><span class="jp">{</span>
+  <span class="jk">"key"</span><span class="jp">:</span>           <span class="jv">"api_key:free:usr_abc"</span><span class="jp">,</span>
+  <span class="jk">"tokens"</span><span class="jp">:</span>       <span class="jn">67</span><span class="jp">,</span>
+  <span class="jk">"limit"</span><span class="jp">:</span>        <span class="jn">100</span><span class="jp">,</span>
+  <span class="jk">"resets_in_sec"</span><span class="jp">:</span><span class="jn">14</span>
+<span class="jp">}</span></div>
+          <div class="api-response-body" data-code="404"><span class="jp">{</span>
+  <span class="jk">"error"</span><span class="jp">:</span> <span class="jv">"no_rule_matches_key"</span>
+<span class="jp">}</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /detailed -->
+</div>
+
 {{hint "why rate headers on every response?" "Without headers, clients have no visibility into their quota — they blast until <span class='hl'>429</span>, then retry aggressively, creating a second spike. With <strong>X-RateLimit-Remaining</strong>, well-behaved SDKs (Stripe, AWS) slow down proactively at <span class='hl'>10% remaining</span>. This turns a thundering herd of retries into smooth self-throttling — same traffic, zero retry storms."}}
 
 {{triggerQs "Questions about rate headers"
