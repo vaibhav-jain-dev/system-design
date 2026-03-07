@@ -51,24 +51,119 @@
 
 {{diagram "sa-api-design"}}
 
-{{code "http" `# Read: autocomplete suggestions
-GET /autocomplete?q=new+y&limit=10&lang=en&uid=u123
-Authorization: Bearer <token>   # uid used only for personalization
+<div class="api-doc">
+  <div class="api-view-tabs">
+    <button class="api-view-tab active" data-view="quick">Quick</button>
+    <button class="api-view-tab" data-view="detailed">Detailed</button>
+  </div>
 
-HTTP 200 OK
-{
-  "suggestions": [
-    {"text": "new york", "score": 0.98, "type": "query"},
-    {"text": "new york times", "score": 0.91, "type": "query"},
-    {"text": "new york weather", "score": 0.87, "type": "query"}
+  <!-- ── QUICK VIEW ── -->
+  <div class="api-view-pane active" data-view="quick">
+    <div class="api-quick">
+      <div class="api-quick-block">
+        <div class="api-quick-section"># Read path (cacheable)</div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/autocomplete<span class="pq">?q=new+y&amp;limit=10&amp;lang=en&amp;uid=u123</span></span>
+          <span class="api-quick-comment"># Suggestions from trie (CDN cacheable by prefix)</span>
+        </div>
+      </div>
+      <div class="api-quick-block">
+        <div class="api-quick-section"># Write path (async)</div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/queries/log</span>
+          <span class="api-quick-comment"># Log submitted query to Kafka (fire-and-forget)</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── DETAILED VIEW ── -->
+  <div class="api-view-pane" data-view="detailed">
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method GET">GET</span>
+          <span class="api-path">/autocomplete<span class="pq">?q=&amp;limit=&amp;lang=&amp;uid=</span></span>
+          <span class="api-desc">Autocomplete suggestions — GET for CDN cacheability (not POST)</span>
+        </div>
+        <button class="api-copy-btn" data-path="/autocomplete?q=&limit=10&lang=en">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Query Parameters</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">q</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Partial query prefix (URL-encoded)</td></tr>
+              <tr><td><span class="rf">limit</span><span class="rbadge opt">optional</span></td><td><span class="rt">integer</span></td><td class="rd">Max suggestions; default 10, max 20</td></tr>
+              <tr><td><span class="rf">lang</span><span class="rbadge opt">optional</span></td><td><span class="rt">string</span></td><td class="rd">Language code — separate tries per language; default "en"</td></tr>
+              <tr><td><span class="rf">uid</span><span class="rbadge opt">optional</span></td><td><span class="rt">string</span></td><td class="rd">User ID for personalization blending (validated via JWT)</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK</span>
+            <span class="api-tab s4" data-code="400">400 Bad Request</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><pre>{
+  <span class="jk">"suggestions"</span>: [
+    {<span class="jk">"text"</span>: <span class="jv">"new york"</span>, <span class="jk">"score"</span>: <span class="jn">0.98</span>, <span class="jk">"type"</span>: <span class="jv">"query"</span>},
+    {<span class="jk">"text"</span>: <span class="jv">"new york times"</span>, <span class="jk">"score"</span>: <span class="jn">0.91</span>, <span class="jk">"type"</span>: <span class="jv">"query"</span>},
+    {<span class="jk">"text"</span>: <span class="jv">"new york weather"</span>, <span class="jk">"score"</span>: <span class="jn">0.87</span>, <span class="jk">"type"</span>: <span class="jv">"query"</span>}
   ],
-  "latency_ms": 12,
-  "from_cache": true
+  <span class="jk">"latency_ms"</span>: <span class="jn">12</span>,
+  <span class="jk">"from_cache"</span>: <span class="jb">true</span>
 }
+<span class="jc">// Cache-Control: public, max-age=60 — CDN caches by prefix+lang</span>
+<span class="jc">// from_cache distinguishes trie hit vs Redis cache hit vs CDN hit</span></pre></div>
+          <div class="api-response-body" data-code="400"><pre>{
+  <span class="jk">"error"</span>: <span class="jv">"query_too_long"</span>,
+  <span class="jk">"max_chars"</span>: <span class="jn">200</span>
+}</pre></div>
+        </div>
+      </div>
+      <div class="api-card-note">CDN caches GET responses by (q, lang) — personalisation via uid is blended at the service layer, not part of the cache key. POST responses are never cached by CDN — wrong choice for autocomplete at 290 K QPS.</div>
+    </div>
 
-# Write: log submitted query (fire-and-forget, async)
-POST /queries/log
-{"query": "new york flights", "lang": "en", "uid": "u123", "ts": 1709600000}`}}
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>
+          <span class="api-path">/queries/log</span>
+          <span class="api-desc">Log final submitted query — async, Kafka-backed, never blocks the user</span>
+        </div>
+        <button class="api-copy-btn" data-path="/queries/log">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Request Body</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">query</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Final query the user submitted (not a prefix)</td></tr>
+              <tr><td><span class="rf">lang</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Language code for trie shard routing</td></tr>
+              <tr><td><span class="rf">uid</span><span class="rbadge opt">optional</span></td><td><span class="rt">string</span></td><td class="rd">User ID for personalised trie warm-up (stripped before aggregation)</td></tr>
+              <tr><td><span class="rf">ts</span><span class="rbadge req">required</span></td><td><span class="rt">epoch ms</span></td><td class="rd">Client timestamp — used for trending detection time windows</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="202">202 Accepted</span>
+          </div>
+          <div class="api-response-body active" data-code="202"><pre>{<span class="jk">"status"</span>: <span class="jv">"queued"</span>}
+<span class="jc">// Enqueued to Kafka raw-queries topic</span>
+<span class="jc">// MapReduce aggregation runs hourly, trie rebuilt every 24h</span></pre></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
 
 {{think "Why GET and not POST for autocomplete? GET is idempotent and cacheable — the same prefix+lang always returns the same global top-10 (personalization is additive, blended client-side or at the service layer). POST cannot be cached by CDN or browser."
   (whyNot "POST for autocomplete" "POST responses are never cached by CDN. At 290K QPS, without CDN caching of popular prefixes we'd need 5x more service capacity.")

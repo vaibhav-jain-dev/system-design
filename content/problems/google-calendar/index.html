@@ -53,42 +53,190 @@
 
 {{diagram "gc-api-design"}}
 
-{{code "http" `# Create or update event (idempotent — client generates UUID)
-PUT /v1/events/{event_id}
-Authorization: Bearer {token}
-Content-Type: application/json
-If-Match: {etag}  # optional — for optimistic concurrency
+<div class="api-doc">
+  <div class="api-view-tabs">
+    <button class="api-view-tab active" data-view="quick">Quick</button>
+    <button class="api-view-tab" data-view="detailed">Detailed</button>
+  </div>
 
-{
-  "calendar_id": "user@example.com",
-  "title": "Weekly Sync",
-  "start": "2026-03-09T14:00:00Z",
-  "end":   "2026-03-09T15:00:00Z",
-  "timezone": "America/New_York",
-  "rrule": "FREQ=WEEKLY;BYDAY=MO;COUNT=52",
-  "attendees": ["alice@example.com", "bob@example.com"],
-  "reminders": [{"method": "push", "minutes_before": 10}]
+  <!-- ── QUICK VIEW ── -->
+  <div class="api-view-pane active" data-view="quick">
+    <div class="api-quick">
+      <div class="api-quick-block">
+        <div class="api-quick-section"># Events (idempotent PUT)</div>
+        <div class="api-quick-row">
+          <span class="api-method PUT">PUT</span>
+          <span class="api-quick-path">/v1/events/<span class="pp">{event_id}</span></span>
+          <span class="api-quick-comment"># Create or update event (client-generated UUID)</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/v1/events<span class="pq">?calendar_id=&amp;start=&amp;end=&amp;sync_token=</span></span>
+          <span class="api-quick-comment"># List events or delta sync with token</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method DELETE">DELETE</span>
+          <span class="api-quick-path">/v1/events/<span class="pp">{event_id}</span></span>
+          <span class="api-quick-comment"># Soft delete (tombstone, propagated via sync)</span>
+        </div>
+      </div>
+      <div class="api-quick-block">
+        <div class="api-quick-section"># Scheduling</div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/v1/freeBusy</span>
+          <span class="api-quick-comment"># Query availability for N attendees in a time range</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/v1/calendars/<span class="pp">{cal_id}</span>/acl</span>
+          <span class="api-quick-comment"># Calendar sharing permissions (reader/writer/owner)</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── DETAILED VIEW ── -->
+  <div class="api-view-pane" data-view="detailed">
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method PUT">PUT</span>
+          <span class="api-path">/v1/events/<span class="pp">{event_id}</span></span>
+          <span class="api-desc">Create or update event — idempotent; client generates UUID before first request</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/events/{event_id}">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Request Headers + Body</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">If-Match</span><span class="rbadge opt">header</span></td><td><span class="rt">ETag</span></td><td class="rd">Optimistic lock — "v5" prevents lost updates; 412 if mismatch</td></tr>
+              <tr><td><span class="rf">calendar_id</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Owner calendar (e.g., user@example.com)</td></tr>
+              <tr><td><span class="rf">title</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Event display name</td></tr>
+              <tr><td><span class="rf">start / end</span><span class="rbadge req">required</span></td><td><span class="rt">RFC 3339 UTC</span></td><td class="rd">Always stored in UTC; timezone name kept separately for DST expansion</td></tr>
+              <tr><td><span class="rf">timezone</span><span class="rbadge req">required</span></td><td><span class="rt">IANA tz name</span></td><td class="rd">e.g. "America/New_York" — not offset — so DST shifts apply correctly</td></tr>
+              <tr><td><span class="rf">rrule</span><span class="rbadge opt">optional</span></td><td><span class="rt">RFC 5545</span></td><td class="rd">Recurrence rule; master event only (exceptions are child events)</td></tr>
+              <tr><td><span class="rf">attendees</span><span class="rbadge opt">optional</span></td><td><span class="rt">array</span></td><td class="rd">Email list; each gets an invite notification</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK</span>
+            <span class="api-tab s4" data-code="412">412 Conflict</span>
+            <span class="api-tab s4" data-code="409">409 Overlap</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><pre>{
+  <span class="jk">"event_id"</span>: <span class="jv">"evt_abc123"</span>,
+  <span class="jk">"etag"</span>: <span class="jv">""v5""</span>,
+  <span class="jk">"updated_at"</span>: <span class="jv">"2026-03-07T10:00:00Z"</span>,
+  <span class="jk">"sequence"</span>: <span class="jn">5</span>  <span class="jc">// iCal sequence number for attendee sync</span>
+}</pre></div>
+          <div class="api-response-body" data-code="412"><pre>{
+  <span class="jk">"error"</span>: <span class="jv">"precondition_failed"</span>,
+  <span class="jk">"current_etag"</span>: <span class="jv">""v6""</span>,
+  <span class="jk">"message"</span>: <span class="jv">"Event was modified by another client — re-fetch before updating"</span>
+}</pre></div>
+          <div class="api-response-body" data-code="409"><pre>{
+  <span class="jk">"error"</span>: <span class="jv">"room_already_booked"</span>,
+  <span class="jk">"conflicting_event_id"</span>: <span class="jv">"evt_xyz"</span>
 }
+<span class="jc">// Room booking conflict — meeting rooms are exclusive resources</span></pre></div>
+        </div>
+      </div>
+    </div>
 
-Response 200:
-{
-  "event_id": "evt_abc123",
-  "etag": "\"v5\"",
-  "updated_at": "2026-03-05T10:00:00Z"
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method GET">GET</span>
+          <span class="api-path">/v1/events<span class="pq">?calendar_id=&amp;start=&amp;end=&amp;sync_token=</span></span>
+          <span class="api-desc">List events or delta-sync — sync_token gives only changes since last poll</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/events">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Query Parameters</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">calendar_id</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Calendar to query</td></tr>
+              <tr><td><span class="rf">start / end</span><span class="rbadge opt">optional</span></td><td><span class="rt">RFC 3339</span></td><td class="rd">Date range filter (ignored if sync_token present)</td></tr>
+              <tr><td><span class="rf">sync_token</span><span class="rbadge opt">optional</span></td><td><span class="rt">string</span></td><td class="rd">Base64-encoded cursor; 410 Gone after 7 days (full sync required)</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK</span>
+            <span class="api-tab s4" data-code="410">410 Token Expired</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><pre>{
+  <span class="jk">"items"</span>: [
+    {<span class="jk">"event_id"</span>: <span class="jv">"evt_abc123"</span>, <span class="jk">"status"</span>: <span class="jv">"confirmed"</span>, <span class="jk">"updated_at"</span>: <span class="jv">"..."</span>}
+  ],
+  <span class="jk">"next_sync_token"</span>: <span class="jv">"eyJ0IjoxNzA5NjAwMDAwfQ=="</span>,
+  <span class="jk">"next_page_token"</span>: <span class="jv">null</span>
 }
+<span class="jc">// next_sync_token is the cursor for next delta poll</span>
+<span class="jc">// items includes deleted events as {status: "cancelled"}</span></pre></div>
+          <div class="api-response-body" data-code="410"><pre>{
+  <span class="jk">"error"</span>: <span class="jv">"sync_token_expired"</span>,
+  <span class="jk">"message"</span>: <span class="jv">"Token older than 7 days — perform a full sync"</span>
+}
+<span class="jc">// Client discards local cache, calls GET /v1/events without sync_token</span></pre></div>
+        </div>
+      </div>
+    </div>
 
-# List events in date range (with delta sync)
-GET /v1/events?calendar_id=user@example.com&start=2026-03-01T00:00:00Z&end=2026-03-31T23:59:59Z&sync_token=eyJ0IjoxNzA5...
-Response: { "items": [...], "next_sync_token": "eyJ0IjoxNzA5...", "next_page_token": null }
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>
+          <span class="api-path">/v1/freeBusy</span>
+          <span class="api-desc">Query free/busy windows across multiple calendars for scheduling</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/freeBusy">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Request Body</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">time_min / time_max</span><span class="rbadge req">required</span></td><td><span class="rt">RFC 3339 UTC</span></td><td class="rd">Query window; max 31 days</td></tr>
+              <tr><td><span class="rf">items</span><span class="rbadge req">required</span></td><td><span class="rt">array</span></td><td class="rd">[{id: "email@example.com"}] — list of calendars to query</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><pre>{
+  <span class="jk">"calendars"</span>: {
+    <span class="jk">"alice@example.com"</span>: {
+      <span class="jk">"busy"</span>: [
+        {<span class="jk">"start"</span>: <span class="jv">"2026-03-09T14:00:00Z"</span>, <span class="jk">"end"</span>: <span class="jv">"2026-03-09T15:00:00Z"</span>}
+      ]
+    },
+    <span class="jk">"bob@example.com"</span>: {
+      <span class="jk">"busy"</span>: []
+    }
+  }
+}
+<span class="jc">// Titles and details omitted intentionally — free/busy only, respects privacy</span></pre></div>
+        </div>
+      </div>
+    </div>
 
-# Free/busy query (for scheduling)
-POST /v1/freeBusy
-{ "time_min": "2026-03-09T00:00:00Z", "time_max": "2026-03-09T23:59:59Z",
-  "items": [{"id": "alice@example.com"}, {"id": "bob@example.com"}] }
-
-# Delete (soft delete)
-DELETE /v1/events/{event_id}
-Response 204`}}
+  </div>
+</div>
 
 {{think "PUT vs POST is a deliberate choice for calendar events, not just convention."
   (whyNot "POST /events" "POST is not idempotent. A mobile client that loses the network mid-request and retries creates a duplicate event. User sees two 'Weekly Sync' entries with no way to tell which is the original.")

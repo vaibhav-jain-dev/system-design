@@ -88,27 +88,206 @@ Messages are sent over WebSocket for lowest latency; REST provides durability an
 
 {{diagram "cs-api-design"}}
 
-{{code "go" `// WebSocket message frame
-type WSFrame struct {
-    Type    string          // "message", "receipt", "typing", "presence"
-    ID      string          // Client-generated UUID for dedup
-    Payload json.RawMessage // Type-specific data
+<div class="api-doc">
+  <div class="api-view-tabs">
+    <button class="api-view-tab active" data-view="quick">Quick</button>
+    <button class="api-view-tab" data-view="detailed">Detailed</button>
+  </div>
+
+  <!-- ── QUICK VIEW ── -->
+  <div class="api-view-pane active" data-view="quick">
+    <div class="api-quick">
+      <div class="api-quick-block">
+        <div class="api-quick-section"># WebSocket (real-time events)</div>
+        <div class="api-quick-row">
+          <span class="api-method GET">WS</span>
+          <span class="api-quick-path">/v1/ws/connect</span>
+          <span class="api-quick-comment"># Persistent connection: send messages, receive receipts</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">WS</span>
+          <span class="api-quick-path"><span class="pq">frame.type = "message"</span></span>
+          <span class="api-quick-comment"># Send E2E-encrypted message to conversation</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">WS</span>
+          <span class="api-quick-path"><span class="pq">frame.type = "receipt"</span></span>
+          <span class="api-quick-comment"># delivered/read acknowledgement from server</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">WS</span>
+          <span class="api-quick-path"><span class="pq">frame.type = "typing"</span></span>
+          <span class="api-quick-comment"># Typing indicator (fire-and-forget, no ACK)</span>
+        </div>
+      </div>
+      <div class="api-quick-block">
+        <div class="api-quick-section"># REST (CRUD + history)</div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/v1/conversations/<span class="pp">{conv_id}</span>/messages</span>
+          <span class="api-quick-comment"># Fetch message history (cursor paginated)</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/v1/media/upload</span>
+          <span class="api-quick-comment"># Get S3 pre-signed URL for media upload</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/v1/groups</span>
+          <span class="api-quick-comment"># Create group conversation</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/v1/messages/<span class="pp">{msg_id}</span>/retry</span>
+          <span class="api-quick-comment"># REST fallback if WebSocket drops during send</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── DETAILED VIEW ── -->
+  <div class="api-view-pane" data-view="detailed">
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method GET">WS</span>
+          <span class="api-path">/v1/ws/connect</span>
+          <span class="api-desc">Persistent WebSocket — all real-time events over one connection per user</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/ws/connect">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div class="api-card-note">Client generates a UUID before sending. On disconnect + retry, same UUID is resent — server deduplicates on client_msg_id. Single checkmark = server ACK'd; double checkmark = recipient delivered.</div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="send">Send Message</span>
+            <span class="api-tab s3" data-code="ack">Server ACK</span>
+            <span class="api-tab s3" data-code="typing">Typing</span>
+          </div>
+          <div class="api-response-body active" data-code="send"><pre><span class="jc">// Client → Server</span>
+{
+  <span class="jk">"type"</span>: <span class="jv">"message"</span>,
+  <span class="jk">"client_msg_id"</span>: <span class="jv">"uuid-from-client"</span>,  <span class="jc">// dedup key</span>
+  <span class="jk">"conversation_id"</span>: <span class="jv">"conv_abc"</span>,
+  <span class="jk">"encrypted_body"</span>: <span class="jv">"&lt;AES-256-GCM base64&gt;"</span>,
+  <span class="jk">"media_url"</span>: <span class="jv">null</span>,
+  <span class="jk">"msg_type"</span>: <span class="jv">"text"</span>
+}</pre></div>
+          <div class="api-response-body" data-code="ack"><pre><span class="jc">// Server → Client (after Kafka write)</span>
+{
+  <span class="jk">"type"</span>: <span class="jv">"ack"</span>,
+  <span class="jk">"client_msg_id"</span>: <span class="jv">"uuid-from-client"</span>,
+  <span class="jk">"server_msg_id"</span>: <span class="jv">"1709600000000-3"</span>,  <span class="jc">// Snowflake ID</span>
+  <span class="jk">"timestamp"</span>: <span class="jv">"2026-03-07T10:00:00Z"</span>
+}
+<span class="jc">// No ACK in 5s → client falls back to REST POST /v1/messages</span></pre></div>
+          <div class="api-response-body" data-code="typing"><pre><span class="jc">// Client → Server (fire-and-forget, no ACK)</span>
+{
+  <span class="jk">"type"</span>: <span class="jv">"typing"</span>,
+  <span class="jk">"conversation_id"</span>: <span class="jv">"conv_abc"</span>,
+  <span class="jk">"is_typing"</span>: <span class="jb">true</span>
 }
 
-// Send message payload
-type SendMessage struct {
-    ConversationID string
-    EncryptedBody  []byte  // E2E encrypted by client
-    MediaKey       []byte  // AES-256 key for media (encrypted for recipient)
-    MediaURL       string  // S3 URL if media message
-    Type           string  // "text", "image", "video", "document"
-}
+<span class="jc">// Server → all other members in conversation</span>
+{
+  <span class="jk">"type"</span>: <span class="jv">"typing"</span>,
+  <span class="jk">"user_id"</span>: <span class="jv">"usr_123"</span>,
+  <span class="jk">"conversation_id"</span>: <span class="jv">"conv_abc"</span>,
+  <span class="jk">"is_typing"</span>: <span class="jb">true</span>
+}</pre></div>
+        </div>
+      </div>
+    </div>
 
-// Delivery receipt payload
-type Receipt struct {
-    MessageID string
-    Status    string // "delivered", "read"
-}`}}
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method GET">GET</span>
+          <span class="api-path">/v1/conversations/<span class="pp">{conv_id}</span>/messages</span>
+          <span class="api-desc">Message history — cursor-paginated by Snowflake ID</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/conversations/{conv_id}/messages">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Query Params</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">before</span><span class="rbadge opt">optional</span></td><td><span class="rt">Snowflake ID</span></td><td class="rd">Fetch messages older than this ID (cursor pagination)</td></tr>
+              <tr><td><span class="rf">limit</span><span class="rbadge opt">optional</span></td><td><span class="rt">integer</span></td><td class="rd">Max 50 per page; default 20</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK</span>
+            <span class="api-tab s4" data-code="403">403 Forbidden</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><pre>{
+  <span class="jk">"messages"</span>: [
+    {
+      <span class="jk">"msg_id"</span>: <span class="jv">"1709600000000-3"</span>,
+      <span class="jk">"sender_id"</span>: <span class="jv">"usr_456"</span>,
+      <span class="jk">"encrypted_body"</span>: <span class="jv">"&lt;base64&gt;"</span>,
+      <span class="jk">"timestamp"</span>: <span class="jv">"2026-03-07T10:00:00Z"</span>,
+      <span class="jk">"status"</span>: <span class="jv">"read"</span>
+    }
+  ],
+  <span class="jk">"has_more"</span>: <span class="jb">true</span>,
+  <span class="jk">"oldest_cursor"</span>: <span class="jv">"1709599000000-1"</span>
+}</pre></div>
+          <div class="api-response-body" data-code="403"><pre>{
+  <span class="jk">"error"</span>: <span class="jv">"not_a_member"</span>,
+  <span class="jk">"message"</span>: <span class="jv">"You are not a member of this conversation"</span>
+}</pre></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>
+          <span class="api-path">/v1/media/upload</span>
+          <span class="api-desc">Get S3 pre-signed URL — media never flows through chat server</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/media/upload">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Request Body</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">mime_type</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">e.g., "image/jpeg" — determines S3 content-type</td></tr>
+              <tr><td><span class="rf">size_bytes</span><span class="rbadge req">required</span></td><td><span class="rt">integer</span></td><td class="rd">File size; server rejects &gt;100MB</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK</span>
+            <span class="api-tab s4" data-code="413">413 Too Large</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><pre>{
+  <span class="jk">"upload_url"</span>: <span class="jv">"https://s3.amazonaws.com/chat-media/...?X-Amz-..."</span>,
+  <span class="jk">"media_id"</span>: <span class="jv">"med_xyz"</span>,
+  <span class="jk">"expires_in_seconds"</span>: <span class="jn">300</span>
+}
+<span class="jc">// Client PUTs file to upload_url directly, then sends media_id in WS message</span></pre></div>
+          <div class="api-response-body" data-code="413"><pre>{
+  <span class="jk">"error"</span>: <span class="jv">"file_too_large"</span>,
+  <span class="jk">"max_bytes"</span>: <span class="jn">104857600</span>
+}</pre></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
 
 {{hint "why client-generated message ID?" "The client generates a UUID before sending. If the WebSocket drops during send, the client retries with the same ID. The server uses this ID for <strong>deduplication</strong> — if it sees the same ID twice, it ACKs without storing again. Without this, a network hiccup causes duplicate messages."}}
 

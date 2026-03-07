@@ -301,6 +301,132 @@ Content files are **Go template fragments** — no `<html>` or `<head>`, just bo
 
 ---
 
+## REST API Documentation Component (`api-doc`)
+
+Problems with an API design phase use the `.api-doc` component. It renders **two tabs**:
+- **Quick** (default) — compact monospace table showing `METHOD  /path  # description`, grouped by P0/P1/P2 priority sections
+- **Detailed** — individual cards with request-field table + tabbed response JSON
+
+### HTML skeleton
+
+```html
+<div class="api-doc">
+  <div class="api-view-tabs">
+    <button class="api-view-tab active" data-view="quick">Quick</button>
+    <button class="api-view-tab" data-view="detailed">Detailed</button>
+  </div>
+
+  <!-- QUICK PANE (shown by default) -->
+  <div class="api-view-pane active" data-view="quick">
+    <div class="api-quick">
+      <div class="api-quick-block">
+        <div class="api-quick-section"># P0 — Core</div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/api/v1/urls</span>
+          <span class="api-quick-comment"># one-line description</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/<span class="pp">{short_code}</span></span>
+          <span class="api-quick-comment"># use .pp for path params, .pq for query string</span>
+        </div>
+      </div>
+      <!-- repeat .api-quick-block for each section (P1, P2, Admin, etc.) -->
+    </div>
+  </div>
+
+  <!-- DETAILED PANE -->
+  <div class="api-view-pane" data-view="detailed">
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>          <!-- GET POST PUT DELETE PATCH -->
+          <span class="api-path">/api/v1/urls</span>
+          <span class="api-desc">Short human description</span>
+        </div>
+        <span class="api-auth">🔑 Bearer token</span>        <!-- omit if public -->
+        <button class="api-copy-btn" data-path="/api/v1/urls">Copy</button>
+      </div>
+      <div class="api-card-body">
+
+        <!-- REQUEST TABLE (omit if no body/params) -->
+        <div>
+          <div class="api-req-label">Request Body</div>      <!-- or "Query Parameters" -->
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><span class="rf">field_name</span><span class="rbadge req">required</span></td>
+                <td><span class="rt">string</span></td>       <!-- string integer boolean string[] -->
+                <td class="rd">Human description</td>
+              </tr>
+              <tr>
+                <td><span class="rf">optional_field</span><span class="rbadge opt">optional</span></td>
+                <td><span class="rt">integer</span></td>
+                <td class="rd">Description; default X</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- RESPONSE TABS -->
+        <div class="api-responses">
+          <div class="api-tabs">
+            <!-- Tab class: s2 = 2xx green, s3 = 3xx blue, s4 = 4xx red -->
+            <span class="api-tab s2 active" data-code="201">201 Created</span>
+            <span class="api-tab s4" data-code="400">400 Bad Request</span>
+          </div>
+          <!-- Response body: JSON tokens use .jk .jv .jn .jb .jp .jc -->
+          <div class="api-response-body active" data-code="201"><span class="jp">{</span>
+  <span class="jk">"field"</span><span class="jp">:</span> <span class="jv">"value"</span><span class="jp">,</span>
+  <span class="jk">"count"</span><span class="jp">:</span> <span class="jn">42</span>
+<span class="jp">}</span></div>
+          <div class="api-response-body" data-code="400"><span class="jp">{</span>
+  <span class="jk">"error"</span><span class="jp">:</span> <span class="jv">"error_code"</span>
+<span class="jp">}</span></div>
+        </div>
+
+        <!-- OPTIONAL NOTE -->
+        <div class="api-card-note">One-line contextual note — key design decision.</div>
+
+      </div>
+    </div>
+    <!-- repeat .api-card for each endpoint -->
+
+  </div><!-- /detailed -->
+</div>
+```
+
+### JSON token CSS classes (inside `.api-response-body`)
+
+| Class | Colour | Use |
+|-------|--------|-----|
+| `.jk` | Blue | JSON key |
+| `.jv` | Green | String value |
+| `.jn` | Orange | Number value |
+| `.jb` | Purple | Boolean / null |
+| `.jp` | Gray | Punctuation `{ } [ ] , :` |
+| `.jc` | Muted italic | Inline comment `// ...` |
+
+### Response header blocks (for middleware / redirect responses)
+
+```html
+<div class="api-resp-headers">
+  <span class="hk">Header-Name:</span>  <span class="hv">value</span>  <span class="hc">// comment</span>
+</div>
+```
+
+### Rules for when to add `api-doc`
+
+- **Every problem** that has an "API Design" phase **must** have an `api-doc` block placed after the priority diagram (`{{diagram "xxx-api-design"}}`) and before the first `{{hint}}`.
+- **Quick view** groups endpoints by priority: `# P0 — Core`, `# P1 — Important`, `# P2 — Nice to Have`, or domain sections like `# Admin API`.
+- **Detailed view** has one `.api-card` per endpoint. Include a request table only when the endpoint has a request body or meaningful query params. Always include response tabs with at least one success (2xx) and one error (4xx) tab.
+- Rate-limiter style problems: use `200 OK` / `429` method badges to represent middleware response contracts, plus `# Admin API` section for rule management endpoints.
+
+---
+
 ## Diagram Registry (internal/diagrams/)
 
 Diagrams are stored as **Go structs** in domain-specific files, not inline in content HTML. Content files reference diagrams by slug: `{{diagram "rl-architecture"}}`.

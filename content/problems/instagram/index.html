@@ -45,6 +45,281 @@
 
 {{diagram "ig-api-design"}}
 
+<div class="api-doc">
+  <div class="api-view-tabs">
+    <button class="api-view-tab active" data-view="quick">Quick</button>
+    <button class="api-view-tab" data-view="detailed">Detailed</button>
+  </div>
+
+  <!-- ── QUICK VIEW ── -->
+  <div class="api-view-pane active" data-view="quick">
+    <div class="api-quick">
+      <div class="api-quick-block">
+        <div class="api-quick-section"># P0 — Core (Media Upload — 2-phase presigned S3)</div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/api/v1/media/upload/init</span>
+          <span class="api-quick-comment"># Step 1 — get presigned S3 URL + upload_id</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/api/v1/media/upload/complete</span>
+          <span class="api-quick-comment"># Step 2 — attach caption, tags → returns media_id</span>
+        </div>
+      </div>
+      <div class="api-quick-block">
+        <div class="api-quick-section"># P0 — Core (Feed &amp; Social)</div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/api/v1/feed<span class="pq">?cursor=&amp;limit=20&amp;type=ranked</span></span>
+          <span class="api-quick-comment"># Cursor-paginated home feed</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/api/v1/follow/<span class="pp">{user_id}</span></span>
+          <span class="api-quick-comment"># Follow/unfollow toggle → async fan-out via SQS</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/api/v1/like/<span class="pp">{post_id}</span></span>
+          <span class="api-quick-comment"># Like/unlike toggle; composite PK dedup</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/api/v1/comment/<span class="pp">{post_id}</span></span>
+          <span class="api-quick-comment"># Add comment or threaded reply</span>
+        </div>
+      </div>
+      <div class="api-quick-block">
+        <div class="api-quick-section"># P1 — Important</div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/api/v1/stories</span>
+          <span class="api-quick-comment"># 24 h ephemeral content; DynamoDB TTL cleanup</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/api/v1/explore<span class="pq">?cursor=&amp;limit=20</span></span>
+          <span class="api-quick-comment"># Trending + ML-ranked personalised feed</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/api/v1/notifications</span>
+          <span class="api-quick-comment"># SSE stream; falls back to long-poll</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── DETAILED VIEW ── -->
+  <div class="api-view-pane" data-view="detailed">
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>
+          <span class="api-path">/api/v1/media/upload/init</span>
+          <span class="api-desc">Step 1 — get presigned S3 upload URL</span>
+        </div>
+        <span class="api-auth">🔑 Bearer token</span>
+        <button class="api-copy-btn" data-path="/api/v1/media/upload/init">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Request Body</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">content_type</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">MIME type e.g. <code>image/jpeg</code></td></tr>
+              <tr><td><span class="rf">size_bytes</span><span class="rbadge req">required</span></td><td><span class="rt">integer</span></td><td class="rd">File size; max <strong>50 MB</strong></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="201">201 Created</span>
+            <span class="api-tab s4" data-code="400">400 Bad Request</span>
+          </div>
+          <div class="api-response-body active" data-code="201"><span class="jp">{</span>
+  <span class="jk">"upload_id"</span><span class="jp">:</span>     <span class="jv">"upl_9fGh2kX..."</span><span class="jp">,</span>
+  <span class="jk">"presigned_url"</span><span class="jp">:</span> <span class="jv">"https://s3.amazonaws.com/..."</span><span class="jp">,</span>
+  <span class="jk">"expires_in"</span><span class="jp">:</span>   <span class="jn">900</span>
+<span class="jp">}</span></div>
+          <div class="api-response-body" data-code="400"><span class="jp">{</span>
+  <span class="jk">"error"</span><span class="jp">:</span> <span class="jv">"file_too_large"</span><span class="jp">,</span> <span class="jk">"max_bytes"</span><span class="jp">:</span> <span class="jn">52428800</span>
+<span class="jp">}</span></div>
+        </div>
+        <div class="api-card-note">Client PUTs bytes directly to S3 via presigned URL — never through your API servers.</div>
+      </div>
+    </div>
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>
+          <span class="api-path">/api/v1/media/upload/complete</span>
+          <span class="api-desc">Step 2 — confirm upload, attach caption &amp; tags</span>
+        </div>
+        <span class="api-auth">🔑 Bearer token</span>
+        <button class="api-copy-btn" data-path="/api/v1/media/upload/complete">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Request Body</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">upload_id</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Token from <code>/init</code></td></tr>
+              <tr><td><span class="rf">caption</span><span class="rbadge opt">optional</span></td><td><span class="rt">string</span></td><td class="rd">Max 2,200 chars</td></tr>
+              <tr><td><span class="rf">tags</span><span class="rbadge opt">optional</span></td><td><span class="rt">string[]</span></td><td class="rd">Hashtag list</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK</span>
+            <span class="api-tab s4" data-code="404">404 Not Found</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><span class="jp">{</span>
+  <span class="jk">"media_id"</span><span class="jp">:</span> <span class="jv">"med_Ab3xK9..."</span><span class="jp">,</span>
+  <span class="jk">"cdn_url"</span><span class="jp">:</span>  <span class="jv">"https://cdn.instagram.com/p/Ab3xK9/..."</span><span class="jp">,</span>
+  <span class="jk">"status"</span><span class="jp">:</span>  <span class="jv">"processing"</span>  <span class="jc">// resize pipeline async</span>
+<span class="jp">}</span></div>
+          <div class="api-response-body" data-code="404"><span class="jp">{</span>
+  <span class="jk">"error"</span><span class="jp">:</span> <span class="jv">"upload_id_not_found_or_expired"</span>
+<span class="jp">}</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method GET">GET</span>
+          <span class="api-path">/api/v1/feed<span class="pq">?cursor=&amp;limit=20&amp;type=ranked</span></span>
+          <span class="api-desc">Paginated home feed</span>
+        </div>
+        <span class="api-auth">🔑 Bearer token</span>
+        <button class="api-copy-btn" data-path="/api/v1/feed">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Query Parameters</div>
+          <table class="api-req-table">
+            <thead><tr><th>Param</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">cursor</span><span class="rbadge opt">optional</span></td><td><span class="rt">string</span></td><td class="rd">Opaque token from previous page; omit for first</td></tr>
+              <tr><td><span class="rf">limit</span><span class="rbadge opt">optional</span></td><td><span class="rt">integer</span></td><td class="rd">Max <strong>50</strong>, default <strong>20</strong></td></tr>
+              <tr><td><span class="rf">type</span><span class="rbadge opt">optional</span></td><td><span class="rt">string</span></td><td class="rd"><code>ranked</code> (ML) or <code>chronological</code> — default ranked</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK</span>
+            <span class="api-tab s4" data-code="401">401 Unauthorized</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><span class="jp">{</span>
+  <span class="jk">"posts"</span><span class="jp">: [{</span> <span class="jk">"post_id"</span><span class="jp">:</span> <span class="jv">"pst_..."</span><span class="jp">,</span> <span class="jk">"media_url"</span><span class="jp">:</span> <span class="jv">"..."</span><span class="jp">,</span> <span class="jk">"like_count"</span><span class="jp">:</span> <span class="jn">1542</span> <span class="jp">}],</span>
+  <span class="jk">"next_cursor"</span><span class="jp">:</span> <span class="jv">"eyJ0cyI6MTYwM..."</span>  <span class="jc">// null on last page</span>
+<span class="jp">}</span></div>
+          <div class="api-response-body" data-code="401"><span class="jp">{</span> <span class="jk">"error"</span><span class="jp">:</span> <span class="jv">"unauthorized"</span> <span class="jp">}</span></div>
+        </div>
+        <div class="api-card-note">Cursor encodes last-seen timestamp — immune to new-post insertion mid-scroll.</div>
+      </div>
+    </div>
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>
+          <span class="api-path">/api/v1/follow/<span class="pp">{user_id}</span></span>
+          <span class="api-desc">Follow / unfollow toggle</span>
+        </div>
+        <span class="api-auth">🔑 Bearer token</span>
+        <button class="api-copy-btn" data-path="/api/v1/follow/{user_id}">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK</span>
+            <span class="api-tab s4" data-code="404">404 Not Found</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><span class="jp">{</span>
+  <span class="jk">"following"</span><span class="jp">:</span> <span class="jb">true</span><span class="jp">,</span>  <span class="jc">// false = unfollowed</span>
+  <span class="jk">"fan_out"</span><span class="jp">:</span>   <span class="jv">"async"</span>
+<span class="jp">}</span></div>
+          <div class="api-response-body" data-code="404"><span class="jp">{</span> <span class="jk">"error"</span><span class="jp">:</span> <span class="jv">"user_not_found"</span> <span class="jp">}</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>
+          <span class="api-path">/api/v1/like/<span class="pp">{post_id}</span></span>
+          <span class="api-desc">Like / unlike toggle</span>
+        </div>
+        <span class="api-auth">🔑 Bearer token</span>
+        <button class="api-copy-btn" data-path="/api/v1/like/{post_id}">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK</span>
+            <span class="api-tab s4" data-code="409">409 Conflict</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><span class="jp">{</span>
+  <span class="jk">"liked"</span><span class="jp">:</span>      <span class="jb">true</span><span class="jp">,</span>
+  <span class="jk">"like_count"</span><span class="jp">:</span> <span class="jn">1543</span>  <span class="jc">// Redis INCR — approximate</span>
+<span class="jp">}</span></div>
+          <div class="api-response-body" data-code="409"><span class="jp">{</span> <span class="jk">"error"</span><span class="jp">:</span> <span class="jv">"already_liked"</span> <span class="jp">}</span></div>
+        </div>
+        <div class="api-card-note">Composite PK <code>(user_id, post_id)</code> prevents double-like at DB layer.</div>
+      </div>
+    </div>
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>
+          <span class="api-path">/api/v1/comment/<span class="pp">{post_id}</span></span>
+          <span class="api-desc">Add a comment or threaded reply</span>
+        </div>
+        <span class="api-auth">🔑 Bearer token</span>
+        <button class="api-copy-btn" data-path="/api/v1/comment/{post_id}">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Request Body</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">text</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Max <strong>2,200 chars</strong></td></tr>
+              <tr><td><span class="rf">reply_to</span><span class="rbadge opt">optional</span></td><td><span class="rt">string</span></td><td class="rd">Parent <code>comment_id</code> for threaded reply</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="201">201 Created</span>
+            <span class="api-tab s4" data-code="400">400 Bad Request</span>
+          </div>
+          <div class="api-response-body active" data-code="201"><span class="jp">{</span>
+  <span class="jk">"comment_id"</span><span class="jp">:</span> <span class="jv">"cmt_..."</span><span class="jp">,</span>
+  <span class="jk">"status"</span><span class="jp">:</span>     <span class="jv">"published"</span>  <span class="jc">// async toxicity check</span>
+<span class="jp">}</span></div>
+          <div class="api-response-body" data-code="400"><span class="jp">{</span>
+  <span class="jk">"error"</span><span class="jp">:</span> <span class="jv">"text_too_long"</span><span class="jp">,</span> <span class="jk">"max_chars"</span><span class="jp">:</span> <span class="jn">2200</span>
+<span class="jp">}</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /detailed -->
+</div>
+
 {{hint "why separate media upload from post creation?" "Uploading a 5MB photo takes 2-10 seconds depending on network. Creating a post (caption, tags, metadata) takes <100ms. If you combine them in one API call, the entire request blocks for the upload duration. Separate them: POST /media/upload returns a media_id, then POST /posts references the media_id. This lets the client upload media in the background while the user types a caption."}}
 
 {{think "API design for Instagram is deceptively complex because it needs to handle very different access patterns within the same system."
