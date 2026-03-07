@@ -261,30 +261,51 @@
                 if (href.startsWith('#')) idToNav[href.slice(1)] = item;
             });
 
-            // Show/hide the ‹ arrow based on whether the nav is scrolled right
+            // Update ‹ arrow visibility AND left/right fade overlays
             function updateArrow(inner) {
                 var arrow = inner && inner.previousElementSibling;
                 if (!arrow || !arrow.classList.contains('stage-nav-arrow')) return;
-                arrow.classList.toggle('visible', inner.scrollLeft > 4);
-            }
+                var scrolled = inner.scrollLeft > 4;
+                arrow.classList.toggle('visible', scrolled);
 
-            // Scroll active nav item to the left edge of the nav strip
-            function scrollNavToActive(item) {
-                var inner = item.closest('.stage-nav-inner');
-                if (inner) {
-                    var targetLeft = Math.max(0, item.offsetLeft - 8);
-                    inner.scrollTo({ left: targetLeft, behavior: 'smooth' });
-                    // Arrow visibility will update via the scroll listener below
+                // Drive fade overlays via classes on the parent .stage-nav
+                var nav = inner.closest('.stage-nav');
+                if (nav) {
+                    nav.classList.toggle('scroll-started', scrolled);
+                    var atEnd = inner.scrollLeft + inner.clientWidth >= inner.scrollWidth - 4;
+                    nav.classList.toggle('scroll-at-end', atEnd);
                 }
             }
 
-            // Wire arrow-visibility listener on .stage-nav-inner
+            // Scroll active nav item to the left of the nav strip,
+            // leaving ~48 px of the previous item peeking in so the user
+            // can see where they came from and what comes next.
+            function scrollNavToActive(item) {
+                var inner = item.closest('.stage-nav-inner');
+                if (inner) {
+                    var targetLeft = Math.max(0, item.offsetLeft - 48);
+                    inner.scrollTo({ left: targetLeft, behavior: 'smooth' });
+                }
+            }
+
+            // Wire scroll + wheel listeners on .stage-nav-inner
             var navInner = document.querySelector('.stage-nav-inner');
             if (navInner) {
                 navInner.addEventListener('scroll', function() {
                     updateArrow(navInner);
                 }, { passive: true });
-                updateArrow(navInner); // init
+
+                // Convert vertical wheel events into horizontal scroll so the
+                // user can navigate the strip by scrolling up/down over the bar.
+                navInner.addEventListener('wheel', function(e) {
+                    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+                        e.preventDefault();
+                        navInner.scrollLeft += e.deltaY;
+                        updateArrow(navInner);
+                    }
+                }, { passive: false });
+
+                updateArrow(navInner); // init state
             }
 
             var currentActive = null;
