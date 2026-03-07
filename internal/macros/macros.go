@@ -487,7 +487,7 @@ func stageNav(args ...interface{}) template.HTML {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(`<nav class="stage-nav"><div class="stage-nav-inner">`)
+	sb.WriteString(`<nav class="stage-nav"><button class="stage-nav-arrow" aria-label="Scroll left" onclick="var i=this.nextElementSibling;i.scrollTo({left:Math.max(0,i.scrollLeft-200),behavior:'smooth'})">&#8249;</button><div class="stage-nav-inner">`)
 	for _, item := range items {
 		sb.WriteString(fmt.Sprintf(
 			`<a href="#%s" class="stage-nav-item" onclick="event.preventDefault(); document.getElementById('%s').scrollIntoView({behavior:'smooth', block:'start'})"><span class="stage-nav-num">%d</span><span class="stage-nav-label">%s</span></a>`,
