@@ -673,11 +673,11 @@ CREATE TABLE drivers (
 
 {{deepQA "Critical Interview Questions" `
 <div class="dqa-item">
-  <div class="dqa-q">Why Redis GEO over Postgres PostGIS for driver locations?</div>
+  <div class="dqa-q">Why <a class="dqa-link" href="/fund/storage/redis">Redis</a> GEO over Postgres PostGIS for driver locations?</div>
   <div class="dqa-a">5M active drivers × 1 update/4s = 1.25M GEO writes/sec. Redis handles 200K+ simple ops/sec per instance with O(log N) GEOADD. PostGIS requires B-tree index update on every write — at 1.25M writes/sec, index contention makes it impossible even on high-end RDS. Redis is single-threaded, lock-free for sorted set operations.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">What's the precision of Redis GEO?</div>
-    <div class="dqa-sub-a">52-bit geohash gives ~0.6m accuracy. Sufficient for matching — we don't need centimeter precision to find a driver 200m away. GEORADIUS uses Haversine for distance sorting, which is accurate to within 0.3% for city-scale distances.</div>
+    <div class="dqa-sub-a">52-bit <a class="dqa-link" href="/algo/geohash">geohash</a> gives ~0.6m accuracy. Sufficient for matching — we don't need centimeter precision to find a driver 200m away. GEORADIUS uses Haversine for distance sorting, which is accurate to within 0.3% for city-scale distances.</div>
     <div class="dqa-deep">
       <div class="dqa-deep-q">How do you handle the driver TTL — what if a driver goes offline without explicitly signing out?</div>
       <div class="dqa-deep-a">Each driver maintains a heartbeat key (driver:loc:{id}) with 30s TTL, refreshed on every location update. If the app crashes or network drops, the key expires. Before including a candidate in matching, we check EXISTS driver:loc:{id}. GEORADIUS doesn't expire individual sorted set members — the heartbeat key is our liveness signal.</div>
@@ -686,10 +686,10 @@ CREATE TABLE drivers (
 </div>
 <div class="dqa-item">
   <div class="dqa-q">How do you prevent double-booking the same driver for two simultaneous rides?</div>
-  <div class="dqa-a">Before sending an offer, the matching service does SET NX driver:{id}:locked 1 EX 20 in Redis. NX (not exists) is atomic — only one matching instance can acquire it. The lock expires after 20s (offer window + buffer). On accept or reject, the lock is explicitly deleted. This is a single-key lock — Redis guarantees atomicity without Redlock complexity.</div>
+  <div class="dqa-a">Before sending an offer, the matching service does SET NX driver:{id}:locked 1 EX 20 in <a class="dqa-link" href="/fund/storage/redis">Redis</a>. NX (not exists) is atomic — only one matching instance can acquire it. The lock expires after 20s (offer window + buffer). On accept or reject, the lock is explicitly deleted. This is a single-key lock — Redis guarantees atomicity without Redlock complexity.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">What if the matching service crashes after acquiring the lock but before sending the offer?</div>
-    <div class="dqa-sub-a">The 20s TTL handles this. The lock auto-expires. The ride retries matching after a 30s delay (via Kafka scheduled retry). The driver is available again. Net effect: 50-second matching delay for that ride. Acceptable for a crash-recovery scenario.</div>
+    <div class="dqa-sub-a">The 20s TTL handles this. The lock auto-expires. The ride retries matching after a 30s delay (via <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> scheduled retry). The driver is available again. Net effect: 50-second matching delay for that ride. Acceptable for a crash-recovery scenario.</div>
     <div class="dqa-deep">
       <div class="dqa-deep-q">Why not use database-level locking (SELECT FOR UPDATE) instead of Redis locks for driver assignment?</div>
       <div class="dqa-deep-a">Database row locks are held for the duration of a transaction. Offering a driver and waiting 15s for their response would hold the lock for 15 seconds — blocking all other operations on that driver row. Redis locks are application-level and don't hold DB connections or transactions. This is why we separate the assignment lock (Redis) from the ride record write (Postgres, milliseconds).</div>
@@ -698,7 +698,7 @@ CREATE TABLE drivers (
 </div>
 <div class="dqa-item">
   <div class="dqa-q">Walk me through surge pricing — how does it actually work end-to-end?</div>
-  <div class="dqa-a">A Kafka consumer reads ride request events and driver location events. Every 5 minutes, a surge calculator groups events by H3 cell (resolution 8, ~0.7km²), computes demand/supply ratio, and writes surge multipliers to Redis (HSET surge:{city} cell_id multiplier). When a rider requests a ride, fare estimate reads the multiplier for their pickup cell from Redis in O(1). The multiplier is shown before confirmation and locked for 5 minutes (the TTL matches the recompute interval).</div>
+  <div class="dqa-a">A <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> consumer reads ride request events and driver location events. Every 5 minutes, a surge calculator groups events by H3 cell (resolution 8, ~0.7km²), computes demand/supply ratio, and writes surge multipliers to <a class="dqa-link" href="/fund/storage/redis">Redis</a> (HSET surge:{city} cell_id multiplier). When a rider requests a ride, fare estimate reads the multiplier for their pickup cell from Redis in O(1). The multiplier is shown before confirmation and locked for 5 minutes (the TTL matches the recompute interval).</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">What happens if a rider's surge multiplier changes during their payment flow?</div>
     <div class="dqa-sub-a">The fare estimate shown at request time is binding for 5 minutes (matching the surge TTL). If the rider confirms within that window, they pay the quoted surge. If they take longer (edge case — rare), the system re-quotes with the current surge and requires re-confirmation. This is a one-time UX friction for the rare case.</div>
@@ -709,10 +709,10 @@ CREATE TABLE drivers (
   </div>
 </div>
 <div class="dqa-item">
-  <div class="dqa-q">How do you scale WebSocket connections for 1M concurrent riders tracking their rides?</div>
-  <div class="dqa-a">WebSocket gateway is a fleet of stateless servers (each handles 10K concurrent connections). Load balancer uses sticky sessions (cookie-based with ALB) to route reconnects to the same server. Each server subscribes to Redis Pub/Sub channels for the rides it's serving. When a driver location update arrives, Redis broadcasts to all subscribers of that ride's channel. Fan-out is O(subscribers) which is always 2 (rider + driver apps) per ride.</div>
+  <div class="dqa-q">How do you scale <a class="dqa-link" href="/fund/networking/websockets">WebSocket</a> connections for 1M concurrent riders tracking their rides?</div>
+  <div class="dqa-a">WebSocket gateway is a fleet of stateless servers (each handles 10K concurrent connections). Load balancer uses sticky sessions (cookie-based with ALB) to route reconnects to the same server. Each server subscribes to <a class="dqa-link" href="/fund/storage/redis">Redis</a> Pub/Sub channels for the rides it's serving. When a driver location update arrives, Redis broadcasts to all subscribers of that ride's channel. Fan-out is O(subscribers) which is always 2 (rider + driver apps) per ride.</div>
   <div class="dqa-sub">
-    <div class="dqa-sub-q">Why Redis Pub/Sub instead of Kafka for this fan-out?</div>
+    <div class="dqa-sub-q">Why Redis Pub/Sub instead of <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> for this fan-out?</div>
     <div class="dqa-sub-a">Redis Pub/Sub has < 1ms delivery. Location updates fire every 4 seconds — we need low-latency delivery to the rider's map. Kafka has 10–50ms minimum latency (batching). Kafka is appropriate for durable event log (ride state changes). Pub/Sub is appropriate for ephemeral, real-time updates where a dropped message is acceptable (next update arrives in 4s anyway).</div>
     <div class="dqa-deep">
       <div class="dqa-deep-q">What if the Redis Pub/Sub broker crashes mid-ride?</div>
@@ -722,7 +722,7 @@ CREATE TABLE drivers (
 </div>
 <div class="dqa-item">
   <div class="dqa-q">How does the system handle a 10x demand spike (e.g., concert ends, major storm)?</div>
-  <div class="dqa-a">Three layers: (1) Auto-scaling — ECS matching workers scale out in 2 minutes on CPU/queue depth metrics. (2) Surge pricing — multiplier increases to attract drivers, reducing demand and increasing supply simultaneously. (3) Virtual queue — if matching service queue depth exceeds 10K rides, new requests are queued with position shown to rider. This prevents thundering-herd on Redis GEO and matching workers.</div>
+  <div class="dqa-a">Three layers: (1) Auto-scaling — ECS matching workers scale out in 2 minutes on CPU/queue depth metrics. (2) Surge pricing — multiplier increases to attract drivers, reducing demand and increasing supply simultaneously. (3) Virtual queue — if matching service queue depth exceeds 10K rides, new requests are queued with position shown to rider. This prevents thundering-herd on <a class="dqa-link" href="/fund/storage/redis">Redis</a> GEO and matching workers.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">How fast can the matching service scale out?</div>
     <div class="dqa-sub-a">ECS Fargate tasks start in ~90 seconds. We keep 20% warm capacity (pre-scaled) at all times. Combined with auto-scaling, we can absorb a 5x demand spike in under 3 minutes. Beyond 5x, surge pricing is the primary demand throttle — not infrastructure scaling.</div>

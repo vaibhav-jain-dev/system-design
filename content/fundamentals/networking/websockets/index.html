@@ -18,7 +18,7 @@
 
 {{table "Real-Time Transport Comparison" (rows
   (row "Mechanism" "Direction" "Protocol" "Latency" "Use Case")
-  (row "WebSocket" "Full-duplex" "WS / WSS" "1-5ms" "Chat, gaming, collaboration, live maps")
+  (row "WebSocket" "Full-duplex" "WS / WSS" "1-5ms" "<a class=\"dqa-link\" href=\"/problem/chat-system\">Chat</a>, gaming, collaboration, live maps")
   (row "SSE" "Server → Client only" "HTTP/1.1 or HTTP/2" "5-50ms" "Live feeds, dashboards, notifications")
   (row "Long Polling" "Server → Client (delayed)" "HTTP" "100-300ms per msg" "Legacy fallback, simple notifications")
   (row "HTTP Polling" "Client pulls" "HTTP" "Interval-based" "Batch status checks, not real-time")
@@ -164,9 +164,9 @@ class ReconnectingWebSocket {
 {{say `The fundamental scaling problem: <strong>client A is connected to server 1; a message for client A arrives at server 2</strong>. How does server 2 deliver it?
 <ul>
   <li><span class="hl-red">Naive approach:</span> server-to-server RPC — requires every server to know where every client is connected; O(N²) coordination</li>
-  <li><strong>Solution:</strong> shared <span class="hl-blue">pub/sub layer</span> (typically Redis Pub/Sub) — any server publishes to <code>user:{id}</code> channel; the server holding that connection delivers it</li>
+  <li><strong>Solution:</strong> shared <span class="hl-blue">pub/sub layer</span> (typically <a class="dqa-link" href="/fund/storage/redis">Redis</a> Pub/Sub) — any server publishes to <code>user:{id}</code> channel; the server holding that connection delivers it</li>
   <li><strong>Sticky sessions (ALB)</strong> reduce Redis traffic by routing reconnects to the same server — but they don't eliminate the routing problem if the server crashes</li>
-  <li>At <span class="hl">1M concurrent connections</span>: shard by city or user_id range across multiple Redis nodes — Uber runs hundreds of Redis shards for this workload</li>
+  <li>At <span class="hl">1M concurrent connections</span>: shard by city or user_id range across multiple Redis nodes — <a class="dqa-link" href="/problem/ride-hailing">Uber</a> runs hundreds of Redis shards for this workload</li>
 </ul>`}}
 
 {{diagram "fund-websocket-scaling"}}
@@ -181,7 +181,7 @@ class ReconnectingWebSocket {
   (row "Strategy" "Pros" "Cons" "When to Use")
   (row "Sticky sessions (ALB)" "Reduces Redis traffic, reconnects to same server" "Server crash = all connections lost" "Always — combine with pub/sub")
   (row "Redis Pub/Sub" "O(1) routing, works across any server count" "Fire-and-forget, needs HA Redis" "Standard pattern for cross-server fan-out")
-  (row "Consistent hash routing" "Predictable server assignment per user" "Rebalance on server add/remove" "Chat apps with room-based routing")
+  (row "<a class=\"dqa-link\" href=\"/algo/consistent-hashing\">Consistent hash</a> routing" "Predictable server assignment per user" "Rebalance on server add/remove" "<a class=\"dqa-link\" href=\"/problem/chat-system\">Chat</a> apps with room-based routing")
   (row "Centralized WS gateway" "Single routing layer (e.g., Pusher, Ably)" "Cost, vendor lock-in" "Startups or when ops burden is too high")
 )}}
 
@@ -210,8 +210,8 @@ func (h *Hub) Publish(userID string, payload []byte) {
 {{hint "ALB WebSocket support" "AWS ALB supports WebSocket proxying natively. It keeps the TCP connection open and forwards frames. Set idle_timeout to 3600 seconds (ALB default is 60s — too short for long-lived connections). Enable sticky sessions with duration-based cookies for reconnect efficiency."}}
 
 {{triggerQs "Phase 4 Interview Questions"
-  "How does Uber route driver location updates to the correct rider's app?"
-  "Uber assigns each active trip a channel (trip_id). The rider's app subscribes via WebSocket to the server holding their connection. That server subscribes to Redis channel trip:{trip_id}. The driver's app publishes location updates to trip:{trip_id} via any server. Redis delivers to the subscribed server, which forwards to the rider's WebSocket. Cross-server routing with O(1) publish."
+  "How does <a class=\"dqa-link\" href=\"/problem/ride-hailing\">Uber</a> route driver location updates to the correct rider's app?"
+  "<a class=\"dqa-link\" href=\"/problem/ride-hailing\">Uber</a> assigns each active trip a channel (trip_id). The rider's app subscribes via WebSocket to the server holding their connection. That server subscribes to Redis channel trip:{trip_id}. The driver's app publishes location updates to trip:{trip_id} via any server. Redis delivers to the subscribed server, which forwards to the rider's WebSocket. Cross-server routing with O(1) publish."
   "What happens to in-flight messages when a WebSocket server is restarted for a deploy?"
   "During a rolling deploy, the server sends a WebSocket close frame (1001 Going Away) to all connected clients before shutdown. Clients receive the close, trigger their reconnect logic with backoff, and connect to a different healthy server. The new server re-subscribes to Redis channels for that user. Messages during the reconnect window are buffered client-side or fetched from history on reconnect. Total disruption: 1-3 seconds."
 }}
@@ -220,7 +220,7 @@ func (h *Hub) Publish(userID string, payload []byte) {
 
 {{phase 5 "Redis Pub/Sub Fan-Out" "5 min"}}
 
-{{say `<span class="hl-blue">Redis Pub/Sub</span> is the standard backend for WebSocket fan-out:
+{{say `<a class="dqa-link" href="/fund/storage/redis"><span class="hl-blue">Redis Pub/Sub</span></a> is the standard backend for WebSocket fan-out:
 <ul>
   <li>One publisher, N subscribers — each WebSocket server subscribes to the channels for its connected users</li>
   <li>Throughput: <span class="hl">~1M publishes/sec</span> on a single Redis node <small>(r6g.xlarge)</small></li>
@@ -346,7 +346,7 @@ async function startLongPolling(userId, onMessage) {
   (row "WSS (TLS)" "Certificate at load balancer" "Eavesdropping, injection")
   (row "Origin validation" "Check Origin header on upgrade" "Cross-origin WebSocket hijacking")
   (row "JWT authentication" "Validate token on upgrade" "Unauthorized connections")
-  (row "Rate limiting" "Max N messages/sec per connection" "DoS via message flood")
+  (row "<a class=\"dqa-link\" href=\"/fund/distributed/rate-limiting\">Rate limiting</a>" "Max N messages/sec per connection" "DoS via message flood")
   (row "Message size limit" "Reject payloads >64KB" "Memory exhaustion")
   (row "Connection limit per user" "Max 5 concurrent WS per user_id" "Resource exhaustion")
   (row "Idle timeout" "Close after 30min no activity" "Ghost connection accumulation")
@@ -356,7 +356,7 @@ async function startLongPolling(userId, onMessage) {
 
 {{triggerQs "Phase 7 Interview Questions"
   "How do you prevent a single client from DoSing your WebSocket server with messages?"
-  "Rate limit at the connection level: track message count per connection per second, close or throttle connections exceeding the limit (e.g., >100 messages/sec). Also apply a global rate limit per user_id to prevent the same user from opening multiple connections to bypass per-connection limits. Use a token bucket algorithm — fill at N tokens/sec, each message consumes one token."
+  "Rate limit at the connection level: track message count per connection per second, close or throttle connections exceeding the limit (e.g., >100 messages/sec). Also apply a global rate limit per user_id to prevent the same user from opening multiple connections to bypass per-connection limits. Use a <a class=\"dqa-link\" href=\"/algo/token-bucket\">token bucket</a> algorithm — fill at N tokens/sec, each message consumes one token."
   "How do you authenticate a WebSocket connection?"
   "Pass a short-lived JWT (15-minute TTL) as a query parameter or Subprotocol header during the upgrade request. The server validates the JWT before returning 101. Once the connection is established, the user is trusted for the connection lifetime — no per-message auth overhead. For long-lived connections (>15min), implement a re-auth flow: server sends an auth-challenge message, client responds with a refreshed token."
 }}
@@ -380,10 +380,10 @@ async function startLongPolling(userId, onMessage) {
 
 {{table "Real Company Usage" (rows
   (row "Company" "Use Case" "Scale")
-  (row "Slack" "Chat messages, presence, typing indicators" "Millions of concurrent connections")
-  (row "Uber" "Driver location streaming to riders" "Millions of active trips globally")
+  (row "Slack (<a class=\"dqa-link\" href=\"/problem/chat-system\">Chat</a>)" "Chat messages, presence, typing indicators" "Millions of concurrent connections")
+  (row "<a class=\"dqa-link\" href=\"/problem/ride-hailing\">Uber</a>" "Driver location streaming to riders" "Millions of active trips globally")
   (row "Figma" "Collaborative canvas sync" "Multiple editors, real-time cursor position")
-  (row "BookMyShow" "Live seat map updates during booking" "Thousands of concurrent seat selections")
+  (row "<a class=\"dqa-link\" href=\"/problem/ticket-booking\">BookMyShow</a>" "Live seat map updates during booking" "Thousands of concurrent seat selections")
   (row "Robinhood" "Live stock price streaming" "Real-time price ticks to active traders")
   (row "Discord" "Voice signaling + text messages" "Millions of concurrent WebSocket connections")
 )}}

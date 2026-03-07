@@ -14,14 +14,14 @@
 {{think "Where in the stack should rate limiting live?"
   (whyNot "only at the database layer" "By the time the request reaches the DB, the full request cost (network, auth, parse) is already paid. You need to reject at the API layer or edge, before compute is wasted.")
   (how "At the API gateway?" "Yes — API Gateway is the earliest you can act on HTTP semantics (headers, user_id, endpoint). CDN-level rate limiting (CloudFront, Cloudflare) is even earlier but only works for IP-based limits.")
-  (whatIf "I rate limit at the app server instead of gateway" "Every app server instance has its own counter. If you have 10 instances, the effective limit is 10x what you intended. You need a shared store (Redis) to coordinate across instances.")
+  (whatIf "I rate limit at the app server instead of gateway" "Every app server instance has its own counter. If you have 10 instances, the effective limit is 10x what you intended. You need a shared store (<a class="dqa-link" href="/fund/storage/redis">Redis</a>) to coordinate across instances.")
 }}
 
 {{hint "Rate limiting is a distributed coordination problem" "A single app server can track its own counters in memory. The hard part is synchronizing counters across a fleet of servers without creating a new bottleneck."}}
 
-{{compare "Rate Limiter Placement" (options
+{{compare "<a class="dqa-link" href="/problem/rate-limiter">Rate Limiter</a> Placement" (options
   (best "API Gateway + Redis" "Centralized enforcement before compute cost. Redis atomics prevent race conditions. Single enforcement point for all services.")
-  (alt "In-process + sticky routing" "Works if requests for the same user always go to the same server (IP hash, consistent hashing). Avoids Redis network hop but requires sticky routing.")
+  (alt "In-process + sticky routing" "Works if requests for the same user always go to the same server (IP hash, <a class="dqa-link" href="/algo/consistent-hashing">consistent hashing</a>). Avoids Redis network hop but requires sticky routing.")
   (nofit "Database-only" "Too slow and too late. By the time you check the DB, request processing has already started. Never use the primary DB for rate limit counters.")
 )}}
 
@@ -31,7 +31,7 @@
 
 {{diagram "fund-rl-token-bucket"}}
 
-{{think "Why is token bucket the default choice?"
+{{think "Why is <a class="dqa-link" href="/algo/token-bucket">token bucket</a> the default choice?"
   (how "Core mechanic" "tokens = min(capacity, tokens + rate × elapsed_seconds). This single formula handles both the burst allowance and the sustained rate.")
   (whyNot "strict per-second counters" "A counter-based approach rejects all traffic the instant you hit N per second, even if the next second is empty. Token bucket allows accumulating unused capacity as burst credit.")
   (whatIf "A user sends 1000 requests at startup" "If the bucket capacity is 100, only 100 get through immediately. The remaining 900 are rejected. The bucket refills at rate R per second going forward. Burst capacity is bounded by capacity, not infinite.")
@@ -70,7 +70,7 @@ class TokenBucket:
         self.tokens = min(self.capacity, self.tokens + added)
         self.last_refill = now
 
-# Redis-backed token bucket (for distributed use)
+# <a class="dqa-link" href="/fund/storage/redis">Redis</a>-backed token bucket (for distributed use)
 def is_allowed_redis(redis_client, user_id: str, capacity: int, rate: float) -> bool:
     """Atomic token bucket check using Redis + Lua script."""
     lua_script = """
@@ -138,7 +138,7 @@ def is_allowed_redis(redis_client, user_id: str, capacity: int, rate: float) -> 
 import redis
 
 # ---- Sliding Window Log (exact, memory-heavy) ----
-def is_allowed_log(r: redis.Redis, user_id: str, limit: int, window_seconds: int) -> bool:
+def is_allowed_log(r: redis.<a class="dqa-link" href="/fund/storage/redis">Redis</a>, user_id: str, limit: int, window_seconds: int) -> bool:
     """
     Exact sliding window using a sorted set.
     Score = timestamp (float). Members = unique request IDs (uuid or timestamp).
@@ -200,7 +200,7 @@ def is_allowed_counter(r: redis.Redis, user_id: str, limit: int, window_seconds:
 {{think "When to use log vs counter variant?"
   (whyNot "sliding window log for high-volume APIs" "If you allow 1000 req/hour and a user sends 1000 requests, the sorted set holds 1000 members. For 1M users each at limit: 1 trillion entries. Sorted set is O(log N) but N is unbounded.")
   (how "sliding window counter O(1) tradeoff" "Two integers per user regardless of request rate. The approximation error is at most the previous window's traffic × elapsed fraction. For bursty traffic, error is &lt; 1%. For monotone traffic (constant rate), error is 0%.")
-  (whatIf "I need exact counts at high volume" "Use Redis sorted sets but cap entries: ZREMRANGEBYSCORE aggressively. Or use token bucket (O(1)) which gives exact burst semantics without storing timestamps.")
+  (whatIf "I need exact counts at high volume" "Use Redis sorted sets but cap entries: ZREMRANGEBYSCORE aggressively. Or use <a class="dqa-link" href="/algo/token-bucket">token bucket</a> (O(1)) which gives exact burst semantics without storing timestamps.")
 }}
 
 {{triggerQs "Sliding Window Interview Questions"
@@ -282,12 +282,12 @@ class LeakyBucket:
 
 {{triggerQs "Fixed and Leaky Bucket Questions"
   "When would you actually use a leaky bucket?" "API gateways where you want constant output rate regardless of input burstiness. Nginx's limit_req uses leaky bucket. Good when downstream services (databases, third-party APIs) need smooth traffic, not bursts."
-  "What is the tradeoff with leaky bucket over token bucket?" "Leaky bucket smooths traffic but adds latency (requests wait in queue). Token bucket lets bursts through immediately and rejects when capacity is exceeded. Token bucket is lower latency but sends bursty traffic downstream."
+  "What is the tradeoff with leaky bucket over <a class="dqa-link" href="/algo/token-bucket">token bucket</a>?" "Leaky bucket smooths traffic but adds latency (requests wait in queue). Token bucket lets bursts through immediately and rejects when capacity is exceeded. Token bucket is lower latency but sends bursty traffic downstream."
 }}
 
 {{phase 5 "Distributed Rate Limiter" "6 min"}}
 
-{{say "A single app server can track counters in memory. But with 10 app servers, each server only sees 1/10 of traffic. You need a shared counter store — Redis is the standard solution."}}
+{{say "A single app server can track counters in memory. But with 10 app servers, each server only sees 1/10 of traffic. You need a shared counter store — <a class="dqa-link" href="/fund/storage/redis">Redis</a> is the standard solution."}}
 
 {{diagram "fund-rl-distributed"}}
 
@@ -424,11 +424,11 @@ def check_rate_limits(request, redis_client) -> tuple[bool, str]:
 
 {{phase 7 "Failure & Bypass" "4 min"}}
 
-{{say "Rate limiters must be designed to fail safely. Redis going down should not take down your API. And rate limits must be hard to bypass at scale."}}
+{{say "Rate limiters must be designed to fail safely. <a class="dqa-link" href="/fund/storage/redis">Redis</a> going down should not take down your API. And rate limits must be hard to bypass at scale."}}
 
 {{think "Fail-open vs fail-closed when Redis is unavailable"
   (whyNot "fail-closed (block all traffic)" "If Redis goes down for 30 seconds and you block all traffic, your entire API goes down with it. Redis is now a single point of failure for your rate limiter AND your service.")
-  (how "fail-open with local fallback" "Each app server maintains an in-memory token bucket as fallback. When Redis is unreachable, switch to local counters. Effective limit becomes N × per-server-limit where N is server count. Accept the elevated risk for the duration of the Redis outage.")
+  (how "fail-open with local fallback" "Each app server maintains an in-memory <a class="dqa-link" href="/algo/token-bucket">token bucket</a> as fallback. When Redis is unreachable, switch to local counters. Effective limit becomes N × per-server-limit where N is server count. Accept the elevated risk for the duration of the Redis outage.")
   (whatIf "Redis is down for 5 minutes" "With fail-open and 10 servers each allowing 100 req/s, effective limit is 1000 req/s instead of 100 req/s. This is a 5-minute window of 10x rate limit bypass. For most APIs, this is acceptable vs a full outage.")
 }}
 
@@ -489,7 +489,7 @@ class RateLimiterWithFallback:
 
 {{phase 8 "Interview Summary" "3 min"}}
 
-{{say "To summarize rate limiting: choose the algorithm based on burst tolerance, precision needs, and memory constraints. Always use atomic operations in distributed systems. Design for Redis failure from day one."}}
+{{say "To summarize rate limiting: choose the algorithm based on burst tolerance, precision needs, and memory constraints. Always use atomic operations in distributed systems. Design for <a class="dqa-link" href="/fund/storage/redis">Redis</a> failure from day one."}}
 
 {{table "Algorithm Selection Guide" (rows
   (row "Requirement"                  "Best Algorithm"           "Why")
@@ -510,7 +510,7 @@ class RateLimiterWithFallback:
   "Layer limits: per-IP (before auth) + per-user (after auth) + per-endpoint (expensive ops)."
   "Never trust X-Forwarded-For without validating it comes from your own load balancer."
   "Return 429 with Retry-After header so clients can back off gracefully."
-  "Redis memory: ~64 bytes/user for token bucket, ~128 bytes/user for sliding window counter."
+  "Redis memory: ~64 bytes/user for <a class="dqa-link" href="/algo/token-bucket">token bucket</a>, ~128 bytes/user for sliding window counter."
 }}
 
 {{avoid "Do not say 'fixed window is fine for most cases.' It is not — the boundary burst attack is well-known and trivially exploitable. If you propose fixed window, always pair it with 'and I would mitigate the boundary attack by using sliding window or adding jitter to reset times.'"}}

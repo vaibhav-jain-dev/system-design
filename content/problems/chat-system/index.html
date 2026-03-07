@@ -604,7 +604,7 @@ response = dynamodb.query(
 {{deepQA "Critical Interview Questions" `
 <div class="dqa-item">
   <div class="dqa-q">How do you handle message delivery when the recipient is offline?</div>
-  <div class="dqa-a">Messages are persisted to DynamoDB immediately after Kafka write. The Presence Service (Redis heartbeat TTL) determines if the user is online. If offline, we write to the offline queue and trigger a push notification via APNs/FCM. When the user reconnects, their client sends its last sync cursor (Snowflake message_id). The server queries DynamoDB for all messages > cursor and streams them back over WebSocket.</div>
+  <div class="dqa-a">Messages are persisted to <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a> immediately after <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> write. The Presence Service (<a class="dqa-link" href="/fund/storage/redis">Redis</a> heartbeat TTL) determines if the user is online. If offline, we write to the offline queue and trigger a push notification via APNs/FCM. When the user reconnects, their client sends its last sync cursor (<a class="dqa-link" href="/algo/snowflake-id">Snowflake ID</a> message_id). The server queries DynamoDB for all messages > cursor and streams them back over WebSocket.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">What if there are 10,000 unread messages when the user comes online?</div>
     <div class="dqa-sub-a">Paginate the sync. Stream messages in batches of 100 over WebSocket. Render conversations sorted by <span class="dqa-key">updated_at</span> so the user sees the most recent conversations first. Background-sync older conversations. The client maintains a local SQLite database for instant rendering of previously loaded messages.</div>
@@ -630,7 +630,7 @@ response = dynamodb.query(
 
 <div class="dqa-item">
   <div class="dqa-q">How do you handle ordering and deduplication at 700K messages per second?</div>
-  <div class="dqa-a">Ordering: Kafka partitions by conversation_id, so all messages in a conversation land in the same partition and are totally ordered. Each message gets a <span class="dqa-key">Snowflake ID</span> (timestamp + machine_id + sequence) providing global ordering. Dedup: Client generates a UUID before sending. Server checks idempotency key on DynamoDB conditional write — PutItem with ConditionExpression "attribute_not_exists(message_id)".</div>
+  <div class="dqa-a">Ordering: <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> partitions by conversation_id, so all messages in a conversation land in the same partition and are totally ordered. Each message gets a <a class="dqa-link" href="/algo/snowflake-id">Snowflake ID</a> (timestamp + machine_id + sequence) providing global ordering. Dedup: Client generates a UUID before sending. Server checks idempotency key on <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a> conditional write — PutItem with ConditionExpression "attribute_not_exists(message_id)".</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">What if two messages from different users arrive at exactly the same time?</div>
     <div class="dqa-sub-a">Snowflake IDs from different Chat Service instances have different <span class="dqa-key">machine_id</span> bits, so they're always unique. The timestamp portion provides millisecond ordering. If two messages have the same millisecond timestamp, the machine_id and sequence number break the tie. There's no conflict — both messages are stored with distinct IDs.</div>
@@ -643,20 +643,20 @@ response = dynamodb.query(
 
 <div class="dqa-item">
   <div class="dqa-q">How would you design the system for multi-region deployment?</div>
-  <div class="dqa-a">Deploy full stack (WebSocket servers, Chat Service, Kafka, DynamoDB) in 5+ regions. Use <span class="dqa-key">DynamoDB Global Tables</span> for multi-region message replication (async, ~1 second lag). Kafka MirrorMaker 2 replicates topic data across regions. Users connect to the nearest region via GeoDNS (Route 53 latency-based routing). Cross-region messages route through Kafka inter-region replication.</div>
+  <div class="dqa-a">Deploy full stack (WebSocket servers, Chat Service, <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a>, <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a>) in 5+ regions. Use <span class="dqa-key">DynamoDB Global Tables</span> for multi-region message replication (async, ~1 second lag). Kafka MirrorMaker 2 replicates topic data across regions. Users connect to the nearest region via GeoDNS (Route 53 latency-based routing). Cross-region messages route through Kafka inter-region replication.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">How do you handle a conversation where users are in different regions?</div>
     <div class="dqa-sub-a">The message is produced to the sender's regional Kafka cluster. Kafka MirrorMaker replicates it to the receiver's region. Latency penalty: ~80-120ms for cross-region replication (US-East to EU-West). Total delivery time: ~150-200ms. This is acceptable — users won't notice 200ms vs 50ms in a chat. The alternative (global Kafka) would mean <span class="dqa-key">every</span> message pays cross-region latency, even local ones.</div>
     <div class="dqa-deep">
       <div class="dqa-deep-q">What about DynamoDB Global Tables conflict resolution?</div>
-      <div class="dqa-deep-a">DynamoDB Global Tables use <span class="dqa-key">last-writer-wins</span> based on timestamps. For messages, there are no conflicts — each message has a unique Snowflake ID as the sort key, so writes never collide. For read_receipts (last_read_message_id), last-writer-wins is correct semantics — you always want the most recent read position. The only risk is with profile updates, where we use conditional writes to prevent stale overwrites.</div>
+      <div class="dqa-deep-a">DynamoDB Global Tables use <span class="dqa-key">last-writer-wins</span> based on timestamps. For messages, there are no conflicts — each message has a unique <a class="dqa-link" href="/algo/snowflake-id">Snowflake ID</a> as the sort key, so writes never collide. For read_receipts (last_read_message_id), last-writer-wins is correct semantics — you always want the most recent read position. The only risk is with profile updates, where we use conditional writes to prevent stale overwrites.</div>
     </div>
   </div>
 </div>
 
 <div class="dqa-item">
   <div class="dqa-q">What are the main failure modes and how do you handle them?</div>
-  <div class="dqa-a">Three critical failure modes: (1) WebSocket server crash — client auto-reconnects in ~2s, syncs missed messages via offline queue. (2) Kafka broker failure — replication factor 3 means 2 brokers can fail without data loss; producers retry on failure. (3) DynamoDB throttling — on-demand capacity auto-scales but has a 2x burst limit; sustained hot partitions trigger adaptive capacity.</div>
+  <div class="dqa-a">Three critical failure modes: (1) WebSocket server crash — client auto-reconnects in ~2s, syncs missed messages via offline queue. (2) <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> broker failure — replication factor 3 means 2 brokers can fail without data loss; producers retry on failure. (3) <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a> throttling — on-demand capacity auto-scales but has a 2x burst limit; sustained hot partitions trigger adaptive capacity.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">What's your disaster recovery plan?</div>
     <div class="dqa-sub-a">RPO (recovery point objective) = 1 second for messages (Kafka replication lag). RTO (recovery time objective) = 30 seconds for regional failover (DNS propagation). <span class="dqa-key">DynamoDB Global Tables</span> replicate to all regions within ~1 second. Kafka MirrorMaker 2 replicates with similar lag. We run chaos engineering monthly — kill a random WebSocket server, fail a Kafka broker, throttle DynamoDB — to verify recovery paths.</div>
