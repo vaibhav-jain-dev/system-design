@@ -16,7 +16,7 @@
 
 {{table "Geospatial Index Options at a Glance" (rows
   (row "Index Type"   "Structure"         "Best For"                        "Latency")
-  (row "GeoHash"      "Base32 string"     "Prefix search, cache keys"       "&lt; 1ms in Redis")
+  (row "<a class="dqa-link" href="/algo/geohash">GeoHash</a>"      "Base32 string"     "Prefix search, cache keys"       "&lt; 1ms in <a class="dqa-link" href="/fund/storage/redis">Redis</a>")
   (row "S2 Cells"     "64-bit cell ID"    "Polygon containment, Google Maps" "&lt; 1ms in memory")
   (row "H3 Hexagons"  "64-bit index"      "Aggregation, equal-area zones"    "&lt; 1ms in memory")
   (row "PostGIS GIST" "R-tree variant"    "Complex joins, durability"        "~10ms at 1M rows")
@@ -30,7 +30,7 @@
   "A bounding-box query returns all points within a rectangle (min_lat, max_lat, min_lng, max_lng). It is fast but imprecise — corners of the box are farther than the specified radius. A radius query applies an exact Haversine or ST_DWithin distance filter on top of the bounding-box candidates. Spatial indexes almost always do bounding-box first, then exact filter."
 }}
 
-{{phase 2 "GeoHash" "5 min"}}
+{{phase 2 "<a class="dqa-link" href="/algo/geohash">GeoHash</a>" "5 min"}}
 
 {{say `<span class="hl-blue">GeoHash</span> divides the world into a hierarchical grid encoded as base32 strings:
 <ul>
@@ -43,7 +43,7 @@
 {{think "GeoHash prefix sharing is powerful but has a critical edge case."
   (whyNot "pure prefix matching" "Two points separated by only 1 meter can have completely different GeoHash prefixes if they sit on opposite sides of a cell boundary. Always query the 8 neighboring cells in addition to the target cell.")
   (how "GeoHash precision vs length" "Each additional base32 character roughly halves cell dimensions. A 6-character GeoHash covers ~1.2km × 0.6km. A 9-character GeoHash covers ~4.8m × 4.8m. Choose precision based on acceptable error, not maximum accuracy.")
-  (whatIf "user is exactly on a cell boundary" "Their GeoHash prefix differs from a point 2 meters away across the boundary. The fix: expand your search to all 8 adjacent cells. Redis GEOSEARCH handles this internally — but if you implement GeoHash yourself, always fetch neighbors.")
+  (whatIf "user is exactly on a cell boundary" "Their GeoHash prefix differs from a point 2 meters away across the boundary. The fix: expand your search to all 8 adjacent cells. <a class="dqa-link" href="/fund/storage/redis">Redis</a> GEOSEARCH handles this internally — but if you implement GeoHash yourself, always fetch neighbors.")
 }}
 
 {{diagram "fund-geospatial-geohash"}}
@@ -66,7 +66,7 @@
   "Store the GeoHash string as a VARCHAR column with a B-tree index. For a 5km search at precision-6, compute the target cell and its 8 neighbors, then do a WHERE geohash_6 IN (...9 values...). This is a 9-row index lookup with exact distance post-filter — no full scan."
 }}
 
-{{qa "How does Uber find nearby drivers?" "Uber uses Google S2 cells. Each driver's location is mapped to an S2 cell at a specific level. Finding nearby drivers means querying adjacent cells at that level. Drivers update their cell every few seconds via WebSocket. The matching service queries Redis with the rider's cell and neighboring cells to find candidates within 5km." "Why not just use a SQL query with latitude/longitude range?" "A bounding box query (lat BETWEEN x-0.05 AND x+0.05) works for small datasets but doesn't use spatial indexes efficiently. At 1M active drivers, you need a purpose-built spatial index (GeoHash, S2, or R-tree) to avoid full table scans."}}
+{{qa "How does <a class="dqa-link" href="/problem/ride-hailing">Uber</a> find nearby drivers?" "Uber uses Google S2 cells. Each driver's location is mapped to an S2 cell at a specific level. Finding nearby drivers means querying adjacent cells at that level. Drivers update their cell every few seconds via WebSocket. The matching service queries Redis with the rider's cell and neighboring cells to find candidates within 5km." "Why not just use a SQL query with latitude/longitude range?" "A bounding box query (lat BETWEEN x-0.05 AND x+0.05) works for small datasets but doesn't use spatial indexes efficiently. At 1M active drivers, you need a purpose-built spatial index (GeoHash, S2, or R-tree) to avoid full table scans."}}
 
 {{phase 3 "S2 Cells" "4 min"}}
 
@@ -74,7 +74,7 @@
 <ul>
   <li>Projects Earth's sphere onto <strong>six cube faces</strong>, each recursively subdivided into a quadtree — every cell gets a <strong>64-bit integer ID</strong></li>
   <li>Levels: <span class="hl">Level 0</span> ≈ 85M km² (cube face); <span class="hl">Level 14</span> ≈ 0.6 km² (driver matching); <span class="hl">Level 30</span> ≈ 1 cm²</li>
-  <li>Strength: <strong>polygon containment and intersection</strong> — GeoHash handles these poorly because its rectangular cells distort at high latitudes</li>
+  <li>Strength: <strong>polygon containment and intersection</strong> — <a class="dqa-link" href="/algo/geohash">GeoHash</a> handles these poorly because its rectangular cells distort at high latitudes</li>
   <li>Store cell IDs as <code>BIGINT</code> in any database; containment queries become fast B-tree range scans on integers</li>
 </ul>`}}
 
@@ -97,12 +97,12 @@
 
 {{phase 4 "H3 Hexagonal Grid" "4 min"}}
 
-{{say `<span class="hl-blue">H3</span> is Uber's hexagonal hierarchical grid — designed for equal-area analytics:
+{{say `<span class="hl-blue">H3</span> is <a class="dqa-link" href="/problem/ride-hailing">Uber</a>'s hexagonal hierarchical grid — designed for equal-area analytics:
 <ul>
   <li>Every cell at a given resolution has the <strong>same area</strong> — density comparisons are meaningful across any latitude</li>
-  <li>Each hexagon has exactly <strong>6 equidistant neighbors</strong> (vs 8 corner-touching for GeoHash) — smoother spatial aggregation</li>
+  <li>Each hexagon has exactly <strong>6 equidistant neighbors</strong> (vs 8 corner-touching for <a class="dqa-link" href="/algo/geohash">GeoHash</a>) — smoother spatial aggregation</li>
   <li>Resolution <span class="hl">8</span> ≈ <span class="hl">0.74 km²</span> per cell (neighborhood scale) — Uber's standard for surge pricing zones</li>
-  <li>Used by Uber for surge pricing: compute supply/demand ratio per H3 cell every <span class="hl">30 seconds</span>, store in Redis with <span class="hl">60s TTL</span></li>
+  <li>Used by Uber for surge pricing: compute supply/demand ratio per H3 cell every <span class="hl">30 seconds</span>, store in <a class="dqa-link" href="/fund/storage/redis">Redis</a> with <span class="hl">60s TTL</span></li>
 </ul>`}}
 
 {{think "Equal-area cells change what's possible for analytics."
@@ -126,9 +126,9 @@
 
 {{hint "H3 for surge pricing" "Compute supply (active drivers) and demand (ride requests) per resolution-8 H3 cell every 30 seconds. Surge multiplier = demand / supply, clamped to [1.0, 5.0]. Store in Redis with key 'surge:h3:{cell_id}' and TTL 60s. Riders query their current H3 cell to get the local surge multiplier — one Redis GET."}}
 
-{{phase 5 "Redis GEO Commands" "6 min"}}
+{{phase 5 "<a class="dqa-link" href="/fund/storage/redis">Redis</a> GEO Commands" "6 min"}}
 
-{{say `<span class="hl-blue">Redis GEO</span> stores coordinates in a sorted set where the score is a <strong>52-bit GeoHash</strong>:
+{{say `<span class="hl-blue">Redis GEO</span> stores coordinates in a sorted set where the score is a <strong>52-bit <a class="dqa-link" href="/algo/geohash">GeoHash</a></strong>:
 <ul>
   <li><code>GEOADD</code> is <span class="hl">O(log N)</span> — stores position as a float64 score in the underlying sorted set</li>
   <li><code>GEOSEARCH</code> finds nearest N members or all within a radius — handles the boundary problem internally by scanning multiple adjacent score ranges</li>
@@ -185,7 +185,7 @@ if stale:
 {{think "Redis GEO is the right call for real-time location matching."
   (how "why sorted set as backend" "The 52-bit GeoHash fits in a sorted set score (float64). GEOSEARCH performs a range scan on that score, expanding the range until it captures the requested radius. It handles the boundary problem internally by scanning multiple adjacent ranges.")
   (whyNot "storing raw lat/lng in Redis hashes" "You lose the proximity index. You would have to HGETALL all drivers and compute distance in your application — O(N) at 100K concurrent drivers. Redis GEO keeps the index in the sorted set score, so GEOSEARCH is O(N+log M) where N is results and M is total members.")
-  (whatIf "a driver sends location updates every second at 500K concurrent drivers" "500K GEOADD/sec. One Redis node handles ~100K ops/sec. Shard by city or geographic region — each city gets its own 'drivers:active:{city}' key on a separate Redis node. Uber runs hundreds of Redis shards for this workload.")
+  (whatIf "a driver sends location updates every second at 500K concurrent drivers" "500K GEOADD/sec. One Redis node handles ~100K ops/sec. Shard by city or geographic region — each city gets its own 'drivers:active:{city}' key on a separate Redis node. <a class="dqa-link" href="/problem/ride-hailing">Uber</a> runs hundreds of Redis shards for this workload.")
 }}
 
 {{triggerQs "Redis GEO Interview Questions"
@@ -197,14 +197,14 @@ if stale:
   "Redis GEO uses a 52-bit GeoHash which gives ~0.6 meter accuracy. For ride-sharing, this is more than sufficient — drivers are matched within 2-5km and dispatched to street-level addresses. The 0.6m error is imperceptible. Precision only matters if you are doing centimeter-scale surveying, not application-level location matching."
 }}
 
-{{qa "How do food delivery apps show nearby restaurants?" "Pre-compute restaurant GeoHash at onboarding and store it in Redis. When a user opens the app, compute their GeoHash prefix, query Redis GEORADIUS within 5km, and return sorted by distance. The restaurant list is relatively static (thousands, not millions), so this is a simple GEORADIUS call — not the complex driver-matching problem." "What about geofencing (e.g., 'user entered zone X')?" "Geofencing checks if a point is inside a polygon, not proximity search. Use S2 or H3 to cover the polygon with cells, then check if the user's cell overlaps the polygon's cell set. Redis doesn't support polygon queries natively — use PostGIS ST_Contains or a dedicated geofencing service."}}
+{{qa "How do <a class="dqa-link" href="/problem/food-delivery">food delivery</a> apps show nearby restaurants?" "Pre-compute restaurant GeoHash at onboarding and store it in Redis. When a user opens the app, compute their GeoHash prefix, query Redis GEORADIUS within 5km, and return sorted by distance. The restaurant list is relatively static (thousands, not millions), so this is a simple GEORADIUS call — not the complex driver-matching problem." "What about geofencing (e.g., 'user entered zone X')?" "Geofencing checks if a point is inside a polygon, not proximity search. Use S2 or H3 to cover the polygon with cells, then check if the user's cell overlaps the polygon's cell set. Redis doesn't support polygon queries natively — use PostGIS ST_Contains or a dedicated geofencing service."}}
 
 {{phase 6 "PostGIS & Fallback" "4 min"}}
 
 {{say `<span class="hl-blue">PostGIS</span> is PostgreSQL's spatial extension — the right choice when you need durability, SQL joins, or historical queries:
 <ul>
   <li>A GIST index on a <code>GEOGRAPHY(POINT)</code> column prunes candidates with a bounding-box filter, then applies exact distance — <span class="hl">~10ms</span> for a 5km radius on 1M rows</li>
-  <li><span class="hl-red">10× slower than Redis GEO</span> (<span class="hl">0.5ms</span>) but durable — never loses data, supports full SQL</li>
+  <li><span class="hl-red">10× slower than <a class="dqa-link" href="/fund/storage/redis">Redis</a> GEO</span> (<span class="hl">0.5ms</span>) but durable — never loses data, supports full SQL</li>
   <li>Best as a <strong>write-through store</strong>: write locations to both PostGIS (durability) and Redis GEO (speed); reads go to Redis, fall back to PostGIS if Redis is unavailable</li>
   <li>Also the source of truth for billing, audit, and historical trip replay</li>
 </ul>`}}
@@ -274,7 +274,7 @@ def find_nearby_drivers(lng: float, lat: float, radius_m: int = 5000, limit: int
 
 {{say `Match the index to the query pattern:
 <ul>
-  <li><strong>Redis GEO</strong> — real-time nearest-N lookups; <span class="hl">sub-ms latency</span>; use when freshness and speed matter most</li>
+  <li><strong><a class="dqa-link" href="/fund/storage/redis">Redis</a> GEO</strong> — real-time nearest-N lookups; <span class="hl">sub-ms latency</span>; use when freshness and speed matter most</li>
   <li><strong>H3</strong> — demand/supply aggregation, surge pricing zones, heat maps; equal-area cells make density ratios comparable across latitudes</li>
   <li><strong>S2</strong> — polygon containment and geofencing; sphere-aware, minimal distortion; Google Maps, Pokémon GO</li>
   <li><strong>PostGIS GIST</strong> — durable, full SQL, <span class="hl">~10ms</span> at 1M rows; historical queries, complex spatial joins</li>
@@ -298,28 +298,28 @@ def find_nearby_drivers(lng: float, lat: float, radius_m: int = 5000, limit: int
 )}}
 
 {{think "The real system uses all of these layers together."
-  (how "Uber's actual stack" "Redis GEO for real-time dispatch (sub-ms). H3 for surge pricing computed every 30s (equal-area aggregation). PostGIS for historical trip data, driver earnings, and audit. S2 for geofence containment checks at airport zones and restricted areas.")
+  (how "<a class="dqa-link" href="/problem/ride-hailing">Uber</a>'s actual stack" "Redis GEO for real-time dispatch (sub-ms). H3 for surge pricing computed every 30s (equal-area aggregation). PostGIS for historical trip data, driver earnings, and audit. S2 for geofence containment checks at airport zones and restricted areas.")
   (whatIf "Redis GEO cluster goes down during peak hours" "Fall back to PostGIS for dispatch. Accept 10ms vs 0.5ms latency. At 1,000 match requests/sec, PostGIS can handle this with 2 read replicas. Pre-test the failover path — it should be automatic via your location service circuit breaker.")
 }}
 
-{{qa "How accurate is geospatial matching for ride-sharing vs delivery?" "Ride-sharing needs 100m accuracy for driver matching (which driver is closest?) but street-level accuracy for pickup (navigate to exact address). GeoHash precision-7 gives ~150m cells — good for matching. Final navigation uses exact coordinates. Delivery needs POI-level accuracy — which restaurant is closest to the user? GeoHash precision-6 (~600m) is sufficient." "Should I use DynamoDB for geospatial queries?" "DynamoDB doesn't have native geospatial indexes. You'd need to implement GeoHash-based queries manually: store GeoHash as sort key, query with begins_with for prefix matching. The geo-library-dynamodb library does this. For simple proximity queries it works; for complex spatial queries (polygon, radius with distance sort), use Redis GEO or PostGIS."}}
+{{qa "How accurate is geospatial matching for ride-sharing vs delivery?" "Ride-sharing needs 100m accuracy for driver matching (which driver is closest?) but street-level accuracy for pickup (navigate to exact address). <a class="dqa-link" href="/algo/geohash">GeoHash</a> precision-7 gives ~150m cells — good for matching. Final navigation uses exact coordinates. Delivery needs POI-level accuracy — which restaurant is closest to the user? GeoHash precision-6 (~600m) is sufficient." "Should I use <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a> for geospatial queries?" "DynamoDB doesn't have native geospatial indexes. You'd need to implement GeoHash-based queries manually: store GeoHash as sort key, query with begins_with for prefix matching. The geo-library-dynamodb library does this. For simple proximity queries it works; for complex spatial queries (polygon, radius with distance sort), use Redis GEO or PostGIS."}}
 
 {{phase 8 "Interview Summary" "2 min"}}
 
 {{say `In an interview, the answer is never 'use a spatial index' — it is <strong>which one and why</strong>:
 <ul>
-  <li><strong>Redis GEO</strong> → real-time matching, <span class="hl">sub-ms</span>, ephemeral</li>
+  <li><strong><a class="dqa-link" href="/fund/storage/redis">Redis</a> GEO</strong> → real-time matching, <span class="hl">sub-ms</span>, ephemeral</li>
   <li><strong>H3</strong> → equal-area analytics, surge zones, <span class="hl">30-second</span> aggregation windows</li>
   <li><strong>S2</strong> → polygon containment, geofencing, sphere-aware</li>
   <li><strong>PostGIS</strong> → durability, historical queries, full SQL joins, <span class="hl">~10ms</span></li>
   <li>Most production systems layer two or three of these together — name the combination and explain why each layer exists</li>
 </ul>`}}
 
-{{avoid "Do not say Redis GEO gives you exact GPS precision. It uses a 52-bit GeoHash accurate to 0.6 meters — sufficient for ride-sharing but not surveying. Also: GEORADIUS is deprecated since Redis 6.2. Always say GEOSEARCH. And never propose a B-tree on raw lat/lng columns — it cannot answer radius queries efficiently."}}
+{{avoid "Do not say Redis GEO gives you exact GPS precision. It uses a 52-bit <a class="dqa-link" href="/algo/geohash">GeoHash</a> accurate to 0.6 meters — sufficient for ride-sharing but not surveying. Also: GEORADIUS is deprecated since Redis 6.2. Always say GEOSEARCH. And never propose a B-tree on raw lat/lng columns — it cannot answer radius queries efficiently."}}
 
 {{table "Company Usage Reference" (rows
   (row "Company"     "Technology"   "Use Case")
-  (row "Uber"        "H3 + Redis"   "Surge pricing zones + real-time driver dispatch")
+  (row "<a class="dqa-link" href="/problem/ride-hailing">Uber</a>"        "H3 + Redis"   "Surge pricing zones + real-time driver dispatch")
   (row "Google Maps" "S2"           "Map tile rendering, polygon containment, routing")
   (row "Pokémon GO"  "S2"           "Spawn zones, gym regions, geofencing")
   (row "Foursquare"  "GeoHash"      "Venue search, neighborhood clustering")

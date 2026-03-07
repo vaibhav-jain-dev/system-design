@@ -41,7 +41,7 @@
   (row "5"     "Update last_refill timestamp"                             "For next refill calculation")
 )}}
 
-{{think "Lazy refill is the key insight. You do not need a background thread adding tokens every millisecond. On each request, compute how many tokens WOULD have accumulated since last check. This makes the implementation stateless between requests — perfect for Redis, where you cannot run background threads."
+{{think "Lazy refill is the key insight. You do not need a background thread adding tokens every millisecond. On each request, compute how many tokens WOULD have accumulated since last check. This makes the implementation stateless between requests — perfect for <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a>, where you cannot run background threads."
   (how "is retry-after calculated?" "deficit = tokens_needed - current_tokens. retry_after = deficit / refill_rate. If the bucket has 3 tokens and the request needs 5, deficit = 2, retry_after = 2/refill_rate seconds. Return this in the Retry-After HTTP header.")
   (whatIf "the refill rate is very high and elapsed time is very large" "Cap at bucket_size: tokens = min(bucket_size, tokens + elapsed * refill_rate). Without the cap, an idle client could accumulate years of tokens and fire millions of requests. The cap enforces the burst limit regardless of idle time.")
   (whyNot "a background timer that adds tokens every millisecond" "Background timers in distributed systems require either a dedicated thread per bucket (impractical at 10 million users) or a shared timer that updates all buckets (lock contention nightmare). Lazy refill is mathematically equivalent and requires zero background work.")
@@ -51,7 +51,7 @@
 
 {{phase 3 "Python Implementation (Thread-Safe)" "8 min"}}
 
-{{say "Here is a complete thread-safe implementation suitable for a single-server deployment. For distributed systems, see the Redis version in Phase 5."}}
+{{say "Here is a complete thread-safe implementation suitable for a single-server deployment. For distributed systems, see the <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> version in Phase 5."}}
 
 {{code "python" `import time
 import threading
@@ -123,7 +123,7 @@ for i in range(15):
 
 {{compare "Rate Limiting Algorithm" (options
   (best "Token Bucket" "Allows controlled bursts up to bucket capacity while enforcing sustained rate. O(1) memory per key. Used by AWS API Gateway, Stripe, and most production APIs.")
-  (alt "Sliding Window Counter" "Weighted count from current and previous time windows. No burst problem at window boundaries. O(1) memory per key. Used by Cloudflare.")
+  (alt "<a class=\"dqa-link\" href=\"/fund/distributed/rate-limiting\">Sliding Window Counter</a>" "Weighted count from current and previous time windows. No burst problem at window boundaries. O(1) memory per key. Used by Cloudflare.")
   (alt "Leaky Bucket" "Processes requests at a fixed rate. Smooths all bursts. Good for systems that need uniform output rate.")
   (nofit "Fixed Window Counter" "Counts requests per fixed time window. Has the boundary burst problem: 2x the limit possible across two adjacent window edges. Only acceptable for MVP or internal tooling.")
 )}}
@@ -141,7 +141,7 @@ for i in range(15):
 
 {{think "Sliding Window Counter is the main alternative to token bucket when burst behavior is a concern. It stores just two counters (current window count + previous window count) and weights them by how far into the current window you are. The boundary burst problem shrinks to near zero without storing per-request timestamps like Sliding Window Log."
   (whyNot "Sliding Window Log" "Stores a timestamp for every request in the current window. At 1000 req/min per user, that is 1000 timestamps in memory per user. O(N) memory per key makes it impractical at scale. Only use for very low-volume, high-accuracy requirements.")
-  (how "does Cloudflare's Sliding Window Counter work?" "Two Redis keys per user per window: one for the current window, one for the previous. On each request: weight = (window_size - elapsed_in_current_window) / window_size. effective_count = prev_count * weight + curr_count. Allow if effective_count &lt; limit.")
+  (how "does Cloudflare's Sliding Window Counter work?" "Two <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> keys per user per window: one for the current window, one for the previous. On each request: weight = (window_size - elapsed_in_current_window) / window_size. effective_count = prev_count * weight + curr_count. Allow if effective_count &lt; limit.")
 }}
 
 {{triggerQs "Questions this phase triggers"
@@ -153,7 +153,7 @@ for i in range(15):
 
 {{phase 5 "Distributed Token Bucket with Redis" "8 min"}}
 
-{{say "For distributed systems with multiple app servers, the bucket state must live in Redis. A Lua script ensures atomic check-and-update with no race conditions."}}
+{{say "For distributed systems with multiple app servers, the bucket state must live in <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a>. A Lua script ensures atomic check-and-update with no race conditions."}}
 
 {{code "python" `import time
 import redis
@@ -232,7 +232,7 @@ else:
 
 {{phase 6 "System Design Integration" "5 min"}}
 
-{{say "Token bucket rate limiting appears in API rate limiter interviews. Here is how it fits as middleware in the request path."}}
+{{say "Token bucket rate limiting appears in <a class=\"dqa-link\" href=\"/problem/rate-limiter\">Rate Limiter</a> interviews. Here is how it fits as middleware in the request path."}}
 
 {{diagram "algo-token-bucket-api-arch"}}
 
@@ -271,11 +271,11 @@ else:
   "O(1) time and O(1) space per rate limit key"
   "Allows bursts up to bucket capacity, then enforces sustained rate"
   "Return X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After headers"
-  "Fail-open on Redis failure for most APIs, fail-closed for payments"
+  "Fail-open on <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> failure for most APIs, fail-closed for payments"
   "Used by AWS API Gateway, Stripe, GitHub, and most production rate limiters"
 }}
 
-{{key "The token bucket interview tests whether you understand the two knobs (burst vs sustained rate), why lazy refill eliminates background threads, and how Redis Lua scripts prevent race conditions in distributed deployments. Always discuss fail-open vs fail-closed as a deliberate design decision."}}
+{{key "The token bucket interview tests whether you understand the two knobs (burst vs sustained rate), why lazy refill eliminates background threads, and how <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> Lua scripts prevent race conditions in distributed deployments. Always discuss fail-open vs fail-closed as a deliberate design decision. See also: <a class=\"dqa-link\" href=\"/problem/rate-limiter\">Rate Limiter</a> system design."}}
 
 {{phase 8 "Summary & Key Takeaways" "2 min"}}
 
@@ -285,7 +285,7 @@ else:
   "Token bucket has two independent parameters: bucket_size (burst) and refill_rate (sustained throughput)"
   "Lazy refill calculates tokens on demand — no background timer or thread needed"
   "Single-server: mutex lock protects the token count and timestamp"
-  "Distributed: Redis Lua script ensures atomic check-and-update with no race conditions"
+  "Distributed: <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> Lua script ensures atomic check-and-update with no race conditions"
   "O(1) time and O(1) space per rate limit key"
   "Return standard headers: X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After"
   "Fail-open on Redis failure for most APIs; fail-closed for payments and authentication"
@@ -293,4 +293,4 @@ else:
   "Used by AWS API Gateway, Stripe, GitHub, and most production rate limiters"
 }}
 
-{{key "Token bucket is the default choice for API rate limiting because it handles bursty traffic naturally, uses O(1) memory per key, and scales to distributed deployments with a single Redis Lua script. Always mention the two knobs, lazy refill, and the fail-open vs fail-closed decision."}}
+{{key "Token bucket is the default choice for API rate limiting because it handles bursty traffic naturally, uses O(1) memory per key, and scales to distributed deployments with a single <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> Lua script. Always mention the two knobs, lazy refill, and the fail-open vs fail-closed decision."}}

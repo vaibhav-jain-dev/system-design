@@ -535,9 +535,37 @@ response = dynamodb.query(
   (nofit "DynamoDB for media" "400KB item size limit. A single image exceeds this. Binary blobs in DynamoDB waste expensive IOPS")
 )}}
 
+{{hint "media deduplication via content hash" `Before uploading, the client computes a <strong>SHA-256 hash</strong> of the plaintext file. The media service checks if S3 already has this hash (stored as an S3 object tag). If it does, we skip the upload and reuse the existing URL — only the E2E-encrypted message (containing the AES key) differs per recipient:
+<ul>
+  <li>Saves <span class="hl">60-80%</span> of upload bandwidth for forwarded media (same meme sent to many groups)</li>
+  <li>ETag on S3 provides content integrity verification after upload</li>
+  <li><span class="hl-red">Hash computed on plaintext before encryption</span> — the encrypted blob changes even for the same file (random IV), so dedup must happen before encryption or use a deterministic IV per content hash</li>
+  <li><small>WhatsApp reports ~65% dedup rate on forwarded images in groups</small></li>
+</ul>`}}
+
 {{think "Media thumbnails create a latency challenge — you want the thumbnail to appear instantly in the chat."
   (how "thumbnail pipeline" "S3 event triggers Lambda on upload. Lambda generates a small (200×200) blurred thumbnail. The thumbnail is stored unencrypted because it's already a degraded preview. The message includes both the full media_url (encrypted) and thumbnail_url (unencrypted). Receiver sees the thumbnail immediately, downloads and decrypts the full media on tap.")
   (whatIf "the media upload fails halfway" "S3 multipart upload handles this — the client uploads in 5MB chunks. If the connection drops, it resumes from the last successful chunk. The message is only sent after the upload completes. If the upload is abandoned, S3 lifecycle rules clean up incomplete multipart uploads after 24 hours.")
+  (how "CDN delivery of encrypted media" "CloudFront sits in front of S3. The receiver's client fetches the ciphertext blob from the nearest CloudFront edge node — typically <span class='hl'>< 20ms</span> vs ~80ms from S3 origin. CloudFront caches the encrypted blob (it's content-addressed by SHA-256 key and never changes). The client decrypts locally. CDN sees only opaque encrypted bytes — E2E guarantee holds even with CDN caching.")
+}}
+
+{{triggerQs "Media Questions"
+  "How do you prevent a user from accessing another user's media file if they have the S3 URL?"
+  `<strong>Presigned S3 URLs</strong> with a short TTL are the primary defense — the media service issues a URL valid for only <span class='hl'>15 minutes</span>. Beyond the URL:
+<ul>
+  <li>The S3 bucket is <span class='hl-red'>completely private</span> — no public access; all requests go through the media service for authorization</li>
+  <li>Even if a URL leaks, the ciphertext is useless without the <strong>AES-256 decryption key</strong>, which only lives inside the E2E-encrypted message</li>
+  <li>S3 Object Lock prevents deletion of media that may be referenced by multiple messages (forwarded content)</li>
+  <li><small>For compliance markets, server-side encryption (SSE-S3) is layered on top — orthogonal to E2E</small></li>
+</ul>`
+  "How do you handle very large video files — a user sends a 500MB 4K video?"
+  `<strong>Multipart upload</strong> for files > 5MB and <strong>server-side transcoding</strong> before delivery:
+<ul>
+  <li>Client splits the file into <span class='hl'>5MB chunks</span> and uploads in parallel — a <span class='hl'>500MB</span> video uploads in ~10 parallel streams</li>
+  <li>After upload, a transcoding Lambda converts to H.264 at <strong>360p / 720p / 1080p</strong> — receiver auto-selects based on network conditions</li>
+  <li>The original 4K ciphertext is stored; transcoded versions are re-encrypted with the same AES key — <span class='hl-red'>client must accept that thumbnails and transcoded previews are server-visible</span> (trade-off for streaming UX)</li>
+  <li>Cost: <small>AWS Elemental MediaConvert, ~$0.015/min of video processed</small></li>
+</ul>`
 }}
 
 {{phase 10 "Scaling & Reliability" "8 min"}}
@@ -563,10 +591,41 @@ response = dynamodb.query(
   (row "Redis (presence)" "Cluster mode, 10 shards" "500M keys (all users), heartbeat TTL")
 )}}
 
+{{hint "connection draining during rolling deploys" `WebSocket servers hold long-lived connections — a naive deploy kills them all. The correct approach is <strong>graceful connection draining</strong>:
+<ul>
+  <li>Mark the server as <span class='hl-blue'>draining</span> in the session registry (<a href="/fund/storage/redis">Redis</a>): new connections are no longer routed to it</li>
+  <li>Wait <span class='hl'>60 seconds</span> — existing connections idle or disconnect naturally (heartbeat timeout is 30s, so most will have reconnected)</li>
+  <li>After drain period, force-close any remaining connections; clients auto-reconnect in <span class='hl'>2-3 seconds</span> to a healthy server</li>
+  <li><span class='hl-red'>Without draining</span>: a rolling deploy of <span class='hl'>5,000 servers</span> at 10 servers/minute causes <span class='hl'>1M reconnects/minute</span> — thundering herd on the session registry</li>
+  <li><small>NLB deregistration delay (default 300s) handles this automatically if the NLB target group is configured correctly</small></li>
+</ul>`}}
+
 {{think "Multi-region is essential for a global chat service — users expect sub-200ms message delivery."
+  (how "region-based consistent hashing for WebSocket servers" "Users are assigned to a WebSocket server using consistent hashing on user_id mod virtual_nodes. The hash ring has 5,000 real servers × 150 virtual nodes = 750K points. When a server is added (scale-out event), only 1/5000 of users need to move — ~40,000 connections reassigned vs 200M for random assignment. The session registry update is atomic: Redis HSET user_id → new_server_ip, TTL=5min.")
   (how "multi-region message routing" "Each region has its own Kafka cluster and WebSocket fleet. If sender is in US-East and receiver is in EU-West, the message flows: sender → US-East Kafka → cross-region replicator → EU-West Kafka → EU-West Chat Service → receiver. Cross-region latency adds ~80ms (US-East to EU-West). Total delivery: ~150ms P99.")
   (whatIf "an entire region goes down" "DNS failover (Route 53 health checks) redirects users to the nearest healthy region. The user's WebSocket reconnects to a server in the new region. The new server queries DynamoDB Global Tables (multi-region replicated) for missed messages. Recovery time: ~30 seconds for DNS propagation + ~2 seconds for WebSocket reconnect.")
   (whyNot "single region with CDN" "CDN helps for static content and media, but chat messages are dynamic and personalized. You cannot cache a real-time message stream. The only way to reduce latency for a user in Tokyo is to have servers in Tokyo.")
+}}
+
+{{triggerQs "Scaling Questions"
+  "What happens during a rolling deploy of WebSocket servers — do all connected users lose their connections?"
+  `<strong>Connection draining</strong> prevents mass disconnection. The deploy sequence per server:
+<ul>
+  <li>Mark server as <span class='hl-blue'>draining</span> in Redis — Load balancer stops routing new connections to it</li>
+  <li>Wait <span class='hl'>60 seconds</span> — heartbeat timeout is 30s, so clients that miss 2 heartbeats reconnect naturally; most connections drain within 40s</li>
+  <li>Force-close remaining connections; clients reconnect in <span class='hl'>2-3 seconds</span></li>
+  <li>With <span class='hl'>5,000 servers</span> and one server deploying every 2 minutes: only <span class='hl'>~40,000 clients</span> reconnect at any given time — spread over the 2-min window, that's <span class='hl'>~333 reconnects/sec</span>, well within Redis capacity</li>
+  <li><span class='hl-red'>No messages are lost</span> — reconnection triggers an offline-queue sync, delivering any messages that arrived during the ~3s reconnect window</li>
+</ul>`
+  "How does Kafka handle back-pressure when message volume spikes to 700K msgs/sec?"
+  `Kafka's partitioned architecture absorbs spikes with no producer-side back-pressure:
+<ul>
+  <li><span class='hl'>10,000 partitions</span> across <span class='hl'>100 brokers</span> = 100 partitions/broker; each broker handles ~7,000 msgs/sec at steady state</li>
+  <li>Producers use <strong>async batching</strong> (<code>linger.ms=5</code>, <code>batch.size=64KB</code>) — at 700K msgs/sec, batching reduces broker round trips by <span class='hl'>~20x</span></li>
+  <li>During a spike, Kafka consumers (Chat Service) fall behind — messages accumulate in partitions (consumer lag). Chat Service auto-scales horizontally: new pods claim idle partitions within <span class='hl'>30 seconds</span></li>
+  <li><span class='hl-red'>Back-pressure risk</span>: if Chat Service can't keep up and lag grows beyond <span class='hl'>60 seconds</span>, delivery SLA is breached — alert on consumer lag, not throughput</li>
+  <li><small>Kafka retention: 7 days. Even if consumers are down for 6 days, no messages are lost.</small></li>
+</ul>`
 }}
 
 {{diagram "cs-multi-device"}}
@@ -590,9 +649,40 @@ response = dynamodb.query(
   (nofit "Database-backed presence" "Every heartbeat is a write to DB. 500M users × heartbeat every 30s = 16M writes/sec just for presence. No relational DB handles this")
 )}}
 
+{{hint "batching read receipts to reduce WebSocket traffic" `Read receipts are generated at very high frequency — opening a chat room triggers a receipt for every visible message. Sending each as an individual WebSocket frame is wasteful:
+<ul>
+  <li>Client buffers receipts locally and flushes in batches of up to <span class='hl'>20 receipts</span> every <span class='hl'>500ms</span></li>
+  <li>Reduces WebSocket frames by <span class='hl'>10-20x</span> — instead of 20 individual frames per chat open, 1 batch frame</li>
+  <li>Server receives the batch, fans out to all relevant senders via <a href="/fund/storage/redis">Redis pub/sub</a> on their connection's channel</li>
+  <li><span class='hl-red'>Trade-off</span>: read receipt may appear up to 500ms late — <strong>imperceptible to users</strong> (human reaction time is ~200ms for visual change)</li>
+  <li><small>Group chats with 256 members: without batching, reading 50 messages triggers 50 × 255 = 12,750 individual receipt frames. With batching: 255 batch frames, one per group member who was online.</small></li>
+</ul>`}}
+
 {{think "Presence is a privacy-sensitive feature that affects the architecture."
   (whatIf "a user disables last-seen" "We still track presence internally (needed for delivery routing — online users get WebSocket, offline get push). But we suppress the presence information in the API response for that user. The privacy setting is a read-time filter, not a write-time decision.")
+  (whatIf "a user manually sets their presence to 'do not disturb'" "DND is a separate presence state stored alongside the heartbeat TTL key: Redis HSET user:presence:{id} status 'dnd' online true. The WebSocket heartbeat still refreshes the TTL (so the user is 'online' internally for delivery routing), but the DND flag is returned to contacts querying presence. Typing indicators are suppressed — the client does not emit typing events when in DND. Incoming messages are still delivered but push notifications are silenced at the APNs/FCM layer.")
   (how "presence fan-out is bounded" "When User A comes online, we need to notify User A's contacts who have the app open. But we do NOT proactively push presence to all contacts. Instead, when User B opens a chat with User A, User B's client subscribes to User A's presence channel. This is lazy subscription — only active conversations get real-time presence updates.")
+}}
+
+{{triggerQs "Presence Questions"
+  "How do you handle 200M concurrent presence heartbeats — 500M users each sending a heartbeat every 30 seconds?"
+  `<strong>Redis Cluster</strong> with TTL-based keys handles this volume without a heartbeat write storm:
+<ul>
+  <li><span class='hl'>200M online users</span> × 1 heartbeat/30s = <span class='hl'>6.7M writes/sec</span> — distributed across <span class='hl'>10 Redis shards</span> = 670K writes/sec per shard (within Redis's <span class='hl'>~1M ops/sec</span> per node)</li>
+  <li>Each key: <code>user:presence:{user_id}</code> → TTL=60s. Heartbeat is a single <code>EXPIRE</code> command — no value update needed for binary online/offline</li>
+  <li>Presence read: <code>EXISTS user:presence:{user_id}</code> — O(1), sub-ms. No joins, no DB reads</li>
+  <li><span class='hl-red'>No DynamoDB writes for heartbeats</span> — at 6.7M writes/sec, DynamoDB would cost <span class='hl'>~$2M/month</span> in WCU alone</li>
+  <li><small>Redis memory: 200M keys × ~60 bytes per key = ~12GB across the cluster — comfortably fits in r7g.xlarge instances ($0.24/hr each)</small></li>
+</ul>`
+  "How do typing indicators work without overwhelming the server?"
+  `Typing indicators use <strong>fire-and-forget</strong> delivery via <a href="/fund/storage/redis">Redis pub/sub</a> with aggressive client-side throttling:
+<ul>
+  <li>Client publishes a <code>TYPING</code> event to Redis channel <code>chat:{conversation_id}:typing</code> only <strong>once per 3 seconds</strong> while the user is actively typing — client throttles locally</li>
+  <li><span class='hl-red'>Never persisted</span> to Kafka or DynamoDB — typing events are ephemeral; losing them is acceptable</li>
+  <li>Recipient's WebSocket server subscribes to the conversation's typing channel. Event delivery: <span class='hl'>< 10ms</span> via Redis pub/sub</li>
+  <li>The typing indicator auto-dismisses after <span class='hl'>5 seconds</span> on the receiver's screen — if no follow-up TYPING event arrives, the indicator disappears (handles the case where the connection drops mid-typing)</li>
+  <li>For group chats: typing events are published to the group channel; all members' servers receive them. At 256 members, a busy group could see up to 256 concurrent typing events — <strong>UI coalesces</strong> to "Alice, Bob, and 3 others are typing"</li>
+</ul>`
 }}
 
 {{checklist "WebSocket for real-time delivery, offline queue for reliability" "Kafka as durable message bus between services" "DynamoDB partitioned by conversation_id with Snowflake sort keys" "Fan-out-on-write for groups (bounded by 256 cap)" "Signal Protocol for E2E encryption — server is zero-knowledge" "Per-device sync cursors for multi-device" "Redis for session registry and presence (heartbeat TTL)" "NLB for WebSocket, ALB for REST API"}}
@@ -604,7 +694,7 @@ response = dynamodb.query(
 {{deepQA "Critical Interview Questions" `
 <div class="dqa-item">
   <div class="dqa-q">How do you handle message delivery when the recipient is offline?</div>
-  <div class="dqa-a">Messages are persisted to DynamoDB immediately after Kafka write. The Presence Service (Redis heartbeat TTL) determines if the user is online. If offline, we write to the offline queue and trigger a push notification via APNs/FCM. When the user reconnects, their client sends its last sync cursor (Snowflake message_id). The server queries DynamoDB for all messages > cursor and streams them back over WebSocket.</div>
+  <div class="dqa-a">Messages are persisted to <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a> immediately after <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> write. The Presence Service (<a class="dqa-link" href="/fund/storage/redis">Redis</a> heartbeat TTL) determines if the user is online. If offline, we write to the offline queue and trigger a push notification via APNs/FCM. When the user reconnects, their client sends its last sync cursor (<a class="dqa-link" href="/algo/snowflake-id">Snowflake ID</a> message_id). The server queries DynamoDB for all messages > cursor and streams them back over WebSocket.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">What if there are 10,000 unread messages when the user comes online?</div>
     <div class="dqa-sub-a">Paginate the sync. Stream messages in batches of 100 over WebSocket. Render conversations sorted by <span class="dqa-key">updated_at</span> so the user sees the most recent conversations first. Background-sync older conversations. The client maintains a local SQLite database for instant rendering of previously loaded messages.</div>
@@ -630,7 +720,7 @@ response = dynamodb.query(
 
 <div class="dqa-item">
   <div class="dqa-q">How do you handle ordering and deduplication at 700K messages per second?</div>
-  <div class="dqa-a">Ordering: Kafka partitions by conversation_id, so all messages in a conversation land in the same partition and are totally ordered. Each message gets a <span class="dqa-key">Snowflake ID</span> (timestamp + machine_id + sequence) providing global ordering. Dedup: Client generates a UUID before sending. Server checks idempotency key on DynamoDB conditional write — PutItem with ConditionExpression "attribute_not_exists(message_id)".</div>
+  <div class="dqa-a">Ordering: <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> partitions by conversation_id, so all messages in a conversation land in the same partition and are totally ordered. Each message gets a <a class="dqa-link" href="/algo/snowflake-id">Snowflake ID</a> (timestamp + machine_id + sequence) providing global ordering. Dedup: Client generates a UUID before sending. Server checks idempotency key on <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a> conditional write — PutItem with ConditionExpression "attribute_not_exists(message_id)".</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">What if two messages from different users arrive at exactly the same time?</div>
     <div class="dqa-sub-a">Snowflake IDs from different Chat Service instances have different <span class="dqa-key">machine_id</span> bits, so they're always unique. The timestamp portion provides millisecond ordering. If two messages have the same millisecond timestamp, the machine_id and sequence number break the tie. There's no conflict — both messages are stored with distinct IDs.</div>
@@ -643,20 +733,20 @@ response = dynamodb.query(
 
 <div class="dqa-item">
   <div class="dqa-q">How would you design the system for multi-region deployment?</div>
-  <div class="dqa-a">Deploy full stack (WebSocket servers, Chat Service, Kafka, DynamoDB) in 5+ regions. Use <span class="dqa-key">DynamoDB Global Tables</span> for multi-region message replication (async, ~1 second lag). Kafka MirrorMaker 2 replicates topic data across regions. Users connect to the nearest region via GeoDNS (Route 53 latency-based routing). Cross-region messages route through Kafka inter-region replication.</div>
+  <div class="dqa-a">Deploy full stack (WebSocket servers, Chat Service, <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a>, <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a>) in 5+ regions. Use <span class="dqa-key">DynamoDB Global Tables</span> for multi-region message replication (async, ~1 second lag). Kafka MirrorMaker 2 replicates topic data across regions. Users connect to the nearest region via GeoDNS (Route 53 latency-based routing). Cross-region messages route through Kafka inter-region replication.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">How do you handle a conversation where users are in different regions?</div>
     <div class="dqa-sub-a">The message is produced to the sender's regional Kafka cluster. Kafka MirrorMaker replicates it to the receiver's region. Latency penalty: ~80-120ms for cross-region replication (US-East to EU-West). Total delivery time: ~150-200ms. This is acceptable — users won't notice 200ms vs 50ms in a chat. The alternative (global Kafka) would mean <span class="dqa-key">every</span> message pays cross-region latency, even local ones.</div>
     <div class="dqa-deep">
       <div class="dqa-deep-q">What about DynamoDB Global Tables conflict resolution?</div>
-      <div class="dqa-deep-a">DynamoDB Global Tables use <span class="dqa-key">last-writer-wins</span> based on timestamps. For messages, there are no conflicts — each message has a unique Snowflake ID as the sort key, so writes never collide. For read_receipts (last_read_message_id), last-writer-wins is correct semantics — you always want the most recent read position. The only risk is with profile updates, where we use conditional writes to prevent stale overwrites.</div>
+      <div class="dqa-deep-a">DynamoDB Global Tables use <span class="dqa-key">last-writer-wins</span> based on timestamps. For messages, there are no conflicts — each message has a unique <a class="dqa-link" href="/algo/snowflake-id">Snowflake ID</a> as the sort key, so writes never collide. For read_receipts (last_read_message_id), last-writer-wins is correct semantics — you always want the most recent read position. The only risk is with profile updates, where we use conditional writes to prevent stale overwrites.</div>
     </div>
   </div>
 </div>
 
 <div class="dqa-item">
   <div class="dqa-q">What are the main failure modes and how do you handle them?</div>
-  <div class="dqa-a">Three critical failure modes: (1) WebSocket server crash — client auto-reconnects in ~2s, syncs missed messages via offline queue. (2) Kafka broker failure — replication factor 3 means 2 brokers can fail without data loss; producers retry on failure. (3) DynamoDB throttling — on-demand capacity auto-scales but has a 2x burst limit; sustained hot partitions trigger adaptive capacity.</div>
+  <div class="dqa-a">Three critical failure modes: (1) WebSocket server crash — client auto-reconnects in ~2s, syncs missed messages via offline queue. (2) <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> broker failure — replication factor 3 means 2 brokers can fail without data loss; producers retry on failure. (3) <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a> throttling — on-demand capacity auto-scales but has a 2x burst limit; sustained hot partitions trigger adaptive capacity.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">What's your disaster recovery plan?</div>
     <div class="dqa-sub-a">RPO (recovery point objective) = 1 second for messages (Kafka replication lag). RTO (recovery time objective) = 30 seconds for regional failover (DNS propagation). <span class="dqa-key">DynamoDB Global Tables</span> replicate to all regions within ~1 second. Kafka MirrorMaker 2 replicates with similar lag. We run chaos engineering monthly — kill a random WebSocket server, fail a Kafka broker, throttle DynamoDB — to verify recovery paths.</div>

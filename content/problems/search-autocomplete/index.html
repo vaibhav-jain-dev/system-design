@@ -605,6 +605,17 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
 
 {{checklist "Scaling checklist" "CDN caches top 10K prefixes with 60s TTL — verify cache hit ratio > 88%" "Each trie service replica handles 6K QPS — load test before production" "Redis cluster has 3 nodes for HA — no single point of failure" "Kafka partitions match consumer parallelism — 50 partitions, 50 Flink workers" "Trie rebuild job completes in &lt;30 min — alert on >45 min runtimes" "Multi-region: push trie snapshots to regional S3 buckets within 5 min of rebuild"}}
 
+{{hint "horizontal scaling is trivial for the trie" "The trie is read-only after build — horizontal scaling is trivial. Each new instance downloads the trie snapshot from S3, loads it into RAM, and starts serving in <span class=\"hl\">60 seconds</span>. No leader, no coordination needed during queries. The only constraint is the <span class=\"hl\">60-second rebuild window</span> — during that window the instance serves no traffic, so maintain <strong>N+1 capacity headroom</strong> at all times."}}
+
+{{triggerQs "Scaling Questions"
+  "How do you handle a trie node going down during peak traffic?"
+  "The trie service is stateless — each instance holds a <strong>full copy of the trie in RAM</strong>. The load balancer routes around the failed node in <span class=\"hl\">~30 seconds</span> (health check interval). The replacement node needs <span class=\"hl\">~60 seconds</span> to rebuild its trie on startup (download S3 snapshot + deserialize). During this window, traffic is split across the remaining N-1 nodes, which may be at 100% capacity — maintain <strong>N+1 capacity headroom</strong> so no single failure causes saturation."
+  "What's the maximum trie size for a language before memory pressure becomes a problem?"
+  "At <span class=\"hl\">1.5 GB per language trie</span>, a 64 GB r6g.2xlarge handles 10+ language tries. The real constraint is <strong>trie rebuild time</strong> — <span class=\"hl\">60 seconds at 1.5 GB</span>. If the trie grows to <span class=\"hl\">5 GB</span>, rebuild takes 3–4 minutes, widening the stale-data window. Mitigations: increase trie sync frequency (hourly → 15 min) to reduce staleness, or <span class=\"hl-blue\">shard the trie by prefix range</span> (A–M on one node set, N–Z on another) to keep each shard under 1.5 GB."
+  "How do you avoid a thundering herd when all trie nodes rebuild simultaneously?"
+  "Stagger rebuilds with a <span class=\"hl-blue\">random jitter</span> of 0–15 minutes. In a 10-node cluster, rebuilds are spread across 10 non-overlapping windows. A <strong>Redis distributed lock</strong> (background mutex) ensures at most 1–2 nodes rebuild simultaneously — the others serve the current trie while waiting. This caps the number of S3 download streams and prevents synchronized CPU spikes."
+}}
+
 {{phase 11 "Failure Modes" "4 min"}}
 
 {{say `Autocomplete is non-critical — degraded suggestions are better than a broken search box:
@@ -640,6 +651,8 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
   "No. We degrade gracefully: if Redis is unreachable, we skip personalization and return global top-10. The user gets slightly less tailored suggestions but doesn't see an error. This is a UX tradeoff we've explicitly chosen — availability > personalization freshness."
 }}
 
+{{qa "What if the Kafka query log pipeline falls behind?" "Trie freshness degrades. A <span class=\"hl\">4-hour Kafka lag</span> means new trending queries take 4 hours to appear in the trie. This is a <strong>freshness SLO violation</strong>, not an availability failure — users still get suggestions, just not the most recent ones. Alert on consumer group lag <span class=\"hl\">&gt; 30 minutes</span>. The mitigation: increase <span class=\"hl-blue\">consumer group parallelism</span> to match partition count — 10 consumers per 10 partitions. If lag is structural (sustained throughput > consumer capacity), add partitions to the query-log topic and scale consumers to match." "How do you prevent Kafka lag from cascading into trie staleness permanently?" "The Flink job that processes the query log is stateless — it only needs to process the <em>current window</em> to compute new trie weights. If lag spikes during a traffic event, the job catches up by processing historical events in bulk (Flink's event-time processing handles out-of-order arrival). The trie is only swapped when a full rebuild completes — if the job crashes mid-rebuild, the previous snapshot remains live. Lag &gt; 2 hours triggers an auto-scaling event on the Flink cluster."}}
+
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 
 {{say `Complete end-to-end flow — client to CDN to service to trie:
@@ -653,7 +666,7 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
 
 {{deepQA "Critical Interview Questions" `
 <div class="dqa-item">
-  <div class="dqa-q">How does the trie achieve effectively O(1) lookup at query time?</div>
+  <div class="dqa-q">How does the <a class="dqa-link" href="/algo/trie">trie</a> achieve effectively O(1) lookup at query time?</div>
   <div class="dqa-a">We pre-compute the top-K suggestions at <span class="dqa-key">every prefix node</span> during the hourly rebuild. At query time we simply traverse the trie character by character (O(prefix_length), typically 1-15 chars) and return the cached list at the final node — no subtree traversal needed.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">Why not just store a flat hash map of prefix → top-K?</div>
@@ -665,8 +678,8 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
   </div>
 </div>
 <div class="dqa-item">
-  <div class="dqa-q">How do you handle viral/trending queries that appear mid-cycle before the hourly trie rebuild?</div>
-  <div class="dqa-a">A separate Flink job watches <span class="dqa-key">5-minute tumbling windows</span> on the Kafka query stream. Any query exceeding 10K submissions in a 5-minute window is classified as trending. The job computes a synthetic score and writes it directly to Redis with a 60-minute TTL. Autocomplete service polls Redis for trending overrides and blends them with trie results on every request.</div>
+  <div class="dqa-q">How do you handle viral/trending queries that appear mid-cycle before the hourly <a class="dqa-link" href="/algo/trie">trie</a> rebuild?</div>
+  <div class="dqa-a">A separate Flink job watches <span class="dqa-key">5-minute tumbling windows</span> on the <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> query stream. Any query exceeding 10K submissions in a 5-minute window is classified as trending. The job computes a synthetic score and writes it directly to <a class="dqa-link" href="/fund/storage/redis">Redis</a> with a 60-minute TTL. Autocomplete service polls Redis for trending overrides and blends them with trie results on every request.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">How do you prevent a bot attack from injecting garbage into trending?</div>
     <div class="dqa-sub-a">Three mitigations: rate limit by IP at CDN (200/min), require valid authenticated uid for query logging (bots without sessions aren't counted), and validate trending candidates with a statistical anomaly check — count must be 3-sigma above the query's own 7-day baseline. A brand-new query spiking from 0 to 10K in 5 minutes fails the baseline check and gets flagged for human review before injection.</div>
@@ -678,7 +691,7 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
 </div>
 <div class="dqa-item">
   <div class="dqa-q">How do you scale to 290K QPS with under 100ms p99?</div>
-  <div class="dqa-a">Three-layer caching reduces origin load by 90%. <span class="dqa-key">CDN</span> (CloudFront) caches the top 10K prefixes at the edge — these account for ~88% of traffic. <span class="dqa-key">Redis</span> L1 cache handles the next tier. The remaining ~29K QPS hits 50 stateless trie service replicas, each handling 6K QPS with a 1.5GB in-memory trie. Trie lookup is 1-5ms in-process.</div>
+  <div class="dqa-a">Three-layer caching reduces origin load by 90%. <span class="dqa-key">CDN</span> (CloudFront) caches the top 10K prefixes at the edge — these account for ~88% of traffic. <span class="dqa-key"><a class="dqa-link" href="/fund/storage/redis">Redis</a></span> L1 cache handles the next tier. The remaining ~29K QPS hits 50 stateless <a class="dqa-link" href="/algo/trie">trie</a> service replicas, each handling 6K QPS with a 1.5GB in-memory trie. Trie lookup is 1-5ms in-process.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">What's the memory footprint across the entire fleet?</div>
     <div class="dqa-sub-a">Each of the 50 trie replicas holds 1.5GB per language trie. For 3 language tries: 4.5GB per replica × 50 replicas = 225GB total fleet memory for trie data. We use r6g.2xlarge instances (64GB RAM) — 3 language tries fit comfortably with room for OS overhead.</div>
@@ -690,10 +703,10 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
 </div>
 <div class="dqa-item">
   <div class="dqa-q">How does personalization work without violating user privacy?</div>
-  <div class="dqa-a">We never log raw uid+query pairs in the shared query log. The query log contains a <span class="dqa-key">daily-salted SHA-256 hash</span> of the uid — this makes cross-day linkage impossible. Personal history lives in a per-uid Redis Hash with 90-day TTL, explicitly scoped to the user's account and deleted on history clear. Personalization blending is ephemeral — the blended results are never stored.</div>
+  <div class="dqa-a">We never log raw uid+query pairs in the shared query log. The query log contains a <span class="dqa-key">daily-salted SHA-256 hash</span> of the uid — this makes cross-day linkage impossible. Personal history lives in a per-uid <a class="dqa-link" href="/fund/storage/redis">Redis</a> Hash with 90-day TTL, explicitly scoped to the user's account and deleted on history clear. Personalization blending is ephemeral — the blended results are never stored.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">What about GDPR right-to-erasure requests?</div>
-    <div class="dqa-sub-a">A GDPR deletion request triggers: (1) DEL on user:history:{uid} in Redis — immediate, (2) a tombstone record in a deletions table that the Kafka consumer uses to filter out that uid's events from aggregation — effective within the next hourly job, (3) a scan of the S3 query log archives to remove salted-hash occurrences — async, completes within 30 days per GDPR Article 17.</div>
+    <div class="dqa-sub-a">A GDPR deletion request triggers: (1) DEL on user:history:{uid} in Redis — immediate, (2) a tombstone record in a deletions table that the <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> consumer uses to filter out that uid's events from aggregation — effective within the next hourly job, (3) a scan of the S3 query log archives to remove salted-hash occurrences — async, completes within 30 days per GDPR Article 17.</div>
     <div class="dqa-deep">
       <div class="dqa-deep-q">Could you infer a user's uid from their personalized autocomplete results?</div>
       <div class="dqa-deep-a">No. The personalized suggestions are returned only to the authenticated session that made the request. The response is not cached at the CDN level (we strip uid from the CDN cache key). An attacker observing CDN-cached responses sees only global top-10. The personalized blend is computed at the origin and returned over TLS directly to the authenticated client.</div>
@@ -701,14 +714,14 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
   </div>
 </div>
 <div class="dqa-item">
-  <div class="dqa-q">How do you do zero-downtime trie updates — the blue/green swap?</div>
+  <div class="dqa-q">How do you do zero-downtime <a class="dqa-link" href="/algo/trie">trie</a> updates — the blue/green swap?</div>
   <div class="dqa-a">The trie rebuild runs in a <span class="dqa-key">background goroutine</span>, building a complete new trie from the aggregated counts into a separate memory region. After sanity checks pass (top queries for 'the', 'google', etc. look correct), we do an <span class="dqa-key">atomic pointer swap</span>. In Python, CPython's GIL makes the pointer assignment atomic. In-flight requests using the old trie complete normally — the old trie is reference-counted and freed ~5 seconds after swap.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">What if the new trie fails sanity checks?</div>
     <div class="dqa-sub-a">We abort the swap, keep the current trie serving, and alert on-call. The rebuild job is retried on the next hour. Meanwhile the previous trie snapshot from S3 is available if the current in-memory trie becomes corrupted (e.g., OOM kill forces a cold restart). Two consecutive failed rebuilds trigger a P2 incident.</div>
     <div class="dqa-deep">
       <div class="dqa-deep-q">How do you roll out a new trie to 50 replicas without a thundering herd on S3?</div>
-      <div class="dqa-deep-a">The rebuild job pushes the new trie snapshot to S3, then updates a Redis key trie:latest:{lang} with the new S3 path. Trie replicas poll this key every 5 minutes. When they see a new path, they stagger their S3 download using a random jitter of 0-300 seconds. This spreads 50 downloads over 5 minutes — S3 handles it trivially. No thundering herd.</div>
+      <div class="dqa-deep-a">The rebuild job pushes the new trie snapshot to S3, then updates a <a class="dqa-link" href="/fund/storage/redis">Redis</a> key trie:latest:{lang} with the new S3 path. Trie replicas poll this key every 5 minutes. When they see a new path, they stagger their S3 download using a random jitter of 0-300 seconds. This spreads 50 downloads over 5 minutes — S3 handles it trivially. No thundering herd.</div>
     </div>
   </div>
 </div>

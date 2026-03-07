@@ -37,7 +37,7 @@
   (how "virtual nodes work mathematically?" "Physical node P gets V tokens: hash('P#0'), hash('P#1'), ..., hash('P#149'). All V tokens go on the ring as separate ownership points. A key walks clockwise to whichever token it hits first — that token's parent node owns the key.")
 }}
 
-{{hint "V_nodes formula" "Rule of thumb: V = replication_factor × 50. For RF=3, use 150 vnodes per physical node. DynamoDB uses a fixed 64 virtual nodes per physical partition host. Cassandra defaults to 256."}}
+{{hint "V_nodes formula" "Rule of thumb: V = replication_factor × 50. For RF=3, use 150 vnodes per physical node. &lt;a class='dqa-link' href='/fund/storage/dynamodb'>DynamoDB&lt;/a> uses a fixed 64 virtual nodes per physical partition host. Cassandra defaults to 256."}}
 
 {{table "Virtual Node Count Trade-offs" (rows
   (row "Vnodes (V)" "Load Std Dev" "Metadata per node" "Rebalance granularity")
@@ -148,6 +148,13 @@ print(ring.get_nodes("user:12345", 3))  # ["node-2", "node-1", "node-3"] (replic
 
 {{hint "bisect_left vs bisect" "Use bisect.bisect (= bisect_right) so that if the key hashes exactly to a token, it lands on the NEXT node clockwise. bisect_left would put it on the token itself — either works as long as you're consistent."}}
 
+{{hint "sorted_keys maintenance cost" "<code>bisect.insort</code> is <span class='hl-red'>O(N)</span> for list insertion because Python's list requires shifting elements. At <span class='hl'>10,000 vnodes</span> (1,000 nodes × 10), insort is still fast — ~<span class='hl'>10μs</span> per operation. But at <strong>100K+ vnodes</strong>, the shifting cost becomes significant. Switch to <code>sortedcontainers.SortedList</code> which gives <span class='hl-blue'>O(log N)</span> insertion via a B-tree structure. For most clusters (≤ 200 nodes × 150 vnodes = 30K entries), the plain list is fast enough."}}
+
+{{think "Thread safety is a real concern if the ring is used from multiple threads — reads during add_node or remove_node can see partial state: some tokens inserted but not others, leading to incorrect routing."
+  (how "copy-on-write solves this" "Build a completely new ring object (new dict and sorted list) and atomically swap the reference: <code>self._ring = new_ring</code>. In Python, reference assignment is atomic. Readers always see either the old complete ring or the new complete ring — never a half-built one.")
+  (whatIf "you hold a lock instead" "A lock blocks all reads during every node add/remove operation. For a ring with 150 vnodes per node, that's 150 insort operations under the lock. At high read throughput, this creates measurable latency spikes. Copy-on-write has zero impact on readers.")
+}}
+
 {{think "The ring lookup is O(log N) for binary search on sorted_keys. With 10 nodes and 150 vnodes each, sorted_keys has 1500 entries — bisect finds the slot in ~11 comparisons. Negligible overhead."
   (how "this scales to millions of keys?" "The ring metadata is tiny: 10 nodes × 150 vnodes = 1500 entries, each an integer and a string. The entire ring fits in a few KB of RAM. It's rebuilt in memory on startup from cluster membership gossip.")
 }}
@@ -164,7 +171,7 @@ print(ring.get_nodes("user:12345", 3))  # ["node-2", "node-1", "node-3"] (replic
 
 {{think "Write sharding for hot keys is a deliberate denormalization. You trade read complexity for write scalability."
   (how "write sharding works?" "Instead of writing counter to 'trending:worldcup', write to 'trending:worldcup#0' through 'trending:worldcup#N-1' where N=10. Pick shard by random(0,N) or by client_id % N. On read, fetch all 10 shards and sum.")
-  (whatIf "a shard node goes down during a scatter-gather read" "Read from the remaining N-1 shards and extrapolate, or return partial data. Redis Cluster handles this by returning a CLUSTERDOWN error for the failed slot — your client must retry on replica.")
+  (whatIf "a shard node goes down during a scatter-gather read" "Read from the remaining N-1 shards and extrapolate, or return partial data. &lt;a class='dqa-link' href='/fund/storage/redis'>Redis Cluster&lt;/a> handles this by returning a CLUSTERDOWN error for the failed slot — your client must retry on replica.")
 }}
 
 {{code "python" `# Write sharding for hot keys
@@ -182,6 +189,10 @@ def get_counter(redis_client, key: str) -> int:
     return sum(int(v or 0) for v in values)
 `}}
 
+{{hint "DynamoDB write sharding example" "DynamoDB has a hard <span class='hl'>3,000 WCU/partition</span> limit. If a hot key like <code>user:popular_celeb</code> gets <strong>50,000 writes/sec</strong>, that's ~17× the partition limit. Fix: add a random suffix <code>0-9</code> to the partition key — write to <code>user:popular_celeb#3</code>, <code>user:popular_celeb#7</code>, etc. This distributes across <strong>10 partitions</strong>, each handling 5,000 WCU/sec. On read, scatter-gather all 10 suffixes in parallel and merge. DynamoDB Contributor Insights flags keys exceeding <span class='hl'>1,000 WCU/second</span> — use it to detect hotspots before they become incidents."}}
+
+{{qa "How does Cassandra handle hot partitions?" "Cassandra's approach is <strong>write sharding</strong> at the application layer — same pattern as the code above. For a trending hashtag accumulating millions of writes, you shard the partition key: <code>hashtag:worldcup:0</code> through <code>hashtag:worldcup:N-1</code>, picking a random shard per write. On read, query all N shards and aggregate. Cassandra also supports <span class='hl-blue'>CRDT counters</span> natively — <code>UPDATE ... SET count = count + 1</code> — which handle concurrent increments without conflicts, but they still concentrate on one partition. Write sharding is the only way to distribute the write load." "What N should you use for write sharding?" "Match N to your throughput ratio over the node limit. DynamoDB: <code>N = ceil(peak_writes / 3000)</code>. For 30K WCU/sec peak, use N=10. Cassandra: tune N to keep each shard partition below ~<span class='hl'>10MB/sec</span> write throughput. Too large N increases read scatter-gather fan-out — N=10 to 20 is a practical ceiling for most systems."}}
+
 {{triggerQs "Phase 5 Trigger Questions"
   "How do you detect a hot key before it becomes a problem?"
   "Redis 4.0+ has OBJECT FREQ with LFU eviction policy — it tracks access frequency per key. Alternatively, run Redis MONITOR for 1 second and count key appearances. DynamoDB Contributor Insights flags partition keys exceeding 1000 WCU/second."
@@ -195,9 +206,9 @@ def get_counter(redis_client, key: str) -> int:
 
 {{table "Real-World Consistent Hashing Usage" (rows
   (row "System" "Implementation" "Virtual Nodes" "Key Detail")
-  (row "DynamoDB" "Fixed partition token space" "~64 vnodes/host" "Partition key hashed to token; physical server owns multiple partitions")
+  (row "&lt;a class='dqa-link' href='/fund/storage/dynamodb'>DynamoDB&lt;/a>" "Fixed partition token space" "~64 vnodes/host" "Partition key hashed to token; physical server owns multiple partitions")
   (row "Cassandra" "Token ring (Murmur3)" "256 vnodes/node" "RF=3: next 3 distinct nodes clockwise; Gossip protocol distributes ring state")
-  (row "Redis Cluster" "16384 fixed hash slots" "N/A (fixed slots)" "slot = CRC16(key) % 16384; resharding moves whole slots not individual keys")
+  (row "&lt;a class='dqa-link' href='/fund/storage/redis'>Redis Cluster&lt;/a>" "16384 fixed hash slots" "N/A (fixed slots)" "slot = CRC16(key) % 16384; resharding moves whole slots not individual keys")
   (row "Akamai CDN" "Proprietary ring" "Undisclosed" "Used in original 1997 Akamai paper — consistent hashing invented for CDN")
   (row "Memcached (libketama)" "Ring with 160 vnodes" "160 per server" "Client-side ring; each client computes which server owns the key")
 )}}
@@ -240,12 +251,19 @@ def get_counter(redis_client, key: str) -> int:
 
 {{phase 8 "Interview Summary" "2 min"}}
 
-{{say "Consistent hashing maps both keys and servers to a ring. Adding or removing a node remaps only 1/N keys. Virtual nodes (150 per physical server) ensure even load distribution. Hot keys — as opposed to hot ring segments — require write sharding, not consistent hashing."}}
+{{say "Consistent hashing maps both keys and servers to a shared ring:
+<ul>
+  <li><strong>Core property:</strong> adding or removing a node remaps only <span class='hl'>1/N keys</span> — not ~100% like modulo hashing</li>
+  <li><strong>Virtual nodes:</strong> each physical server holds <span class='hl'>150 tokens</span> on the ring — balances load distribution and spreads failure impact across many survivors</li>
+  <li><strong>Implementation:</strong> sorted token array + binary search = <span class='hl-blue'>O(log V×N)</span> lookup; the ring metadata is tiny (10 nodes × 150 vnodes = <span class='hl'>1,500 integers</span>)</li>
+  <li><strong>Hot keys ≠ hot ring segments:</strong> write sharding (<code>key#0..key#N-1</code>) solves hot individual keys; consistent hashing solves uneven node load from hash boundaries</li>
+  <li><strong>Real systems:</strong> Cassandra uses a token ring with 256 vnodes; <a class='dqa-link' href='/fund/storage/dynamodb'>DynamoDB</a> uses fixed partition tokens; <a class='dqa-link' href='/fund/storage/redis'>Redis Cluster</a> uses 16,384 fixed hash slots (not consistent hashing)</li>
+</ul>"}}
 
 {{diagram "fund-consistent-hashing-summary"}}
 
 {{compare "When to Use Consistent Hashing" (options
-  (best "Distributed cache (Redis, Memcached)" "Keys naturally distribute; adding cache nodes is frequent; client-side ring is trivial")
+  (best "Distributed cache (&lt;a class='dqa-link' href='/fund/storage/redis'>Redis&lt;/a>, Memcached)" "Keys naturally distribute; adding cache nodes is frequent; client-side ring is trivial")
   (best "Distributed DB partition placement" "Cassandra, DynamoDB use it to map rows to storage nodes at scale")
   (alt "Fixed pre-sharding (Redis Cluster style)" "When ring complexity is unwanted and shard count is known upfront; simpler to reason about")
   (nofit "Single-node or small cluster" "Overhead not justified below ~5 nodes; simple modulo or random is fine")

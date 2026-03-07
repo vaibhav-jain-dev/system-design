@@ -67,7 +67,7 @@ def handle_payment_charged(event):
     event_bus.publish("restaurant.notified", {"saga_id": event["saga_id"]})
 `}}
 
-{{hint "when to use choreography" "Prefer choreography for simple, short sagas with 2-3 steps. For food delivery (6+ steps with multiple compensations), orchestration wins — you need a single place to see what went wrong."}}
+{{hint "when to use choreography" "Prefer choreography for simple, short sagas with 2-3 steps. For <a class="dqa-link" href="/problem/food-delivery">food delivery</a> (6+ steps with multiple compensations), orchestration wins — you need a single place to see what went wrong."}}
 
 {{triggerQs "Choreography Questions"
   "How do you debug a stalled choreography saga?"
@@ -98,7 +98,7 @@ def handle_payment_charged(event):
   "What happens if the orchestrator becomes a bottleneck?"
   "Shard by saga_id. Each shard handles a subset of sagas. Use a stateless orchestrator with state persisted to a database — horizontal scaling then works. Uber Cadence and AWS Step Functions both shard internally."
   "Is the orchestrator a single point of failure?"
-  "Only if stateful and single-instance. A stateless orchestrator with state in Postgres or DynamoDB survives crashes. Run 2+ orchestrator instances with leader election or idempotent workers."
+  "Only if stateful and single-instance. A stateless orchestrator with state in Postgres or <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a> survives crashes. Run 2+ orchestrator instances with leader election or idempotent workers."
 }}
 
 {{qa "What is a pivot transaction in a saga?" "A pivot transaction is a step that cannot be compensated once completed — like sending a physical package or triggering an external payment settlement. All steps before the pivot must be compensatable. All steps after the pivot must always succeed (or be retriable)." "How do you design around a pivot?" "Place the pivot as late as possible in the saga. Validate everything (inventory, payment auth, fraud check) before the pivot. The pivot itself commits the irreversible action. Steps after it are confirmations that must succeed via retry."}}
@@ -189,11 +189,11 @@ def charge_customer_idempotent(saga_id: str, customer_id: str, amount: float):
 `}}
 
 {{think "Idempotency and 'at least once delivery' are inseparable in sagas."
-  (whyNot "relying on message deduplication at the broker layer" "Kafka and SQS guarantee at-least-once delivery. Message deduplication at the broker is optional and has a finite deduplication window (5 minutes in SQS). Application-level idempotency keys are the reliable guarantee.")
+  (whyNot "relying on message deduplication at the broker layer" "<a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> and SQS guarantee at-least-once delivery. Message deduplication at the broker is optional and has a finite deduplication window (5 minutes in SQS). Application-level idempotency keys are the reliable guarantee.")
   (how "idempotency key scoping" "Use (saga_id, step_name) as the composite key. Don't use just saga_id — a saga has multiple steps, each needing its own idempotency record.")
 }}
 
-{{hint "saga_step_log TTL" "Purge saga_step_log entries after saga completion + 7 days. Sagas rarely replay after completion. Keeping them forever inflates the table. A TTL index in Postgres or DynamoDB handles this automatically."}}
+{{hint "saga_step_log TTL" "Purge saga_step_log entries after saga completion + 7 days. Sagas rarely replay after completion. Keeping them forever inflates the table. A TTL index in Postgres or <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a> handles this automatically."}}
 
 {{phase 6 "Saga Failure Recovery" "4 min"}}
 
@@ -203,7 +203,7 @@ def charge_customer_idempotent(saga_id: str, customer_id: str, amount: float):
 
 {{think "Recovery correctness depends entirely on what 'last successful step' means."
   (how "step success definition" "A step is successful only when both the action completed AND the saga_log record is committed. If the service crashed after the action but before the log write, the step replays — which is safe because it's idempotent.")
-  (whatIf "the saga_log database itself is unavailable" "The saga stalls. This is acceptable — the saga_log DB (typically Postgres or DynamoDB) should be the highest-availability store in the system. Use multi-AZ replicas. A saga with a lost log is better than a saga with a corrupt log.")
+  (whatIf "the saga_log database itself is unavailable" "The saga stalls. This is acceptable — the saga_log DB (typically Postgres or <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a>) should be the highest-availability store in the system. Use multi-AZ replicas. A saga with a lost log is better than a saga with a corrupt log.")
 }}
 
 {{table "Saga Log Schema" (rows

@@ -876,7 +876,7 @@ CREATE TABLE order_events (
 {{deepQA "Critical Interview Questions" `
 <div class="dqa-item">
   <div class="dqa-q">10 delivery partners are near the restaurant — which one gets assigned? Walk me through the exact algorithm step by step.</div>
-  <div class="dqa-a"><span class="dqa-key">Redis GEORADIUS</span> returns the 20 nearest partners sorted by Haversine distance in ~2ms. We then apply hard constraint filters: <span class="dqa-key">status=AVAILABLE</span>, rating ≥ 4.0, 30-day acceptance rate ≥ 80%, active_orders < 3. The remaining candidates are scored: score = 0.6 × normalized_distance + 0.2 × (1 − normalized_rating) + 0.2 × (1 − acceptance_rate). The lowest-scoring partner wins. We issue an optimistic-lock UPDATE on the partner row — whichever concurrent transaction commits first gets the assignment; the loser retries.</div>
+  <div class="dqa-a"><span class="dqa-key"><a class="dqa-link" href="/fund/storage/redis">Redis</a> GEORADIUS</span> returns the 20 nearest partners sorted by Haversine distance in ~2ms. We then apply hard constraint filters: <span class="dqa-key">status=AVAILABLE</span>, rating ≥ 4.0, 30-day acceptance rate ≥ 80%, active_orders < 3. The remaining candidates are scored: score = 0.6 × normalized_distance + 0.2 × (1 − normalized_rating) + 0.2 × (1 − acceptance_rate). The lowest-scoring partner wins. We issue an optimistic-lock UPDATE on the partner row — whichever concurrent transaction commits first gets the assignment; the loser retries.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">What if two partners have nearly identical scores — say score 0.12 vs 0.13?</div>
     <div class="dqa-sub-a">The 0.01 difference is below noise level of Haversine accuracy. We take the <span class="dqa-key">GEORADIUS sort=ASC</span> tiebreak — nearest by straight-line distance. In practice this is rare; a 0.01 score gap corresponds to ~50m distance difference, which is within GPS accuracy anyway.</div>
@@ -890,14 +890,14 @@ CREATE TABLE order_events (
     <div class="dqa-sub-a">The matching service immediately re-runs the algorithm excluding that partner. The rejection decrements their <span class="dqa-key">acceptance_rate_30d</span> by 1/30d weight. Three consecutive rejections flag the partner for temporary suspension review. The second attempt takes &lt;100ms since Redis state is unchanged.</div>
     <div class="dqa-deep">
       <div class="dqa-deep-q">Does acceptance_rate update synchronously or asynchronously?</div>
-      <div class="dqa-deep-a">Asynchronously via a <span class="dqa-key">Kafka rejection event</span>. The matching service publishes the rejection; a separate partner-stats consumer updates the rolling rate in PostgreSQL every 30 seconds in a batch. Real-time matching reads the cached value — 30-second staleness is acceptable here.</div>
+      <div class="dqa-deep-a">Asynchronously via a <span class="dqa-key"><a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> rejection event</span>. The matching service publishes the rejection; a separate partner-stats consumer updates the rolling rate in PostgreSQL every 30 seconds in a batch. Real-time matching reads the cached value — 30-second staleness is acceptable here.</div>
     </div>
   </div>
 </div>
 
 <div class="dqa-item">
   <div class="dqa-q">A delivery partner's phone dies while they are mid-delivery with the food. How do you detect it and what happens next?</div>
-  <div class="dqa-a">Detection is passive: the partner's location key in Redis has a <span class="dqa-key">60-second TTL</span> that resets on each GPS ping. When the phone dies, pings stop, the key expires, and the partner is automatically removed from the GEORADIUS index. A background scanner runs every 30 seconds querying orders in PICKED_UP state where last_location_update &gt; 90 seconds ago — this fires the <span class="dqa-key">PARTNER_UNREACHABLE</span> event.</div>
+  <div class="dqa-a">Detection is passive: the partner's location key in <a class="dqa-link" href="/fund/storage/redis">Redis</a> has a <span class="dqa-key">60-second TTL</span> that resets on each GPS ping. When the phone dies, pings stop, the key expires, and the partner is automatically removed from the GEORADIUS index. A background scanner runs every 30 seconds querying orders in PICKED_UP state where last_location_update &gt; 90 seconds ago — this fires the <span class="dqa-key">PARTNER_UNREACHABLE</span> event.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">Why not immediately reassign the order to another partner?</div>
     <div class="dqa-sub-a">The food is physically with the unreachable partner — reassigning would send a new partner to the restaurant for food that isn't there. The system <span class="dqa-key">cannot reassign a PICKED_UP order</span>. Instead: call the partner, notify the customer of delay, start a 5-minute escalation timer. If still unreachable at 5 minutes, escalate to human support.</div>
@@ -918,7 +918,7 @@ CREATE TABLE order_events (
 
 <div class="dqa-item">
   <div class="dqa-q">A restaurant delays an order by 20 minutes after the partner is already assigned. How do you update the ETA and notify all parties?</div>
-  <div class="dqa-a">The restaurant updates prep time via PUT /v1/orders/{id}/prep-time with a new_eta body. The order service writes the updated <span class="dqa-key">estimated_ready_at</span> to PostgreSQL and publishes an ORDER_DELAYED event to Kafka. The ETA service consumes this event, recomputes total ETA using the new restaurant_prep_remaining value, and publishes an ETA_UPDATED event. Notification service fans this to the customer's SSE stream and sends a push notification within 2 seconds of the restaurant's update.</div>
+  <div class="dqa-a">The restaurant updates prep time via PUT /v1/orders/{id}/prep-time with a new_eta body. The order service writes the updated <span class="dqa-key">estimated_ready_at</span> to PostgreSQL and publishes an ORDER_DELAYED event to <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a>. The ETA service consumes this event, recomputes total ETA using the new restaurant_prep_remaining value, and publishes an ETA_UPDATED event. Notification service fans this to the customer's SSE stream and sends a push notification within 2 seconds of the restaurant's update.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">Does the partner need to be told? They are already on their way to the restaurant.</div>
     <div class="dqa-sub-a">Yes. The partner app receives an <span class="dqa-key">ORDER_DELAYED push notification</span> with the new estimated ready time. If the delay is &gt; 15 minutes and the partner is already within 500m of the restaurant, the app suggests they wait nearby or accept a different order nearby (batch opportunity). The partner is not penalized for arriving late when the restaurant caused the delay.</div>
@@ -953,7 +953,7 @@ CREATE TABLE order_events (
     <div class="dqa-sub-a">Graph analysis: build a <span class="dqa-key">bipartite graph</span> of customer → restaurant order edges. A dense cluster (10+ customer accounts all ordering from one restaurant with high cancel rates in 24 hours) is flagged. Shared device fingerprints, IP addresses, or payment methods across the cluster elevates confidence. Automated block at fraud score &gt; 0.85.</div>
     <div class="dqa-deep">
       <div class="dqa-deep-q">Does this fraud detection run synchronously in the order placement path?</div>
-      <div class="dqa-deep-a">No — adding 200ms fraud scoring to every order placement would be unacceptable. <span class="dqa-key">Lightweight synchronous checks</span> (rate limit, OTP status) happen inline. Heavy graph analysis runs asynchronously on Kafka ORDER_PLACED events. If fraud is detected post-placement, the order is auto-cancelled and refund reversed within 60 seconds.</div>
+      <div class="dqa-deep-a">No — adding 200ms fraud scoring to every order placement would be unacceptable. <span class="dqa-key">Lightweight synchronous checks</span> (rate limit, OTP status) happen inline. Heavy graph analysis runs asynchronously on <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> ORDER_PLACED events. If fraud is detected post-placement, the order is auto-cancelled and refund reversed within 60 seconds.</div>
     </div>
   </div>
 </div>
@@ -966,7 +966,7 @@ CREATE TABLE order_events (
     <div class="dqa-sub-a"><span class="dqa-key">Graceful demand shedding</span>: The platform temporarily stops showing restaurants in the most supply-starved zones. Customers who try to order see "Limited delivery available in your area" with an estimated recovery time. Orders already in queue keep their position. This is preferable to accepting orders that will never be fulfilled — it protects restaurant ratings and reduces support volume.</div>
     <div class="dqa-deep">
       <div class="dqa-deep-q">How do you define "most supply-starved zones" for the demand shedding decision?</div>
-      <div class="dqa-deep-a">Each zone has a <span class="dqa-key">serviceable threshold</span>: minimum available partners to accept new orders (typically 3 per zone). Zones below threshold are marked RESTRICTED in Redis with a 5-minute TTL. The API gateway checks this flag before allowing order placement. The Zone Manager service refreshes zone status every 30 seconds based on live GEORADIUS counts.</div>
+      <div class="dqa-deep-a">Each zone has a <span class="dqa-key">serviceable threshold</span>: minimum available partners to accept new orders (typically 3 per zone). Zones below threshold are marked RESTRICTED in <a class="dqa-link" href="/fund/storage/redis">Redis</a> with a 5-minute TTL. The API gateway checks this flag before allowing order placement. The Zone Manager service refreshes zone status every 30 seconds based on live GEORADIUS counts.</div>
     </div>
   </div>
   <div class="dqa-sub">
