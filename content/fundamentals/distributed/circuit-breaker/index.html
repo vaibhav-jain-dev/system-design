@@ -91,6 +91,8 @@ Tune these <em>per dependency</em> — a payment service and an analytics servic
   "Start with fixed — 60 seconds. Exponential backoff in OPEN state adds complexity. If the dependency is slow to recover, operators prefer a fixed probe interval so they can predict when traffic resumes."
 }}
 
+{{qa "How is a circuit breaker different from a rate limiter?" "A rate limiter caps the number of requests a client can make. A circuit breaker caps the number of requests your service makes to a dependency. Rate limiter protects the server from clients. Circuit breaker protects the client from servers." "Can they work together?" "Yes — rate limit inbound traffic AND circuit-break outbound calls. In a microservice chain A → B → C, A rate-limits its own clients while circuit-breaking its calls to B. B does the same for C."}}
+
 {{phase 4 "Implementation" "6 min"}}
 
 {{say "Here is a Python circuit breaker state machine. In production, use a library — <strong>Resilience4j</strong> for Java, <strong>Polly</strong> for .NET, <strong>pybreaker</strong> for Python — but understanding the implementation tells you exactly what the configuration parameters control."}}
@@ -266,6 +268,8 @@ def charge_with_circuit_breaker(payload):
   "If <span class='hl'>1000 req/s</span> hit a service at 50% failure rate and each failed request retries 3 times, the failing service receives <span class='hl'>1000 + 500×3 = 2500 req/s</span> — 2.5x amplification on an already failing service. Circuit breaker trips after enough failures and reduces calls to zero, giving the dependency headroom to recover."
 }}
 
+{{qa "Should I use a service mesh circuit breaker or an in-code library?" "Service mesh (Istio/Envoy) gives you circuit breaking without code changes — pure infrastructure. In-code libraries (Resilience4j, Polly) give you custom fallback logic per endpoint. Use both: mesh for baseline protection, library for business-critical paths needing custom fallback." "What about serverless functions — do they need circuit breakers?" "Yes. Lambda calling a database or external API can still cause cascading failures. Use a client-side circuit breaker library inside the function. The cold-start penalty means HALF_OPEN probes may have higher latency — set timeout thresholds 2x higher than for long-running services."}}
+
 {{phase 7 "Monitoring & Alerting" "3 min"}}
 
 {{say `A circuit breaker that opens silently is useless for operations:
@@ -316,6 +320,8 @@ def charge_with_circuit_breaker(payload):
   (row "Service mesh" "Istio/Envoy outlier detection" "Proxy-level, language-agnostic, no code changes")
   (row "AWS SDKs" "Adaptive retry mode" "SDKs include built-in circuit breaker behavior")
 )}}
+
+{{qa "What happens to in-flight requests when the circuit opens?" "In-flight requests complete normally — the circuit breaker only affects new calls. Requests already past the circuit breaker gate continue until they succeed or timeout. Only subsequent calls get the fast CircuitOpenError." "Can a circuit breaker cause data inconsistency?" "Yes. If a write to service B succeeds but the circuit opens before confirmation reaches service A, A may retry the write after the circuit closes — causing a duplicate. Always use idempotency keys on writes that cross circuit breaker boundaries."}}
 
 {{avoid "saying circuit breaker retries the request. It does not. The circuit breaker stops calling the failing dependency. Retry is a separate concern that sits outside the circuit breaker. Conflating them is the most common interview mistake on this topic."}}
 
