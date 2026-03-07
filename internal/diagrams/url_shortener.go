@@ -159,7 +159,7 @@ func registerURLShortener(r *Registry) {
       <div class="d-flow-v">
         <div class="d-box green" data-tip="Pareto principle: top 20% of URLs (viral content, popular links) account for 80% of redirect traffic.">20% hot URLs generate 80% traffic</div>
         <div class="d-box green" data-tip="Daily active set resets each day. Cumulative storage grows but working set stays ~20M URLs.">Daily URLs to cache: 100M &#215; 0.2 = <span class="d-metric size">20M URLs</span></div>
-        <div class="d-box green" data-tip="r6g.large = 13 GB RAM, ~$92/mo. Comfortably holds 20M × 500B = 10 GB working set.">Cache memory: 20M &#215; 500B = <span class="d-metric size">10 GB</span> (fits 1 Redis node)</div>
+        <div class="d-box green" data-tip="r6g.large = 13 GB RAM, ~$150/mo on-demand. Comfortably holds 20M × 500B = 10 GB working set.">Cache memory: 20M &#215; 500B = <span class="d-metric size">10 GB</span> (fits 1 Redis node)</div>
         <div class="d-box purple" data-tip="95% cache hit means 5% of 57K peak = ~2.9K RPS actually reach DynamoDB. Well within on-demand limits.">At 90% cache hit: only <span class="d-metric throughput">1,157 RPS</span> reach DB</div>
       </div>
     </div>
@@ -170,8 +170,8 @@ func registerURLShortener(r *Registry) {
       <div class="d-flow-v">
         <div class="d-box indigo" data-tip="ECS Fargate tasks, 2 vCPU / 4 GB each. Auto-scale on CPU 60%. Stateless — scale horizontally without coordination.">API Servers: <span class="d-metric throughput">4-6 instances</span> (each handles 2-3K RPS)</div>
         <div class="d-box indigo" data-tip="On-demand billing: $1.25/M reads, $1.25/M writes. Switch to provisioned + reserved at 10K+ sustained RPS to save ~70%.">Database: DynamoDB on-demand (auto-scales)</div>
-        <div class="d-box indigo" data-tip="r6g.large: 13 GB RAM, ~$92/mo. Cluster mode: 3 primary + 2 replicas each = 9 nodes for HA and read scaling.">Cache: 1x r6g.large (<span class="d-metric size">13 GB</span>) &#8594; 3-node cluster at scale</div>
-        <div class="d-box indigo" data-tip="CloudFront absorbs 60%+ of reads at the edge. Each cache hit saves a DynamoDB read (~$0.00000125).">CDN: CloudFront 400+ PoPs (absorbs <span class="d-metric throughput">60%+</span> reads)</div>
+        <div class="d-box indigo" data-tip="r6g.large: 13 GB RAM, ~$150/mo on-demand. Cluster mode: 3 primary + 2 replicas each = 9 nodes for HA and read scaling.">Cache: 1x r6g.large (<span class="d-metric size">13 GB</span>) &#8594; 3-node cluster at scale</div>
+        <div class="d-box indigo" data-tip="CloudFront absorbs 60%+ of reads at the edge. Each cache hit saves a DynamoDB read (~$0.00000125).">CDN: CloudFront 750+ PoPs (absorbs <span class="d-metric throughput">60%+</span> reads)</div>
         <div class="d-box indigo" data-tip="KGS pre-generates key batches of 1000. Lambda invocations cost ~$0.0000002 each. 2 instances for HA.">KGS: 2 Lambda instances + DynamoDB table</div>
       </div>
     </div>
