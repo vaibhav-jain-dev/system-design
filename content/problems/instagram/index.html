@@ -45,6 +45,158 @@
 
 {{diagram "ig-api-design"}}
 
+<div class="api-doc">
+
+  {{/* POST /api/v1/media/upload/init — Step 1 of 2-phase upload */}}
+  <div class="api-endpoint">
+    <div class="api-endpoint-header">
+      <span class="api-method post">POST</span>
+      <span class="api-path">/api/v1/media/upload/init</span>
+      <span class="api-status-badge s2xx">201 Created</span>
+      <span class="api-auth-badge">🔑 Bearer token</span>
+    </div>
+    <div class="api-endpoint-body">
+      <div>
+        <div class="api-section-label">Request Body</div>
+        <div class="api-json"><span class="jp">{</span>
+  <span class="jk">"content_type"</span><span class="jp">:</span> <span class="jv">"image/jpeg"</span><span class="jp">,</span>   <span class="jc">// MIME type</span>
+  <span class="jk">"size_bytes"</span><span class="jp">:</span>   <span class="jn">4800000</span>             <span class="jc">// max 50 MB</span>
+<span class="jp">}</span></div>
+      </div>
+      <div>
+        <div class="api-section-label">Response Body</div>
+        <div class="api-json"><span class="jp">{</span>
+  <span class="jk">"upload_id"</span><span class="jp">:</span>     <span class="jv">"upl_9fGh2kX..."</span><span class="jp">,</span>          <span class="jc">// client passes this to /complete</span>
+  <span class="jk">"presigned_url"</span><span class="jp">:</span> <span class="jv">"https://s3.amazonaws.com/..."</span><span class="jp">,</span>  <span class="jc">// PUT directly to S3</span>
+  <span class="jk">"expires_in"</span><span class="jp">:</span>   <span class="jn">900</span>                         <span class="jc">// 15 min TTL on presigned URL</span>
+<span class="jp">}</span></div>
+      </div>
+      <div class="api-note">Client PUTs the raw bytes directly to S3 using <code>presigned_url</code> — never through your API servers.</div>
+    </div>
+  </div>
+
+  {{/* POST /api/v1/media/upload/complete — Step 2 */}}
+  <div class="api-endpoint">
+    <div class="api-endpoint-header">
+      <span class="api-method post">POST</span>
+      <span class="api-path">/api/v1/media/upload/complete</span>
+      <span class="api-status-badge s2xx">200 OK</span>
+      <span class="api-auth-badge">🔑 Bearer token</span>
+    </div>
+    <div class="api-endpoint-body">
+      <div>
+        <div class="api-section-label">Request Body</div>
+        <div class="api-json"><span class="jp">{</span>
+  <span class="jk">"upload_id"</span><span class="jp">:</span> <span class="jv">"upl_9fGh2kX..."</span><span class="jp">,</span>
+  <span class="jk">"caption"</span><span class="jp">:</span>   <span class="jv">"Optional caption"</span><span class="jp">,</span>
+  <span class="jk">"tags"</span><span class="jp">:</span>      <span class="jp">[</span><span class="jv">"travel"</span><span class="jp">,</span> <span class="jv">"photo"</span><span class="jp">]</span>
+<span class="jp">}</span></div>
+      </div>
+      <div>
+        <div class="api-section-label">Response Body</div>
+        <div class="api-json"><span class="jp">{</span>
+  <span class="jk">"media_id"</span><span class="jp">:</span>   <span class="jv">"med_Ab3xK9..."</span><span class="jp">,</span>
+  <span class="jk">"cdn_url"</span><span class="jp">:</span>    <span class="jv">"https://cdn.instagram.com/p/Ab3xK9/..."</span><span class="jp">,</span>
+  <span class="jk">"status"</span><span class="jp">:</span>     <span class="jv">"processing"</span>    <span class="jc">// resize pipeline is async</span>
+<span class="jp">}</span></div>
+      </div>
+    </div>
+  </div>
+
+  {{/* GET /api/v1/feed — Paginated home feed */}}
+  <div class="api-endpoint">
+    <div class="api-endpoint-header">
+      <span class="api-method get">GET</span>
+      <span class="api-path">/api/v1/feed<span class="path-query">?cursor=eyJ0cyI6...&amp;limit=20&amp;type=ranked</span></span>
+      <span class="api-status-badge s2xx">200 OK</span>
+      <span class="api-auth-badge">🔑 Bearer token</span>
+    </div>
+    <div class="api-endpoint-body">
+      <div>
+        <div class="api-section-label">Response Body</div>
+        <div class="api-json"><span class="jp">{</span>
+  <span class="jk">"posts"</span><span class="jp">:</span> <span class="jp">[{</span>
+    <span class="jk">"post_id"</span><span class="jp">:</span>     <span class="jv">"pst_..."</span><span class="jp">,</span>
+    <span class="jk">"author_id"</span><span class="jp">:</span>   <span class="jv">"usr_..."</span><span class="jp">,</span>
+    <span class="jk">"media_url"</span><span class="jp">:</span>   <span class="jv">"https://cdn.instagram.com/..."</span><span class="jp">,</span>
+    <span class="jk">"like_count"</span><span class="jp">:</span>  <span class="jn">1542</span><span class="jp">,</span>
+    <span class="jk">"created_at"</span><span class="jp">:</span>  <span class="jv">"2026-03-07T12:00:00Z"</span>
+  <span class="jp">}]</span><span class="jp">,</span>
+  <span class="jk">"next_cursor"</span><span class="jp">:</span> <span class="jv">"eyJ0cyI6MTYwM..."</span>  <span class="jc">// null when no more pages</span>
+<span class="jp">}</span></div>
+      </div>
+      <div class="api-note">Cursor encodes last post timestamp — never offset. <code>type=ranked</code> vs <code>type=chronological</code>.</div>
+    </div>
+  </div>
+
+  {{/* POST /api/v1/follow/{user_id} — Follow / unfollow toggle */}}
+  <div class="api-endpoint">
+    <div class="api-endpoint-header">
+      <span class="api-method post">POST</span>
+      <span class="api-path">/api/v1/follow/<span class="path-param">{user_id}</span></span>
+      <span class="api-status-badge s2xx">200 OK</span>
+      <span class="api-auth-badge">🔑 Bearer token</span>
+    </div>
+    <div class="api-endpoint-body">
+      <div>
+        <div class="api-section-label">Response Body</div>
+        <div class="api-json"><span class="jp">{</span>
+  <span class="jk">"following"</span><span class="jp">:</span> <span class="jv">true</span><span class="jp">,</span>  <span class="jc">// false if unfollow toggled</span>
+  <span class="jk">"fan_out"</span><span class="jp">:</span>   <span class="jv">"async"</span>  <span class="jc">// feed rebuild queued in background</span>
+<span class="jp">}</span></div>
+      </div>
+      <div class="api-note">Idempotent toggle. Triggers async fan-out to rebuild follower feed cache via SQS.</div>
+    </div>
+  </div>
+
+  {{/* POST /api/v1/like/{post_id} — Like / unlike toggle */}}
+  <div class="api-endpoint">
+    <div class="api-endpoint-header">
+      <span class="api-method post">POST</span>
+      <span class="api-path">/api/v1/like/<span class="path-param">{post_id}</span></span>
+      <span class="api-status-badge s2xx">200 OK</span>
+      <span class="api-auth-badge">🔑 Bearer token</span>
+    </div>
+    <div class="api-endpoint-body">
+      <div>
+        <div class="api-section-label">Response Body</div>
+        <div class="api-json"><span class="jp">{</span>
+  <span class="jk">"liked"</span><span class="jp">:</span>       <span class="jv">true</span><span class="jp">,</span>
+  <span class="jk">"like_count"</span><span class="jp">:</span> <span class="jn">1543</span>   <span class="jc">// approximate counter from Redis INCR</span>
+<span class="jp">}</span></div>
+      </div>
+      <div class="api-note">Composite PK <code>(user_id, post_id)</code> in DB prevents double-like. Returns <strong>409</strong> on race — client treats as success.</div>
+    </div>
+  </div>
+
+  {{/* POST /api/v1/comment/{post_id} — Add comment */}}
+  <div class="api-endpoint">
+    <div class="api-endpoint-header">
+      <span class="api-method post">POST</span>
+      <span class="api-path">/api/v1/comment/<span class="path-param">{post_id}</span></span>
+      <span class="api-status-badge s2xx">201 Created</span>
+      <span class="api-auth-badge">🔑 Bearer token</span>
+    </div>
+    <div class="api-endpoint-body">
+      <div>
+        <div class="api-section-label">Request Body</div>
+        <div class="api-json"><span class="jp">{</span>
+  <span class="jk">"text"</span><span class="jp">:</span>       <span class="jv">"Great shot!"</span><span class="jp">,</span>    <span class="jc">// max 2,200 chars</span>
+  <span class="jk">"reply_to"</span><span class="jp">:</span>  <span class="jv">"cmt_..."</span>           <span class="jc">// optional — thread reply</span>
+<span class="jp">}</span></div>
+      </div>
+      <div>
+        <div class="api-section-label">Response Body</div>
+        <div class="api-json"><span class="jp">{</span>
+  <span class="jk">"comment_id"</span><span class="jp">:</span> <span class="jv">"cmt_..."</span><span class="jp">,</span>
+  <span class="jk">"status"</span><span class="jp">:</span>     <span class="jv">"published"</span>  <span class="jc">// async toxicity check — removed if flagged</span>
+<span class="jp">}</span></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
 {{hint "why separate media upload from post creation?" "Uploading a 5MB photo takes 2-10 seconds depending on network. Creating a post (caption, tags, metadata) takes <100ms. If you combine them in one API call, the entire request blocks for the upload duration. Separate them: POST /media/upload returns a media_id, then POST /posts references the media_id. This lets the client upload media in the background while the user types a caption."}}
 
 {{think "API design for Instagram is deceptively complex because it needs to handle very different access patterns within the same system."
