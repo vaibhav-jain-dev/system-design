@@ -47,11 +47,31 @@ func FuncMap(diagramReg *diagrams.Registry) template.FuncMap {
 		"how":     howItem,
 
 		// Utility functions for templates
-		"map":      makeMap,
-		"multiply": multiply,
-		"slugIcon": slugIcon,
-		"contains": strings.Contains,
+		"map":          makeMap,
+		"multiply":     multiply,
+		"slugIcon":     slugIcon,
+		"contains":     strings.Contains,
+		"slugImagePath": slugImagePath,
 	}
+}
+
+// slugImagePath maps a content slug to a tech image path under /static/img/tech/.
+// Fundamental slugs contain "/" (e.g. "storage/redis") which would break URL paths,
+// so we use an explicit whitelist of known images.
+func slugImagePath(kind, slug string) string {
+	knownImages := map[string]string{
+		"problem:url-shortener":               "/static/img/tech/problem-url-shortener.svg",
+		"problem:rate-limiter":                "/static/img/tech/problem-rate-limiter.svg",
+		"problem:instagram":                   "/static/img/tech/problem-instagram.svg",
+		"fundamental:storage/redis":           "/static/img/tech/fund-redis.svg",
+		"fundamental:storage/dynamodb":        "/static/img/tech/fund-dynamodb.svg",
+		"fundamental:networking/load-balancing": "/static/img/tech/fund-load-balancer.svg",
+		"fundamental:networking/cdn":          "/static/img/tech/fund-cdn.svg",
+	}
+	if path, ok := knownImages[kind+":"+slug]; ok {
+		return path
+	}
+	return ""
 }
 
 // makeMap creates a map from alternating key-value pairs.
@@ -99,6 +119,12 @@ func slugIcon(slug string) template.HTML {
 		"icon-prompt-chain":    `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`,
 		"icon-guardrails":      `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>`,
 		"icon-embeddings":      `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><line x1="9" y1="6" x2="15" y2="6"/><line x1="6" y1="9" x2="6" y2="15"/><line x1="18" y1="9" x2="18" y2="15"/><line x1="9" y1="18" x2="15" y2="18"/><line x1="9" y1="8" x2="15" y2="16"/></svg>`,
+		// Category icons (used for sidebar category labels)
+		"icon-cat-networking":  `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg>`,
+		"icon-cat-storage":     `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>`,
+		"icon-cat-distributed": `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><path d="M12 8v13M5 16l7-5M19 16l-7-5"/></svg>`,
+		"icon-cat-messaging":   `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 2H8l-4 5h16l-4-5z"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>`,
+		"icon-cat-caching":     `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>`,
 	}
 
 	slugToIcon := map[string]string{
@@ -128,6 +154,12 @@ func slugIcon(slug string) template.HTML {
 		"prompt-chaining":               "icon-prompt-chain",
 		"guardrails":                    "icon-guardrails",
 		"embeddings-vector-search":      "icon-embeddings",
+		// Category names (used in welcome page)
+		"Networking":          "icon-cat-networking",
+		"Storage":             "icon-cat-storage",
+		"Distributed Systems": "icon-cat-distributed",
+		"Messaging":           "icon-cat-messaging",
+		"Caching":             "icon-cat-caching",
 	}
 
 	iconName := ""
@@ -273,10 +305,15 @@ func optionsList(opts ...CompareOption) []CompareOption { return opts }
 
 // compare renders a color-coded comparison card.
 func compare(title string, opts []CompareOption) template.HTML {
+	icons := map[string]string{
+		"best":  `<svg class="compare-svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
+		"alt":   `<svg class="compare-svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>`,
+		"nofit": `<svg class="compare-svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
+	}
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`<div class="compare-card"><div class="compare-title">%s</div>`, title))
 	for _, opt := range opts {
-		icon := map[string]string{"best": "✓", "alt": "~", "nofit": "✗"}[opt.Kind]
+		icon := icons[opt.Kind]
 		sb.WriteString(fmt.Sprintf(
 			`<div class="compare-option compare-%s"><span class="compare-icon">%s</span><strong>%s</strong> — %s</div>`,
 			opt.Kind, icon, opt.Name, opt.Reason))
