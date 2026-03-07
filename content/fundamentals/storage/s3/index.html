@@ -111,6 +111,10 @@ def upload_large_file(bucket, key, filepath):
   "AWS recommends multipart for files > <span class='hl'>100 MB</span>. The minimum part size is 5 MB. Benefits: resume interrupted uploads, parallel part upload, ability to abandon partial uploads. For chat media (< 5 MB images), single PUT is simpler and sufficient."
 }}
 
+{{hint "content-type and metadata must be set at upload start" "Content-Type and custom metadata (x-amz-meta-*) are set in the CreateMultipartUpload call, not per-part. If you forget to set Content-Type at initiation, the assembled object defaults to application/octet-stream — images will download instead of displaying in browsers."}}
+
+{{qa "How do you resume a failed multipart upload?" "Each part has an ETag returned on successful upload. Store part numbers and ETags as you go. On failure, call <span class='hl-blue'>ListParts</span> to get already-uploaded parts, then continue uploading only the missing parts. The upload_id remains valid for 7 days unless you set an AbortIncompleteMultipartUploads lifecycle rule." "What about client-side upload to S3 from a browser?" "Generate a pre-signed POST policy with conditions: max file size, allowed content types, target key prefix. The browser uploads directly to S3 using a multipart form POST. Your server never touches the file bytes. Use <span class='hl-blue'>S3 Transfer Acceleration</span> for uploads from distant regions — routes through CloudFront edge locations for <span class='hl'>50-500%</span> faster uploads."}}
+
 {{phase 4 "Storage Classes & Lifecycle" "4 min"}}
 
 {{say `S3 offers 7 storage classes. The key trade-off is <strong>access cost vs storage cost</strong>:
@@ -143,6 +147,19 @@ def upload_large_file(bucket, key, filepath):
 
 {{qa "How much does S3 actually cost for a typical system design problem?" "S3 Standard: $0.023/GB/month for storage + $0.0004/1000 GET requests + $0.005/1000 PUT requests. For 1TB of images with 10M reads/month: $23 storage + $4 GETs = $27/month. Egress to CloudFront is free within the same region. Egress to internet is $0.09/GB — this is usually the largest cost." "Is S3 strongly consistent?" "Yes, since December 2020. All S3 operations (PUT, GET, DELETE, LIST) are read-after-write consistent. You can PUT an object and immediately GET it. Before 2020, new PUTs were consistent but overwrites and deletes were eventually consistent — this is no longer the case."}}
 
+{{triggerQs "Storage Class Questions"
+  "How does Intelligent-Tiering actually work?"
+  "S3 monitors access patterns per object. Objects not accessed for <span class='hl'>30 days</span> move to Infrequent Access tier (<span class='hl'>$0.0125/GB</span>). Not accessed for <span class='hl'>90 days</span> → Archive Instant Access (<span class='hl'>$0.004/GB</span>). When accessed again, they automatically move back to frequent tier. Monitoring fee: <span class='hl'>$0.0025 per 1,000 objects/month</span>."
+  "When is Intelligent-Tiering better than manual lifecycle rules?"
+  "When access patterns are unpredictable. Manual lifecycle rules assume 'after 30 days, nobody reads this.' Intelligent-Tiering measures actual access. A photo uploaded 6 months ago that goes viral stays in the hot tier automatically. Manual lifecycle would have moved it to Glacier."
+}}
+
+{{compare "Storage Class Selection" (options
+  (best "Intelligent-Tiering" "Set and forget. No retrieval fees for frequent/infrequent tiers. Best when access patterns are unpredictable. Only $0.0025/1K objects monitoring fee.")
+  (alt "Manual lifecycle rules" "Predictable patterns: images > 30 days → IA, > 365 days → Glacier. No monitoring fee. But wrong for content that gets accessed unpredictably.")
+  (nofit "Everything in Standard" "Paying $0.023/GB for data you access once a year. At 100 TB, lifecycle to Glacier saves $22,000/month.")
+)}}
+
 {{phase 5 "Versioning & Replication" "4 min"}}
 
 {{say `Two critical durability features:
@@ -172,6 +189,28 @@ def upload_large_file(bucket, key, filepath):
   "Replication is <span class='hl-red'>asynchronous</span> — it does not add latency to the original PUT. The replica appears in the destination bucket within <span class='hl'>1-5 seconds</span> under normal conditions. If you need synchronous consistency, use multi-region strong consistency (Spanner or DynamoDB Global Tables, not S3)."
 }}
 
+{{hint "versioning doubles or triples storage cost" "With versioning enabled, every overwrite creates a new version. If a 5 MB profile photo is updated 10 times, S3 stores <span class='hl'>50 MB</span> — all 10 versions. Set a lifecycle rule to expire non-current versions after 30 days: <code>NoncurrentVersionExpiration: NoncurrentDays: 30</code>. This keeps one month of rollback history without unbounded cost growth."}}
+
+{{code "json" `{
+  "Rules": [
+    {
+      "ID": "cleanup-old-versions",
+      "Status": "Enabled",
+      "NoncurrentVersionExpiration": {
+        "NoncurrentDays": 30,
+        "NewerNoncurrentVersions": 3
+      }
+    },
+    {
+      "ID": "abort-incomplete-multipart",
+      "Status": "Enabled",
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 7
+      }
+    }
+  ]
+}`}}
+
 {{phase 6 "S3 Event Notifications & Triggers" "3 min"}}
 
 {{say `S3 can trigger downstream processing on object events:
@@ -189,6 +228,49 @@ Targets: <strong>Lambda</strong> (direct invoke), <strong>SNS</strong> (fan-out)
 }}
 
 {{hint "EventBridge for complex routing" "S3→EventBridge allows content-based filtering: route .mp4 uploads to video transcoder, .jpg uploads to image resizer, uploads to 'uploads/sensitive/' prefix to DLP scanner — all from one S3 bucket. Simpler than maintaining multiple SQS queues."}}
+
+{{triggerQs "Event Notification Questions"
+  "What is the difference between S3 events via SQS vs EventBridge?"
+  "S3 → SQS: simple, one queue per event type, low cost. S3 → EventBridge: content-based filtering (route by prefix, suffix, object size), multiple targets per rule, and integration with 50+ AWS services. Use SQS for single-consumer pipelines. Use EventBridge when you need to route different file types to different processors from one bucket."
+  "Can S3 events be lost?"
+  "S3 event notifications are <span class='hl-red'>at-least-once</span> delivery. Events can be duplicated — especially during high-throughput uploads. Design processors to be <strong>idempotent</strong>: use the S3 object key + version_id as a deduplication key. Events are not guaranteed in order across different objects."
+}}
+
+{{code "python" `# Lambda triggered by S3 upload — image processing pipeline
+import boto3, os
+
+s3 = boto3.client('s3')
+
+def handler(event, context):
+    for record in event['Records']:
+        bucket = record['s3']['bucket']['name']
+        key = record['s3']['object']['key']
+        size = record['s3']['object']['size']
+
+        # Idempotency: check if already processed
+        version_id = record['s3']['object'].get('versionId', 'null')
+        dedup_key = f"{bucket}/{key}/{version_id}"
+
+        if already_processed(dedup_key):
+            return  # Duplicate event — skip
+
+        # Generate thumbnails
+        if key.startswith('uploads/') and size < 50_000_000:  # < 50 MB
+            img = s3.get_object(Bucket=bucket, Key=key)['Body'].read()
+
+            for size_name, dimensions in [('thumb', 150), ('medium', 600)]:
+                resized = resize_image(img, dimensions)
+                s3.put_object(
+                    Bucket=bucket,
+                    Key=f"processed/{size_name}/{os.path.basename(key)}",
+                    Body=resized,
+                    ContentType='image/jpeg',
+                    CacheControl='public, max-age=31536000'
+                )
+
+        mark_processed(dedup_key)`}}
+
+{{qa "How do you build an image processing pipeline with S3?" "Upload lands in <code>uploads/</code> prefix → S3 event triggers SQS → Lambda reads original from S3 → generates thumbnail, medium, and large versions → writes to <code>processed/thumb/</code>, <code>processed/medium/</code>, <code>processed/large/</code> prefixes → updates DynamoDB metadata record with URLs. All steps are idempotent — re-processing the same upload produces identical output." "What if Lambda times out on a large video file?" "Lambda has a <span class='hl'>15-minute</span> maximum timeout. For video transcoding (which can take hours), use S3 event → SQS → ECS Fargate task. Fargate has no timeout limit. Or use <span class='hl-blue'>AWS Elemental MediaConvert</span> for managed video transcoding — it handles queueing, scaling, and output format selection."}}
 
 {{phase 7 "Interview: S3 in System Design" "4 min"}}
 
@@ -219,6 +301,8 @@ Targets: <strong>Lambda</strong> (direct invoke), <strong>SNS</strong> (fan-out)
 
 {{phase 8 "Trade-offs & Edge Cases" "3 min"}}
 
+{{say "S3 has limitations that trip up engineers in interviews: no atomic multi-object updates, per-prefix rate limits, and data egress costs that dominate the bill at scale. Know these and their mitigations."}}
+
 {{table "S3 Limitations & Mitigations" (rows
   (row "Limitation" "Impact" "Mitigation")
   (row "Eventual consistency on overwrite (old SDK)" "Rare stale reads after update" "S3 is now strongly consistent for all operations (Nov 2020). No longer an issue.")
@@ -232,6 +316,15 @@ Targets: <strong>Lambda</strong> (direct invoke), <strong>SNS</strong> (fan-out)
 {{think "S3 request rate limits are per prefix, not per bucket. If all keys start with 'images/', you hit the limit. Randomize: 'images/a3f5/photo.jpg' spreads across thousands of prefixes."
   (whatIf "your key scheme is date-prefixed: 2024/01/15/photo.jpg" "All requests on the same day hit the same prefix '2024/01/15' — rate limit at peak hour. Use randomized hash prefix: hash(photo_id)[:2]/2024-01-15/photo.jpg. First 2 chars of hash give 256 prefix buckets.")
 }}
+
+{{triggerQs "S3 Edge Case Questions"
+  "How do you handle S3 throttling at high request rates?"
+  "S3 supports <span class='hl'>3,500 PUT/s and 5,500 GET/s per prefix</span>. Distribute objects across prefixes using a hash: <code>hash(id)[:2]/original-path/file.jpg</code> gives 256 prefix buckets × 5,500 = <span class='hl'>1.4M GET/s</span>. S3 also auto-partitions based on access patterns, but distributing upfront avoids a ramp-up period where throttling occurs."
+  "What happens to S3 data if your AWS account is compromised?"
+  "An attacker with admin access can delete all objects and versions. Defense: enable <span class='hl-blue'>S3 Object Lock</span> in Compliance mode on critical buckets — <strong>nobody</strong>, not even the root account, can delete objects before the retention period expires. Also enable <span class='hl-blue'>MFA Delete</span> on versioned buckets so deleting versions requires a physical MFA device."
+}}
+
+{{hint "S3 Select reduces data transfer by 80%" "S3 Select lets you run SQL queries directly on S3 objects (CSV, JSON, Parquet) and return only matching rows. Instead of downloading a 1 GB CSV and filtering client-side, S3 Select streams only the matching rows — reducing data transfer by <span class='hl'>80%+</span> and cutting egress costs proportionally. Use it for analytics queries on archived data without spinning up Athena."}}
 
 {{checklist
   "Use pre-signed URLs for all private object access — never proxy through app servers"

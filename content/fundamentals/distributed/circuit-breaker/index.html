@@ -193,6 +193,15 @@ class CircuitBreaker:
 
 {{hint "use a library in production" "This implementation omits metrics emission, configurable window types, and slow-call rate tracking. <strong>Resilience4j</strong> (Java), <strong>Polly</strong> (.NET), and <strong>pybreaker</strong> (Python) handle all of this. Know the concepts; do not hand-roll it in production."}}
 
+{{triggerQs "Implementation Questions"
+  "How does the sliding window work internally?"
+  "Two types: <strong>count-based</strong> uses a fixed-size ring buffer (e.g., last 100 calls). <strong>Time-based</strong> uses N partial aggregation buckets (e.g., 10 one-second buckets = 10-second window). Count-based responds faster to sudden spikes. Time-based is more representative when request rate varies. Resilience4j supports both."
+  "What about thread safety — how does the circuit breaker handle concurrent calls?"
+  "State transitions use <span class='hl-blue'>compare-and-swap (CAS)</span> operations — no locks on the hot path. The sliding window uses atomic counters for success/failure aggregation. Lock-free design is critical: at <span class='hl'>10K req/s</span>, a lock on every call adds measurable contention. Resilience4j's count-based window uses a lock-free ring buffer."
+}}
+
+{{qa "How do you test a circuit breaker?" "Three approaches: (1) <strong>Unit test the state machine</strong> — inject failures to verify CLOSED→OPEN→HALF_OPEN→CLOSED transitions. (2) <strong>Chaos testing</strong> — use Chaos Monkey or Litmus to kill downstream pods in staging and verify the circuit opens within expected time. (3) <strong>Load test with fault injection</strong> — Toxiproxy or Istio fault injection to simulate 50% failure rate and verify fallback activation." "Should I use the same circuit breaker library across all services?" "Yes. Standardize on one library per language — <span class='hl-blue'>Resilience4j</span> for Java, <span class='hl-blue'>Polly</span> for .NET. This ensures consistent metric naming, dashboarding, and configuration patterns. A centralized config service can push circuit breaker parameters to all services via feature flags."}}
+
 {{phase 5 "Fallback Strategies" "4 min"}}
 
 {{say "When the circuit is OPEN, you need a fallback — a degraded but functional response. The right fallback depends on the business impact of the failing dependency. <span class='hl-red'>Not all failures justify showing an error page.</span>"}}
@@ -215,6 +224,54 @@ class CircuitBreaker:
   "Can a fallback itself fail?"
   "Yes — if the fallback reads from Redis and Redis is also down. <strong>Layer your fallbacks</strong>: primary service → Redis cache → in-process cache → hardcoded default. Each layer should be faster and more reliable than the one above it."
 }}
+
+{{code "python" `# Layered fallback: primary service → Redis cache → in-process cache → default
+import functools
+from datetime import timedelta
+
+class FallbackChain:
+    def __init__(self, redis_client, local_cache):
+        self.redis = redis_client
+        self.local = local_cache  # Simple dict with TTL
+
+    def get_recommendations(self, user_id: str) -> list:
+        # Layer 1: Primary service (protected by circuit breaker)
+        try:
+            return cb.call(recommendation_service.get, user_id)
+        except CircuitOpenError:
+            pass
+
+        # Layer 2: Redis cache (6-hour stale fallback)
+        cached = self.redis.get(f"recs:fallback:{user_id}")
+        if cached:
+            return json.loads(cached)
+
+        # Layer 3: In-process cache (popular recommendations)
+        if "popular" in self.local:
+            return self.local["popular"]
+
+        # Layer 4: Hardcoded default (last resort)
+        return [{"id": "trending", "title": "Trending Now"}]
+
+    def update_fallback_cache(self, user_id: str, recs: list):
+        """Call on every successful primary service response."""
+        self.redis.setex(
+            f"recs:fallback:{user_id}",
+            timedelta(hours=6),
+            json.dumps(recs)
+        )`}}
+
+{{hint "warm the fallback cache proactively" "Do not wait for the circuit to open to discover the fallback cache is empty. On every successful call to the primary service, write the response to the fallback cache with a long TTL (6-24 hours). When the circuit opens, the fallback cache is already warm. Cold fallback caches during an outage are the most common circuit breaker failure mode."}}
+
+{{table "Fallback Strategy by Dependency Type" (rows
+  (row "Dependency" "Fallback" "Acceptable Staleness" "Example")
+  (row "Recommendation engine" "Cached recommendations → popular items" "6 hours" "Netflix shows trending instead of personalized")
+  (row "Payment processor" "Queue for later processing" "N/A (async)" "Order confirmed, payment processing")
+  (row "User profile service" "Cached profile → anonymous defaults" "1 hour" "Show cached avatar instead of error")
+  (row "Search service" "Cached results → suggest browse categories" "30 minutes" "Amazon shows categories when search is down")
+  (row "Notification service" "Queue and batch later" "N/A (async)" "Buffer push notifications, send on recovery")
+  (row "Auth/permissions service" "Cached permissions → deny new permissions" "5 minutes" "Allow existing permissions, block new ones")
+)}}
 
 {{phase 6 "Integration with Retry" "4 min"}}
 
@@ -302,6 +359,45 @@ def charge_with_circuit_breaker(payload):
   "Usually not. Each instance maintains its own circuit breaker. If one instance's circuit opens, others will follow within seconds as they hit the same failing dependency. Shared state via Redis adds complexity and a new dependency. Local state is simpler and sufficient."
 }}
 
+{{code "python" `# Prometheus metrics for circuit breaker monitoring
+from prometheus_client import Gauge, Counter, Histogram
+
+# State gauge — 0=CLOSED, 1=OPEN, 2=HALF_OPEN
+circuit_state = Gauge(
+    'circuit_breaker_state',
+    'Current circuit breaker state',
+    ['dependency']
+)
+
+# Open event counter — fires on every CLOSED→OPEN transition
+circuit_opened = Counter(
+    'circuit_breaker_opened_total',
+    'Number of times circuit has opened',
+    ['dependency']
+)
+
+# Fallback invocations — spike = degraded operation
+fallback_total = Counter(
+    'circuit_breaker_fallback_total',
+    'Number of fallback invocations',
+    ['dependency', 'fallback_type']  # stale_cache, default, queue
+)
+
+# Failure rate — early warning before circuit trips
+failure_rate = Gauge(
+    'circuit_breaker_failure_rate',
+    'Current failure rate in sliding window',
+    ['dependency']
+)
+
+# Usage: emit on every state change
+def on_state_change(dependency: str, old_state, new_state):
+    circuit_state.labels(dependency=dependency).set(new_state.value)
+    if new_state == State.OPEN:
+        circuit_opened.labels(dependency=dependency).inc()`}}
+
+{{qa "How do you set up alerts for circuit breaker events?" "Three alerts: (1) <strong>circuit_breaker_state == OPEN for > 5 minutes</strong> — sustained outage, page on-call. (2) <strong>circuit_breaker_failure_rate > 0.3 for > 2 minutes</strong> — early warning before circuit trips, investigate now. (3) <strong>circuit_breaker_opened_total rate > 3/hour</strong> — thrashing, misconfigured parameters or chronically unstable dependency. Route to the team that owns the failing dependency, not the calling team." "Should circuit breaker dashboards be per-service or centralized?" "Centralized. Create one Grafana dashboard with a row per dependency: state, failure rate, open duration, fallback rate. During an incident, operators need to see all circuit states at once — not hunt through 20 service dashboards. Add a single <span class='hl-blue'>circuit_breaker_state == 1</span> alert rule that catches all dependencies."}}
+
 {{phase 8 "Interview Summary" "3 min"}}
 
 {{say `Circuit breaker prevents cascading failures by detecting sustained dependency failures and failing fast:
@@ -326,6 +422,15 @@ def charge_with_circuit_breaker(payload):
 {{avoid "saying circuit breaker retries the request. It does not. The circuit breaker stops calling the failing dependency. Retry is a separate concern that sits outside the circuit breaker. Conflating them is the most common interview mistake on this topic."}}
 
 {{avoid "letting multiple requests through in HALF_OPEN state. Exactly one test request must pass through. Multiple simultaneous HALF_OPEN requests can overwhelm a partially-recovered service and send it back to failure. Use an atomic flag — compare-and-swap — to enforce single-request HALF_OPEN probing."}}
+
+{{triggerQs "Interview Deep Questions"
+  "How does Netflix use circuit breakers in production?"
+  "Netflix pioneered the pattern with <span class='hl-blue'>Hystrix</span> (now replaced by <span class='hl-blue'>Resilience4j</span>). Every service-to-service call is wrapped in a circuit breaker. At <span class='hl'>100+ microservices</span>, a single dependency failure can cascade through the entire call graph. Netflix uses <strong>bulkhead isolation</strong> alongside circuit breakers — each dependency gets its own thread pool so a slow service cannot exhaust the caller's entire thread pool."
+  "What is the difference between a circuit breaker and a bulkhead?"
+  "A circuit breaker detects failures and stops calling. A bulkhead limits resource allocation per dependency — typically a dedicated thread pool or semaphore. Without a bulkhead, 10 dependencies sharing one thread pool means one slow dependency can exhaust all threads. The bulkhead ensures at most N threads are used for any single dependency. <strong>Use both together</strong>: bulkhead limits blast radius, circuit breaker stops the bleeding."
+  "How do service meshes implement circuit breaking?"
+  "Istio/Envoy uses <span class='hl-blue'>outlier detection</span>: if a target returns 5 consecutive 5xx errors, it is ejected from the load balancing pool for 30 seconds. This is proxy-level circuit breaking — no code changes needed. Limitation: no custom fallback logic. Use service mesh for baseline protection and in-code libraries for business-critical paths needing custom fallbacks."
+}}
 
 {{checklist "Circuit breaker stops calls to a failing dependency and fails fast — protects against cascading failure" "Three states: CLOSED (normal), OPEN (fast fail, no network call), HALF_OPEN (single probe request)" "Key parameters: failure_threshold, min_requests, wait_duration_in_open, success_threshold_in_half_open" "Retry handles transient errors; circuit breaker handles sustained failures — use both, layered correctly" "Fallback strategies: stale cache, default response, queue for writes — never propagate a 500 to the user" "Emit metrics on state transitions; alert when circuit stays OPEN for more than 5 minutes" "HALF_OPEN must allow exactly one test request — atomic flag prevents simultaneous probes" "Use a library in production — Resilience4j, Polly, pybreaker — do not hand-roll"}}
 
