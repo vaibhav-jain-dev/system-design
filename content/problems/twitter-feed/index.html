@@ -52,35 +52,178 @@
 
 {{diagram "tf-api-design"}}
 
-{{code "http" `# Post a tweet
-POST /v1/tweets
-Authorization: Bearer {token}
-Body: { "text": "...", "media_ids": [], "reply_to": null }
-Response 201: { "tweet_id": "1234567890", "created_at": "..." }
+<div class="api-doc">
+  <div class="api-view-tabs">
+    <button class="api-view-tab active" data-view="quick">Quick</button>
+    <button class="api-view-tab" data-view="detailed">Detailed</button>
+  </div>
 
-# Get home timeline
-GET /v1/timeline/home?cursor={tweet_id}&limit=20
-Authorization: Bearer {token}
-Response 200: {
-  "tweets": [ { "tweet_id": "...", "author": {...}, "text": "...", "likes": 42 } ],
-  "next_cursor": "...",
-  "has_more": true
+  <!-- ── QUICK VIEW ── -->
+  <div class="api-view-pane active" data-view="quick">
+    <div class="api-quick">
+      <div class="api-quick-block">
+        <div class="api-quick-section"># Feed reads</div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/v1/timeline/home<span class="pq">?cursor={tweet_id}&amp;limit=20</span></span>
+          <span class="api-quick-comment"># Cursor-paginated feed (Snowflake ID as cursor)</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/v1/timeline/stream</span>
+          <span class="api-quick-comment"># SSE stream — real-time new tweet push</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/v1/tweets/<span class="pp">{tweet_id}</span></span>
+          <span class="api-quick-comment"># Single tweet with reply + like counts</span>
+        </div>
+      </div>
+      <div class="api-quick-block">
+        <div class="api-quick-section"># Writes</div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/v1/tweets</span>
+          <span class="api-quick-comment"># Create tweet; triggers fan-out pipeline</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/v1/tweets/<span class="pp">{tweet_id}</span>/likes</span>
+          <span class="api-quick-comment"># Like (idempotent PUT semantics)</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/v1/users/<span class="pp">{user_id}</span>/follow</span>
+          <span class="api-quick-comment"># Follow user (triggers timeline rebuild)</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method DELETE">DELETE</span>
+          <span class="api-quick-path">/v1/tweets/<span class="pp">{tweet_id}</span></span>
+          <span class="api-quick-comment"># Delete tweet (tombstone in Cassandra)</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── DETAILED VIEW ── -->
+  <div class="api-view-pane" data-view="detailed">
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>
+          <span class="api-path">/v1/tweets</span>
+          <span class="api-desc">Create tweet — enqueues Kafka fanout immediately</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/tweets">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Request Body</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">text</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Tweet content ≤ 280 characters</td></tr>
+              <tr><td><span class="rf">media_ids</span><span class="rbadge opt">optional</span></td><td><span class="rt">array</span></td><td class="rd">Pre-uploaded media IDs (from POST /v1/media)</td></tr>
+              <tr><td><span class="rf">reply_to</span><span class="rbadge opt">optional</span></td><td><span class="rt">Snowflake ID</span></td><td class="rd">Parent tweet for reply threading</td></tr>
+              <tr><td><span class="rf">quote_tweet_id</span><span class="rbadge opt">optional</span></td><td><span class="rt">Snowflake ID</span></td><td class="rd">Tweet being quoted (renders embedded)</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="201">201 Created</span>
+            <span class="api-tab s4" data-code="400">400 Too Long</span>
+          </div>
+          <div class="api-response-body active" data-code="201"><pre>{
+  <span class="jk">"tweet_id"</span>: <span class="jv">"1709600000000-3"</span>,  <span class="jc">// Snowflake ID</span>
+  <span class="jk">"created_at"</span>: <span class="jv">"2026-03-07T10:00:00Z"</span>
+}
+<span class="jc">// Fan-out to follower timelines is async via Kafka — not in response time</span></pre></div>
+          <div class="api-response-body" data-code="400"><pre>{
+  <span class="jk">"error"</span>: <span class="jv">"text_too_long"</span>,
+  <span class="jk">"length"</span>: <span class="jn">291</span>,
+  <span class="jk">"max_chars"</span>: <span class="jn">280</span>
+}</pre></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method GET">GET</span>
+          <span class="api-path">/v1/timeline/home<span class="pq">?cursor={tweet_id}&amp;limit=20</span></span>
+          <span class="api-desc">Home timeline — cursor-paginated; Snowflake ID as stable cursor</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/timeline/home">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Query Parameters</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">cursor</span><span class="rbadge opt">optional</span></td><td><span class="rt">Snowflake ID</span></td><td class="rd">Fetch tweets older than this ID; omit for latest</td></tr>
+              <tr><td><span class="rf">limit</span><span class="rbadge opt">optional</span></td><td><span class="rt">integer</span></td><td class="rd">Default 20, max 100</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK</span>
+            <span class="api-tab s4" data-code="401">401 Unauthorized</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><pre>{
+  <span class="jk">"tweets"</span>: [
+    {
+      <span class="jk">"tweet_id"</span>: <span class="jv">"1709600000000-3"</span>,
+      <span class="jk">"author"</span>: {<span class="jk">"user_id"</span>: <span class="jv">"u_456"</span>, <span class="jk">"handle"</span>: <span class="jv">"@alice"</span>},
+      <span class="jk">"text"</span>: <span class="jv">"Hello world"</span>,
+      <span class="jk">"likes"</span>: <span class="jn">42</span>,
+      <span class="jk">"retweets"</span>: <span class="jn">7</span>
+    }
+  ],
+  <span class="jk">"next_cursor"</span>: <span class="jv">"1709500000000-1"</span>,
+  <span class="jk">"has_more"</span>: <span class="jb">true</span>
+}
+<span class="jc">// Cursor is stable — new tweets at top don't break pagination</span></pre></div>
+          <div class="api-response-body" data-code="401"><pre>{
+  <span class="jk">"error"</span>: <span class="jv">"unauthorized"</span>
+}</pre></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method GET">GET</span>
+          <span class="api-path">/v1/timeline/stream</span>
+          <span class="api-desc">SSE stream — push new tweets to open feed tab in real time</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/timeline/stream">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div class="api-card-note">Requires <code>Accept: text/event-stream</code>. SSE is unidirectional server→client, works over HTTP/2, auto-reconnects. Use WebSocket only for DMs — SSE is correct here.</div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 Stream</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><pre><span class="jk">event</span>: <span class="jv">new_tweet</span>
+<span class="jk">data</span>: {
+  <span class="jk">"tweet_id"</span>: <span class="jv">"1709600005000-7"</span>,
+  <span class="jk">"author_id"</span>: <span class="jv">"u_789"</span>,
+  <span class="jk">"text"</span>: <span class="jv">"New tweet from someone you follow"</span>
 }
 
-# Real-time new tweet stream
-GET /v1/timeline/stream
-Accept: text/event-stream
-Authorization: Bearer {token}
-# SSE events: data: { "tweet_id": "...", "author_id": "...", "text": "..." }
+<span class="jc">// Client inserts tweet at top of feed, updates unread count badge</span></pre></div>
+        </div>
+      </div>
+    </div>
 
-# Get tweet
-GET /v1/tweets/{tweet_id}
-
-# Like a tweet
-POST /v1/tweets/{tweet_id}/likes
-
-# Follow a user
-POST /v1/users/{user_id}/follow`}}
+  </div>
+</div>
 
 {{hint "cursor-based pagination" "Use tweet_id (Snowflake, time-sortable) as cursor, not offset. Offset breaks when new tweets insert at page 0. tweet_id cursors are stable: ZRANGEBYSCORE user:{id}:timeline (−∞, cursor_id) LIMIT 20."}}
 

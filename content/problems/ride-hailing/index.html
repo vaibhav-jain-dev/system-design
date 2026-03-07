@@ -49,29 +49,186 @@ Does that align?`}}
 
 {{diagram "rh-api-design"}}
 
-{{code "http" `# Rider APIs (REST over HTTPS)
-POST   /v1/rides                              # Request a ride
-       Body: {pickup_lat, pickup_lng, dest_lat, dest_lng, ride_type}
-       Returns: {ride_id, status: "searching", fare_estimate, eta_seconds}
+<div class="api-doc">
+  <div class="api-view-tabs">
+    <button class="api-view-tab active" data-view="quick">Quick</button>
+    <button class="api-view-tab" data-view="detailed">Detailed</button>
+  </div>
 
-GET    /v1/rides/{ride_id}                    # Poll ride status
-       Returns: {status, driver, driver_lat, driver_lng, eta_seconds, fare}
+  <!-- ── QUICK VIEW ── -->
+  <div class="api-view-pane active" data-view="quick">
+    <div class="api-quick">
+      <div class="api-quick-block">
+        <div class="api-quick-section"># Rider APIs (REST)</div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/v1/rides</span>
+          <span class="api-quick-comment"># Request ride; returns ride_id + fare estimate</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/v1/rides/<span class="pp">{ride_id}</span></span>
+          <span class="api-quick-comment"># Poll status, driver location, ETA</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method DELETE">DELETE</span>
+          <span class="api-quick-path">/v1/rides/<span class="pp">{ride_id}</span></span>
+          <span class="api-quick-comment"># Cancel (cancellation fee if driver already matched)</span>
+        </div>
+      </div>
+      <div class="api-quick-block">
+        <div class="api-quick-section"># Driver APIs (WebSocket)</div>
+        <div class="api-quick-row">
+          <span class="api-method GET">WS</span>
+          <span class="api-quick-path">/v1/drivers/connect</span>
+          <span class="api-quick-comment"># Bidirectional: push location, receive ride offers</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method PUT">PUT</span>
+          <span class="api-quick-path">/v1/drivers/status</span>
+          <span class="api-quick-comment"># Toggle available / offline (REST)</span>
+        </div>
+      </div>
+      <div class="api-quick-block">
+        <div class="api-quick-section"># Internal (gRPC, service-to-service)</div>
+        <div class="api-quick-row">
+          <span class="api-method POST">RPC</span>
+          <span class="api-quick-path">/internal/matching/run</span>
+          <span class="api-quick-comment"># Trigger matching for ride_id</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">RPC</span>
+          <span class="api-quick-path">/internal/geo/nearby<span class="pq">?lat=&lng=&r=5km</span></span>
+          <span class="api-quick-comment"># Redis GEORADIUS query for available drivers</span>
+        </div>
+      </div>
+    </div>
+  </div>
 
-DELETE /v1/rides/{ride_id}                    # Cancel ride
+  <!-- ── DETAILED VIEW ── -->
+  <div class="api-view-pane" data-view="detailed">
 
-# Driver APIs (WebSocket for location push + offer receipt)
-WS     /v1/drivers/connect                    # Persistent connection
-       Client→Server: {type: "location", lat, lng, heading, speed}  # every 4s
-       Server→Client: {type: "offer", ride_id, pickup, dest, fare_estimate}
-       Client→Server: {type: "response", ride_id, action: "accept"|"reject"}
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>
+          <span class="api-path">/v1/rides</span>
+          <span class="api-desc">Request a ride — idempotent with X-Idempotency-Key</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/rides">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Request Body</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">pickup_lat</span><span class="rbadge req">required</span></td><td><span class="rt">float64</span></td><td class="rd">Pickup latitude</td></tr>
+              <tr><td><span class="rf">pickup_lng</span><span class="rbadge req">required</span></td><td><span class="rt">float64</span></td><td class="rd">Pickup longitude</td></tr>
+              <tr><td><span class="rf">dest_lat</span><span class="rbadge req">required</span></td><td><span class="rt">float64</span></td><td class="rd">Destination latitude</td></tr>
+              <tr><td><span class="rf">dest_lng</span><span class="rbadge req">required</span></td><td><span class="rt">float64</span></td><td class="rd">Destination longitude</td></tr>
+              <tr><td><span class="rf">ride_type</span><span class="rbadge req">required</span></td><td><span class="rt">enum</span></td><td class="rd">"economy" | "comfort" | "xl"</td></tr>
+              <tr><td><span class="rf">X-Idempotency-Key</span><span class="rbadge req">header</span></td><td><span class="rt">UUID</span></td><td class="rd">Prevents duplicate bookings on retry; 60s TTL in Redis</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="202">202 Accepted</span>
+            <span class="api-tab s4" data-code="429">429 Surge</span>
+          </div>
+          <div class="api-response-body active" data-code="202"><pre>{
+  <span class="jk">"ride_id"</span>: <span class="jv">"ride_9x2ab"</span>,
+  <span class="jk">"status"</span>: <span class="jv">"searching"</span>,
+  <span class="jk">"fare_estimate_usd"</span>: <span class="jn">12.40</span>,
+  <span class="jk">"surge_multiplier"</span>: <span class="jn">1.0</span>,
+  <span class="jk">"eta_to_pickup_seconds"</span>: <span class="jn">180</span>
+}</pre></div>
+          <div class="api-response-body" data-code="429"><pre>{
+  <span class="jk">"error"</span>: <span class="jv">"surge_pricing"</span>,
+  <span class="jk">"surge_multiplier"</span>: <span class="jn">2.3</span>,
+  <span class="jk">"confirm_surge_token"</span>: <span class="jv">"tok_abc"</span>,
+  <span class="jk">"expires_in_seconds"</span>: <span class="jn">30</span>
+}
+<span class="jc">// rider must confirm surge explicitly — re-POST with token</span></pre></div>
+        </div>
+      </div>
+    </div>
 
-# Driver status (REST)
-PUT    /v1/drivers/status                     # Toggle online/offline
-       Body: {status: "available"|"offline"}
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method GET">WS</span>
+          <span class="api-path">/v1/drivers/connect</span>
+          <span class="api-desc">Driver WebSocket — location push + ride offer receipt</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/drivers/connect">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div class="api-card-note">WebSocket is required because drivers both <em>push</em> GPS every 4 s AND <em>receive</em> ride offers — SSE is server-only and cannot carry location from client to server. One connection per active driver.</div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="loc">Client → Server</span>
+            <span class="api-tab s3" data-code="offer">Server → Client</span>
+          </div>
+          <div class="api-response-body active" data-code="loc"><pre>{
+  <span class="jk">"type"</span>: <span class="jv">"location"</span>,
+  <span class="jk">"lat"</span>: <span class="jn">37.7749</span>,
+  <span class="jk">"lng"</span>: <span class="jn">-122.4194</span>,
+  <span class="jk">"heading"</span>: <span class="jn">90</span>,
+  <span class="jk">"speed_kmh"</span>: <span class="jn">35</span>
+}
+<span class="jc">// ~250 bytes per frame, every 4 seconds</span></pre></div>
+          <div class="api-response-body" data-code="offer"><pre>{
+  <span class="jk">"type"</span>: <span class="jv">"offer"</span>,
+  <span class="jk">"ride_id"</span>: <span class="jv">"ride_9x2ab"</span>,
+  <span class="jk">"pickup_address"</span>: <span class="jv">"1 Infinite Loop, Cupertino"</span>,
+  <span class="jk">"destination_address"</span>: <span class="jv">"SFO Terminal 2"</span>,
+  <span class="jk">"estimated_fare_usd"</span>: <span class="jn">38.50</span>,
+  <span class="jk">"pickup_eta_seconds"</span>: <span class="jn">240</span>,
+  <span class="jk">"expires_in_seconds"</span>: <span class="jn">15</span>
+}
+<span class="jc">// no response in 15 s → offer goes to next driver</span></pre></div>
+        </div>
+      </div>
+    </div>
 
-# Internal (service-to-service, not public)
-POST   /internal/matching/run                 # Trigger matching for a ride_id
-GET    /internal/geo/nearby?lat=&lng=&r=5km   # Query Redis GEO`}}
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method GET">GET</span>
+          <span class="api-path">/v1/rides/<span class="pp">{ride_id}</span></span>
+          <span class="api-desc">Poll ride status — driver location, ETA, fare</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/rides/{ride_id}">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK</span>
+            <span class="api-tab s4" data-code="404">404 Not Found</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><pre>{
+  <span class="jk">"status"</span>: <span class="jv">"ARRIVING"</span>,
+  <span class="jk">"driver"</span>: {
+    <span class="jk">"name"</span>: <span class="jv">"Ravi K"</span>,
+    <span class="jk">"rating"</span>: <span class="jn">4.8</span>,
+    <span class="jk">"vehicle_plate"</span>: <span class="jv">"KA01MN4567"</span>
+  },
+  <span class="jk">"driver_lat"</span>: <span class="jn">37.7750</span>,
+  <span class="jk">"driver_lng"</span>: <span class="jn">-122.4200</span>,
+  <span class="jk">"eta_seconds"</span>: <span class="jn">90</span>,
+  <span class="jk">"fare_usd"</span>: <span class="jn">12.40</span>
+}</pre></div>
+          <div class="api-response-body" data-code="404"><pre>{
+  <span class="jk">"error"</span>: <span class="jv">"ride_not_found"</span>
+}</pre></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
 
 {{think "WebSocket vs HTTP polling for driver location: drivers send 250 bytes every 4 seconds. HTTP polling means 125K TCP handshakes/sec across 500K active drivers. WebSocket persistent connections pay the handshake cost once and amortize it over hours."
   (whyNot "SSE for driver connections" "SSE is unidirectional server→client. Drivers need to both push location AND receive offers. WebSocket is the correct abstraction for bidirectional low-latency communication.")

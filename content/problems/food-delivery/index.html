@@ -86,24 +86,214 @@ These three non-functional targets drive every architectural decision that follo
 
 {{diagram "fd-api-design"}}
 
-{{code "http" `# Customer APIs
-POST   /v1/orders                          # Place order
-GET    /v1/orders/{order_id}               # Get order status + ETA
-DELETE /v1/orders/{order_id}               # Cancel order
-GET    /v1/orders/{order_id}/tracking      # Real-time tracking (SSE stream)
+<div class="api-doc">
+  <div class="api-view-tabs">
+    <button class="api-view-tab active" data-view="quick">Quick</button>
+    <button class="api-view-tab" data-view="detailed">Detailed</button>
+  </div>
 
-# Delivery partner APIs
-POST   /v1/partners/location               # Update GPS location (WebSocket push)
-PUT    /v1/partners/status                 # Go online/offline
-GET    /v1/partners/assignments            # Get pending delivery assignments
-PUT    /v1/assignments/{id}/accept         # Accept/reject delivery
-PUT    /v1/assignments/{id}/status         # Update delivery status
+  <!-- ── QUICK VIEW ── -->
+  <div class="api-view-pane active" data-view="quick">
+    <div class="api-quick">
+      <div class="api-quick-block">
+        <div class="api-quick-section"># Customer APIs (REST)</div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/v1/orders</span>
+          <span class="api-quick-comment"># Place order (idempotency key required)</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/v1/orders/<span class="pp">{order_id}</span></span>
+          <span class="api-quick-comment"># Status + ETA for order tracking</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/v1/orders/<span class="pp">{order_id}</span>/tracking</span>
+          <span class="api-quick-comment"># SSE stream: partner location + ETA updates</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method DELETE">DELETE</span>
+          <span class="api-quick-path">/v1/orders/<span class="pp">{order_id}</span></span>
+          <span class="api-quick-comment"># Cancel (allowed within 5 min of placement)</span>
+        </div>
+      </div>
+      <div class="api-quick-block">
+        <div class="api-quick-section"># Partner APIs (WebSocket)</div>
+        <div class="api-quick-row">
+          <span class="api-method GET">WS</span>
+          <span class="api-quick-path">/v1/partners/connect</span>
+          <span class="api-quick-comment"># Bidirectional: location push + assignment receipt</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method PUT">PUT</span>
+          <span class="api-quick-path">/v1/partners/status</span>
+          <span class="api-quick-comment"># Go online/offline (REST)</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method PUT">PUT</span>
+          <span class="api-quick-path">/v1/assignments/<span class="pp">{id}</span>/accept</span>
+          <span class="api-quick-comment"># Accept or reject delivery offer</span>
+        </div>
+      </div>
+    </div>
+  </div>
 
-# Internal APIs (service-to-service)
-POST   /internal/matching/find-partner     # Trigger partner matching
-GET    /internal/geo/nearby-partners       # Query Redis GEORADIUS
-POST   /internal/eta/calculate             # ETA computation
-POST   /internal/pricing/surge             # Get surge multiplier`}}
+  <!-- ── DETAILED VIEW ── -->
+  <div class="api-view-pane" data-view="detailed">
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>
+          <span class="api-path">/v1/orders</span>
+          <span class="api-desc">Place a new order — idempotent with X-Idempotency-Key</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/orders">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Request Body</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">restaurant_id</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Target restaurant UUID</td></tr>
+              <tr><td><span class="rf">items</span><span class="rbadge req">required</span></td><td><span class="rt">array</span></td><td class="rd">[{item_id, quantity, modifiers}]</td></tr>
+              <tr><td><span class="rf">delivery_address</span><span class="rbadge req">required</span></td><td><span class="rt">object</span></td><td class="rd">{lat, lng, street, instructions}</td></tr>
+              <tr><td><span class="rf">payment_method_id</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Saved payment method UUID</td></tr>
+              <tr><td><span class="rf">X-Idempotency-Key</span><span class="rbadge req">header</span></td><td><span class="rt">UUID</span></td><td class="rd">Client-generated; duplicate requests return original order_id</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="201">201 Created</span>
+            <span class="api-tab s4" data-code="409">409 Conflict</span>
+          </div>
+          <div class="api-response-body active" data-code="201"><pre>{
+  <span class="jk">"order_id"</span>: <span class="jv">"ord_7f3e9a"</span>,
+  <span class="jk">"status"</span>: <span class="jv">"PLACED"</span>,
+  <span class="jk">"estimated_delivery_minutes"</span>: <span class="jn">35</span>,
+  <span class="jk">"total_amount_cents"</span>: <span class="jn">1850</span>
+}</pre></div>
+          <div class="api-response-body" data-code="409"><pre>{
+  <span class="jk">"error"</span>: <span class="jv">"duplicate_order"</span>,
+  <span class="jk">"existing_order_id"</span>: <span class="jv">"ord_7f3e9a"</span>
+}
+<span class="jc">// same idempotency key → return existing order, not error</span></pre></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method GET">GET</span>
+          <span class="api-path">/v1/orders/<span class="pp">{order_id}</span>/tracking</span>
+          <span class="api-desc">SSE stream — partner location + ETA deltas (unidirectional)</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/orders/{order_id}/tracking">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div class="api-card-note">Requires <code>Accept: text/event-stream</code>. Events fire on status change or every 10 seconds. Customer receives only, so SSE beats WebSocket — simpler, HTTP/2 multiplexed, auto-reconnects.</div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 Stream</span>
+            <span class="api-tab s4" data-code="404">404 Not Found</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><pre><span class="jc">// SSE event format</span>
+<span class="jk">event</span>: <span class="jv">location_update</span>
+<span class="jk">data</span>: {
+  <span class="jk">"partner_lat"</span>: <span class="jn">12.9716</span>,
+  <span class="jk">"partner_lng"</span>: <span class="jn">77.5946</span>,
+  <span class="jk">"eta_seconds"</span>: <span class="jn">840</span>,
+  <span class="jk">"order_status"</span>: <span class="jv">"PICKED_UP"</span>
+}</pre></div>
+          <div class="api-response-body" data-code="404"><pre>{
+  <span class="jk">"error"</span>: <span class="jv">"order_not_found"</span>
+}</pre></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method GET">WS</span>
+          <span class="api-path">/v1/partners/connect</span>
+          <span class="api-desc">Delivery partner WebSocket — bidirectional location + assignments</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/partners/connect">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div class="api-card-note">WebSocket because partners both <em>push</em> location AND <em>receive</em> assignment offers — SSE is unidirectional and won't work here. One persistent connection per partner.</div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="up">Client → Server</span>
+            <span class="api-tab s3" data-code="down">Server → Client</span>
+          </div>
+          <div class="api-response-body active" data-code="up"><pre>{
+  <span class="jk">"type"</span>: <span class="jv">"location"</span>,
+  <span class="jk">"lat"</span>: <span class="jn">12.9716</span>,
+  <span class="jk">"lng"</span>: <span class="jn">77.5946</span>,
+  <span class="jk">"heading"</span>: <span class="jn">270</span>,
+  <span class="jk">"speed_kmh"</span>: <span class="jn">28</span>
+}
+<span class="jc">// sent every 4 seconds; ~250 bytes per frame</span></pre></div>
+          <div class="api-response-body" data-code="down"><pre>{
+  <span class="jk">"type"</span>: <span class="jv">"assignment"</span>,
+  <span class="jk">"order_id"</span>: <span class="jv">"ord_7f3e9a"</span>,
+  <span class="jk">"restaurant_lat"</span>: <span class="jn">12.9800</span>,
+  <span class="jk">"restaurant_lng"</span>: <span class="jn">77.6000</span>,
+  <span class="jk">"delivery_address"</span>: <span class="jv">"123 MG Road"</span>,
+  <span class="jk">"payout_inr"</span>: <span class="jn">45</span>,
+  <span class="jk">"expires_in_seconds"</span>: <span class="jn">15</span>
+}
+<span class="jc">// partner has 15s to accept before offer goes to next driver</span></pre></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method PUT">PUT</span>
+          <span class="api-path">/v1/assignments/<span class="pp">{id}</span>/accept</span>
+          <span class="api-desc">Accept or reject a delivery offer (REST fallback to WebSocket)</span>
+        </div>
+        <button class="api-copy-btn" data-path="/v1/assignments/{id}/accept">Copy</button>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Request Body</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">action</span><span class="rbadge req">required</span></td><td><span class="rt">enum</span></td><td class="rd">"accept" or "reject"</td></tr>
+              <tr><td><span class="rf">reason</span><span class="rbadge opt">optional</span></td><td><span class="rt">string</span></td><td class="rd">Rejection reason (logged for partner scoring)</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK</span>
+            <span class="api-tab s4" data-code="410">410 Expired</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><pre>{
+  <span class="jk">"assignment_id"</span>: <span class="jv">"asgn_abc"</span>,
+  <span class="jk">"status"</span>: <span class="jv">"accepted"</span>,
+  <span class="jk">"order_id"</span>: <span class="jv">"ord_7f3e9a"</span>
+}</pre></div>
+          <div class="api-response-body" data-code="410"><pre>{
+  <span class="jk">"error"</span>: <span class="jv">"offer_expired"</span>,
+  <span class="jk">"message"</span>: <span class="jv">"Offer window closed — re-assigned to next partner"</span>
+}</pre></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
 
 {{think "WebSocket for partner location vs polling: partners send 250 bytes every 4 seconds. Over 8 hours per partner that's 450KB. Multiplied by 500K partners = 225GB/day just for location payloads. WebSocket persistent connection avoids TCP handshake overhead — saves ~200ms per update."
   (whyNot "REST polling for partner location" "REST polling at 4-second intervals creates 125K new HTTP connections/sec across the fleet. Connection overhead alone would saturate network layer.")
