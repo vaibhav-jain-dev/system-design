@@ -131,6 +131,9 @@ type QuickQuestion struct {
 	Caveat   string `yaml:"caveat"`   // Common mistakes, gotchas, what NOT to say
 	Watch    string `yaml:"watch"`    // The thing that makes the answer stand out
 
+	// Optional inline SVG/HTML diagram showing the flow described in the answer
+	DiagramHTML string `yaml:"diagram_html"`
+
 	// Optional cross-references (slugs)
 	RelatedProblems     []string `yaml:"related_problems"`
 	RelatedFundamentals []string `yaml:"related_fundamentals"`
