@@ -263,49 +263,62 @@
 
             // Update ‹ arrow visibility AND left/right fade overlays
             function updateArrow(inner) {
-                var arrow = inner && inner.previousElementSibling;
-                if (!arrow || !arrow.classList.contains('stage-nav-arrow')) return;
-                var scrolled = inner.scrollLeft > 4;
-                arrow.classList.toggle('visible', scrolled);
-
-                // Drive fade overlays via classes on the parent .stage-nav
+                if (!inner) return;
+                var arrow = inner.previousElementSibling;
+                if (arrow && arrow.classList.contains('stage-nav-arrow')) {
+                    arrow.classList.toggle('visible', inner.scrollLeft > 4);
+                }
                 var nav = inner.closest('.stage-nav');
                 if (nav) {
-                    nav.classList.toggle('scroll-started', scrolled);
-                    var atEnd = inner.scrollLeft + inner.clientWidth >= inner.scrollWidth - 4;
-                    nav.classList.toggle('scroll-at-end', atEnd);
+                    nav.classList.toggle('scroll-started', inner.scrollLeft > 4);
+                    nav.classList.toggle('scroll-at-end',
+                        inner.scrollLeft + inner.clientWidth >= inner.scrollWidth - 4);
                 }
             }
 
-            // Scroll active nav item to the left of the strip.
-            // Uses getBoundingClientRect so the calculation is correct even
-            // after the nav has been teleported into the header (where
-            // item.offsetLeft is relative to .stage-nav, not the scrollable
-            // .stage-nav-inner, and would give a wrong target).
-            function scrollNavToActive(item) {
-                var inner = item.closest('.stage-nav-inner');
-                if (!inner) return;
-                var itemRect  = item.getBoundingClientRect();
-                var innerRect = inner.getBoundingClientRect();
-                // Current scroll position of the item inside the container
-                var currentPos = inner.scrollLeft + (itemRect.left - innerRect.left);
-                // Leave ~48 px so the previous item's number badge peeks in
-                var targetLeft = Math.max(0, currentPos - 48);
-                inner.scrollTo({ left: targetLeft, behavior: 'smooth' });
+            // Custom rAF-driven scroll animation — avoids relying on
+            // scrollTo({behavior:'smooth'}) which can silently fail inside
+            // flex/overflow:hidden parent chains.
+            function animateScrollLeft(el, target, duration) {
+                var start = el.scrollLeft;
+                var dist  = target - start;
+                if (Math.abs(dist) < 1) return;
+                var t0 = performance.now();
+                function step(now) {
+                    var p = Math.min((now - t0) / duration, 1);
+                    p = 1 - Math.pow(1 - p, 3); // ease-out cubic
+                    el.scrollLeft = Math.round(start + dist * p);
+                    if (p < 1) requestAnimationFrame(step);
+                    else updateArrow(el);
+                }
+                requestAnimationFrame(step);
             }
 
-            // Wire scroll listener on .stage-nav-inner
+            // Bring the active nav item to the left of the visible strip,
+            // leaving a ~48 px peek of the previous item.
+            // Wrapped in rAF so getBoundingClientRect reflects settled layout
+            // after the nav has been teleported into the header.
+            function scrollNavToActive(item) {
+                requestAnimationFrame(function() {
+                    var inner = item.closest('.stage-nav-inner');
+                    if (!inner) return;
+                    var itemRect  = item.getBoundingClientRect();
+                    var innerRect = inner.getBoundingClientRect();
+                    var naturalLeft = inner.scrollLeft + (itemRect.left - innerRect.left);
+                    var targetLeft  = Math.max(0, naturalLeft - 48);
+                    animateScrollLeft(inner, targetLeft, 350);
+                });
+            }
+
+            // Wire listeners on .stage-nav-inner
             var navInner = document.querySelector('.stage-nav-inner');
             if (navInner) {
                 navInner.addEventListener('scroll', function() {
                     updateArrow(navInner);
                 }, { passive: true });
 
-                // Attach wheel → horizontal scroll on the whole .stage-nav so
-                // scrolling anywhere over the header bar (including over the
-                // arrow button or items) moves the strip left/right.
-                var navEl = navInner.closest('.stage-nav');
-                var wheelTarget = navEl || navInner;
+                // Wheel over the whole nav bar → horizontal scroll.
+                var wheelTarget = navInner.closest('.stage-nav') || navInner;
                 wheelTarget.addEventListener('wheel', function(e) {
                     if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
                         e.preventDefault();
@@ -314,8 +327,7 @@
                     }
                 }, { passive: false });
 
-                // Init: mark right-fade state immediately
-                // (give layout a frame to settle after teleport)
+                // Init fade state after layout has settled
                 requestAnimationFrame(function() { updateArrow(navInner); });
             }
 
