@@ -11,52 +11,42 @@ func registerGoogleCalendar(r *Registry) {
   <div class="d-col">
     <div class="d-group">
       <div class="d-group-title">Scale</div>
-      <div class="d-flow-v">
-        <div class="d-box blue">1B registered users</div>
-        <div class="d-box blue">500M monthly active users</div>
-        <div class="d-box blue">50B total events stored</div>
-        <div class="d-box purple">100K event reads/sec (peak)</div>
-        <div class="d-box purple">10K event writes/sec (peak)</div>
-        <div class="d-box purple">&#8776; 50 events/user/week average</div>
+      <div class="d-kv">
+        <div class="d-kv-k">Registered</div><div class="d-kv-v">1B users</div>
+        <div class="d-kv-k">MAU</div><div class="d-kv-v">500M monthly active</div>
+        <div class="d-kv-k">Events</div><div class="d-kv-v">50B stored</div>
+        <div class="d-kv-k">Read peak</div><div class="d-kv-v">100K/sec</div>
+        <div class="d-kv-k">Write peak</div><div class="d-kv-v">10K/sec</div>
+        <div class="d-kv-k">Avg rate</div><div class="d-kv-v">&#8776;50 events/user/week</div>
       </div>
     </div>
     <div class="d-group">
-      <div class="d-group-title">P0 &#8212; Core (Must Have)</div>
-      <div class="d-flow-v">
-        <div class="d-box green">Create / update / delete events</div>
-        <div class="d-box green">Recurring events (RRULE)</div>
-        <div class="d-box green">Multi-timezone support (IANA)</div>
-        <div class="d-box green">Free/busy conflict detection</div>
-        <div class="d-box green">Invite attendees + RSVP</div>
+      <div class="d-group-title">Non-Functional Targets</div>
+      <div class="d-kv">
+        <div class="d-kv-k">Read p99</div><div class="d-kv-v">&lt; 100ms</div>
+        <div class="d-kv-k">Write p99</div><div class="d-kv-v">&lt; 200ms</div>
+        <div class="d-kv-k">Availability</div><div class="d-kv-v">99.99%</div>
+        <div class="d-kv-k">Timezone</div><div class="d-kv-v">Zero DST bugs</div>
+        <div class="d-kv-k">Sync lag</div><div class="d-kv-v">Eventual &lt; 2s</div>
       </div>
     </div>
   </div>
   <div class="d-col">
     <div class="d-group">
-      <div class="d-group-title">P1 &#8212; Important</div>
-      <div class="d-flow-v">
-        <div class="d-box blue">Calendar sharing &amp; permissions (ACL)</div>
-        <div class="d-box blue">Multi-channel notifications (email, push, in-app)</div>
-        <div class="d-box blue">Incremental sync (mobile/web clients)</div>
-        <div class="d-box blue">Day / week / month view rendering</div>
-      </div>
-    </div>
-    <div class="d-group">
-      <div class="d-group-title">P2 &#8212; Nice to Have</div>
-      <div class="d-flow-v">
-        <div class="d-box gray">Smart scheduling (find optimal slot)</div>
-        <div class="d-box gray">Room / resource booking</div>
-        <div class="d-box gray">CalDAV / iCal external sync</div>
-      </div>
-    </div>
-    <div class="d-group">
-      <div class="d-group-title">Non-Functional Targets</div>
-      <div class="d-flow-v">
-        <div class="d-box purple">Read latency: &lt; 100ms (p99)</div>
-        <div class="d-box purple">Write latency: &lt; 200ms (p99)</div>
-        <div class="d-box purple">Availability: 99.99%</div>
-        <div class="d-box amber">Timezone correctness: zero DST bugs</div>
-        <div class="d-box amber">Sync consistency: eventual (&lt; 2s lag)</div>
+      <div class="d-group-title">Functional Requirements</div>
+      <div class="d-list">
+        <div class="d-list-item green"><strong>P0</strong> &nbsp;Create / update / delete events</div>
+        <div class="d-list-item green"><strong>P0</strong> &nbsp;Recurring events (RRULE)</div>
+        <div class="d-list-item green"><strong>P0</strong> &nbsp;Multi-timezone support (IANA)</div>
+        <div class="d-list-item green"><strong>P0</strong> &nbsp;Free/busy conflict detection</div>
+        <div class="d-list-item green"><strong>P0</strong> &nbsp;Invite attendees + RSVP</div>
+        <div class="d-list-item blue"><strong>P1</strong> &nbsp;Calendar sharing &amp; permissions (ACL)</div>
+        <div class="d-list-item blue"><strong>P1</strong> &nbsp;Multi-channel notifications (email, push, in-app)</div>
+        <div class="d-list-item blue"><strong>P1</strong> &nbsp;Incremental sync (mobile/web clients)</div>
+        <div class="d-list-item blue"><strong>P1</strong> &nbsp;Day / week / month view rendering</div>
+        <div class="d-list-item gray"><strong>P2</strong> &nbsp;Smart scheduling (find optimal slot)</div>
+        <div class="d-list-item gray"><strong>P2</strong> &nbsp;Room / resource booking</div>
+        <div class="d-list-item gray"><strong>P2</strong> &nbsp;CalDAV / iCal external sync</div>
       </div>
     </div>
   </div>
