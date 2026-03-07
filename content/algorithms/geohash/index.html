@@ -1,6 +1,6 @@
 {{phase 1 "What Is Geohash?" "3 min"}}
 
-{{say "A Geohash encodes a (latitude, longitude) coordinate pair as a short base32 string. The key property: <strong>strings with the same prefix are geographically close</strong>. 'dp3wj' and 'dp3wk' are neighboring cells. This turns a 2D spatial problem into a 1D string prefix problem — and 1D problems are fast."}}
+{{say "A Geohash encodes a (latitude, longitude) coordinate pair as a short base32 string. The key property: &lt;strong>strings with the same prefix are geographically close&lt;/strong>. 'dp3wj' and 'dp3wk' are neighboring cells. This turns a 2D spatial problem into a 1D string prefix problem — and 1D problems are fast."}}
 
 {{diagram "algo-geohash-overview"}}
 
@@ -18,11 +18,11 @@
 )}}
 
 {{think "Geohash precision 6 (~1.2 km × 0.6 km) is the sweet spot for food delivery restaurant lookup. Precision 7 (~150 m) is right for driver-rider matching in ride-hailing. Higher precision means smaller cells, more shards, fewer entities per cell — choose based on matching radius."
-  (whyNot "storing raw lat/lon in a database and querying with Haversine formula" "Finding restaurants within 5 km of (28.61, 77.20): WHERE ST_Distance(point, query_point) < 5000 — this scans every row, computing spherical distance for each. At 1 million restaurants, that's 1M floating-point trig operations per query. O(N) is unacceptable at real-time matching latency.")
+  (whyNot "storing raw lat/lon in a database and querying with Haversine formula" "Finding restaurants within 5 km of (28.61, 77.20): WHERE ST_Distance(point, query_point) &lt; 5000 — this scans every row, computing spherical distance for each. At 1 million restaurants, that's 1M floating-point trig operations per query. O(N) is unacceptable at real-time matching latency.")
   (how "geohash reduces 2D search to 1D prefix lookup" "Convert query point to geohash prefix 'dp3w'. All restaurants with geohash starting with 'dp3w' are in the same 5km²  cell. A B-tree index on the geohash string column makes this O(log N) instead of O(N).")
 }}
 
-{{hint "neighbors are the critical insight" "A proximity search cannot query only one cell — entities near the border of cell 'dp3w' might be closer to the query point than entities in the center of 'dp3w'. Always query the target cell <strong>plus all 8 neighbors</strong>. The 9-cell search is the correct approach."}}
+{{hint "neighbors are the critical insight" "A proximity search cannot query only one cell — entities near the border of cell 'dp3w' might be closer to the query point than entities in the center of 'dp3w'. Always query the target cell &lt;strong>plus all 8 neighbors&lt;/strong>. The 9-cell search is the correct approach."}}
 
 {{triggerQs "Phase 1 Trigger Questions"
   "What is the time complexity of a geohash proximity query vs a Haversine scan?"
@@ -116,7 +116,7 @@ print(encode(19.0760, 72.8777, precision=6))  # "te7udw" (Mumbai)
   (whatIf "two points have the same geohash" "They are in the same cell — not necessarily the same location. Geohash is lossy. Two points 100 meters apart with precision-6 may share a cell. Use geohash for coarse spatial filtering, then compute exact Haversine distance for final ranking/filtering.")
 }}
 
-{{hint "why longitude comes first in the bit interleaving" "Longitude spans 360° (-180 to 180) while latitude spans 180° (-90 to 90). Starting with longitude on the first bit means the first bisection splits the wider dimension, producing more square-shaped cells in early iterations. If latitude came first, early cells would be <span class='hl'>2:1 aspect ratio rectangles</span> — worse for proximity search because distance-to-edge differs by axis."}}
+{{hint "why longitude comes first in the bit interleaving" "Longitude spans 360° (-180 to 180) while latitude spans 180° (-90 to 90). Starting with longitude on the first bit means the first bisection splits the wider dimension, producing more square-shaped cells in early iterations. If latitude came first, early cells would be &lt;span class='hl'>2:1 aspect ratio rectangles&lt;/span> — worse for proximity search because distance-to-edge differs by axis."}}
 
 {{triggerQs "Encoding Questions"
   "How many bits does a precision-6 geohash use, and what does each bit represent?"
@@ -232,7 +232,7 @@ results = r.georadius(
   (whatIf "drivers move every 4 seconds and Redis GEO is updated on each move" "At 100K active drivers updating every 4s: 100K / 4 = 25K GEOADD operations/second. A single Redis node handles 100K ops/second comfortably. Driver locations expire via TTL — set TTL 30s on each GEOADD to automatically remove offline drivers.")
 }}
 
-{{hint "SQL LIKE 'prefix%' vs Redis GEORADIUS" "SQL with B-tree index on geohash column: <span class='hl'>9 separate LIKE queries</span> (one per cell), each O(log N). Total: ~9 × 0.5ms = <span class='hl'>4.5ms</span> on a million-row table. Redis GEORADIUS: single command, <span class='hl'>sub-millisecond</span> for 100K entries. Redis wins for real-time matching. SQL is fine for batch analytics or when you already have Postgres and latency budget is >10ms."}}
+{{hint "SQL LIKE 'prefix%' vs Redis GEORADIUS" "SQL with B-tree index on geohash column: &lt;span class='hl'>9 separate LIKE queries&lt;/span> (one per cell), each O(log N). Total: ~9 × 0.5ms = &lt;span class='hl'>4.5ms&lt;/span> on a million-row table. Redis GEORADIUS: single command, &lt;span class='hl'>sub-millisecond&lt;/span> for 100K entries. Redis wins for real-time matching. SQL is fine for batch analytics or when you already have Postgres and latency budget is >10ms."}}
 
 {{triggerQs "Database Integration Questions"
   "When would you use SQL geohash indexing over Redis GEO?"
@@ -319,14 +319,14 @@ results = r.georadius(
 
 {{think "The two-precision-level pattern (precision 6 for restaurants, precision 7 for partners) reflects update frequency. Restaurants move rarely — index once, query often. Partners move every 4 seconds — the smaller precision-7 cells reduce the number of stale results per GEORADIUS call because fewer entities fit in each cell."
   (whyNot "using a single precision for both restaurants and partners" "Precision 6 cells (~1.2 km) would return too many partners per cell in dense areas — a GEORADIUS at precision 6 in Manhattan might return 500 partners, then you filter 490 of them by exact distance. Precision 7 cells (~150 m) keep the per-cell count manageable: ~20-50 partners in dense areas. For restaurants (static), precision 6 is fine because they don't move and the 9-cell query covers the 5 km delivery radius.")
-  (whatIf "a city has very uneven density — dense downtown vs sparse suburbs" "Use adaptive precision: precision 7 in areas with >50 partners per cell, precision 6 in areas with <10. In practice, just use precision 7 everywhere and accept that suburban cells are mostly empty — empty cells cost nothing in Redis sorted sets. The O(log M) lookup is the same whether the cell has 0 or 50 entries.")
+  (whatIf "a city has very uneven density — dense downtown vs sparse suburbs" "Use adaptive precision: precision 7 in areas with >50 partners per cell, precision 6 in areas with &lt;10. In practice, just use precision 7 everywhere and accept that suburban cells are mostly empty — empty cells cost nothing in Redis sorted sets. The O(log M) lookup is the same whether the cell has 0 or 50 entries.")
 }}
 
 {{triggerQs "Food Delivery Geo Questions"
   "How do you handle the case where no partner is available within 2 km?"
   "Expand radius progressively: 2 km → 5 km → 8 km. If no partner at 8 km, mark order 'searching' and retry every 30s. Cap the search radius at platform-defined max (e.g., 10 km). Surface ETA based on distance to avoid unrealistic expectations for 8-km matches."
   "What happens when the GEORADIUS result includes partners who just went offline?"
-  "Partners' locations expire if not updated (TTL 30s). GEORADIUS may return a stale location for a partner who went offline < 30s ago. Validate availability: after GEORADIUS, check partner status in DynamoDB (or a Redis hash 'partner:{id}:status'). If offline, exclude and try next result."
+  "Partners' locations expire if not updated (TTL 30s). GEORADIUS may return a stale location for a partner who went offline &lt; 30s ago. Validate availability: after GEORADIUS, check partner status in DynamoDB (or a Redis hash 'partner:{id}:status'). If offline, exclude and try next result."
 }}
 
 {{phase 7 "Geohash Boundary Problem" "3 min"}}
@@ -344,7 +344,7 @@ This happens at the 180° meridian, the equator, and the prime meridian (0°). A
   (whatIf "you only query the exact cell and skip neighbors" "A restaurant at the border of cell 'dp3w' and cell 'dp3x' (1 meter from the query point) would be in a different cell. You query 'dp3w' only. The nearby restaurant is in 'dp3x'. You miss it. The user sees 'no restaurants nearby' when one exists 1 meter away. Always query 9 cells.")
 }}
 
-{{hint "the boundary problem has a fixed cost" "Querying 9 cells instead of 1 adds a constant <span class='hl'>8 extra lookups</span> — not 8× latency. In Redis, pipeline all 9 GEORADIUS calls in a single round trip: total latency stays under <span class='hl'>1ms</span>. In SQL, use a single query with WHERE geohash IN ('cell1', 'cell2', ..., 'cell9') — the B-tree handles 9 equality lookups in one index scan. The boundary fix is essentially free."}}
+{{hint "the boundary problem has a fixed cost" "Querying 9 cells instead of 1 adds a constant &lt;span class='hl'>8 extra lookups&lt;/span> — not 8× latency. In Redis, pipeline all 9 GEORADIUS calls in a single round trip: total latency stays under &lt;span class='hl'>1ms&lt;/span>. In SQL, use a single query with WHERE geohash IN ('cell1', 'cell2', ..., 'cell9') — the B-tree handles 9 equality lookups in one index scan. The boundary fix is essentially free."}}
 
 {{phase 8 "Interview Summary" "2 min"}}
 

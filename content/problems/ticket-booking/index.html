@@ -14,7 +14,7 @@ Does that align?`}}
 
 {{think "The hardest subproblem is seat-state consistency under burst traffic. At 100K concurrent users for 500 seats, seat state is contended at a ratio of 200:1. The design is essentially a distributed lock system with a payment window."
   (whyNot "optimistic locking (check-then-act in Postgres)" "Under 100K concurrent users, the retry rate with optimistic locking becomes exponential. Most users end up retrying 5–10 times. Redis SET NX is a single atomic operation — O(1) with no retry storm.")
-  (whatIf "Redis fails at the moment of seat lock" "During Redis failover (Sentinel promotes replica in < 30s), new lock attempts fail with 503. In-flight locks that were already acquired are still valid if the data was replicated synchronously. We use Redlock across 3 Redis nodes for safety — lock requires majority quorum.")
+  (whatIf "Redis fails at the moment of seat lock" "During Redis failover (Sentinel promotes replica in &lt; 30s), new lock attempts fail with 503. In-flight locks that were already acquired are still valid if the data was replicated synchronously. We use Redlock across 3 Redis nodes for safety — lock requires majority quorum.")
 }}
 
 {{hint "why seat locking is the core problem" "Payments take 2–5 seconds. During that window, the seat must be exclusively reserved. Without a lock, two users can both pass the 'is available?' check, pay, and both get the seat — a double-booking. The lock is the only mechanism that serializes access without a queue."}}
@@ -23,8 +23,8 @@ Does that align?`}}
   (row "Requirement" "Target")
   (row "Double-booking prevention" "99.999% — strong invariant")
   (row "Seat lock duration" "10 minutes (payment window)")
-  (row "Seat map load time" "< 500ms p99")
-  (row "Booking flow end-to-end" "< 2s excluding payment")
+  (row "Seat map load time" "&lt; 500ms p99")
+  (row "Booking flow end-to-end" "&lt; 2s excluding payment")
   (row "Concurrent users (rush)" "100K+ for popular show")
   (row "Availability" "99.99% (52 min downtime/year)")
   (row "Consistency" "Strong for seat locks, eventual for seat map views")
@@ -245,10 +245,10 @@ Booking APIs are the most sensitive — they interact with seat locks and paymen
 
 {{think "Why is idempotency key required on POST /bookings/lock? Network failures are common at scale. Without idempotency, a retry after a timeout creates two lock records for the same seats. With an idempotency key, the second request returns the original lock_token — the user doesn't double-lock."
   (whyNot "making lock idempotent via seat_ids deduplication" "Two requests with different idempotency keys but same seat_ids are legitimately different requests (e.g., user opened two browser tabs). Idempotency key ties to the client's intent, not the resource.")
-  (whatIf "idempotency key collides across users (UUID4 collision)" "UUID4 has 2^122 possible values. Probability of collision across 1 billion requests is < 10^-10. We scope idempotency keys per user_id anyway, making collision impossible in practice.")
+  (whatIf "idempotency key collides across users (UUID4 collision)" "UUID4 has 2^122 possible values. Probability of collision across 1 billion requests is &lt; 10^-10. We scope idempotency keys per user_id anyway, making collision impossible in practice.")
 }}
 
-{{hint "why split lock and confirm into two calls" "Payment is handled by the gateway and takes 2–5 seconds. During that time, the seat must stay locked. If we did lock+confirm atomically, we'd hold a database transaction for 5 seconds — blocking all other operations on those seat rows. Two-phase: lock (Redis, instant), pay (gateway, 2–5s), confirm (DB write, < 100ms)."}}
+{{hint "why split lock and confirm into two calls" "Payment is handled by the gateway and takes 2–5 seconds. During that time, the seat must stay locked. If we did lock+confirm atomically, we'd hold a database transaction for 5 seconds — blocking all other operations on those seat rows. Two-phase: lock (Redis, instant), pay (gateway, 2–5s), confirm (DB write, &lt; 100ms)."}}
 
 {{phase 3 "Seat Locking" "6 min"}}
 
@@ -356,7 +356,7 @@ Payment flows through <strong>async webhooks</strong> — not synchronous calls 
   "How does Booking Service know if a seat lock is still valid before confirming?"
   "On POST /bookings/confirm, Booking Service does GET lock:show:{id}:seat:{seat_id} and checks the value starts with the lock_token from the request. If the key is expired (TTL elapsed) or the value doesn't match (different token), return 409 — lock expired or stolen. Only proceed if all seat locks are verified valid."
   "What's the read vs write split strategy?"
-  "Reads: Show browsing → CloudFront CDN → Postgres read replicas (3 replicas). Seat map → Redis cache with 5s TTL + WebSocket invalidation. Writes: Seat locks → Redis Cluster. Booking confirm → Postgres primary (only path needing primary). This routing concentrates primary writes to < 600/sec under normal load."
+  "Reads: Show browsing → CloudFront CDN → Postgres read replicas (3 replicas). Seat map → Redis cache with 5s TTL + WebSocket invalidation. Writes: Seat locks → Redis Cluster. Booking confirm → Postgres primary (only path needing primary). This routing concentrates primary writes to &lt; 600/sec under normal load."
 }}
 
 {{phase 5 "Data Model" "5 min"}}
@@ -396,7 +396,7 @@ CREATE INDEX idx_bookings_show_active
 {{table "Storage Decisions" (rows
   (row "Entity" "Store" "Rationale")
   (row "Seat locks" "Redis SET NX EX 600" "Atomic, 1ms, auto-expiry. Source of truth for availability during checkout.")
-  (row "Bookings + payments" "Postgres primary" "ACID, foreign keys, reports. Write path for < 600 confirms/sec.")
+  (row "Bookings + payments" "Postgres primary" "ACID, foreign keys, reports. Write path for &lt; 600 confirms/sec.")
   (row "Seat map view" "Redis cache 5s TTL" "90% hit rate. 5s stale is acceptable — user sees slight lag in availability update.")
   (row "QR images" "S3 + CloudFront" "Static, immutable once generated. 1 write per booking, many reads.")
   (row "Booking history" "Postgres read replicas" "User sees last 12 months of bookings. 3 replicas for read scalability.")
@@ -441,7 +441,7 @@ def dequeue_batch(show_id: str, batch_size=1000):
 # Step 3: User gets "your turn" notification, proceeds to seat selection
 # Lock must be acquired within 5 minutes of notification`}}
 
-{{think "Why 1K dequeues/second for 500 seats? 500 seats × average 2 seats per booking = ~250 concurrent lock attempts. We dequeue 1K/second to ensure the locking layer sees 4x the number of real competitors per second — fast enough to fill all seats in 1-2 seconds, slow enough to keep Redis lock latency < 10ms."
+{{think "Why 1K dequeues/second for 500 seats? 500 seats × average 2 seats per booking = ~250 concurrent lock attempts. We dequeue 1K/second to ensure the locking layer sees 4x the number of real competitors per second — fast enough to fill all seats in 1-2 seconds, slow enough to keep Redis lock latency &lt; 10ms."
   (whatIf "user's internet disconnects while in queue" "Queue position is server-side. When user reconnects (same session or new browser tab), they poll GET /queue/status with their user_id. Server returns their current position. Queue is not browser-state."
   )
 }}

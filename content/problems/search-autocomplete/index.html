@@ -299,7 +299,7 @@ class AutocompleteHandler:
 
 {{think "Should we have one trie per language or one trie for all languages?"
   (whyNot "single combined trie" "A combined trie for en+es+zh+... would be 8-10GB. It can't be kept hot in CPU cache. Per-language tries are 300MB-1.5GB each, fit in L3 cache, and allow independent update schedules.")
-  (whatIf "a language trie server crashes" "We have 50 replicas per language. Load balancer detects failure via health check in <10s and stops routing. The remaining 49 replicas absorb the load — each handles ~6K QPS, headroom is ~30%.")
+  (whatIf "a language trie server crashes" "We have 50 replicas per language. Load balancer detects failure via health check in &lt;10s and stops routing. The remaining 49 replicas absorb the load — each handles ~6K QPS, headroom is ~30%.")
 }}
 
 {{hint "CDN for autocomplete" "CloudFront caches GET /autocomplete?q=new+y&lang=en for 60 seconds. The top 10K prefixes represent ~90% of traffic. This cuts origin QPS from 290K to ~29K."}}
@@ -509,7 +509,7 @@ CREATE TABLE query_counts (
   (how "trie persistence" "Serialize the trie to Protocol Buffers, gzip it (~500MB for English), upload to S3. On service restart, download from S3 (takes 90s) and deserialize. This is the cold start path — production restarts are rolling so most replicas stay warm.")
 }}
 
-{{hint "Redis Hash for user history" "We store uid → {query: click_count} as a Redis Hash. HGETALL takes <1ms for 100-entry hashes. We cap at 100 queries with a background LRU eviction job running every 15 minutes."}}
+{{hint "Redis Hash for user history" "We store uid → {query: click_count} as a Redis Hash. HGETALL takes &lt;1ms for 100-entry hashes. We cap at 100 queries with a background LRU eviction job running every 15 minutes."}}
 
 {{phase 9 "Personalization" "4 min"}}
 
@@ -563,7 +563,7 @@ def blend_personal(
 
 {{think "Should personalization happen at the CDN or at the service?"
   (whyNot "personalization at CDN" "CDN caches are keyed by URL. Adding uid to the cache key defeats the purpose — we'd get a unique cache entry per user × prefix. At 100M users × 1K popular prefixes = 100B cache entries. Not viable.")
-  (how "CDN + service split" "CDN caches global top-10 (no uid in key). Service fetches from CDN, then blends personalization in <2ms using the user's Redis hash. Total: 5ms CDN + 8ms Redis = 13ms vs 8ms without personalization. Acceptable overhead.")
+  (how "CDN + service split" "CDN caches global top-10 (no uid in key). Service fetches from CDN, then blends personalization in &lt;2ms using the user's Redis hash. Total: 5ms CDN + 8ms Redis = 13ms vs 8ms without personalization. Acceptable overhead.")
 }}
 
 {{hint "privacy: never log personal blend results" "The personalized suggestions shown to a user are computed ephemerally and never stored. We only store the user's query history (what they submitted), not what suggestions we showed them — avoids filter bubble feedback loops."}}
@@ -597,13 +597,13 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
 )}}
 
 {{think "How do we handle multi-region distribution of the trie?"
-  (whyNot "single-region trie with global CDN" "CDN adds <10ms for cached prefixes but uncached requests from APAC to us-east-1 add 150ms round-trip. For cold trie lookups this blows the 100ms budget.")
+  (whyNot "single-region trie with global CDN" "CDN adds &lt;10ms for cached prefixes but uncached requests from APAC to us-east-1 add 150ms round-trip. For cold trie lookups this blows the 100ms budget.")
   (whatIf "trie is stale in a remote region" "We accept 1-2 hours of staleness. The trie rebuild is pushed to regional S3 buckets simultaneously. Each region's autocomplete service downloads and hot-swaps independently. Trending queries use Redis replication with ~100ms cross-region lag.")
 }}
 
 {{hint "instance sizing" "Use memory-optimized instances (r6g.2xlarge, 64GB RAM). Each trie service holds 1.5GB per language × 3 languages = 4.5GB for the trie, plus 2GB for OS/runtime. 64GB allows 13 language tries per instance if needed."}}
 
-{{checklist "Scaling checklist" "CDN caches top 10K prefixes with 60s TTL — verify cache hit ratio > 88%" "Each trie service replica handles 6K QPS — load test before production" "Redis cluster has 3 nodes for HA — no single point of failure" "Kafka partitions match consumer parallelism — 50 partitions, 50 Flink workers" "Trie rebuild job completes in <30 min — alert on >45 min runtimes" "Multi-region: push trie snapshots to regional S3 buckets within 5 min of rebuild"}}
+{{checklist "Scaling checklist" "CDN caches top 10K prefixes with 60s TTL — verify cache hit ratio > 88%" "Each trie service replica handles 6K QPS — load test before production" "Redis cluster has 3 nodes for HA — no single point of failure" "Kafka partitions match consumer parallelism — 50 partitions, 50 Flink workers" "Trie rebuild job completes in &lt;30 min — alert on >45 min runtimes" "Multi-region: push trie snapshots to regional S3 buckets within 5 min of rebuild"}}
 
 {{phase 11 "Failure Modes" "4 min"}}
 
@@ -618,7 +618,7 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
 
 {{table "Failure Scenarios" (rows
   (row "Failure" "Symptom" "Mitigation" "SLO Impact")
-  (row "Trie service down (1 replica)" "QPS redistributed" "Load balancer removes in <10s" "None — 49 replicas absorb")
+  (row "Trie service down (1 replica)" "QPS redistributed" "Load balancer removes in &lt;10s" "None — 49 replicas absorb")
   (row "Trie service down (all)" "No suggestions" "Fallback to Elasticsearch (50ms)" "Latency degrades to 80ms p99")
   (row "Redis cache down" "No L1 cache" "Hit trie directly — 12ms instead of 8ms" "Minimal — 4ms additional latency")
   (row "Kafka lag (>1 hour)" "Stale trie updates" "Accept stale — trie serves last good state" "Freshness SLO violated, not availability")
@@ -628,7 +628,7 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
 
 {{think "What's the blast radius if the hot-path trending updater writes bad data to Redis?"
   (whyNot "no circuit breaker on trending writes" "A bug in the trending detector could inject garbage queries into suggestions for all users. Without a circuit breaker, this would propagate globally in 60 seconds.")
-  (how "circuit breaker" "The trending job validates: query length < 200 chars, no control characters, count < 10M (sanity bound). If validation fails, it logs and skips the write. The trie falls back to hourly rebuild data. Monitoring alerts on 'trending writes rejected > 100/min'.")
+  (how "circuit breaker" "The trending job validates: query length &lt; 200 chars, no control characters, count &lt; 10M (sanity bound). If validation fails, it logs and skips the write. The trie falls back to hourly rebuild data. Monitoring alerts on 'trending writes rejected > 100/min'.")
 }}
 
 {{hint "Elasticsearch fallback SLA" "Elasticsearch fallback handles cold-path misses and full trie outages. Size the ES cluster for 30K QPS (10% of total traffic). At that QPS, use 5 ES nodes with 16 vCPU each. Keep the autocomplete index warm with a background ping job."}}

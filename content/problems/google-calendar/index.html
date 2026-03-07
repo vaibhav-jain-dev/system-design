@@ -15,7 +15,7 @@
   (row "Priority" "Feature" "Rationale")
   (row "P0" "Event CRUD (create, update, delete)" "Core product — nothing works without it")
   (row "P0" "Recurring events (RRULE RFC 5545)" "40%+ of all events are recurring")
-  (row "P0" "Multi-device sync (<5s lag)" "Users expect consistency across phone, desktop, web")
+  (row "P0" "Multi-device sync (&lt;5s lag)" "Users expect consistency across phone, desktop, web")
   (row "P1" "Calendar sharing + ACL (owner/writer/reader)" "Collaboration is a primary use case")
   (row "P1" "Reminders and push notifications" "Core engagement feature")
   (row "P1" "Free/busy queries for scheduling" "Required for invite acceptance flow")
@@ -29,7 +29,7 @@
   (how "status field" "event.status = CANCELLED with cancelled_at + cancelled_by. Never physically delete rows.")
 }}
 
-{{hint "why 99.99% availability?" "Calendar is a daily-driver app. <span class='hl-red'>99.9% = 8.7h downtime/year</span> — unacceptable for 500M users. <span class='hl'>99.99% = 52 min/year</span>. Achieve via multi-AZ PostgreSQL with read replicas and Redis caching for the hot read path."}}
+{{hint "why 99.99% availability?" "Calendar is a daily-driver app. &lt;span class='hl-red'>99.9% = 8.7h downtime/year&lt;/span> — unacceptable for 500M users. &lt;span class='hl'>99.99% = 52 min/year&lt;/span>. Achieve via multi-AZ PostgreSQL with read replicas and Redis caching for the hot read path."}}
 
 {{hint "p99 latency target" "200ms p99 for event fetch covers the 'open calendar' interaction. 100ms for calendar view (list of events in a date range) is achievable with the right index — (calendar_id, start_utc) covering index hits the query directly without a heap fetch."}}
 
@@ -244,13 +244,13 @@
   (how "idempotency on retry" "Client generates event_id before the first request. On retry, same PUT with same event_id hits upsert logic. Server returns 200 with the existing event unchanged.")
 }}
 
-{{hint "ETag for optimistic locking" "<strong>If-Match: 'v5'</strong> prevents the lost-update problem: two clients both fetch event at v5, both try to PUT — the second gets <span class='hl-red'>412 Precondition Failed</span> and must re-fetch before retrying. Prevents silent overwrites in concurrent edit scenarios."}}
+{{hint "ETag for optimistic locking" "&lt;strong>If-Match: 'v5'&lt;/strong> prevents the lost-update problem: two clients both fetch event at v5, both try to PUT — the second gets &lt;span class='hl-red'>412 Precondition Failed&lt;/span> and must re-fetch before retrying. Prevents silent overwrites in concurrent edit scenarios."}}
 
 {{hint "sync_token encoding" "Base64(JSON{last_modified_at: timestamp, calendar_id: string}). The server uses last_modified_at as a cursor in the events table. On 410 Gone (token too old), client does a full sync and gets a fresh token."}}
 
 {{triggerQs "API Design Questions"
   "Why PUT instead of PATCH for updates?"
-  "PUT sends the full resource so the server always has the complete event state. PATCH requires a diff format (JSON Patch RFC 6902) which adds client complexity for minimal benefit. Calendar events are small — <2KB — so full replacement is fine."
+  "PUT sends the full resource so the server always has the complete event state. PATCH requires a diff format (JSON Patch RFC 6902) which adds client complexity for minimal benefit. Calendar events are small — &lt;2KB — so full replacement is fine."
   "How do you handle the sync_token expiring?"
   "sync_tokens are valid for 7 days. After expiry, GET /events returns 410 Gone. The client discards its local cache, does a full sync, and stores the new sync_token. This happens rarely — only after 7 days of no sync."
   "How do you paginate large calendars?"
@@ -307,11 +307,11 @@ def get_events_in_window(calendar_id, window_start, window_end):
 
 {{think "Pre-expanding vs on-the-fly is the key recurring event design decision."
   (whyNot "pre-expand all occurrences into rows" "A weekly recurring event with no end date generates infinite rows. Even with COUNT=52, 2B events/day * 40% recurring * 52 = 41B rows just for one year. Storage cost explodes. More critically, editing the master event requires updating all 52 rows — O(N) write for a single user action.")
-  (whatIf "query window is 1 year" "RRULE expansion of weekly for 1 year = 52 occurrences. At 1μs per occurrence, that's 52μs of CPU. Completely negligible. The expensive case is a daily recurring event with no end date over a 5-year window = 1,825 occurrences, still <2ms of expansion.")
+  (whatIf "query window is 1 year" "RRULE expansion of weekly for 1 year = 52 occurrences. At 1μs per occurrence, that's 52μs of CPU. Completely negligible. The expensive case is a daily recurring event with no end date over a 5-year window = 1,825 occurrences, still &lt;2ms of expansion.")
   (how "exception handling" "Two types of exceptions: EXDATE (cancelled instance) and modified instance. Store both in recurring_exceptions table keyed by (master_event_id, occurrence_date). Lookup is O(1) per occurrence.")
 }}
 
-{{hint "DTSTART timezone matters" "RRULE expansion must use the event's <strong>local timezone</strong> (e.g., America/New_York), not the UTC offset. A weekly Monday event at 9am ET expands to 9am local time after DST transitions — <span class='hl'>14:00 UTC in winter</span> and <span class='hl'>13:00 UTC in summer</span>. <span class='hl-red'>Expanding in UTC produces wrong times for 6 months of the year.</span>"}}
+{{hint "DTSTART timezone matters" "RRULE expansion must use the event's &lt;strong>local timezone&lt;/strong> (e.g., America/New_York), not the UTC offset. A weekly Monday event at 9am ET expands to 9am local time after DST transitions — &lt;span class='hl'>14:00 UTC in winter&lt;/span> and &lt;span class='hl'>13:00 UTC in summer&lt;/span>. &lt;span class='hl-red'>Expanding in UTC produces wrong times for 6 months of the year.&lt;/span>"}}
 
 {{hint "recur_until index" "Index on (calendar_id, start_utc, recur_until) lets the query skip master events that ended before the window. Without this, every query would hit every recurring event ever created for that calendar."}}
 
@@ -336,10 +336,10 @@ def get_events_in_window(calendar_id, window_start, window_end):
 {{think "PostgreSQL as the primary store is the right call for calendar data, not a key-value store."
   (whyNot "DynamoDB" "Calendar queries are range scans: 'all events between March 1 and March 31'. DynamoDB requires sort key range queries — that works, but RRULE expansion needs JOIN-like lookups between master events and exceptions. PostgreSQL handles this natively with indexed foreign keys. Also: ACID transactions matter when updating master + exceptions atomically.")
   (whatIf "PostgreSQL goes down" "Read replicas serve the read path. Writes queue in a client-side retry buffer. 99.99% availability requires multi-AZ with automatic failover via RDS Multi-AZ or Patroni. Failover time: ~30s.")
-  (how "read replicas" "All GET /events requests route to read replicas. PUT/DELETE route to primary. Replica lag is typically <100ms — acceptable since sync_token is based on primary's write timestamp.")
+  (how "read replicas" "All GET /events requests route to read replicas. PUT/DELETE route to primary. Replica lag is typically &lt;100ms — acceptable since sync_token is based on primary's write timestamp.")
 }}
 
-{{hint "Kafka for notifications" "Writing to Kafka on event save is a fire-and-forget O(1) append. If we computed reminders synchronously on event save, a user creating 100 recurring events would trigger <span class='hl-red'>100 × 52 = 5,200 reminder inserts in the hot path</span>. Kafka decouples this — the notification worker reads events and schedules reminders asynchronously."}}
+{{hint "Kafka for notifications" "Writing to Kafka on event save is a fire-and-forget O(1) append. If we computed reminders synchronously on event save, a user creating 100 recurring events would trigger &lt;span class='hl-red'>100 × 52 = 5,200 reminder inserts in the hot path&lt;/span>. Kafka decouples this — the notification worker reads events and schedules reminders asynchronously."}}
 
 {{hint "Calendar Sync Service" "Dedicated service maintains sync_token state and delta computation. Separating it from the API service allows independent scaling — sync load spikes when many users open the app simultaneously (e.g., Monday morning), while write load is more uniform."}}
 
@@ -394,7 +394,7 @@ WHERE acl.user_id = ANY($1::text[])   -- array of attendee user_ids
   (whatIf "free/busy cache miss for a user with 100 attendees on their invite" "Fall back to PostgreSQL. Pre-warm cache asynchronously after the free/busy response. Subsequent queries within TTL hit Redis.")
 }}
 
-{{hint "all-day events" "All-day events (no time, just date) don't overlap the same way. Store as <code>start = date 00:00:00 UTC, end = date+1 00:00:00 UTC</code>. The overlap predicate still works correctly. Flag with <code>is_all_day=true</code> for display purposes only."}}
+{{hint "all-day events" "All-day events (no time, just date) don't overlap the same way. Store as &lt;code>start = date 00:00:00 UTC, end = date+1 00:00:00 UTC&lt;/code>. The overlap predicate still works correctly. Flag with &lt;code>is_all_day=true&lt;/code> for display purposes only."}}
 
 {{hint "recurring conflict detection" "For recurring events, expand all occurrences in the query window first, then run overlap detection. Can't detect recurring conflicts against the master row alone — the RRULE must be materialized."}}
 
@@ -488,7 +488,7 @@ CREATE INDEX idx_acl_user             ON calendar_acl (user_id);              --
   <li>To query 'all events attendee X is on': <code>CREATE INDEX ON events USING GIN(attendees)</code></li>
 </ul>`}}
 
-{{hint "recur_until denormalization" "recur_until is derived from the RRULE (UNTIL or COUNT * interval). Stored as a column so the index idx_events_calendar_time can skip master events with recur_until < window_start. Without this, every query scans all recurring masters regardless of whether they're still active."}}
+{{hint "recur_until denormalization" "recur_until is derived from the RRULE (UNTIL or COUNT * interval). Stored as a column so the index idx_events_calendar_time can skip master events with recur_until &lt; window_start. Without this, every query scans all recurring masters regardless of whether they're still active."}}
 
 {{phase 7 "Notifications & Reminders" "4 min"}}
 
@@ -542,7 +542,7 @@ def reminder_worker():
   (how "timezone-aware fire_at calculation" "Always compute fire_at in UTC: fire_at_utc = start_utc - timedelta(minutes=N). Never subtract minutes from a local time — DST transitions would produce incorrect fire times.")
 }}
 
-{{hint "daily digest notifications" "Daily digest (7am local time) is a different pattern — use a cron job that runs at midnight UTC, computes 7am UTC for each user's timezone, and enqueues in the Redis sorted set with the correct epoch. <span class='hl-red'>Don't use a fixed UTC time for all users</span> — that sends digests at random local times."}}
+{{hint "daily digest notifications" "Daily digest (7am local time) is a different pattern — use a cron job that runs at midnight UTC, computes 7am UTC for each user's timezone, and enqueues in the Redis sorted set with the correct epoch. &lt;span class='hl-red'>Don't use a fixed UTC time for all users&lt;/span> — that sends digests at random local times."}}
 
 {{hint "FCM vs APNs token management" "Push tokens expire and rotate. Store device tokens in a push_tokens table (user_id, platform, token, updated_at). On FCM/APNs registration failure, remove the stale token. Periodic cleanup of tokens not updated in 90 days."}}
 
@@ -602,7 +602,7 @@ def expand_correct(master_start_utc, timezone_str, rrule_str, window_start, wind
   (how "floating events" "All-day events like birthdays have no timezone — they 'float' with the viewer's local date. Store is_all_day=true and start as midnight UTC. On read, display the date portion only, adjusted to user's local timezone. A birthday on March 9 shows March 9 whether viewed from Tokyo or New York.")
 }}
 
-{{hint "storing both UTC and timezone" "<strong>start_utc</strong> gives a precise instant for sorting, conflict detection, and reminder scheduling. <strong>timezone</strong> gives the wall-clock context for display and RRULE expansion. You need both — one without the other is incomplete."}}
+{{hint "storing both UTC and timezone" "&lt;strong>start_utc&lt;/strong> gives a precise instant for sorting, conflict detection, and reminder scheduling. &lt;strong>timezone&lt;/strong> gives the wall-clock context for display and RRULE expansion. You need both — one without the other is incomplete."}}
 
 {{hint "test DST with America/Lord_Howe" "Lord Howe Island (Australia) has a 30-minute DST offset change — the most unusual DST rule. If your timezone handling passes Lord Howe Island tests, it handles all 400+ IANA timezones correctly."}}
 
@@ -625,7 +625,7 @@ def expand_correct(master_start_utc, timezone_str, rrule_str, window_start, wind
 {{table "Sync Strategy Comparison" (rows
   (row "Strategy" "Data transferred" "Server load" "Latency" "Complexity")
   (row "Full sync (every open)" "All 10K events, ~5MB" "Very high — 350K RPS * 5MB = unsustainable" "500ms-2s" "Low")
-  (row "Pull delta (sync_token)" "Only changed events, ~5-50KB" "Low — 95% of syncs return <10 events" "50-200ms" "Medium")
+  (row "Pull delta (sync_token)" "Only changed events, ~5-50KB" "Low — 95% of syncs return &lt;10 events" "50-200ms" "Medium")
   (row "Push via WebSocket" "Real-time, near-zero data" "High — 500M persistent connections" "10-50ms" "High")
   (row "Hybrid: push + pull delta" "Push invalidation, pull changes" "Medium" "50-100ms" "High")
 )}}
@@ -674,7 +674,7 @@ def get_events_delta(calendar_id, sync_token=None, page_token=None):
   (how "CANCELLED events in delta sync" "Deleted events (status=CANCELLED) must appear in delta sync responses so clients know to remove them from local storage. If you filter them out, the client's local copy is stale forever. Include all status values in the delta query.")
 }}
 
-{{hint "ETag on GET responses" "Return <code>ETag: 'v5'</code> on every GET /events/{id}. Client stores it. On PUT, sends <code>If-Match: 'v5'</code>. If another device updated the event in between (etag now 'v6'), server returns <span class='hl-red'>412 Precondition Failed</span>. Client must re-fetch before retrying. Without ETag, concurrent edits silently overwrite each other."}}
+{{hint "ETag on GET responses" "Return &lt;code>ETag: 'v5'&lt;/code> on every GET /events/{id}. Client stores it. On PUT, sends &lt;code>If-Match: 'v5'&lt;/code>. If another device updated the event in between (etag now 'v6'), server returns &lt;span class='hl-red'>412 Precondition Failed&lt;/span>. Client must re-fetch before retrying. Without ETag, concurrent edits silently overwrite each other."}}
 
 {{hint "why not WebSockets for sync?" "WebSockets require persistent server-side connection state for 500M users — that's 500M TCP connections across the server fleet. Load balancers must be sticky. Stateless delta pull via HTTPS scales to any size without server-side state per connection."}}
 
@@ -715,7 +715,7 @@ def get_events_delta(calendar_id, sync_token=None, page_token=None):
   (how "5 database shards" "shard_id = hash(user_id) % 5. At 2TB/day across 5 shards = 400GB/shard/day. Use PostgreSQL with 20TB NVMe SSDs per shard = 50 days of raw capacity. Hot data (last 90 days) stays on SSD; older data streams to S3 via pg_partman time partitioning.")
 }}
 
-{{hint "Cache hit rate is the primary scaling metric" "If <span class='hl'>95%</span> of calendar views are served from Redis, PostgreSQL handles only 5% of 460K RPS = <span class='hl'>23K RPS</span> — well within 5 shards' capacity. Monitor cache hit rate per shard. If it drops below <span class='hl-red'>90%</span>, increase Redis cluster memory or reduce TTL churn."}}
+{{hint "Cache hit rate is the primary scaling metric" "If &lt;span class='hl'>95%&lt;/span> of calendar views are served from Redis, PostgreSQL handles only 5% of 460K RPS = &lt;span class='hl'>23K RPS&lt;/span> — well within 5 shards' capacity. Monitor cache hit rate per shard. If it drops below &lt;span class='hl-red'>90%&lt;/span>, increase Redis cluster memory or reduce TTL churn."}}
 
 {{hint "CDN for static calendar assets" "The calendar UI (JS, CSS, locale data) is static. Serve from CloudFront with 1-year cache headers. Reduces origin load for the ~350K static asset requests per second at peak."}}
 
@@ -758,9 +758,9 @@ WHERE calendar_id IN (
   (whatIf "an assistant (writer) creates a recurring meeting on the exec's calendar and the assistant leaves the company" "The meeting was created on behalf of the exec (organizer_id = exec's user_id). Revoking the assistant's ACL doesn't affect the event — events are owned by the calendar, not the creator. The exec still owns the meeting.")
 }}
 
-{{hint "freeBusyReader role" "<strong>freeBusyReader</strong> can see only busy/free blocks — no titles, no attendees, no descriptions. Used for cross-organization scheduling where you want availability without exposing meeting content. Implemented by filtering event fields in the /freeBusy response based on the requester's ACL role — <strong>the DB returns full rows; the serializer strips fields.</strong>"}}
+{{hint "freeBusyReader role" "&lt;strong>freeBusyReader&lt;/strong> can see only busy/free blocks — no titles, no attendees, no descriptions. Used for cross-organization scheduling where you want availability without exposing meeting content. Implemented by filtering event fields in the /freeBusy response based on the requester's ACL role — &lt;strong>the DB returns full rows; the serializer strips fields.&lt;/strong>"}}
 
-{{hint "ACL cache invalidation" "Cache per-user ACL in Redis with <span class='hl'>TTL 5 minutes</span>: <code>acl:{user_id} → set of {calendar_id:role}</code>. Invalidate on any calendar_acl write. 5-minute stale ACL is a product decision not a security flaw — <span class='hl-red'>for strict security, TTL = 0 and always query the DB</span>."}}
+{{hint "ACL cache invalidation" "Cache per-user ACL in Redis with &lt;span class='hl'>TTL 5 minutes&lt;/span>: &lt;code>acl:{user_id} → set of {calendar_id:role}&lt;/code>. Invalidate on any calendar_acl write. 5-minute stale ACL is a product decision not a security flaw — &lt;span class='hl-red'>for strict security, TTL = 0 and always query the DB&lt;/span>."}}
 
 {{triggerQs "Sharing & Permissions Questions"
   "How do you implement 'view only the title, hide description and attendees' for reader role?"
@@ -781,7 +781,7 @@ WHERE calendar_id IN (
 
 {{diagram "gc-calendar-view"}}
 
-{{checklist "Store events in UTC with IANA timezone name — never UTC offsets" "RRULE on master row, expand on-the-fly within query window, exceptions in recurring_exceptions table" "PUT for idempotent event creation — mobile clients retry safely" "sync_token = Base64(calendar_id + last_synced_at), 7-day expiry, 410 Gone triggers full sync" "Conflict detection: start_utc < requested_end AND end_utc > requested_start with covering index" "Redis sorted set as delay queue for reminders (score = fire_at_epoch), ZPOPMIN every 1s" "ACL cached in Redis per user (TTL 5min), invalidated on revocation" "Soft deletes with status=CANCELLED — never hard delete, 30-day tombstone in delta sync"}}
+{{checklist "Store events in UTC with IANA timezone name — never UTC offsets" "RRULE on master row, expand on-the-fly within query window, exceptions in recurring_exceptions table" "PUT for idempotent event creation — mobile clients retry safely" "sync_token = Base64(calendar_id + last_synced_at), 7-day expiry, 410 Gone triggers full sync" "Conflict detection: start_utc &lt; requested_end AND end_utc > requested_start with covering index" "Redis sorted set as delay queue for reminders (score = fire_at_epoch), ZPOPMIN every 1s" "ACL cached in Redis per user (TTL 5min), invalidated on revocation" "Soft deletes with status=CANCELLED — never hard delete, 30-day tombstone in delta sync"}}
 
 {{deepQA "Critical Interview Questions" `
 <div class="dqa-item">

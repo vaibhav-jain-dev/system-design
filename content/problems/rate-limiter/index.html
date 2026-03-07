@@ -86,9 +86,9 @@
 
 {{diagram "rl-capacity-estimation"}}
 
-{{hint "why estimate ops/sec before picking storage?" "At <span class='hl'>500K req/s</span>, even a <span class='hl'>5ms</span> Redis call costs <span class='hl'>2,500 CPU-seconds/s</span> of parallel capacity across the fleet. DynamoDB's <strong>10–20ms</strong> latency is simply incompatible with a hot-path rate check — this constraint selects Redis before we even compare features."}}
+{{hint "why estimate ops/sec before picking storage?" "At &lt;span class='hl'>500K req/s&lt;/span>, even a &lt;span class='hl'>5ms&lt;/span> Redis call costs &lt;span class='hl'>2,500 CPU-seconds/s&lt;/span> of parallel capacity across the fleet. DynamoDB's &lt;strong>10–20ms&lt;/strong> latency is simply incompatible with a hot-path rate check — this constraint selects Redis before we even compare features."}}
 
-{{say "ElastiCache r6g.large: <strong>100K+ ops/s per node</strong>. A 3-shard cluster = <span class='hl'>300K+ ops/s</span>. For 500K peak, 6 nodes or Lua scripts to halve round trips."}}
+{{say "ElastiCache r6g.large: &lt;strong>100K+ ops/s per node&lt;/strong>. A 3-shard cluster = &lt;span class='hl'>300K+ ops/s&lt;/span>. For 500K peak, 6 nodes or Lua scripts to halve round trips."}}
 
 {{hint "why Lua reduces round trips?" `Sliding window needs three Redis calls:
 <ul>
@@ -315,7 +315,7 @@ Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</
   (how "the IETF draft standardizes rate limit headers" "The draft RateLimit header standard defines RateLimit-Limit, RateLimit-Remaining, and RateLimit-Reset as official HTTP headers. X-RateLimit-* prefixed headers are the current convention (used by GitHub, Stripe, Twitter). Adopt the X- prefix now and plan to support the IETF standard when it is finalized.")
 }}
 
-{{hint "why rate headers on every response?" "Without headers, clients have no visibility into their quota — they blast until <span class='hl'>429</span>, then retry aggressively, creating a second spike. With <strong>X-RateLimit-Remaining</strong>, well-behaved SDKs (Stripe, AWS) slow down proactively at <span class='hl'>10% remaining</span>. This turns a thundering herd of retries into smooth self-throttling — same traffic, zero retry storms."}}
+{{hint "why rate headers on every response?" "Without headers, clients have no visibility into their quota — they blast until &lt;span class='hl'>429&lt;/span>, then retry aggressively, creating a second spike. With &lt;strong>X-RateLimit-Remaining&lt;/strong>, well-behaved SDKs (Stripe, AWS) slow down proactively at &lt;span class='hl'>10% remaining&lt;/span>. This turns a thundering herd of retries into smooth self-throttling — same traffic, zero retry storms."}}
 
 {{triggerQs "Questions about rate headers"
   "What happens if a client ignores the rate limit headers?"
@@ -342,7 +342,7 @@ Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</
 
 {{diagram "rl-token-bucket"}}
 
-{{hint "why Lua for token bucket?" "Token bucket requires a <span class='hl-blue'>read-modify-write</span> sequence: read current tokens → calculate refill → check if allowed → write new count. Without <span class='hl-blue'>atomicity</span>, two concurrent requests both read token count = 1, both see 'allowed', both decrement — <span class='hl-red'>2 requests get through when only 1 token remained</span>. Lua runs the entire sequence as a single atomic operation on Redis — no other command can interleave."}}
+{{hint "why Lua for token bucket?" "Token bucket requires a &lt;span class='hl-blue'>read-modify-write&lt;/span> sequence: read current tokens → calculate refill → check if allowed → write new count. Without &lt;span class='hl-blue'>atomicity&lt;/span>, two concurrent requests both read token count = 1, both see 'allowed', both decrement — &lt;span class='hl-red'>2 requests get through when only 1 token remained&lt;/span>. Lua runs the entire sequence as a single atomic operation on Redis — no other command can interleave."}}
 
 {{code "python" `import time
 import redis
@@ -472,7 +472,7 @@ class SlidingWindowCounter:
 {{avoid "Fixed Window has the boundary burst problem: a user can send 100 requests at 11:59:59 and 100 more at 12:00:01, effectively getting 200 requests in 2 seconds. Use Sliding Window Counter instead for accurate rate limiting."}}
 
 {{compare "Algorithm Selection" (options
-  (best "Sliding Window Counter" "Best balance: O(1) memory per key, <1% error vs true sliding window, no boundary burst. Used by Cloudflare and Stripe.")
+  (best "Sliding Window Counter" "Best balance: O(1) memory per key, &lt;1% error vs true sliding window, no boundary burst. Used by Cloudflare and Stripe.")
   (alt "Token Bucket" "Great for APIs that want to allow bursts. Used by AWS API Gateway. Slightly more complex state management.")
   (alt "Fixed Window" "Simplest to implement and debug. Fine if you accept 2x burst at boundaries. Good for MVP rate limiting.")
   (nofit "Sliding Window Log" "O(N) memory per key where N is requests in window. Does not scale for high-throughput APIs. Only use for very low rate limits like login attempts.")
@@ -570,7 +570,7 @@ async def rate_limit_middleware(request: Request, call_next):
 
 {{key "The rate limiter must add under 1ms latency. Redis Lua scripts make the check atomic and avoid multiple round trips. A single Lua eval replaces what would be 3 separate Redis commands."}}
 
-{{hint "why include rate headers on allowed responses, not just 429s?" "A well-behaved SDK reads <strong>X-RateLimit-Remaining</strong> and slows down when it drops below <span class='hl'>10%</span>. This prevents the retry storm that follows a 429 wave — a storm that itself causes another wave of 429s. Headers on successful responses are what make smooth self-throttling possible."}}
+{{hint "why include rate headers on allowed responses, not just 429s?" "A well-behaved SDK reads &lt;strong>X-RateLimit-Remaining&lt;/strong> and slows down when it drops below &lt;span class='hl'>10%&lt;/span>. This prevents the retry storm that follows a 429 wave — a storm that itself causes another wave of 429s. Headers on successful responses are what make smooth self-throttling possible."}}
 
 {{triggerQs "Questions this section might trigger"
   "Where exactly should the rate limiter sit — API gateway, load balancer, or application code?"
@@ -604,7 +604,7 @@ async def rate_limit_middleware(request: Request, call_next):
 
 {{diagram "rl-distributed-challenges"}}
 
-{{hint "why is multi-region the hardest sub-problem?" "Single-region is easy — all app servers share one Redis cluster; Lua atomicity handles concurrent writes. Multi-region breaks this: a synchronous cross-region Redis read adds <span class='hl'>50–150ms</span> depending on geography. At <strong>500K req/s</strong>, that's an extra <span class='hl'>25,000–75,000 seconds</span> of latency per second fleet-wide — a complete non-starter on the hot path."}}
+{{hint "why is multi-region the hardest sub-problem?" "Single-region is easy — all app servers share one Redis cluster; Lua atomicity handles concurrent writes. Multi-region breaks this: a synchronous cross-region Redis read adds &lt;span class='hl'>50–150ms&lt;/span> depending on geography. At &lt;strong>500K req/s&lt;/strong>, that's an extra &lt;span class='hl'>25,000–75,000 seconds&lt;/span> of latency per second fleet-wide — a complete non-starter on the hot path."}}
 
 {{diagram "rl-multi-region"}}
 
@@ -693,9 +693,9 @@ return {1, limit - count - 1, 0}
   (whatIf "you switch algorithms for an endpoint after deployment" "Old keys in Redis have the wrong data structure. Two options: let old keys expire naturally (within one window duration), or run a migration script that deletes keys matching the old pattern. In practice, rate limit keys have short TTLs (60-120s), so simply switching the algorithm and waiting one window duration is sufficient.")
 }}
 
-{{hint "why sorted set for sliding window log?" "Sorted set stores members with a float64 score. Using <strong>timestamp-in-milliseconds as the score</strong>, <span class='hl-blue'>ZRANGEBYSCORE</span> can count all requests in [now − window, now] efficiently. The score-as-timestamp design is what makes time-window queries natural — but at <span class='hl-red'>O(N) memory per key</span>, it only works for very low rate limits like <strong>5 login attempts per 15 min</strong>."}}
+{{hint "why sorted set for sliding window log?" "Sorted set stores members with a float64 score. Using &lt;strong>timestamp-in-milliseconds as the score&lt;/strong>, &lt;span class='hl-blue'>ZRANGEBYSCORE&lt;/span> can count all requests in [now − window, now] efficiently. The score-as-timestamp design is what makes time-window queries natural — but at &lt;span class='hl-red'>O(N) memory per key&lt;/span>, it only works for very low rate limits like &lt;strong>5 login attempts per 15 min&lt;/strong>."}}
 
-{{hint "why string counter for sliding window counter?" "The sliding window counter needs only two integers: current window count and previous window count. <span class='hl-blue'>INCR</span> is <span class='hl'>O(1)</span> and uses <span class='hl'>~50 bytes per key</span>. Sorted sets cost <span class='hl-red'>O(log N) per operation</span> and <strong>~50 bytes per request</strong>. For <strong>50M active users × 10 endpoints</strong>: sliding window counter = <span class='hl'>~50 GB</span>; sorted set log at 100 req/min = <span class='hl-red'>250 GB</span>. Strings win at scale."}}
+{{hint "why string counter for sliding window counter?" "The sliding window counter needs only two integers: current window count and previous window count. &lt;span class='hl-blue'>INCR&lt;/span> is &lt;span class='hl'>O(1)&lt;/span> and uses &lt;span class='hl'>~50 bytes per key&lt;/span>. Sorted sets cost &lt;span class='hl-red'>O(log N) per operation&lt;/span> and &lt;strong>~50 bytes per request&lt;/strong>. For &lt;strong>50M active users × 10 endpoints&lt;/strong>: sliding window counter = &lt;span class='hl'>~50 GB&lt;/span>; sorted set log at 100 req/min = &lt;span class='hl-red'>250 GB&lt;/span>. Strings win at scale."}}
 
 {{diagram "rl-lua-execution"}}
 
@@ -759,11 +759,11 @@ activedefrag: yes                 # Defragment memory proactively
   (whatIf "you need to preserve rate limit state across Redis restarts" "You generally don't — counters self-heal within one window. But if you need it (e.g., for billing-related rate limits with long windows like monthly quotas), use RDB snapshots every 60 seconds instead of AOF. RDB is a background fork that doesn't block the event loop.")
 }}
 
-{{avoid "Do not enable Redis persistence (<span class='hl-blue'>RDB</span> snapshots or <span class='hl-blue'>AOF</span> log) for rate limiting. Rate limit counters are ephemeral — persistence adds disk I/O latency with zero benefit. Counters reset on window expiry anyway, and if Redis restarts, they rebuild naturally from incoming requests."}}
+{{avoid "Do not enable Redis persistence (&lt;span class='hl-blue'>RDB&lt;/span> snapshots or &lt;span class='hl-blue'>AOF&lt;/span> log) for rate limiting. Rate limit counters are ephemeral — persistence adds disk I/O latency with zero benefit. Counters reset on window expiry anyway, and if Redis restarts, they rebuild naturally from incoming requests."}}
 
 {{qa "Should you use Cluster mode or a single shard with replicas for rate limiting?" "Cluster mode for any production deployment beyond a single team's API. A single shard maxes out at ~100K ops/sec and 13 GB memory. With 50M active rate limit keys at 100 bytes each = 5 GB, a single shard works — but you have no horizontal scaling runway. Cluster mode with 3 shards gives 300K ops/sec and 39 GB, and you can add shards without downtime. The trade-off: Lua scripts must use hash tags to ensure all keys for a single rate check land on the same shard." "What about Sentinel instead of Cluster?" "Sentinel provides high availability (automatic failover) but not horizontal scaling — it is still a single shard with replicas. Use Sentinel only if your rate limit key count fits in one node and your ops/sec is under 100K. Beyond that, Cluster mode is required. In ElastiCache, 'Cluster Mode Enabled' gives you both: automatic failover per shard plus horizontal scaling across shards."}}
 
-{{hint "why volatile-lru over allkeys-lru?" "<span class='hl-blue'>volatile-lru</span> only evicts keys that have a TTL set. Our rate limit keys all have TTLs (by design), so they're eligible for eviction. Any config or schema data sharing this Redis instance without a TTL is protected. <span class='hl-red'>allkeys-lru evicts anything</span> — including non-ephemeral data — which causes subtle data loss bugs in mixed-use Redis instances."}}
+{{hint "why volatile-lru over allkeys-lru?" "&lt;span class='hl-blue'>volatile-lru&lt;/span> only evicts keys that have a TTL set. Our rate limit keys all have TTLs (by design), so they're eligible for eviction. Any config or schema data sharing this Redis instance without a TTL is protected. &lt;span class='hl-red'>allkeys-lru evicts anything&lt;/span> — including non-ephemeral data — which causes subtle data loss bugs in mixed-use Redis instances."}}
 
 {{triggerQs "Redis Configuration Questions"
   "Why disable persistence (RDB/AOF) for rate limiting Redis instances?"
@@ -828,11 +828,11 @@ activedefrag: yes                 # Defragment memory proactively
 
 {{phase 10 "Cost Estimates" "2 min"}}
 
-{{say "Rate limiting infrastructure: <span class='hl'>~$580/month</span> for a 3-node ElastiCache cluster handling <span class='hl'>300K ops/s</span>. Middleware overhead is <span class='hl'><0.1ms per rate check</span> — the Redis cluster is the only dedicated line item."}}
+{{say "Rate limiting infrastructure: &lt;span class='hl'>~$580/month&lt;/span> for a 3-node ElastiCache cluster handling &lt;span class='hl'>300K ops/s&lt;/span>. Middleware overhead is &lt;span class='hl'>&lt;0.1ms per rate check&lt;/span> — the Redis cluster is the only dedicated line item."}}
 
 {{diagram "rl-cost-breakdown"}}
 
-{{hint "why the Redis cluster cost dominates?" "App server CPU for rate limit middleware is negligible — a Lua script check is <span class='hl'>~0.1ms CPU</span> per request. At <span class='hl'>$580/month</span> for a 3-shard cluster handling <strong>300K ops/s</strong>, that's <span class='hl'>$0.000002 per rate limit check</span>. Cheaper than the cost of one fraudulent request to most APIs."}}
+{{hint "why the Redis cluster cost dominates?" "App server CPU for rate limit middleware is negligible — a Lua script check is &lt;span class='hl'>~0.1ms CPU&lt;/span> per request. At &lt;span class='hl'>$580/month&lt;/span> for a 3-shard cluster handling &lt;strong>300K ops/s&lt;/strong>, that's &lt;span class='hl'>$0.000002 per rate limit check&lt;/span>. Cheaper than the cost of one fraudulent request to most APIs."}}
 
 {{think "Rate limiting infrastructure is cheap. The real cost is engineering time to get it right."
   (whatIf "you need to scale to 5M req/sec" "A 3-shard cluster handles 300K ops/sec. For 5M, you need roughly 50 shards (~$10K/month). At that scale, evaluate whether a purpose-built solution like Envoy's rate limiting service or a commercial solution (Kong, Apigee) is more cost-effective than a custom Redis implementation. The custom solution likely wins if you have the engineering capacity to operate it.")
@@ -843,9 +843,9 @@ activedefrag: yes                 # Defragment memory proactively
 
 {{triggerQs "Cost & Operations Questions"
   "How much does it cost to rate-limit 1M requests per second?"
-  "A <span class='hl'>6-node ElastiCache r6g.large cluster</span> handles <span class='hl'>500K ops/sec</span> at <span class='hl'>~$582/month</span>. For 1M req/sec, double to 12 nodes = <span class='hl'>~$1,164/month</span>. Add <span class='hl'>~$30/month</span> cross-AZ transfer. Total: under <span class='hl'>$1,200/month</span> — less than the cost of one engineer-hour of DDoS incident response."
+  "A &lt;span class='hl'>6-node ElastiCache r6g.large cluster&lt;/span> handles &lt;span class='hl'>500K ops/sec&lt;/span> at &lt;span class='hl'>~$582/month&lt;/span>. For 1M req/sec, double to 12 nodes = &lt;span class='hl'>~$1,164/month&lt;/span>. Add &lt;span class='hl'>~$30/month&lt;/span> cross-AZ transfer. Total: under &lt;span class='hl'>$1,200/month&lt;/span> — less than the cost of one engineer-hour of DDoS incident response."
   "Should you build or buy rate limiting?"
-  "Build if: you need custom algorithms (per-tenant, per-endpoint, combined limits), your team can operate Redis clusters, and you want zero vendor lock-in. Buy (Kong, Apigee, AWS WAF) if: you need rate limiting in <1 week, your team is <5 engineers, or you need managed DDoS protection bundled. At <span class='hl'>$50K+/year</span> for enterprise API gateways, the build option is cheaper if you already run Redis."
+  "Build if: you need custom algorithms (per-tenant, per-endpoint, combined limits), your team can operate Redis clusters, and you want zero vendor lock-in. Buy (Kong, Apigee, AWS WAF) if: you need rate limiting in &lt;1 week, your team is &lt;5 engineers, or you need managed DDoS protection bundled. At &lt;span class='hl'>$50K+/year&lt;/span> for enterprise API gateways, the build option is cheaper if you already run Redis."
 }}
 
 {{phase 11 "Sub-Problems & Building Blocks" "3 min"}}
