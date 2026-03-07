@@ -67,6 +67,18 @@ func slugImagePath(kind, slug string) string {
 		"fundamental:storage/dynamodb":        "/static/img/tech/fund-dynamodb.svg",
 		"fundamental:networking/load-balancing": "/static/img/tech/fund-load-balancer.svg",
 		"fundamental:networking/cdn":          "/static/img/tech/fund-cdn.svg",
+		"algorithm:base62-encoding":           "/static/img/tech/algo-base62-encoding.svg",
+		"algorithm:consistent-hashing":        "/static/img/tech/algo-consistent-hashing.svg",
+		"algorithm:token-bucket":              "/static/img/tech/algo-token-bucket.svg",
+		"algorithm:bloom-filter":              "/static/img/tech/algo-bloom-filter.svg",
+		"algorithm:snowflake-id":              "/static/img/tech/algo-snowflake-id.svg",
+		"algorithm:trie":                      "/static/img/tech/algo-trie.svg",
+		"algorithm:geohash":                   "/static/img/tech/algo-geohash.svg",
+		"pattern:rag":                         "/static/img/tech/pat-rag.svg",
+		"pattern:agent-tools":                 "/static/img/tech/pat-agent-tools.svg",
+		"pattern:prompt-chaining":             "/static/img/tech/pat-prompt-chaining.svg",
+		"pattern:guardrails":                  "/static/img/tech/pat-guardrails.svg",
+		"pattern:embeddings-vector-search":    "/static/img/tech/pat-embeddings-vector-search.svg",
 	}
 	if path, ok := knownImages[kind+":"+slug]; ok {
 		return path
