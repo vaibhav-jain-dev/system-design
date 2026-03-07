@@ -595,6 +595,88 @@ func registerFundamentals(r *Registry) {
 </div>`,
 	})
 
+	r.Register(&Diagram{
+		Slug:        "fund-cap-partition-behavior",
+		Title:       "System Behavior During a Network Partition",
+		Description: "Shows what happens step-by-step when a network partition occurs in CP vs AP systems",
+		ContentFile: "fundamentals/distributed/cap-theorem",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-row">
+    <div class="d-box gray" data-tip="Node A and Node B can exchange messages normally.">Node A &#8596; Node B <span class="d-status active"></span></div>
+    <div class="d-arrow">&#8594; partition &#8594;</div>
+    <div class="d-box red" data-tip="Network split: nodes cannot communicate. Both are still running.">Node A &#10007; Node B <span class="d-status error"></span></div>
+  </div>
+  <div class="d-arrow-down">&#8595;</div>
+  <div class="d-cols">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">CP System Response</div>
+        <div class="d-flow-v" style="gap:0.5rem">
+          <div class="d-box blue" data-tip="Only the majority partition (quorum) accepts writes."><span class="d-step">1</span> Majority partition keeps serving</div>
+          <div class="d-box red" data-tip="Minority side returns errors or times out."><span class="d-step">2</span> Minority partition rejects requests</div>
+          <div class="d-box blue" data-tip="When network heals, minority catches up from majority."><span class="d-step">3</span> Partition heals &#8594; minority syncs</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">AP System Response</div>
+        <div class="d-flow-v" style="gap:0.5rem">
+          <div class="d-box green" data-tip="Both sides continue accepting reads and writes."><span class="d-step">1</span> Both partitions keep serving</div>
+          <div class="d-box amber" data-tip="Each side may have different data versions."><span class="d-step">2</span> Data diverges between sides</div>
+          <div class="d-box green" data-tip="Conflict resolution: LWW, vector clocks, or CRDTs."><span class="d-step">3</span> Partition heals &#8594; reconcile conflicts</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-caption">CP sacrifices availability during partition. AP sacrifices consistency. Both recover when partition heals.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-lb-algorithm-comparison",
+		Title:       "Load Balancing Algorithm Comparison",
+		Description: "Visual comparison of Round Robin, Least Connections, and Weighted algorithms",
+		ContentFile: "fundamentals/networking/load-balancing",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols">
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Round Robin</div>
+      <div class="d-flow-v" style="gap:0.4rem">
+        <div class="d-box blue" data-tip="Requests distributed 1-2-3-1-2-3 in order.">Server 1 &#8592; req 1, 4, 7</div>
+        <div class="d-box blue" data-tip="Equal distribution regardless of server load.">Server 2 &#8592; req 2, 5, 8</div>
+        <div class="d-box blue" data-tip="Simple but ignores server health and capacity.">Server 3 &#8592; req 3, 6, 9</div>
+      </div>
+      <div class="d-label">Simple, equal distribution. Ignores server load.</div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Least Connections</div>
+      <div class="d-flow-v" style="gap:0.4rem">
+        <div class="d-box green" data-tip="Currently handling the fewest active connections.">Server 1: 3 active &#8592; next req</div>
+        <div class="d-box gray" data-tip="Busy server receives fewer new requests.">Server 2: 8 active</div>
+        <div class="d-box gray" data-tip="Moderate load.">Server 3: 5 active</div>
+      </div>
+      <div class="d-label">Routes to least busy server. Best for varied request durations.</div>
+    </div>
+  </div>
+  <div class="d-col">
+    <div class="d-group">
+      <div class="d-group-title">Weighted Round Robin</div>
+      <div class="d-flow-v" style="gap:0.4rem">
+        <div class="d-box indigo" data-tip="Large instance gets proportionally more traffic.">Server 1 (w=5): 50% traffic</div>
+        <div class="d-box indigo" data-tip="Medium instance.">Server 2 (w=3): 30% traffic</div>
+        <div class="d-box indigo" data-tip="Small instance.">Server 3 (w=2): 20% traffic</div>
+      </div>
+      <div class="d-label">For heterogeneous fleets (different instance sizes).</div>
+    </div>
+  </div>
+</div>`,
+	})
+
 	// -------------------------------------------------------
 	// Circuit Breaker
 	// -------------------------------------------------------

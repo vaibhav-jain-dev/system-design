@@ -122,6 +122,8 @@ def is_allowed_redis(redis_client, user_id: str, capacity: int, rate: float) -> 
 
 {{hint "Token bucket allows controlled bursts" "This is why Stripe and AWS APIs use it. A bursty but well-behaved client gets natural burst credit. A sustained abuser hits the refill rate ceiling after draining the bucket."}}
 
+{{qa "What's the difference between rate limiting and throttling?" "Rate limiting rejects requests above the cap — the connection ends immediately with 429. Throttling slows requests down by adding artificial delay, keeping the connection open. Rate limiting protects the server; throttling shapes client behavior." "When would you throttle instead of rate limit?" "Batch processing workloads where a short wait is acceptable. AWS S3 throttles with exponential backoff rather than hard rejection. For user-facing APIs, rate limiting (hard reject) is better — holding connections open ties up server threads."}}
+
 {{phase 3 "Sliding Window Algorithm" "5 min"}}
 
 {{say "Sliding window is more precise than fixed window and avoids the boundary burst attack. Two variants: sliding window log (exact, memory-heavy) and sliding window counter (approximate, O(1) space)."}}
@@ -360,6 +362,8 @@ def is_allowed_distributed(r, user_id: str, limit: int, window_seconds: int) -> 
 
 {{hint "Redis hash tags keep user counters on one shard" "Key pattern {user_id}:rl:sliding guarantees all rate limit keys for one user land on the same Redis cluster shard. Without hash tags, Lua scripts that touch multiple keys fail if keys are on different shards."}}
 
+{{qa "Why Redis over DynamoDB for rate limiting?" "Sub-millisecond latency. Rate limit checks are on the hot path of every API request — adding 10ms (DynamoDB p50) is unacceptable. Redis Lua scripts execute in ~0.5ms. Also, Redis supports atomic multi-step operations natively; DynamoDB requires conditional writes with retries." "What about using DynamoDB with DAX?" "DAX reduces DynamoDB reads to ~1ms but writes still go to DynamoDB at ~10ms. Rate limiting is write-heavy (every request updates a counter). Redis handles 100K+ writes/second per node with consistent sub-ms latency."}}
+
 {{phase 6 "Strategy: Per User vs Per IP" "4 min"}}
 
 {{say "Rate limiting strategy defines what you identify as the rate-limited entity. Per-user, per-IP, per-endpoint, and per-tenant have different tradeoffs."}}
@@ -480,6 +484,8 @@ class RateLimiterWithFallback:
   "What HTTP status code do you return when rate limited?" "429 Too Many Requests. Include Retry-After header (seconds until the window resets or next token is available) and X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset headers. This lets well-behaved clients back off gracefully."
   "How do you prevent a Redis rate limiter from becoming a single point of failure?" "Redis Sentinel or Redis Cluster for HA. Plus fail-open with local in-memory fallback. Plus circuit breaker: after N Redis timeouts, stop trying Redis for 30 seconds to avoid cascade delays on the hot path."
 }}
+
+{{qa "How do you rate limit WebSocket connections?" "Two layers: limit connection establishment per IP/user (token bucket on the upgrade request), and limit messages per connection per second (in-process counter since each connection is stateful on one server). WebSocket messages don't go through the API gateway, so in-process limiting is the only option." "What about rate limiting GraphQL?" "GraphQL is tricky because one request can trigger expensive nested queries. Rate limit by query complexity score, not request count. Parse the query, assign cost per field/resolver, sum the cost, and apply token bucket against a complexity budget instead of a request count."}}
 
 {{phase 8 "Interview Summary" "3 min"}}
 

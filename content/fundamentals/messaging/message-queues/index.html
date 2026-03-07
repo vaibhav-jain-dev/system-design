@@ -98,6 +98,8 @@ auto.offset.reset=earliest  # Start from beginning on new group`}}
   "Kafka uses sequential disk writes (append-only log) and batches messages at the broker. Sequential I/O on SSDs reaches 500MB/sec+. RabbitMQ uses an in-memory queue with disk overflow, and routing decisions add CPU overhead per message. Kafka's design favors throughput over routing flexibility."
 }}
 
+{{qa "How do you choose the number of Kafka partitions?" "Partitions determine max consumer parallelism — you can have at most one consumer per partition in a consumer group. Start with the number of consumers you need at peak load. For 10K messages/sec with each consumer handling 1K/sec, you need at least 10 partitions. Over-partitioning (1000+ partitions) increases metadata overhead and leader election time." "Can you change partition count after creating a topic?" "You can add partitions but never reduce them. Adding partitions breaks key ordering — messages for the same key may land on different partitions. If you use key-based partitioning for ordering guarantees, plan partition count upfront."}}
+
 {{phase 4 "Exactly-Once Semantics" "5 min"}}
 
 {{say "Exactly-once is the hardest delivery guarantee. At-most-once drops messages on failure. At-least-once reprocesses on failure — fine if your consumers are idempotent. True exactly-once requires idempotent producers, Kafka transactions, and idempotent consumers."}}
@@ -170,6 +172,8 @@ try {
   "Original topic, partition, offset (for traceability), failure reason (exception class + message), retry count, first failure timestamp, last failure timestamp, and the original message payload. This metadata is stored in Kafka message headers, not the payload — keep the payload intact for replay."
 }}
 
+{{qa "What happens when a Kafka consumer crashes mid-processing?" "The partition is rebalanced to another consumer in the group. If auto-commit is enabled, any uncommitted messages are reprocessed — you get at-least-once delivery. If the consumer committed before processing completed, the message is lost — you get at-most-once. For exactly-once, commit the offset atomically with the processing result (e.g., in the same DB transaction)." "How long does Kafka retain messages?" "Configurable per topic: default 7 days (log.retention.hours=168). You can set it to infinite for event sourcing use cases. Retention is by time or size — whichever limit is hit first. Compacted topics retain only the latest value per key, with no time-based deletion."}}
+
 {{phase 6 "Back-Pressure Handling" "4 min"}}
 
 {{say "Back-pressure is what happens when producers write faster than consumers can process. Without handling it, your broker runs out of memory, your consumer lag grows unboundedly, and eventually the system falls over. You want consumers to signal their capacity constraints upstream."}}
@@ -239,6 +243,8 @@ spec:
   "What instance type would you choose for Kafka brokers?"
   "For medium workloads (100MB/sec), m5.4xlarge with gp3 EBS (1GB/sec provisioned). For high throughput (500MB/sec+), i3en.xlarge or i3en.2xlarge with NVMe local storage — ~2.5GB/sec sequential write at lower cost per MB/sec than EBS. Always use dedicated instances, not burstable (T series) for Kafka."
 }}
+
+{{qa "Should I use Kafka or SQS for a new project?" "SQS for simple task queues where you need at-least-once delivery without managing infrastructure. Kafka for event streaming where you need replay, multiple independent consumers, or high throughput (100K+ msg/sec). SQS maxes out at ~3K msg/sec per queue without batching. SQS is fully managed; Kafka requires cluster management (or use MSK/Confluent Cloud)." "What about Redis Streams vs Kafka?" "Redis Streams work well for lightweight streaming with <10K msg/sec and short retention. Kafka is for production event pipelines: it handles millions of msg/sec, multi-day retention, and has a mature ecosystem (Connect, Schema Registry, ksqlDB). Redis Streams lack built-in replication across clusters."}}
 
 {{phase 8 "Interview Summary" "3 min"}}
 

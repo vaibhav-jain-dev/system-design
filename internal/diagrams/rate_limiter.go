@@ -831,7 +831,7 @@ Retry-After: 45</div>
     <div class="d-group">
       <div class="d-group-title">Monthly Infrastructure</div>
       <div class="d-flow-v">
-        <div class="d-box red" data-tip="r6g.large: 2 vCPUs, 13 GB RAM, Graviton2 processor. ~$92/mo per node × 6 nodes = $552/mo. Reserved pricing (~40% discount) brings it to ~$330/mo." style="text-align:center"><strong>ElastiCache Redis</strong> <div class="d-tag blue">Redis</div><br>3 shards &#215; 2 nodes (r6g.large)<br><strong>$550/mo</strong> <span class="d-metric cost">94% of total</span></div>
+        <div class="d-box red" data-tip="r6g.large: 2 vCPUs, 13 GB RAM, Graviton2 processor. ~$150/mo on-demand per node × 6 nodes = $900/mo. Reserved pricing (~40% discount) brings it to ~$550/mo." style="text-align:center"><strong>ElastiCache Redis</strong> <div class="d-tag blue">Redis</div><br>3 shards &#215; 2 nodes (r6g.large)<br><strong>$550/mo</strong> <span class="d-metric cost">94% of total</span></div>
         <div class="d-box gray" data-tip="Rate limiting middleware runs inside existing ECS Fargate containers. Adds ~0.5% CPU overhead per container. No new containers needed." style="text-align:center"><strong>ECS Fargate (middleware)</strong><br>CPU overhead minimal (~0.5%)<br><strong>$0</strong> incremental <span class="d-metric cost">0%</span></div>
         <div class="d-box blue" data-tip="4 custom metrics × $0.30/metric/mo = $1.20. Add dimensions (endpoint, tier) = ~100 metric streams × $0.30 = $30/mo. Includes alarms for spike detection." style="text-align:center"><strong>CloudWatch Metrics</strong><br>rate_limit_hit, miss, error per tier<br><strong>$30/mo</strong> <span class="d-metric cost">5%</span></div>
       </div>

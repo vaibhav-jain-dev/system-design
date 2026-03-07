@@ -252,6 +252,8 @@ def get_dynamo_partition_key(user_id: str, is_celebrity: bool = False) -> str:
 
 {{hint "DynamoDB burst capacity absorbs transient hotspots" "DynamoDB partitions have a sustained write limit (~1000 WCU/partition) but bank up to 5 minutes of unused capacity for bursts. A sudden spike that would overflow a partition is often absorbed. Design for sustained load, not single-second peaks."}}
 
+{{qa "How do you handle transactions that span multiple shards?" "You generally don't — that's the core tradeoff of sharding. Options: (1) avoid cross-shard transactions by choosing a shard key that co-locates related data, (2) use the Saga pattern for eventually-consistent cross-shard workflows, (3) use a database with native distributed transactions like CockroachDB or Google Spanner." "What about foreign keys across shards?" "Foreign keys cannot span shards. Enforce referential integrity in the application layer — check existence before insert, use soft deletes with async cleanup. This is why sharding is a last resort: you lose SQL guarantees."}}
+
 {{phase 6 "Re-Sharding (Zero Downtime)" "6 min"}}
 
 {{say `<span class="hl-blue">Re-sharding</span> is moving from N shards to M shards without downtime — the most operationally complex database operation:
@@ -470,6 +472,10 @@ def lookup_user_by_email(email: str, index_shard, db_pool):
   "Consistent hashing minimizes key movement when adding shards (1/N keys move vs (N-1)/N for modulo)."
   "Managed databases (DynamoDB, Cassandra, CockroachDB) handle re-sharding automatically — strong preference."
 }}
+
+{{qa "What's the difference between sharding and partitioning?" "Partitioning splits data within a single database instance (e.g., Postgres table partitioning by date range). Sharding splits data across multiple database instances. Partitioning is a DBA optimization; sharding is an architecture decision. You can have partitioned tables within each shard." "Does DynamoDB do sharding?" "Yes, automatically. DynamoDB hashes your partition key to assign rows to partitions (shards). It auto-splits partitions when they exceed 10GB or throughput limits. You never manage shards directly — that's the main selling point over manual Postgres sharding."}}
+
+{{qa "How do you test a sharded system?" "Test with at least 3 shards in staging — single-shard testing misses cross-shard bugs entirely. Key test cases: scatter-gather correctness, re-sharding migration, hot key detection, and failover of a single shard. Use shadow traffic from production to validate before cutover." "What about schema migrations on sharded databases?" "Run migrations on every shard — usually via a migration orchestrator (like Vitess's vtctld). Migrations must be backward-compatible because they roll out shard-by-shard over minutes. Add columns first, deploy code that handles both schemas, then drop old columns."}}
 
 {{avoid "Do not say 'we can just add more shards if we need to scale.' Changing the number of shards requires re-sharding — days of dual-write, backfill, and verification. Always mention that the shard count and shard key are chosen at design time. If you might need to scale from 4 to 8 shards, consider consistent hashing or a managed database that re-shards automatically."}}
 

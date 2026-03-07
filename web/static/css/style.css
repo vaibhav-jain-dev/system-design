@@ -274,6 +274,7 @@ body {
 #header-stage-nav {
     flex: 1;
     min-width: 0;
+    max-width: 680px; /* cap so items always overflow → scroll works on wide screens */
     height: 100%;
     display: none; /* hidden until teleportStageNav() populates it */
     align-items: center;
@@ -297,11 +298,14 @@ body {
 /* Stage nav overrides when teleported into the header */
 .app-header .stage-nav {
     position: relative !important; /* relative so ::before/::after fades work */
+    display: flex !important;      /* arrow + inner side-by-side, not stacked vertically */
+    align-items: center !important;
     background: transparent !important;
     border-bottom: none !important;
     border-radius: 0 !important;
     margin: 0 !important;
     box-shadow: none !important;
+    overflow: hidden; /* clip any residual overflow to the 54 px header boundary */
     width: 100%;
     height: 100%;
 }
@@ -314,6 +318,12 @@ body {
     color: rgba(148, 163, 184, 0.7);
     padding: 4px 9px;
     border-radius: var(--radius-sm);
+}
+.app-header .stage-nav-label {
+    max-width: none;
+    overflow: visible;
+    text-overflow: clip;
+    white-space: nowrap;
 }
 .app-header .stage-nav-item:hover {
     background: rgba(99, 102, 241, 0.15);
@@ -1572,6 +1582,11 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
 }
+
+/* Stage nav only renders in the header strip (teleported by JS).
+   Hide it while it lives in #detail to prevent a second sticky row
+   from appearing below the app-header before / if teleportation runs. */
+#detail .stage-nav { display: none !important; }
 
 /* Hide stage nav on mobile — desktop only */
 @media (max-width: 768px) {
@@ -6311,6 +6326,21 @@ pre  mark.stat-highlight { background: transparent; font-weight: inherit; }
     display: table;
 }
 
+/* ── Bug Type D: compare-option label char-stacking ───────────────────
+   Root cause: .book-page has word-break:break-word. Inside the flex row
+   .compare-option, the <strong> label (e.g. "DynamoDB") gets squeezed
+   to near-zero width by the anonymous text node after it ("— description…")
+   which claims most of the available space. word-break then breaks the
+   label character-by-character.
+   Fix: prevent the label from shrinking below its natural width and keep
+   it on one line; let the description text wrap instead.
+─────────────────────────────────────────────────────────────────────── */
+
+.book-page .compare-option strong {
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
 /* ── Overflow sentinel: last-resort catch-all for book pages ───────────
    Any element that would still overflow horizontally gets clipped
    at the page boundary. Users can still scroll within .diagram-container
@@ -6787,20 +6817,100 @@ pre  mark.stat-highlight { background: transparent; font-weight: inherit; }
 
 /* ── Detail Page Tech Images ──────────── */
 .detail-tech-image {
+    position: relative;
     margin-top: 16px;
     border-radius: var(--radius-lg);
     overflow: hidden;
     border: 1px solid var(--border);
     background: #0F172A;
     box-shadow: var(--shadow-md);
+    height: 200px;
 }
 
 .detail-tech-img {
     display: block;
     width: 100%;
+    height: 100%;
+    object-fit: contain;
+    transition: transform 0.2s ease;
+}
+
+/* Controls overlay */
+.tech-img-controls {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    gap: 4px;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.detail-tech-image:hover .tech-img-controls {
+    opacity: 1;
+}
+
+.tech-img-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: var(--radius-sm);
+    background: rgba(15,23,42,0.85);
+    color: #94A3B8;
+    cursor: pointer;
+    backdrop-filter: blur(4px);
+    transition: all 0.15s ease;
+    padding: 0;
+}
+
+.tech-img-btn svg {
+    width: 13px;
+    height: 13px;
+}
+
+.tech-img-btn:hover {
+    background: rgba(99,102,241,0.25);
+    border-color: var(--indigo);
+    color: #C7D2FE;
+}
+
+.tech-img-btn--fs {
+    margin-left: 4px;
+}
+
+/* Fullscreen state */
+.detail-tech-image.tech-img-fullscreen {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    margin: 0;
+    border-radius: 0;
+    height: 100dvh;
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0A0F1E;
+    overflow: auto;
+    animation: fadeInFullscreen 0.22s var(--ease-out);
+}
+
+.detail-tech-image.tech-img-fullscreen .tech-img-controls {
+    opacity: 1;
+    position: fixed;
+    top: 16px;
+    right: 16px;
+}
+
+.detail-tech-image.tech-img-fullscreen .detail-tech-img {
+    width: auto;
     height: auto;
-    max-height: 200px;
-    object-fit: cover;
+    max-width: 95vw;
+    max-height: 90vh;
+    object-fit: contain;
 }
 
 /* ── Context Card Enhancements ────────── */

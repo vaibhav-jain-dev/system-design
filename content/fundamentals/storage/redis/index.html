@@ -100,7 +100,7 @@ user_id = r.hget("session:abc123", "user_id")
 
 {{phase 3 "Caching Strategies" "5 min"}}
 
-{{say "Caching is the most common use of Redis. The strategy you pick affects how fresh data is, how fast it is, and how complex your code becomes. Here are the four main patterns."}}
+{{say "Caching is the most common use of Redis. Four caching patterns — each trades consistency for complexity differently:"}}
 
 {{compare "Caching Patterns" (options
   (best "Cache-Aside (Lazy Load)" "App checks cache -> miss -> reads DB -> writes cache. Simple, only caches what is needed. Most common pattern in production.")
@@ -236,6 +236,13 @@ auth-token: <token>               # Require password
 
 {{hint "why appendfsync everysec instead of always" "appendfsync always fsyncs after every write — maximum durability but 10-100x write latency overhead. appendfsync everysec batches writes and fsyncs once per second, limiting potential data loss to 1 second. For a cache that backs a database, losing 1 second of cache writes on a crash is acceptable. Use always only when Redis is your primary store and data loss is truly unacceptable."}}
 
+{{qa
+  "How do you size an ElastiCache cluster for a URL shortener caching 200M hot URLs?"
+  "Average URL record: ~500 bytes (short_code + long_url + metadata). 200M × 500B = 100 GB. An r6g.2xlarge has 52 GB RAM. With cluster mode enabled: 2 shards × 52 GB = 104 GB usable. Add 1 replica per shard for failover = 6 nodes total. Cost: 6 × $0.504/hr = ~$2,200/mo. Over-provision by 20-30% to account for Redis overhead (data structure metadata, fragmentation)."
+  "When should you use Redis Cluster mode vs a single node with replicas?"
+  "Single node + replicas: simpler, supports all multi-key operations (MGET, Lua scripts across keys), sufficient when dataset fits in one node's memory (under ~50 GB). Cluster mode: data sharded across multiple primaries, required when dataset exceeds single-node memory or write throughput exceeds ~100K ops/s. Trade-off: cluster mode restricts multi-key operations to keys in the same hash slot."
+}}
+
 {{phase 5 "Eviction Policies" "3 min"}}
 
 {{say "When Redis runs out of memory, it needs to decide which keys to remove. The eviction policy determines this behavior."}}
@@ -268,9 +275,18 @@ auth-token: <token>               # Require password
 
 {{avoid "Never use noeviction for a cache. When Redis fills up, every write returns an error. Your application starts failing because the cache is full. Use allkeys-lru to gracefully evict cold data and keep serving."}}
 
+{{qa
+  "What is the difference between LRU and LFU eviction?"
+  "LRU evicts the key with the <strong>oldest last access time</strong> — it does not care how many times a key was accessed before. LFU evicts the key with the <strong>lowest access frequency</strong>, tracked via a logarithmic counter. At <span class='hl'>1M keys</span>, LRU may evict a key accessed <span class='hl'>10,000 times</span> yesterday but not today, while LFU would keep it. Use LRU for time-sensitive workloads (feeds, trending content); use LFU for stable access patterns (product catalog, configuration)."
+  "How does Redis approximate LRU instead of using true LRU?"
+  "True LRU requires a linked list of all keys sorted by access time — too expensive at millions of keys. Redis samples <span class='hl'>5 random keys</span> (configurable via <strong>maxmemory-samples</strong>) and evicts the least recently used among those <span class='hl'>5</span>. Increasing samples to <span class='hl'>10</span> gets within <span class='hl'>~1%</span> of true LRU accuracy but doubles the CPU cost per eviction. The default of 5 is a good trade-off for most workloads."
+}}
+
 {{key "Always set a TTL on every key, even if you use LRU eviction. TTL is your safety net. A key without TTL that is accessed frequently will never be evicted by LRU, even if the data is stale. TTL guarantees eventual refresh."}}
 
 {{phase 6 "Persistence and Durability" "3 min"}}
+
+{{say "Redis is in-memory by default — restart means data loss. Two persistence mechanisms address this: RDB snapshots for periodic backups, and AOF logs for near-zero data loss. Choose based on your tolerance for data loss versus performance impact."}}
 
 {{table "Redis Persistence Options" (rows
   (row "Option"    "How It Works"                              "Data Loss Window"      "Performance Impact")
@@ -361,6 +377,13 @@ def is_rate_limited(user_id: str, limit: int, window_sec: int) -> bool:
     count = results[2]
     return count > limit
 `}}
+
+{{qa
+  "When should you use Pub/Sub vs. Streams for real-time messaging?"
+  "<strong>Pub/Sub</strong> is fire-and-forget: messages are delivered only to currently connected subscribers and are <span class='hl-red'>lost if no one is listening</span>. <strong>Streams</strong> persist messages and support consumer groups with independent read positions and <span class='hl-blue'>XACK</span> acknowledgment. Use Pub/Sub for ephemeral notifications (typing indicators, presence updates) where loss is acceptable. Use Streams when you need at-least-once delivery, replay, and multiple independent consumers — similar to Kafka but inside Redis."
+  "How does Redlock improve on a single-node distributed lock?"
+  "A single-node lock fails if that Redis node crashes — the lock disappears and two clients can both proceed. <strong>Redlock</strong> acquires the lock on <span class='hl'>N/2 + 1</span> out of <span class='hl'>N independent Redis nodes</span> (typically <span class='hl'>5</span>). A lock is valid only if acquired on a majority within a bounded time window. This tolerates up to <span class='hl'>2 node failures</span> without losing the lock guarantee. Trade-off: <span class='hl'>5x</span> the network round trips per lock acquisition."
+}}
 
 {{triggerQs "Interview Pattern Application"
   "Design a rate limiter that allows 100 requests per minute per user. Walk me through the Redis implementation."

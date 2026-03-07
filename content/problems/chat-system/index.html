@@ -334,6 +334,13 @@ Messages are sent over WebSocket for lowest latency; REST provides durability an
   (nofit "RabbitMQ" "Per-message ACK overhead at 700K msgs/sec is too high. Designed for task queues, not event streaming")
 )}}
 
+{{triggerQs "Questions about core architecture"
+  "Why WebSockets over HTTP long polling or Server-Sent Events?"
+  "WebSockets provide full-duplex communication — both client and server can push messages at any time without polling. HTTP long polling requires a new connection for each server push, adding overhead. Server-Sent Events are one-way (server to client only) — the client still needs HTTP requests to send messages. For a chat system with bidirectional real-time messaging, WebSockets are the only viable option."
+  "How do you handle WebSocket connection drops and reconnection?"
+  "Three mechanisms: 1) Client-side heartbeat — ping every 30 seconds; if no pong within 5 seconds, reconnect. 2) Server-side cleanup — if no heartbeat for 60 seconds, remove the session from Redis and close the socket. 3) On reconnection, the client sends the last received message_id. The server queries DynamoDB for all messages after that ID and delivers them in order. Messages are never lost because they are persisted before ACK is sent."
+}}
+
 {{phase 5 "Message Delivery Flow" "8 min"}}
 
 {{say `Full lifecycle of a message — from sender tapping Send to receiver seeing it appear:
@@ -501,6 +508,13 @@ response = dynamodb.query(
   (whatIf "a user reinstalls the app and loses their keys" "The user generates new identity keys. All contacts see a 'security code changed' warning. New sessions are established via X3DH key exchange. Old messages stored on the device are gone — the server has only ciphertext encrypted with the old keys.")
 }}
 
+{{triggerQs "Questions about encryption"
+  "Can the server search through E2E encrypted messages for compliance or spam detection?"
+  "No — that is the fundamental trade-off of E2E encryption. The server sees only ciphertext and cannot index, search, or moderate message content. Spam detection must happen client-side: the receiving client can flag suspicious messages. For compliance (regulatory message retention), clients can optionally forward decrypted messages to a compliance vault — but this is a deliberate opt-in, not a server capability."
+  "How does E2E encryption work with message backup (iCloud, Google Drive)?"
+  "Messages are backed up in their encrypted form with an additional backup encryption key. WhatsApp lets users create a backup password or use a 64-digit encryption key. Without this backup key, the cloud backup is unreadable — even by Apple or Google. If the user forgets the backup password, all backed-up messages are permanently lost."
+}}
+
 {{phase 9 "Media Sharing" "5 min"}}
 
 {{say `Media messages follow a separate upload pipeline:
@@ -584,6 +598,8 @@ response = dynamodb.query(
 {{checklist "WebSocket for real-time delivery, offline queue for reliability" "Kafka as durable message bus between services" "DynamoDB partitioned by conversation_id with Snowflake sort keys" "Fan-out-on-write for groups (bounded by 256 cap)" "Signal Protocol for E2E encryption — server is zero-knowledge" "Per-device sync cursors for multi-device" "Redis for session registry and presence (heartbeat TTL)" "NLB for WebSocket, ALB for REST API"}}
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
+
+{{say "These questions probe the hardest trade-offs: message ordering guarantees across devices, E2E encryption key management at scale, and group chat fan-out under partition."}}
 
 {{deepQA "Critical Interview Questions" `
 <div class="dqa-item">

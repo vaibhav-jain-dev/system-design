@@ -31,7 +31,7 @@
 
 {{phase 2 "Routing Algorithms" "5 min"}}
 
-{{say "The routing algorithm determines HOW traffic is distributed. The right choice depends on your workload pattern."}}
+{{say "The routing algorithm determines HOW traffic is distributed. Three workload dimensions drive the choice: request duration variance, session stickiness needs, and cache locality requirements."}}
 
 {{triggerQs "Routing Algorithm Basics"
   "Why is round-robin the default?" "It requires no state, handles uniform request sizes well, and distributes evenly across identical instances. Simple to reason about and debug."
@@ -48,6 +48,8 @@
   (row "<span class='hl-blue'>Consistent Hashing</span>"   "Hash ring, minimal redistribution on scale"     "Cache-aware routing, Redis cluster"    "More complex to implement")
   (row "Random"                                       "Randomly pick a server"                          "Simple load tests"                     "No guarantee of even distribution")
 )}}
+
+{{diagram "fund-lb-algorithm-comparison"}}
 
 {{think "Should I switch from round-robin?"
   (whyNot "Least-connections for stateless short requests" "Connection count tracks active connections, not request complexity. For fast stateless requests, round-robin is simpler and equally effective.")
@@ -97,6 +99,8 @@ class ConsistentHashRing:
 `}}
 
 {{followup "When would you NOT use round-robin?" "When request processing time varies wildly. If Server A is processing a 30s video transcode while Server B is idle, round-robin still sends the next request to A. Least-connections would correctly pick B."}}
+
+{{qa "How many virtual nodes should I use in consistent hashing?" "Start with <span class='hl'>150 virtual nodes per server</span>. This brings standard deviation of load distribution below <span class='hl'>5%</span>. Fewer than 100 vnodes creates hot spots; more than 500 wastes memory with diminishing returns." "Does consistent hashing work with weighted nodes?" "Yes — assign virtual nodes proportional to weight. A server with 2x capacity gets <span class='hl'>300 virtual nodes</span> instead of 150. The hash ring naturally routes twice the traffic to it without any algorithm change."}}
 
 {{key "Consistent hashing minimizes redistribution when nodes are added or removed. Without it, adding a server reshuffles all keys. With it, only 1/N keys move."}}
 
@@ -154,6 +158,8 @@ async def health_deep():
 
 {{avoid "Never put expensive operations in the load balancer health check. If /health queries your database, one slow query makes the LB think your server is dead and removes it from rotation. Use a shallow check for LB, deep check for monitoring only."}}
 
+{{qa "Should health checks use GET or HEAD?" "<strong>GET</strong> is standard — ALB health checks only support GET. Return a <span class='hl'>200</span> with a small JSON body (<span class='hl'>&lt;1KB</span>). The body lets you include metadata (version, uptime) for debugging without adding latency." "How do you health-check a gRPC service?" "Use the <span class='hl-blue'>gRPC Health Checking Protocol</span> (grpc.health.v1.Health). ALB natively supports it — configure the health check as gRPC type with path <code>/grpc.health.v1.Health/Check</code>. Returns SERVING, NOT_SERVING, or UNKNOWN."}}
+
 {{key "Health check interval x threshold = detection time. Default: 30s interval x 3 failures = 90s. For critical services, use 10s x 2 = 20s detection."}}
 
 {{phase 4 "AWS ALB vs NLB Comparison" "5 min"}}
@@ -202,6 +208,8 @@ async def health_deep():
   (nofit "Both (NLB in front of ALB)" "Only when you need NLB static IP + ALB L7 features. Adds cost and complexity. Rare use case.")
 )}}
 
+{{qa "Can ALB handle WebSocket and gRPC natively?" "Yes. ALB upgrades HTTP/1.1 connections to WebSocket via the <span class='hl-blue'>Upgrade</span> header automatically — no extra config. For gRPC, ALB routes HTTP/2 frames and supports gRPC health checks natively. <span class='hl-red'>NLB cannot inspect HTTP/2 frames</span> — it treats gRPC as raw TCP." "What happens if I need TLS passthrough?" "Use <strong>NLB with TCP listener</strong>. The TLS handshake terminates at your backend, not the LB. ALB always terminates TLS — it must decrypt to inspect HTTP headers. TLS passthrough is required for mutual TLS (mTLS) or when compliance mandates end-to-end encryption."}}
+
 {{phase 5 "Multi-AZ and High Availability" "5 min"}}
 
 {{say "The load balancer itself must be highly available. Here is how AWS handles this and what you need to configure."}}
@@ -234,6 +242,8 @@ async def health_deep():
 
 {{phase 6 "Failure Scenarios" "3 min"}}
 
+{{say "Load balancer failures range from a single backend crash (minor) to a full AZ outage (major). Understanding these failure modes and their detection times is what separates a good answer from a great one."}}
+
 {{table "Load Balancer Failure Scenarios" (rows
   (row "Failure"                     "Impact"                            "Mitigation"                              "Detection Time")
   (row "Single backend crashes"      "Slight latency spike"              "Health check detects, drains, replaces"  "10-30 seconds")
@@ -246,7 +256,18 @@ async def health_deep():
 
 {{avoid "Never deploy to all targets at once behind an ALB. Use rolling deployments or blue-green. If the new version is broken, a big-bang deploy takes down 100% of capacity. Rolling deploy limits blast radius to 1/N targets."}}
 
+{{hint "502 vs 503 vs 504 — what each means" "502 Bad Gateway: ALB received an invalid response from the target — usually a crashed process or misconfigured port. 503 Service Unavailable: no healthy targets in the target group — all instances failed health checks. 504 Gateway Timeout: target did not respond within the idle timeout (default 60s) — slow backend or network issue. Each points to a different root cause."}}
+
+{{qa
+  "What is the most common load balancer failure in production?"
+  "Target group misconfiguration during deployment — a bad health check path or wrong port causes ALB to mark all new targets unhealthy, returning 502 to all requests. Prevention: canary deploys that route 5% of traffic to the new version first, with automatic rollback if 5XX rate exceeds 1%."
+  "How do you handle a surge that exceeds current ALB capacity?"
+  "ALB auto-scales but needs 1-5 minutes to ramp up. For predictable events (product launch, marketing campaign), contact AWS support 48 hours ahead to pre-warm. For unpredictable spikes, the targets behind the ALB will saturate first — auto-scaling on the target group with aggressive scale-up (1-minute cooldown) is more impactful than ALB pre-warming."
+}}
+
 {{phase 7 "Cost Estimates" "3 min"}}
+
+{{say "Load balancer costs are negligible compared to the compute behind them. The real cost to watch is cross-AZ data transfer — it can be 20x the ALB base fee at high throughput."}}
 
 {{table "ALB Cost Breakdown" (rows
   (row "Component"              "Price"                    "Example (10K RPS)")
@@ -266,10 +287,19 @@ async def health_deep():
   (row "Total"               "All charges"               "~$23/mo")
 )}}
 
+{{hint "cross-AZ transfer is the hidden LB cost" "ALB base fee is $16.43/mo — negligible. But cross-AZ data transfer at $0.01/GB each way adds up fast. At 1 TB/day of inter-AZ traffic, that is $20/day = $600/mo — 20x the ALB base cost. Minimize cross-AZ hops by deploying services and their dependencies in the same AZ when possible."}}
+
 {{think "Is the load balancer a significant cost?"
   (whyNot "Skipping ALB to save money" "A $27/mo ALB distributes traffic to potentially thousands of dollars in compute. The LB cost is noise. The real cost to watch is cross-AZ data transfer.")
   (whatIf "I have 10 microservices — do I need 10 ALBs?" "No. One ALB with path-based routing rules handles all 10. Each additional ALB costs $16.43/mo base. One ALB with 10 routing rules costs the same base fee.")
   (how "What drives LCU cost up unexpectedly?" "Rule evaluations. Many listener rules multiplied by high RPS can dominate your LCU bill. At 10K RPS with 10 rules = 100K rule evaluations/s, which is 100 LCU worth.")
+}}
+
+{{hint "consolidate ALBs to cut base costs" "Each ALB costs <span class='hl'>$16.43/mo</span> base regardless of traffic. Ten microservices on ten ALBs = <span class='hl'>$164/mo</span> in base fees alone. One ALB with path-based rules (<code>/service-a/*</code>, <code>/service-b/*</code>) serves all ten for <span class='hl'>$16.43/mo</span> base. Only split into separate ALBs when teams need independent deployment or different security groups."}}
+
+{{triggerQs "Cost Optimization"
+  "How do I reduce cross-AZ data transfer costs?" "Deploy targets evenly across AZs and disable cross-zone load balancing on NLB. For internal service-to-service calls, use AZ-local internal ALBs — each service calls the ALB in its own AZ. At <span class='hl'>1 TB/day</span> cross-AZ, this saves <span class='hl'>$600/mo</span>."
+  "When does NLB become cheaper than ALB?" "At very high throughput with simple routing. NLB NLCU is <span class='hl'>$0.006/hr</span> vs ALB LCU at <span class='hl'>$0.008/hr</span>, and NLB has no rule-evaluation dimension. At <span class='hl'>100K RPS</span> with 20+ routing rules, ALB LCU costs can be 3-4x higher than NLB NLCU."
 }}
 
 {{phase 8 "Interview Q&A" "5 min"}}
@@ -304,3 +334,5 @@ async def health_deep():
   "Pre-warm ALB before known traffic events (contact AWS support)"
   "Never deploy to all targets at once: use rolling or blue-green"
 }}
+
+{{key "ALB is the default for web workloads — L7 routing, WAF, and gRPC support at ~$27/mo. Switch to NLB only for static IPs, TLS passthrough, or sub-100µs latency. The real cost is cross-AZ transfer at $0.01/GB, not the LB itself."}}

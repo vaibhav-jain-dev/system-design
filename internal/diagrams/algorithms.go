@@ -85,7 +85,7 @@ func registerAlgorithms(r *Registry) {
     <div class="d-flow">
       <div class="d-box gray" data-tip="CDN cache hit ratio ~90% for popular URLs. TTL 24h. Saves origin from 90% of read traffic."><span class="d-step">2</span> CDN (cached?) <span class="d-metric latency">~2ms</span></div>
       <div class="d-arrow">miss →</div>
-      <div class="d-box red" data-tip="Redis read-through cache. Top 20% of URLs serve 80% of reads. ElastiCache r6g.large ~$92/mo."><span class="d-step">3</span> Redis (cached?) <span class="d-metric latency">~5ms</span></div>
+      <div class="d-box red" data-tip="Redis read-through cache. Top 20% of URLs serve 80% of reads. ElastiCache r6g.large ~$150/mo on-demand."><span class="d-step">3</span> Redis (cached?) <span class="d-metric latency">~5ms</span></div>
       <div class="d-arrow">miss →</div>
       <div class="d-box indigo" data-tip="Only reached on double cache miss — roughly 1-2% of reads."><span class="d-step">4</span> Database (fallback) <span class="d-metric latency">~10ms</span></div>
     </div>

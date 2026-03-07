@@ -1,10 +1,10 @@
 {{phase 1 "What Is CloudFront?" "3 min"}}
 
-{{say "<strong>CloudFront</strong> is AWS's CDN — <span class=\"hl\">400+</span> edge locations worldwide. It caches your content at edge PoPs so users get <span class=\"hl\">&lt;20ms</span> latency instead of <span class=\"hl\">200ms+</span> round-trip to origin. Integrates natively with <span class=\"hl-blue\">S3</span>, <span class=\"hl-blue\">ALB</span>, <span class=\"hl-blue\">API Gateway</span>, and <span class=\"hl-blue\">Lambda@Edge</span>."}}
+{{say "<strong>CloudFront</strong> is AWS's CDN — <span class=\"hl\">750+</span> edge locations worldwide. It caches your content at edge PoPs so users get <span class=\"hl\">&lt;20ms</span> latency instead of <span class=\"hl\">200ms+</span> round-trip to origin. Integrates natively with <span class=\"hl-blue\">S3</span>, <span class=\"hl-blue\">ALB</span>, <span class=\"hl-blue\">API Gateway</span>, and <span class=\"hl-blue\">Lambda@Edge</span>."}}
 
 {{table "CloudFront at a Glance" (rows
   (row "Property"           "Detail")
-  (row "Edge Locations"     "400+ PoPs across 90+ cities in 47 countries")
+  (row "Edge Locations"     "750+ PoPs across 100+ cities in 50+ countries")
   (row "Origin Types"       "S3, ALB, API Gateway, EC2, custom HTTP server")
   (row "Protocols"          "HTTP/1.1, HTTP/2, HTTP/3 (QUIC), WebSocket")
   (row "TLS"                "Free ACM certificates, TLS 1.3, custom certs")
@@ -121,6 +121,13 @@ resource "aws_cloudfront_distribution" "main" {
   }
 }
 `}}
+
+{{qa
+  "How do CloudFront behaviors handle routing conflicts?"
+  "CloudFront evaluates behaviors in order — most specific path pattern wins. /api/v1/* matches before /api/*. The default behavior (/*) is a catch-all. Up to 25 ordered behaviors per distribution, each with its own origin, cache policy, and edge function associations."
+  "What happens if I forward too many headers in my cache policy?"
+  "Each unique header combination creates a separate cache entry. Forwarding User-Agent (with thousands of variants) effectively disables caching — your cache hit rate drops to near 0%. Only include headers that genuinely change the response: Accept-Encoding, Accept-Language, and custom headers like X-Locale."
+}}
 
 {{key "Always use Origin Access Control (OAC), not the legacy Origin Access Identity (OAI). OAC supports SSE-KMS encryption and S3 bucket policies. OAI is being deprecated."}}
 
@@ -275,13 +282,20 @@ url = cf_signer.generate_presigned_url(
 )
 `}}
 
+{{qa
+  "How do I restrict CloudFront access to specific users without signed URLs?"
+  "Use CloudFront Functions or Lambda@Edge to validate a JWT or session cookie on Viewer Request. If invalid, return 403 immediately from the edge — the request never reaches your origin. Embed the public key in the function code so no network call is needed for verification."
+  "How do I prevent users from bypassing CloudFront and hitting my ALB directly?"
+  "Add a custom header (e.g., X-Origin-Verify: <secret>) in the CloudFront origin config. Configure your ALB to reject requests missing that header via an ALB listener rule. This ensures only CloudFront-routed requests reach your origin. For S3, use OAC instead — it provides IAM-based access control."
+}}
+
 {{avoid "Never use Origin Access Identity (OAI) for new distributions. OAI does not support SSE-KMS, does not work with S3 bucket policies properly, and AWS is deprecating it. Use OAC."}}
 
 {{phase 5 "Origin Shield and Request Collapsing" "3 min"}}
 
 {{say `<strong>Origin Shield</strong> is an additional caching layer between edge PoPs and your origin:
 <ul>
-  <li><span class="hl-red">Without it</span> — a cache miss from <span class="hl">400+ PoPs</span> creates <span class="hl">400+ simultaneous</span> requests to your origin</li>
+  <li><span class="hl-red">Without it</span> — a cache miss from <span class="hl">750+ PoPs</span> creates <span class="hl">750+ simultaneous</span> requests to your origin</li>
   <li><strong>With it</strong> — all misses route through one regional cache first; only uncached objects hit your origin</li>
 </ul>
 Enables <strong>request collapsing</strong>: concurrent misses for the same object become a single origin request.`}}
@@ -304,12 +318,19 @@ Enables <strong>request collapsing</strong>: concurrent misses for the same obje
 {{think "Will Origin Shield actually reduce my origin load?"
   (whyNot "Origin Shield for purely dynamic uncacheable content" "If every request is a cache miss (no-cache API responses, personalized content), Origin Shield adds a hop without reducing origin requests.")
   (whatIf "I enable Origin Shield but my cache hit rate is still low" "The issue is TTL or cache key configuration, not Origin Shield. Origin Shield only helps with cache misses — if you have a low hit rate, fix your Cache-Control headers and cache policy first.")
-  (how "How much does Origin Shield save in origin compute?" "At 100M requests/month with 90% hit rate, without Shield each of your 400 PoPs independently fetches misses. With Shield, ~10M origin requests become ~1M. Your ECS tasks handle 10x less load.")
+  (how "How much does Origin Shield save in origin compute?" "At 100M requests/month with 90% hit rate, without Shield each of your 750 PoPs independently fetches misses. With Shield, ~10M origin requests become ~1M. Your ECS tasks handle 10x less load.")
 }}
 
-{{hint "Enable Origin Shield before a high-traffic launch" "Cold cache after a new deployment means all 400+ PoPs miss on first requests. With Origin Shield, those misses collapse to one origin request per object. Without it, your origin gets a thundering herd on every deploy."}}
+{{hint "Enable Origin Shield before a high-traffic launch" "Cold cache after a new deployment means all 750+ PoPs miss on first requests. With Origin Shield, those misses collapse to one origin request per object. Without it, your origin gets a thundering herd on every deploy."}}
 
 {{diagram "fund-cloudfront-origin-shield"}}
+
+{{qa
+  "Does Origin Shield add latency to cache hits?"
+  "No. Origin Shield only adds a hop on cache misses — when the edge PoP doesn't have the object, it checks Origin Shield before going to origin. On cache hits at the edge, the request never reaches Origin Shield. The added latency on misses is <span class='hl'>5-20ms</span> (intra-AWS regional hop), which is negligible compared to the origin round-trip it replaces for redundant fetches."
+  "Can I use Origin Shield with a non-AWS origin?"
+  "Yes. Origin Shield works with any custom origin (your own data center, another cloud provider). Pick the Shield region closest to your origin's physical location. The benefit is the same — collapsed requests and a warm regional cache layer between 750+ PoPs and your origin."
+}}
 
 {{phase 6 "Cost Optimization" "3 min"}}
 
@@ -341,6 +362,22 @@ Enables <strong>request collapsing</strong>: concurrent misses for the same obje
   (how "Is reserved capacity worth it for CloudFront?" "For stable, predictable high-traffic distributions, 1-year reserved capacity saves 30-40%. Calculate your average monthly bill and compare. Break-even is typically at $200+/month.")
 }}
 
+{{hint "why price classes matter for cost control" "CloudFront has three price classes: <strong>PriceClass_All</strong> (all 750+ PoPs), <strong>PriceClass_200</strong> (US, EU, Asia, Middle East, Africa), and <strong>PriceClass_100</strong> (US, EU, Asia only). Data transfer in South America costs <span class='hl'>$0.110/GB</span> vs <span class='hl'>$0.085/GB</span> in US/EU. If your users are concentrated in US/EU, PriceClass_100 saves up to 30% — users in excluded regions still get served, just routed to the nearest included PoP with slightly higher latency."}}
+
+{{triggerQs "CloudFront Cost Questions"
+  "How do I estimate my CloudFront bill before deploying?"
+  "Multiply expected monthly bandwidth (GB) by $0.085 (US/EU tier 1) plus request count / 10,000 * $0.01 for HTTPS. A site serving 1TB/month with 10M requests costs approximately $85 + $10 = $95/month. Add Lambda@Edge or CloudFront Functions costs if using edge compute."
+  "Does CloudFront charge for cache hits?"
+  "Yes. CloudFront charges data transfer for every byte delivered to viewers regardless of whether it was a cache hit or miss. The savings from caching come from reduced origin egress and compute — not from CloudFront waiving its own transfer fees."
+}}
+
+{{qa
+  "How does CloudFront billing compare to serving directly from ALB?"
+  "ALB charges <span class='hl'>$0.008/LCU-hour</span> plus <span class='hl'>$0.09/GB</span> data transfer. CloudFront charges <span class='hl'>$0.085/GB</span> with no LCU costs and absorbs request processing at the edge. For cacheable content, CloudFront reduces ALB LCU usage by the cache hit ratio — a 90% hit rate means 10x fewer ALB requests and 10x lower LCU cost."
+  "When is CloudFront more expensive than not using a CDN?"
+  "When your traffic is low (<span class='hl'>&lt;100 GB/month</span>) and users are in a single region near your origin. The added per-GB cost of CloudFront provides minimal latency benefit. Below ~50GB/month, the cost difference is under $5, so the decision is usually about latency, not cost."
+}}
+
 {{key "The biggest CloudFront cost mistake: serving media from EC2 instead of S3. EC2-to-CloudFront costs $0.09/GB. S3-to-CloudFront is free. Move static assets to S3 first."}}
 
 {{phase 7 "Failure Scenarios" "3 min"}}
@@ -356,6 +393,21 @@ Enables <strong>request collapsing</strong>: concurrent misses for the same obje
   (row "Cache stampede after purge" "Origin overwhelmed"                    "Origin Shield + stale-while-revalidate"       "Minutes")
   (row "Wrong cache key config"    "Wrong content served to users"          "Test cache policies in staging first"         "Invalidation (1-2 min)")
 )}}
+
+{{think "Which CDN resilience strategy: stale-if-error, custom error pages, or origin failover?"
+  (whyNot "custom error pages alone" "Custom error pages only cover specific HTTP error codes (503, 504). If the origin is slow but responding with 200s containing partial data, custom error pages never trigger. You need stale-if-error to serve the last good response during degradation, not just outages.")
+  (whatIf "origin is down and cache has expired" "stale-if-error extends the usable lifetime of cached content beyond its TTL specifically for error scenarios. Set stale-if-error=86400 on your Cache-Control header — CloudFront serves day-old content rather than passing through a 503. Custom error pages are the final fallback when no stale content exists.")
+  (how "When does origin failover beat both?" "Origin groups with primary/secondary origins handle regional failures. Primary returns 5xx → CloudFront retries on secondary origin automatically. This is the only strategy that gets fresh content during a partial outage. Best practice: use all three as layers — stale-if-error first, origin failover second, custom error pages last.")
+}}
+
+{{hint "stale-if-error keeps your site alive during origin outages" "Set <code>Cache-Control: public, max-age=300, stale-if-error=86400</code> on cacheable responses. When your origin returns 5xx or times out, CloudFront serves the stale cached version for up to 24 hours. Users see slightly outdated content instead of an error page — far better UX. This requires the origin to have set the header on at least one successful response before the failure."}}
+
+{{triggerQs "CDN Failure Handling"
+  "How does CloudFront handle origin failover automatically?"
+  "Configure an origin group with a primary and secondary origin. If the primary returns 500, 502, 503, 504, or times out, CloudFront retries the request against the secondary origin. The failover is transparent to the client — no DNS change, no redirect. Latency increases by the primary's timeout duration on first failure."
+  "What is the difference between stale-if-error and custom error pages?"
+  "stale-if-error serves the last successful cached response when the origin fails — users see real content, just potentially outdated. Custom error pages serve a static fallback page (e.g., maintenance.html from S3) when no cached content exists. Use both: stale-if-error as the first line of defense, custom error pages as the final fallback."
+}}
 
 {{code "text" `# Custom Error Response — serve fallback when origin fails
 resource "aws_cloudfront_distribution" "main" {
@@ -375,6 +427,13 @@ resource "aws_cloudfront_distribution" "main" {
 }
 `}}
 
+{{qa
+  "What CloudWatch metrics should I alarm on for CloudFront?"
+  "<span class='hl'>4xxErrorRate</span> above <span class='hl'>5%</span> and <span class='hl'>5xxErrorRate</span> above <span class='hl'>1%</span> are the two critical alarms. Also monitor <span class='hl'>OriginLatency</span> p99 — if it exceeds your origin timeout setting (default <span class='hl'>30s</span>), requests are failing silently. CacheHitRate below <span class='hl'>80%</span> indicates a misconfigured cache policy, not a failure, but worth investigating."
+  "How long does CloudFront cache a 503 error from the origin?"
+  "By default, CloudFront caches error responses for <span class='hl'>10 seconds</span> (error_caching_min_ttl). This prevents a failing origin from being hammered with retries. You can override this per error code — set it to <span class='hl'>30-60 seconds</span> for 503s to give your origin time to recover, but keep 404s shorter since they may resolve quickly after a deployment."
+}}
+
 {{phase 8 "Interview Q&A" "3 min"}}
 
 {{say "Three CloudFront topics that come up consistently in interviews: <strong>multi-origin setup</strong>, <strong>cache invalidation strategy</strong>, and <strong>multi-region failover</strong>."}}
@@ -384,6 +443,13 @@ resource "aws_cloudfront_distribution" "main" {
   "One CloudFront distribution with multiple origins and path-based behaviors. /api/* goes to ALB origin with caching disabled. /static/* goes to S3 origin with CachingOptimized policy. /media/* goes to a separate S3 bucket or MediaStore. Each behavior has its own cache policy. API behavior has caching disabled, static has aggressive caching with long TTL."
   "How do you handle cache invalidation in CloudFront?"
   "Three approaches in order of preference: 1) Versioned URLs — app.abc123.js with max-age=1year. URL changes when content changes, no invalidation needed. 2) Short TTL with stale-while-revalidate for dynamic content. 3) Explicit invalidation API as last resort — takes 1-2 minutes, limited to 1,000 free paths per month."
+}}
+
+{{triggerQs "CDN in System Design Interviews"
+  "When should you introduce CloudFront in a system design interview?"
+  "Introduce it when the problem involves serving static content globally, reducing origin load, or improving latency for geographically distributed users. Mention it in the high-level architecture phase — not as an afterthought. Specifically call out: origin type (S3 vs ALB), cache policy per path, and invalidation strategy."
+  "What is the most common CDN mistake candidates make in interviews?"
+  "Treating CDN as a magic box that caches everything. Interviewers want to hear: what is cacheable vs not, how you handle cache invalidation (versioned URLs > explicit purge), what happens on cache miss (Origin Shield, request collapsing), and how you secure origins (OAC, signed URLs). Show you understand the tradeoffs, not just that CDN = fast."
 }}
 
 {{followup "How would you handle multi-region failover with CloudFront?" "Use CloudFront origin groups with primary and secondary origins. If the primary origin returns 5xx or times out, CloudFront automatically fails over to the secondary. Configure health checks on both. For active-active multi-region, use Route 53 latency-based routing as the CloudFront origin — Route 53 routes to the nearest healthy region."}}
