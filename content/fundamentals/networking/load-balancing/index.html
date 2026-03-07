@@ -31,7 +31,7 @@
 
 {{phase 2 "Routing Algorithms" "5 min"}}
 
-{{say "The routing algorithm determines HOW traffic is distributed. The right choice depends on your workload pattern."}}
+{{say "The routing algorithm determines HOW traffic is distributed. Three workload dimensions drive the choice: request duration variance, session stickiness needs, and cache locality requirements."}}
 
 {{triggerQs "Routing Algorithm Basics"
   "Why is round-robin the default?" "It requires no state, handles uniform request sizes well, and distributes evenly across identical instances. Simple to reason about and debug."
@@ -248,6 +248,15 @@ async def health_deep():
 
 {{avoid "Never deploy to all targets at once behind an ALB. Use rolling deployments or blue-green. If the new version is broken, a big-bang deploy takes down 100% of capacity. Rolling deploy limits blast radius to 1/N targets."}}
 
+{{hint "502 vs 503 vs 504 — what each means" "502 Bad Gateway: ALB received an invalid response from the target — usually a crashed process or misconfigured port. 503 Service Unavailable: no healthy targets in the target group — all instances failed health checks. 504 Gateway Timeout: target did not respond within the idle timeout (default 60s) — slow backend or network issue. Each points to a different root cause."}}
+
+{{qa
+  "What is the most common load balancer failure in production?"
+  "Target group misconfiguration during deployment — a bad health check path or wrong port causes ALB to mark all new targets unhealthy, returning 502 to all requests. Prevention: canary deploys that route 5% of traffic to the new version first, with automatic rollback if 5XX rate exceeds 1%."
+  "How do you handle a surge that exceeds current ALB capacity?"
+  "ALB auto-scales but needs 1-5 minutes to ramp up. For predictable events (product launch, marketing campaign), contact AWS support 48 hours ahead to pre-warm. For unpredictable spikes, the targets behind the ALB will saturate first — auto-scaling on the target group with aggressive scale-up (1-minute cooldown) is more impactful than ALB pre-warming."
+}}
+
 {{phase 7 "Cost Estimates" "3 min"}}
 
 {{table "ALB Cost Breakdown" (rows
@@ -267,6 +276,8 @@ async def health_deep():
   (row "NLCU (bandwidth)"    "$0.006/NLCU-hr"           "$2.16/mo")
   (row "Total"               "All charges"               "~$23/mo")
 )}}
+
+{{hint "cross-AZ transfer is the hidden LB cost" "ALB base fee is $16.43/mo — negligible. But cross-AZ data transfer at $0.01/GB each way adds up fast. At 1 TB/day of inter-AZ traffic, that is $20/day = $600/mo — 20x the ALB base cost. Minimize cross-AZ hops by deploying services and their dependencies in the same AZ when possible."}}
 
 {{think "Is the load balancer a significant cost?"
   (whyNot "Skipping ALB to save money" "A $27/mo ALB distributes traffic to potentially thousands of dollars in compute. The LB cost is noise. The real cost to watch is cross-AZ data transfer.")

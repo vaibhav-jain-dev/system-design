@@ -98,6 +98,21 @@
 </ul>
 Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</span></strong> per request. Lua runs all three atomically in one trip — at <strong>500K req/s</strong> that saves <span class='hl'>~150ms/s</span> of cumulative latency across the fleet.`}}
 
+{{triggerQs "Capacity Planning Questions"
+  "How do you size the Redis cluster for a rate limiter handling 500K req/s?"
+  `<ul>
+  <li>Each rate limit check = <strong>1 Redis op</strong> (via Lua script). A single <span class='hl-blue'>r6g.large</span> node handles <span class='hl'>~100K ops/s</span></li>
+  <li>For 500K peak: <strong>6 nodes</strong> (3 shards × 1 replica) give <span class='hl'>300K ops/s</span> read capacity; Lua scripts halve the effective ops by batching 3 commands into 1</li>
+  <li>Memory: 50M keys × 100 bytes = <span class='hl'>5 GB</span> — fits easily in a single 13 GB node, so sharding is for throughput, not memory</li>
+</ul>`
+  "What happens if your capacity estimate is wrong and traffic exceeds Redis throughput?"
+  `<ul>
+  <li>Redis latency spikes from <span class='hl'>sub-ms to 10–50ms</span> under overload — rate checks become the bottleneck instead of the protector</li>
+  <li><strong>Mitigation</strong>: fall back to in-process counters (approximate but <span class='hl'><0.1ms</span>) while you scale the cluster horizontally</li>
+  <li>ElastiCache supports online resharding — add shards without downtime, but rebalancing takes <span class='hl'>10–30 minutes</span></li>
+</ul>`
+}}
+
 {{phase 3 "API Design with Rate Headers" "3 min"}}
 
 {{say `Rate limit headers are mandatory on <strong>every response</strong> — not just rejections:
@@ -488,7 +503,12 @@ class SlidingWindowCounter:
 
 {{phase 5 "Architecture (Hop-by-Hop)" "8 min"}}
 
-{{say "The rate limiter sits directly in the request path. There are three placement options, each with a different latency and flexibility trade-off:"}}
+{{say `Three placement tiers — each trades latency for flexibility:
+<ul>
+  <li><strong>API Gateway / edge</strong> — coarsest limits, lowest latency; catches DDoS before it reaches your fleet</li>
+  <li><strong>Service-level middleware</strong> — fine-grained per-endpoint limits tied to SLAs</li>
+  <li><strong>In-process library</strong> — most specific but couples config to deploy cycles</li>
+</ul>`}}
 
 {{hint "why middleware vs sidecar vs gateway — and when to use each?" `
 <ul>
@@ -745,6 +765,21 @@ activedefrag: yes                 # Defragment memory proactively
 
 {{hint "why volatile-lru over allkeys-lru?" "<span class='hl-blue'>volatile-lru</span> only evicts keys that have a TTL set. Our rate limit keys all have TTLs (by design), so they're eligible for eviction. Any config or schema data sharing this Redis instance without a TTL is protected. <span class='hl-red'>allkeys-lru evicts anything</span> — including non-ephemeral data — which causes subtle data loss bugs in mixed-use Redis instances."}}
 
+{{triggerQs "Redis Configuration Questions"
+  "Why disable persistence (RDB/AOF) for rate limiting Redis instances?"
+  `<ul>
+  <li>Rate limit counters are <strong>ephemeral by design</strong> — they reset every window (typically <span class='hl'>60s</span>). Persistence adds disk I/O with zero recovery benefit</li>
+  <li>AOF at <span class='hl'>500K writes/s</span> means 500K fsyncs/sec, adding <span class='hl'>1–5ms latency</span> per write — unacceptable on the hot path</li>
+  <li>If Redis restarts, counters rebuild naturally from incoming traffic within one window period</li>
+</ul>`
+  "How do you handle Lua script timeout and what is a safe lua-time-limit?"
+  `<ul>
+  <li>Set <span class='hl-blue'>lua-time-limit</span> to <span class='hl'>100ms</span> — a sliding window check should complete in <span class='hl'><1ms</span>; anything beyond 100ms signals a bug</li>
+  <li>When a Lua script exceeds the limit, Redis accepts new connections but responds with <span class='hl-red'>BUSY</span> errors until the script finishes or is killed with <code>SCRIPT KILL</code></li>
+  <li>Monitor <strong>lua script execution time</strong> in ElastiCache CloudWatch metrics — alert at p99 > <span class='hl'>5ms</span></li>
+</ul>`
+}}
+
 {{phase 9 "Trade-offs & Edge Cases" "5 min"}}
 
 {{say "The algorithm is the easy part — the edge cases are where rate limiters fail in production. Here are the critical failure scenarios and how to handle them."}}
@@ -793,7 +828,7 @@ activedefrag: yes                 # Defragment memory proactively
 
 {{phase 10 "Cost Estimates" "2 min"}}
 
-{{say "Infrastructure cost is minimal. The Redis cluster is the only dedicated line item — middleware overhead is negligible CPU."}}
+{{say "Rate limiting infrastructure: <span class='hl'>~$580/month</span> for a 3-node ElastiCache cluster handling <span class='hl'>300K ops/s</span>. Middleware overhead is <span class='hl'><0.1ms per rate check</span> — the Redis cluster is the only dedicated line item."}}
 
 {{diagram "rl-cost-breakdown"}}
 
@@ -808,7 +843,7 @@ activedefrag: yes                 # Defragment memory proactively
 
 {{phase 11 "Sub-Problems & Building Blocks" "3 min"}}
 
-{{say "Here are the building blocks and how they connect — each is a sub-problem worth diving into if the interviewer asks."}}
+{{say "Six building blocks — algorithm selection, Redis atomicity, distributed sync, rule storage, header propagation, and monitoring — each is a sub-problem worth diving into if the interviewer asks."}}
 
 {{diagram "rl-sub-problems"}}
 
@@ -835,7 +870,7 @@ activedefrag: yes                 # Defragment memory proactively
 <div class="dqa-item">
   <div class="dqa-q">Why is Sliding Window Counter preferred over Token Bucket for most production rate limiters?</div>
   <div class="dqa-a">
-    <span class="dqa-key">Sliding Window Counter</span> provides the best balance of accuracy and simplicity. It uses only <span class="dqa-key">O(1) memory per key</span> (two counters: current window + previous window), eliminates the <span class="dqa-key">boundary burst problem</span> of Fixed Window, and requires no complex state management like Token Bucket's floating-point token tracking. Cloudflare and Stripe both use variants of this algorithm. The weighted average calculation <code>prev_count × weight + curr_count</code> achieves within <span class="dqa-key">high accuracy</span> of a true sliding window log while using constant memory.
+    <span class="dqa-key">Sliding Window Counter</span> provides the best balance of accuracy and simplicity. It uses only <span class="dqa-key">O(1) memory per key</span> (two counters: current window + previous window), eliminates the <span class="dqa-key">boundary burst problem</span> of Fixed Window, and requires no complex state management like Token Bucket's floating-point token tracking. Cloudflare and Stripe both use variants of this algorithm. The weighted average calculation <code>prev_count × weight + curr_count</code> achieves <span class="dqa-key"><1% error rate</span> compared to a true sliding window log while using constant memory.
     <div class="dqa-sub">
       <div class="dqa-sub-q">When would you choose Token Bucket over Sliding Window Counter?</div>
       <div class="dqa-sub-a">

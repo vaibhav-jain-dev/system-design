@@ -448,6 +448,8 @@ TOOL_HANDLERS = {
 
 {{key "Every tool must have: 1) Input validation to prevent misuse. 2) Output truncation to prevent context overflow. 3) Timeout to prevent hanging. 4) Error handling that returns useful messages the LLM can reason about. Never let a tool silently fail."}}
 
+{{hint "why tool schema design matters more than agent logic" "The agent's effectiveness is bounded by tool descriptions, not by the LLM's reasoning ability. A vague description like 'searches data' forces the model to guess when to use it. A precise description like 'queries the orders database by customer_id or date range, returns up to 50 rows' tells the model exactly when the tool applies. Invest 80% of agent design time in tool schemas — clear parameter names, explicit constraints, and one-sentence descriptions of what the tool does NOT do."}}
+
 {{think "Tool error messages are part of the agent's context — they must be informative. A generic 'error occurred' forces the agent to guess what went wrong. A specific 'Error: Only SELECT queries are allowed' lets the agent correct its approach on the next iteration without wasting a full LLM call to diagnose."
   (whatIf "a tool returns a very large result" "Truncate to 5000 characters and append '...[truncated]'. The agent receives a signal that there is more data without blowing up the context window. Design your tools to summarize or paginate large results rather than dumping everything into context.")
   (how "test tool reliability" "Write unit tests for each tool with: valid input (happy path), invalid input (bad SQL, missing params), empty results, and timeout scenarios. The agent cannot be more reliable than its tools. Flaky tools cause the agent to loop trying to recover from transient failures.")
@@ -587,6 +589,13 @@ class ClaudeAgent:
 }}
 
 {{hint "why Claude puts tool results in the user message" "Anthropic's API treats the conversation as strictly alternating assistant/user turns. Tool results go in the user turn because the assistant cannot 'receive' data mid-turn. This means parallel tool calls return as a single user message with multiple <span class='hl-blue'>tool_result</span> blocks — batching naturally."}}
+
+{{triggerQs "Questions about production agent deployment"
+  "How do you prevent an agent from running indefinitely or accumulating excessive cost?"
+  "Three hard limits: max iterations (typically 10-15), max total tokens (budget cap per request, e.g. 50K tokens), and wall-clock timeout (60-120 seconds). When any limit is hit, the agent stops and returns a partial answer with a clear message about why it stopped. Without these limits, a confused agent can loop calling tools repeatedly — at $0.01 per iteration, 100 loops costs $1 per request. At 10K requests/day, that is $10K/day in wasted API spend."
+  "How do you handle tool failures in a production agent?"
+  "Return a descriptive error string to the agent, not an exception. The LLM can reason about 'Database error: connection timeout after 5s' and decide to retry or try a different approach. Exceptions crash the loop. For transient failures (timeouts, rate limits), implement automatic retry with exponential backoff inside the tool handler — the agent should not waste an iteration on a retryable failure. For permanent failures (invalid SQL, missing permissions), return the error immediately so the agent can adapt its strategy."
+}}
 
 {{phase 6 "Error Handling & Safety Controls" "8 min"}}
 

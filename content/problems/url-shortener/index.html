@@ -389,7 +389,12 @@ CREATE INDEX idx_urls_expires ON urls(expires_at) WHERE expires_at IS NOT NULL;
 
 {{phase 4 "Key Generation Deep Dive" "8 min"}}
 
-{{say "Short code generation is the most important design decision. There are three main approaches, each with trade-offs in collision risk, guessability, and coordination overhead."}}
+{{say "Short code generation is the most important design decision — three approaches, each with different collision risk, guessability, and coordination overhead:
+<ul>
+  <li><strong>Counter + Base62</strong> — zero collisions but sequential (guessable) and needs a centralized counter</li>
+  <li><strong>MD5/SHA hash truncation</strong> — deterministic per input but Birthday paradox makes collisions frequent at scale</li>
+  <li><strong>Key Generation Service (KGS)</strong> — pre-generates unique random keys in batches, zero collisions, non-guessable</li>
+</ul>"}}
 
 {{hint "why key generation matters most" "Key generation determines collision risk, guessability, coordination overhead, and failure modes. Get it wrong and you either lose data (collisions), expose private URLs (guessable sequences), or create a single point of failure (centralized counter). This is the section interviewers dig deepest into."}}
 
@@ -495,6 +500,13 @@ def base62_decode(s: str) -> int:
 {{diagram "url-write-read-paths"}}
 
 {{key "The read path has four caching layers: Browser (301 cache, 24h), CloudFront edge (global, 24h), ElastiCache (regional, 1h), DynamoDB (origin). A popular URL never hits DynamoDB after the first read."}}
+
+{{triggerQs "Questions about architecture"
+  "Why ECS Fargate instead of Lambda for the redirect service?"
+  "Lambda cold starts range from 100-500ms, unacceptable for the redirect hot path where p99 must be under 10ms. ECS Fargate tasks are always running — no startup delay. Lambda works well for analytics processing (latency-tolerant) but not for redirects."
+  "Why not a monolith instead of separate services?"
+  "At 57K RPS peak, a monolith couples redirect latency to write/analytics processing. A slow analytics query could starve redirect threads. Separating the redirect path (stateless, cached) from the write path (KGS, DynamoDB) and analytics path (Kinesis, Lambda) gives independent scaling and fault isolation."
+}}
 
 {{phase 6 "Caching Deep Dive" "5 min"}}
 
@@ -943,6 +955,13 @@ Error Responses:
 }}
 
 {{hint "why CDN dominates cost at scale?" "CDN charges per GB of egress. A 301 redirect response is ~500 bytes, but at 100K QPS that is 50TB/month in egress. CloudFront charges $0.085/GB for the first 10TB, dropping to $0.020/GB at 500TB+. The per-request cost ($0.0075 per 10K requests) is negligible compared to transfer."}}
+
+{{triggerQs "Questions about monitoring and cost"
+  "How do you set up alerts that do not cause alert fatigue?"
+  "Three tiers: P1 (pages on-call) for redirect success rate below 99.9% or any 5XX above 0.1% — these indicate user-facing impact. P2 (Slack notification) for cache hit ratio below 60% or DynamoDB throttles — early warnings that need attention within hours. P3 (dashboard only) for cost anomalies and batch job delays. Most teams start with too many P1 alerts and tune down within the first month."
+  "What is the single most important metric for a URL shortener?"
+  "Redirect success rate — the percentage of GET /{code} requests that return 301 or 302. If this drops below 99.9%, short URLs are broken and trust is lost. Every other metric (latency, cache hit rate, error rate) is an input to this one metric."
+}}
 
 {{diagram "url-sub-problems"}}
 

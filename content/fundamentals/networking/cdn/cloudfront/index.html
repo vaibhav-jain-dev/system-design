@@ -275,6 +275,13 @@ url = cf_signer.generate_presigned_url(
 )
 `}}
 
+{{qa
+  "How do I restrict CloudFront access to specific users without signed URLs?"
+  "Use CloudFront Functions or Lambda@Edge to validate a JWT or session cookie on Viewer Request. If invalid, return 403 immediately from the edge — the request never reaches your origin. Embed the public key in the function code so no network call is needed for verification."
+  "How do I prevent users from bypassing CloudFront and hitting my ALB directly?"
+  "Add a custom header (e.g., X-Origin-Verify: <secret>) in the CloudFront origin config. Configure your ALB to reject requests missing that header via an ALB listener rule. This ensures only CloudFront-routed requests reach your origin. For S3, use OAC instead — it provides IAM-based access control."
+}}
+
 {{avoid "Never use Origin Access Identity (OAI) for new distributions. OAI does not support SSE-KMS, does not work with S3 bucket policies properly, and AWS is deprecating it. Use OAC."}}
 
 {{phase 5 "Origin Shield and Request Collapsing" "3 min"}}
@@ -341,6 +348,8 @@ Enables <strong>request collapsing</strong>: concurrent misses for the same obje
   (how "Is reserved capacity worth it for CloudFront?" "For stable, predictable high-traffic distributions, 1-year reserved capacity saves 30-40%. Calculate your average monthly bill and compare. Break-even is typically at $200+/month.")
 }}
 
+{{hint "why price classes matter for cost control" "CloudFront has three price classes: <strong>PriceClass_All</strong> (all 750+ PoPs), <strong>PriceClass_200</strong> (US, EU, Asia, Middle East, Africa), and <strong>PriceClass_100</strong> (US, EU, Asia only). Data transfer in South America costs <span class='hl'>$0.110/GB</span> vs <span class='hl'>$0.085/GB</span> in US/EU. If your users are concentrated in US/EU, PriceClass_100 saves up to 30% — users in excluded regions still get served, just routed to the nearest included PoP with slightly higher latency."}}
+
 {{key "The biggest CloudFront cost mistake: serving media from EC2 instead of S3. EC2-to-CloudFront costs $0.09/GB. S3-to-CloudFront is free. Move static assets to S3 first."}}
 
 {{phase 7 "Failure Scenarios" "3 min"}}
@@ -356,6 +365,21 @@ Enables <strong>request collapsing</strong>: concurrent misses for the same obje
   (row "Cache stampede after purge" "Origin overwhelmed"                    "Origin Shield + stale-while-revalidate"       "Minutes")
   (row "Wrong cache key config"    "Wrong content served to users"          "Test cache policies in staging first"         "Invalidation (1-2 min)")
 )}}
+
+{{think "Which CDN resilience strategy: stale-if-error, custom error pages, or origin failover?"
+  (whyNot "custom error pages alone" "Custom error pages only cover specific HTTP error codes (503, 504). If the origin is slow but responding with 200s containing partial data, custom error pages never trigger. You need stale-if-error to serve the last good response during degradation, not just outages.")
+  (whatIf "origin is down and cache has expired" "stale-if-error extends the usable lifetime of cached content beyond its TTL specifically for error scenarios. Set stale-if-error=86400 on your Cache-Control header — CloudFront serves day-old content rather than passing through a 503. Custom error pages are the final fallback when no stale content exists.")
+  (how "When does origin failover beat both?" "Origin groups with primary/secondary origins handle regional failures. Primary returns 5xx → CloudFront retries on secondary origin automatically. This is the only strategy that gets fresh content during a partial outage. Best practice: use all three as layers — stale-if-error first, origin failover second, custom error pages last.")
+}}
+
+{{hint "stale-if-error keeps your site alive during origin outages" "Set <code>Cache-Control: public, max-age=300, stale-if-error=86400</code> on cacheable responses. When your origin returns 5xx or times out, CloudFront serves the stale cached version for up to 24 hours. Users see slightly outdated content instead of an error page — far better UX. This requires the origin to have set the header on at least one successful response before the failure."}}
+
+{{triggerQs "CDN Failure Handling"
+  "How does CloudFront handle origin failover automatically?"
+  "Configure an origin group with a primary and secondary origin. If the primary returns 500, 502, 503, 504, or times out, CloudFront retries the request against the secondary origin. The failover is transparent to the client — no DNS change, no redirect. Latency increases by the primary's timeout duration on first failure."
+  "What is the difference between stale-if-error and custom error pages?"
+  "stale-if-error serves the last successful cached response when the origin fails — users see real content, just potentially outdated. Custom error pages serve a static fallback page (e.g., maintenance.html from S3) when no cached content exists. Use both: stale-if-error as the first line of defense, custom error pages as the final fallback."
+}}
 
 {{code "text" `# Custom Error Response — serve fallback when origin fails
 resource "aws_cloudfront_distribution" "main" {
@@ -384,6 +408,13 @@ resource "aws_cloudfront_distribution" "main" {
   "One CloudFront distribution with multiple origins and path-based behaviors. /api/* goes to ALB origin with caching disabled. /static/* goes to S3 origin with CachingOptimized policy. /media/* goes to a separate S3 bucket or MediaStore. Each behavior has its own cache policy. API behavior has caching disabled, static has aggressive caching with long TTL."
   "How do you handle cache invalidation in CloudFront?"
   "Three approaches in order of preference: 1) Versioned URLs — app.abc123.js with max-age=1year. URL changes when content changes, no invalidation needed. 2) Short TTL with stale-while-revalidate for dynamic content. 3) Explicit invalidation API as last resort — takes 1-2 minutes, limited to 1,000 free paths per month."
+}}
+
+{{triggerQs "CDN in System Design Interviews"
+  "When should you introduce CloudFront in a system design interview?"
+  "Introduce it when the problem involves serving static content globally, reducing origin load, or improving latency for geographically distributed users. Mention it in the high-level architecture phase — not as an afterthought. Specifically call out: origin type (S3 vs ALB), cache policy per path, and invalidation strategy."
+  "What is the most common CDN mistake candidates make in interviews?"
+  "Treating CDN as a magic box that caches everything. Interviewers want to hear: what is cacheable vs not, how you handle cache invalidation (versioned URLs > explicit purge), what happens on cache miss (Origin Shield, request collapsing), and how you secure origins (OAC, signed URLs). Show you understand the tradeoffs, not just that CDN = fast."
 }}
 
 {{followup "How would you handle multi-region failover with CloudFront?" "Use CloudFront origin groups with primary and secondary origins. If the primary origin returns 5xx or times out, CloudFront automatically fails over to the secondary. Configure health checks on both. For active-active multi-region, use Route 53 latency-based routing as the CloudFront origin — Route 53 routes to the nearest healthy region."}}

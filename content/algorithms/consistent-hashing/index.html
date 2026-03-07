@@ -49,11 +49,11 @@
 
 {{table "Virtual Node Count Trade-offs" (rows
   (row "Vnodes/Server"  "Load Std Dev"   "Memory per Node"  "Lookup Time"     "Recommendation")
-  (row "1"              "~58% (terrible)" "Minimal"         "O(log N)"        "Never in production")
-  (row "50"             "~10% (fair)"    "~4KB"             "O(log 50N)"      "Small clusters only")
-  (row "150"            "~8% (good)"     "~12KB"            "O(log 150N)"     "Recommended default")
-  (row "200"            "~7% (great)"    "~16KB"            "O(log 200N)"     "Large clusters")
-  (row "500"            "~4.5% (excellent)" "~40KB"         "O(log 500N)"     "Diminishing returns")
+  (row "1"              "~58% std dev"    "Minimal"         "O(log N)"        "Never in production")
+  (row "50"             "~10% std dev"   "~4KB"             "O(log 50N)"      "Small clusters only")
+  (row "150"            "~8% std dev"    "~12KB"            "O(log 150N)"     "Recommended default")
+  (row "200"            "~7% std dev"    "~16KB"            "O(log 200N)"     "Large clusters")
+  (row "500"            "~4.5% std dev"  "~40KB"            "O(log 500N)"     "Diminishing returns")
 )}}
 
 {{think "150-200 virtual nodes per server is the standard. At 200 vnodes with 1000 physical servers, the ring has 200K entries. At ~40 bytes each (32-byte hash + 8-byte pointer) that is 8 MB — negligible for excellent load balance. The load standard deviation drops as 1/sqrt(vnodes), so going from 150 to 500 vnodes only improves from ~8% to ~4.5% std dev."
@@ -172,6 +172,8 @@ ring.remove_node("cache-2")  # only its keys move clockwise
   (how "do you verify minimal key movement in a test?" "Record key→node mappings before and after add_node/remove_node. Count keys that changed owner. Should be approximately K/(N+1) for adding a node. The implementation above is straightforward to test this way.")
 }}
 
+{{hint "why virtual nodes reduce rebalancing overhead" "Without virtual nodes, a new physical node takes one contiguous arc from a single neighbor — that neighbor loses up to 50% of its keys in the worst case. With 150 vnodes, the new node claims 150 small arcs spread across all existing nodes, so each neighbor loses only <span class='hl'>~1/N</span> of its keys. The rebalancing load is distributed evenly instead of hammering one node."}}
+
 {{avoid "Do not use too few virtual nodes. With only 1 virtual node per server on a 3-node cluster, one node might own 60% of the keyspace by chance. The standard deviation of load is approximately 1/sqrt(vnodes). At 150 vnodes it is about 8%. At 1 vnode it is ~58%."}}
 
 {{triggerQs "Questions this phase triggers"
@@ -210,6 +212,15 @@ ring.remove_node("cache-2")  # only its keys move clockwise
 
 {{think "Rendezvous hashing has the same minimal-movement property as consistent hashing but requires evaluating all N nodes per lookup. At N=100 that is 100 hash computations vs ~7 for consistent hashing (binary search on 150*100=15000 entries). Rendezvous wins for very small N where simplicity matters more than lookup speed."
   (whatIf "you need to support arbitrary node weights and frequent topology changes" "Consistent hashing + virtual nodes handles this naturally. Rendezvous hashing also handles weights but requires O(N) work per lookup. Jump consistent hash is O(1) memory but cannot handle arbitrary removal. Consistent hashing is the general solution.")
+}}
+
+{{hint "when rendezvous hashing beats consistent hashing" "Below ~50 nodes, rendezvous hashing is simpler to implement (no ring, no vnodes, no sorted array) and O(N) is negligible — 50 hash computations take <span class='hl'>~2 microseconds</span>. Above 50 nodes, consistent hashing's O(log N) lookup wins: at 1000 nodes, binary search does ~17 comparisons vs 1000 hash evaluations."}}
+
+{{triggerQs "Questions this comparison triggers"
+  "When would you choose jump consistent hash over ring-based consistent hashing?"
+  "Jump hash is ideal for fixed-size, homogeneous clusters — it uses O(1) memory and O(ln N) time with perfectly uniform distribution. Google uses it internally for storage backends where nodes are rarely added or removed. The limitation is no support for arbitrary node removal or weighted nodes, which makes it unsuitable for elastic cloud deployments."
+  "Can you combine consistent hashing with replication for fault tolerance?"
+  "Yes — walk clockwise from the key's ring position and store copies on the next R distinct physical nodes. With R=3 on a 10-node cluster, losing any single node still leaves 2 replicas available. DynamoDB and Cassandra both use this exact approach. The ring naturally determines replica placement without a separate coordination service."
 }}
 
 {{phase 7 "Real-World Applications" "5 min"}}

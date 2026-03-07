@@ -197,6 +197,8 @@ assert ids == sorted(ids), "Snowflake IDs must be time-sorted"
   (whatIf "you need to hide the creation timestamp from clients" "XOR the timestamp bits with a secret before combining into the final ID. The XOR is invertible with the key so you can decode internally, but external observers cannot extract timing information. Alternatively, use UUID v7 which has the same time-sorted property but is less guessable in the randomness portion.")
 }}
 
+{{hint "when UUID v4 is actually acceptable" "UUID v4 works fine when IDs are not used as primary keys or sort keys — for example, idempotency keys, correlation IDs in logs, or distributed trace IDs. In these cases the 16-byte overhead and random ordering do not matter because you only do point lookups by exact ID, never range scans or sorted inserts."}}
+
 {{phase 6 "Production Variants" "3 min"}}
 
 {{say "Every major tech company uses a Snowflake variant with customized bit layouts for their specific needs."}}
@@ -240,6 +242,15 @@ assert ids == sorted(ids), "Snowflake IDs must be time-sorted"
   (row "URL Shortener"     "Short URL codes"       "Unique ID -> Base62 encode -> short string"       "Random generation had collisions")
   (row "Event sourcing"    "Event IDs"             "Ordered event log across microservices"            "Auto-increment across services")
 )}}
+
+{{hint "ID generation as a single point of failure" "Snowflake generators run locally on each machine — there is no central ID service to fail. The only coordination is machine ID assignment at startup, which can use a lease from ZooKeeper/etcd with a TTL of 5-10 minutes. If the lease service is down, the machine keeps its existing lease until expiry. This makes ID generation available even during partial infrastructure outages."}}
+
+{{triggerQs "Questions about ID generation in distributed systems"
+  "How do you guarantee no duplicate IDs across multiple datacenters?"
+  "Partition the machine ID space by datacenter: use 2 bits for datacenter (4 DCs) + 8 bits for machine (256 per DC). Each datacenter independently assigns machine IDs within its range. No cross-datacenter coordination needed during ID generation — uniqueness is guaranteed by the bit layout as long as machine IDs are unique within each datacenter."
+  "What happens to in-flight Snowflake IDs if a machine crashes and a new one takes its machine ID?"
+  "The new machine starts with sequence=0 at the current timestamp, which is later than any ID the crashed machine produced. Since the timestamp field is most significant, all new IDs are strictly greater than old ones. The only risk is if the new machine starts within the same millisecond — guard against this by waiting 1ms after acquiring a machine ID lease before generating."
+}}
 
 {{followup "What if you need more than 1024 machines?" "Customize the bit layout: steal bits from timestamp or sequence. Example: 39 bits timestamp (17 years) + 14 bits machine (16,384 machines) + 10 bits sequence (1,024 IDs/ms). Or use 2 bits for datacenter + 12 bits for machine = 4 datacenters × 4,096 machines each. The layout is flexible as long as fields sum to 63 usable bits plus the sign bit."}}
 

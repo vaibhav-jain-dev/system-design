@@ -51,6 +51,18 @@
 
 {{hint "conditional chaining for routing" "The classify-then-route pattern is extremely powerful. Run a fast, cheap model to classify the input type (billing question, technical issue, sales inquiry), then route to a specialized chain with domain-specific context. This beats a single chain that tries to handle all cases because each specialized chain can be tuned for its specific domain."}}
 
+{{think "Sequential chaining is the safest default — each step validates its input from the previous step. Parallel chaining cuts latency but requires all branches to be truly independent — if branch B needs output from branch A, you must use sequential."
+  (whyNot "always running steps in parallel" "Parallel execution only works for independent subtasks. If step B needs output from step A, running them in parallel means B starts with no input and fails. Most pipelines have at least one dependency chain.")
+  (whatIf "one step in a sequential chain fails" "The chain aborts at the failure point. Each step should have a validator that checks output format and content before passing downstream. Retry the failed step 2-3 times with a format reminder before aborting the entire chain.")
+}}
+
+{{triggerQs "Questions about chaining patterns"
+  "How do you handle error propagation in a chain?"
+  "Each step returns a structured result with a status field (success/failure) and the output. The orchestrator checks status before invoking the next step. On failure: retry the step up to 3 times, then abort the chain and return an error indicating which step failed. Never silently pass bad output downstream — errors compound through the chain."
+  "When do you add a gate (quality check) between steps?"
+  "Add a gate when the next step is expensive or irreversible. For example: before sending a generated email (cannot unsend), before writing to a database (hard to undo), or before calling a paid API. The gate can be a simple format check (JSON valid?), an LLM judge (is this response appropriate?), or a deterministic rule (does output contain required fields?)."
+}}
+
 {{phase 3 "Chaining Framework Implementation" "10 min"}}
 
 {{think "The framework must enforce strict boundaries between steps. Each step receives a string and returns a string — no shared mutable state. This forces clean interfaces and makes steps independently testable. The alternative — passing a shared context object that steps mutate — creates hidden coupling where step 3 silently depends on a field that step 1 sometimes sets."
