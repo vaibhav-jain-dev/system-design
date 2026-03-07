@@ -59,6 +59,8 @@ S3 stores objects in <strong>buckets</strong>. A bucket is a flat namespace — 
   "Bucket policy is resource-based — attached to the bucket, can grant cross-account access. IAM policy is identity-based — attached to a user/role, controls what that identity can do. For cross-account access (e.g., CloudFront service principal), you need a bucket policy. For same-account service access, IAM role is simpler."
 }}
 
+{{qa "Why use pre-signed URLs instead of proxying uploads through your server?" "Direct upload to S3 via pre-signed URL eliminates your server as a bandwidth bottleneck. A 100MB file upload through your API server consumes 100MB of server memory/bandwidth. With a pre-signed URL, the client uploads directly to S3 — your server only generates the URL (microseconds of work). This scales to thousands of concurrent uploads without adding servers." "What about security — can someone abuse a pre-signed URL?" "Pre-signed URLs expire (typically 5-15 minutes). They are scoped to a specific key (file path), HTTP method, and content-type. The signer's IAM permissions are checked at upload time. You can also set a max content-length condition to prevent oversized uploads."}}
+
 {{phase 3 "Multipart Upload" "4 min"}}
 
 {{say `For files > 5 MB, use multipart upload. The client:
@@ -139,6 +141,8 @@ def upload_large_file(bucket, key, filepath):
 
 {{hint "minimum storage duration charges" "S3 charges minimum storage durations: Standard-IA 30 days, Glacier Instant 90 days, Glacier Flexible 90 days, Glacier Deep Archive 180 days. If you delete an object before the minimum, you pay the remaining days anyway. Design lifecycle transitions to avoid premature deletion."}}
 
+{{qa "How much does S3 actually cost for a typical system design problem?" "S3 Standard: $0.023/GB/month for storage + $0.0004/1000 GET requests + $0.005/1000 PUT requests. For 1TB of images with 10M reads/month: $23 storage + $4 GETs = $27/month. Egress to CloudFront is free within the same region. Egress to internet is $0.09/GB — this is usually the largest cost." "Is S3 strongly consistent?" "Yes, since December 2020. All S3 operations (PUT, GET, DELETE, LIST) are read-after-write consistent. You can PUT an object and immediately GET it. Before 2020, new PUTs were consistent but overwrites and deletes were eventually consistent — this is no longer the case."}}
+
 {{phase 5 "Versioning & Replication" "4 min"}}
 
 {{say `Two critical durability features:
@@ -210,6 +214,8 @@ Targets: <strong>Lambda</strong> (direct invoke), <strong>SNS</strong> (fan-out)
   "Three reasons: (1) <strong>Latency</strong> — CloudFront has 600+ edge PoPs globally vs S3 in one region; (2) <strong>Cost</strong> — CloudFront data transfer is $0.085/GB vs S3 data transfer out at $0.09/GB, and cache hits eliminate S3 GET requests entirely; (3) <strong>Security</strong> — Origin Access Control means S3 bucket is never publicly accessible, reducing attack surface."
   "How does CloudFront cache invalidation work?"
   "Invalidation is propagated to all edge locations. Up to 1,000 paths/mo free, then $0.005 each. Wildcard: /images/* invalidates all objects under that prefix. Propagation takes <span class='hl'>~15 seconds</span> for targeted paths, up to 60s for wildcards. Prefer short TTLs + versioned URLs (image-v2.jpg) over invalidation at scale."}}
+
+{{qa "When should I use S3 vs EBS vs EFS?" "S3 for object storage (images, videos, backups, logs) — accessed via HTTP API, infinite scale, cheapest per GB. EBS for block storage attached to EC2 (database files, OS volumes) — accessed like a local disk, must be in the same AZ. EFS for shared file storage across multiple EC2 instances — NFS protocol, useful for CMS or shared config." "Can S3 handle high-throughput writes?" "S3 supports 3,500 PUT/POST/DELETE and 5,500 GET requests per second per prefix. For higher throughput, distribute objects across multiple prefixes (e.g., hash-based prefix: /a1b2/ instead of /uploads/). S3 auto-partitions based on prefix patterns, but distributing upfront avoids throttling during ramp-up."}}
 
 {{phase 8 "Trade-offs & Edge Cases" "3 min"}}
 

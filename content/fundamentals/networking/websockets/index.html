@@ -82,6 +82,8 @@ Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`}}
   "Yes, if the proxy supports the CONNECT method and passes through Upgrade headers. Many corporate proxies and some CDNs strip Upgrade headers or block CONNECT tunneling — this is why WebSocket fallback to long polling matters. Use WSS (TLS) to reduce proxy interference; encrypted traffic is less likely to be intercepted."
 }}
 
+{{qa "How many WebSocket connections can one server handle?" "A Linux server can hold ~1M concurrent TCP connections with proper tuning (file descriptor limits, ephemeral port range, memory for buffers). Each idle WebSocket uses ~2-4KB of RAM. 1M connections × 4KB = 4GB. The bottleneck is usually message throughput, not connection count." "What about mobile devices with unreliable networks?" "Mobile connections drop frequently (cell tower switches, WiFi to cellular). Implement automatic reconnect with exponential backoff (1s, 2s, 4s, max 30s). Buffer messages client-side during disconnection. On reconnect, send the last received message timestamp and fetch missed messages from the server's message history."}}
+
 {{phase 3 "Connection Management" "5 min"}}
 
 {{say `A WebSocket connection can live for hours or days — two mechanisms keep it healthy:
@@ -213,6 +215,8 @@ func (h *Hub) Publish(userID string, payload []byte) {
   "What happens to in-flight messages when a WebSocket server is restarted for a deploy?"
   "During a rolling deploy, the server sends a WebSocket close frame (1001 Going Away) to all connected clients before shutdown. Clients receive the close, trigger their reconnect logic with backoff, and connect to a different healthy server. The new server re-subscribes to Redis channels for that user. Messages during the reconnect window are buffered client-side or fetched from history on reconnect. Total disruption: 1-3 seconds."
 }}
+
+{{qa "How do you load balance WebSocket connections?" "You can't use round-robin per request because WebSockets are long-lived connections, not individual requests. Use the initial HTTP upgrade request for load balancing — once upgraded, the connection stays on that server. ALB supports WebSocket natively and routes the upgrade to a target. For even distribution, use least-connections algorithm." "What happens if one WebSocket server becomes overloaded?" "Unlike HTTP where a load balancer distributes individual requests, WebSocket connections are sticky to a server. If server A has 50K connections and server B has 10K, new connections should go to B. Use connection-count-aware load balancing (least connections). For rebalancing, the overloaded server can proactively disconnect clients with a 1001 close code, forcing reconnection to a less loaded server."}}
 
 {{phase 5 "Redis Pub/Sub Fan-Out" "5 min"}}
 
@@ -356,6 +360,8 @@ async function startLongPolling(userId, onMessage) {
   "How do you authenticate a WebSocket connection?"
   "Pass a short-lived JWT (15-minute TTL) as a query parameter or Subprotocol header during the upgrade request. The server validates the JWT before returning 101. Once the connection is established, the user is trusted for the connection lifetime — no per-message auth overhead. For long-lived connections (>15min), implement a re-auth flow: server sends an auth-challenge message, client responds with a refreshed token."
 }}
+
+{{qa "Is gRPC streaming better than WebSockets?" "For service-to-service communication, gRPC bidirectional streaming is usually better — it has built-in protobuf serialization, deadline propagation, and works well with service meshes. For browser-to-server, WebSockets are the only full-duplex option since browsers don't natively support gRPC streaming without grpc-web (which is unidirectional)." "When should I use MQTT instead of WebSockets?" "MQTT is purpose-built for IoT: tiny packet overhead (2-byte header vs WebSocket's variable header), built-in QoS levels (0=fire-forget, 1=at-least-once, 2=exactly-once), and last-will messages for disconnect detection. Use MQTT for thousands of low-bandwidth IoT devices. Use WebSockets for interactive applications (chat, gaming, collaboration) where you need arbitrary message formats."}}
 
 {{phase 8 "Interview Summary" "2 min"}}
 
