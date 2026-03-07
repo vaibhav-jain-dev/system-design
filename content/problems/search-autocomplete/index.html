@@ -605,6 +605,17 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
 
 {{checklist "Scaling checklist" "CDN caches top 10K prefixes with 60s TTL — verify cache hit ratio > 88%" "Each trie service replica handles 6K QPS — load test before production" "Redis cluster has 3 nodes for HA — no single point of failure" "Kafka partitions match consumer parallelism — 50 partitions, 50 Flink workers" "Trie rebuild job completes in &lt;30 min — alert on >45 min runtimes" "Multi-region: push trie snapshots to regional S3 buckets within 5 min of rebuild"}}
 
+{{hint "horizontal scaling is trivial for the trie" "The trie is read-only after build — horizontal scaling is trivial. Each new instance downloads the trie snapshot from S3, loads it into RAM, and starts serving in <span class=\"hl\">60 seconds</span>. No leader, no coordination needed during queries. The only constraint is the <span class=\"hl\">60-second rebuild window</span> — during that window the instance serves no traffic, so maintain <strong>N+1 capacity headroom</strong> at all times."}}
+
+{{triggerQs "Scaling Questions"
+  "How do you handle a trie node going down during peak traffic?"
+  "The trie service is stateless — each instance holds a <strong>full copy of the trie in RAM</strong>. The load balancer routes around the failed node in <span class=\"hl\">~30 seconds</span> (health check interval). The replacement node needs <span class=\"hl\">~60 seconds</span> to rebuild its trie on startup (download S3 snapshot + deserialize). During this window, traffic is split across the remaining N-1 nodes, which may be at 100% capacity — maintain <strong>N+1 capacity headroom</strong> so no single failure causes saturation."
+  "What's the maximum trie size for a language before memory pressure becomes a problem?"
+  "At <span class=\"hl\">1.5 GB per language trie</span>, a 64 GB r6g.2xlarge handles 10+ language tries. The real constraint is <strong>trie rebuild time</strong> — <span class=\"hl\">60 seconds at 1.5 GB</span>. If the trie grows to <span class=\"hl\">5 GB</span>, rebuild takes 3–4 minutes, widening the stale-data window. Mitigations: increase trie sync frequency (hourly → 15 min) to reduce staleness, or <span class=\"hl-blue\">shard the trie by prefix range</span> (A–M on one node set, N–Z on another) to keep each shard under 1.5 GB."
+  "How do you avoid a thundering herd when all trie nodes rebuild simultaneously?"
+  "Stagger rebuilds with a <span class=\"hl-blue\">random jitter</span> of 0–15 minutes. In a 10-node cluster, rebuilds are spread across 10 non-overlapping windows. A <strong>Redis distributed lock</strong> (background mutex) ensures at most 1–2 nodes rebuild simultaneously — the others serve the current trie while waiting. This caps the number of S3 download streams and prevents synchronized CPU spikes."
+}}
+
 {{phase 11 "Failure Modes" "4 min"}}
 
 {{say `Autocomplete is non-critical — degraded suggestions are better than a broken search box:
@@ -639,6 +650,8 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
   "What if personalization data (Redis) is unavailable — do you serve 503?"
   "No. We degrade gracefully: if Redis is unreachable, we skip personalization and return global top-10. The user gets slightly less tailored suggestions but doesn't see an error. This is a UX tradeoff we've explicitly chosen — availability > personalization freshness."
 }}
+
+{{qa "What if the Kafka query log pipeline falls behind?" "Trie freshness degrades. A <span class=\"hl\">4-hour Kafka lag</span> means new trending queries take 4 hours to appear in the trie. This is a <strong>freshness SLO violation</strong>, not an availability failure — users still get suggestions, just not the most recent ones. Alert on consumer group lag <span class=\"hl\">&gt; 30 minutes</span>. The mitigation: increase <span class=\"hl-blue\">consumer group parallelism</span> to match partition count — 10 consumers per 10 partitions. If lag is structural (sustained throughput > consumer capacity), add partitions to the query-log topic and scale consumers to match." "How do you prevent Kafka lag from cascading into trie staleness permanently?" "The Flink job that processes the query log is stateless — it only needs to process the <em>current window</em> to compute new trie weights. If lag spikes during a traffic event, the job catches up by processing historical events in bulk (Flink's event-time processing handles out-of-order arrival). The trie is only swapped when a full rebuild completes — if the job crashes mid-rebuild, the previous snapshot remains live. Lag &gt; 2 hours triggers an auto-scaling event on the Flink cluster."}}
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 
