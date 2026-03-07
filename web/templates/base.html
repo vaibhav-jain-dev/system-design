@@ -526,8 +526,12 @@
         var SIDEBAR_PIN_KEY = 'sd-sidebar-pinned';
 
         // ── Layout constants ────────────────────────────────────────────────
-        var BOOK_V_PAD  = 48;   // total top+bottom padding inside the spread area
-        var BOOK_H_PAD  = 36;   // left+right padding inside each page
+        // These must match the CSS values in .book-reader and .book-page exactly
+        // so that element height measurements reflect their true rendered height.
+        var BOOK_READER_VPAD = 20;  // .book-reader top padding (bottom=0); see CSS padding:20px 24px 0
+        var BOOK_READER_HPAD = 48;  // .book-reader left+right padding: 24px × 2
+        var BOOK_PAGE_HPAD   = 80;  // .book-page left+right padding: 40px × 2 (CSS: padding:36px 40px)
+        var BOOK_H_PAD  = 36;   // .book-page top+bottom padding (36px each); used for innerH + meas div
         var BOOK_GAP    = 4;    // gap between left and right pages (spine gap)
         var BOOK_CTRL_H = 52;   // controls bar height
 
@@ -546,8 +550,16 @@
             // being a fixed overlay vs a persistent panel without manual math.
             var vh = window.innerHeight;
 
-            var pageH = vh - BOOK_CTRL_H - BOOK_V_PAD;
-            var pageW = Math.floor((d.offsetWidth - BOOK_GAP - BOOK_H_PAD * 4) / 2);
+            // pageH: subtract controls bar + reader top padding (reader bottom=0)
+            var pageH = vh - BOOK_CTRL_H - BOOK_READER_VPAD;
+            // pageW: width of the measurement div.
+            // We want its inner content width to exactly match the book-page's inner content width,
+            // so element heights measure correctly (no extra text wrapping from incorrect narrowing).
+            // Actual content width per page = (d.offsetWidth - reader h-pad - gap) / 2 - page h-pad
+            // Measurement div content width = pageW - BOOK_H_PAD * 2 (36px each side)
+            // Setting them equal: pageW = actual_content_W + BOOK_H_PAD * 2
+            var pageContentW = Math.floor((d.offsetWidth - BOOK_READER_HPAD - BOOK_GAP) / 2) - BOOK_PAGE_HPAD;
+            var pageW = pageContentW + BOOK_H_PAD * 2;
             if (pageH < 150 || pageW < 150) return;
 
             // ── Collect elements ───────────────────────────────────────────
@@ -601,6 +613,9 @@
 
             // ── Bin-pack elements into pages ───────────────────────────────
             var innerH = pageH - BOOK_H_PAD * 2; // content area height
+            // Allow 5% overflow so one near-fitting element doesn't push to a sparse next page.
+            // The book-page has overflow-y:auto so a slight overflow scrolls rather than breaks layout.
+            var packH  = innerH * 1.05;
             book.pages = [];
             var curPage = [], curH = 0;
 
@@ -608,7 +623,7 @@
                 var h = heights[i];
                 // If adding this element overflows and there's content, start a new page.
                 // If the element alone is taller than a page, it goes alone (page scrolls).
-                if (curH + h > innerH && curPage.length > 0) {
+                if (curH + h > packH && curPage.length > 0) {
                     book.pages.push(curPage);
                     curPage = [el];
                     curH    = h;
