@@ -52,6 +52,7 @@ func FuncMap(diagramReg *diagrams.Registry) template.FuncMap {
 		"slugIcon":     slugIcon,
 		"contains":     strings.Contains,
 		"slugImagePath": slugImagePath,
+		"safe":         func(s string) template.HTML { return template.HTML(s) },
 	}
 }
 
