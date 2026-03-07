@@ -38,6 +38,7 @@ func New(reg *registry.Registry, templateFS, contentFS fs.FS, funcMap template.F
 			"web/templates/doc_card.html",
 			"web/templates/detail_concept.html",
 			"web/templates/detail_quick.html",
+			"web/templates/detail_quick_all.html",
 		))
 
 	return &Handler{
@@ -385,6 +386,26 @@ func (h *Handler) QuickCategoryDetail(w http.ResponseWriter, r *http.Request) {
 
 	if isHTMX(r) {
 		if err := h.templates.ExecuteTemplate(w, "detail_quick.html", data); err != nil {
+			log.Printf("Template error: %v", err)
+			http.Error(w, "Internal error", 500)
+		}
+		return
+	}
+
+	if err := h.templates.ExecuteTemplate(w, "base.html", data); err != nil {
+		log.Printf("Template error: %v", err)
+		http.Error(w, "Internal error", 500)
+	}
+}
+
+// QuickAll renders all quick-answer categories on a single infinite-scroll page.
+func (h *Handler) QuickAll(w http.ResponseWriter, r *http.Request) {
+	data := h.baseData()
+	data["ActiveSlug"] = "quick-all"
+	data["PageType"] = "quick-all"
+
+	if isHTMX(r) {
+		if err := h.templates.ExecuteTemplate(w, "detail_quick_all.html", data); err != nil {
 			log.Printf("Template error: %v", err)
 			http.Error(w, "Internal error", 500)
 		}
