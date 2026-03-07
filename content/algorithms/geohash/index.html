@@ -1,0 +1,331 @@
+{{phase 1 "What Is Geohash?" "3 min"}}
+
+{{say "A Geohash encodes a (latitude, longitude) coordinate pair as a short base32 string. The key property: <strong>strings with the same prefix are geographically close</strong>. 'dp3wj' and 'dp3wk' are neighboring cells. This turns a 2D spatial problem into a 1D string prefix problem — and 1D problems are fast."}}
+
+{{diagram "algo-geohash-overview"}}
+
+{{table "Geohash Precision Table" (rows
+  (row "Length" "Width" "Height" "Area" "Use Case")
+  (row "1" "5,009 km" "4,992 km" "~25M km²" "Continent-level")
+  (row "2" "1,252 km" "624 km" "~781K km²" "Country-level")
+  (row "3" "156 km" "156 km" "~24K km²" "Region/state")
+  (row "4" "39 km" "20 km" "~780 km²" "City-level")
+  (row "5" "4.9 km" "4.9 km" "~24 km²" "District-level")
+  (row "6" "1.2 km" "0.61 km" "~0.73 km²" "Neighborhood (food delivery)")
+  (row "7" "153 m" "153 m" "~23K m²" "Block-level (ride-hailing)")
+  (row "8" "38 m" "19 m" "~720 m²" "Building-level")
+  (row "9" "4.8 m" "4.8 m" "~23 m²" "Street-level (precise delivery)")
+)}}
+
+{{think "Geohash precision 6 (~1.2 km × 0.6 km) is the sweet spot for food delivery restaurant lookup. Precision 7 (~150 m) is right for driver-rider matching in ride-hailing. Higher precision means smaller cells, more shards, fewer entities per cell — choose based on matching radius."
+  (whyNot "storing raw lat/lon in a database and querying with Haversine formula" "Finding restaurants within 5 km of (28.61, 77.20): WHERE ST_Distance(point, query_point) < 5000 — this scans every row, computing spherical distance for each. At 1 million restaurants, that's 1M floating-point trig operations per query. O(N) is unacceptable at real-time matching latency.")
+  (how "geohash reduces 2D search to 1D prefix lookup" "Convert query point to geohash prefix 'dp3w'. All restaurants with geohash starting with 'dp3w' are in the same 5km²  cell. A B-tree index on the geohash string column makes this O(log N) instead of O(N).")
+}}
+
+{{hint "neighbors are the critical insight" "A proximity search cannot query only one cell — entities near the border of cell 'dp3w' might be closer to the query point than entities in the center of 'dp3w'. Always query the target cell <strong>plus all 8 neighbors</strong>. The 9-cell search is the correct approach."}}
+
+{{triggerQs "Phase 1 Trigger Questions"
+  "What is the time complexity of a geohash proximity query vs a Haversine scan?"
+  "Geohash: O(log N) B-tree index lookup across 9 cells. Haversine scan: O(N) full table scan. At 1M restaurants, log N ≈ 20 vs 1,000,000 operations. The geohash index is ~50,000x faster. In practice, add a bounding-box filter (lat BETWEEN x AND y AND lon BETWEEN a AND b) as a secondary filter to exclude edge cases."
+  "Why do we need to query 9 cells instead of just 1?"
+  "A query point at the corner of its geohash cell is closer to points in neighboring cells than to most points in its own cell. The corner case: query point is at the bottom-right corner of cell A. The nearest restaurant may be in cell B (directly right) just 10 meters away, while the nearest restaurant in cell A may be 500 meters away. Always query self + 8 neighbors."
+}}
+
+{{phase 2 "Encoding Algorithm" "5 min"}}
+
+{{say "Geohash encodes by repeatedly bisecting the coordinate space. Latitude range [-90, 90] and longitude range [-180, 180] are halved alternately, building a binary string that is then base32 encoded."}}
+
+{{code "python" `BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+
+def encode(lat: float, lon: float, precision: int = 6) -> str:
+    """
+    Encode (lat, lon) as a geohash string of given precision.
+    Each base32 char encodes 5 bits.
+    precision=6 → 30 bits → ~1.2 km × 0.6 km cell.
+    """
+    lat_range = [-90.0, 90.0]
+    lon_range = [-180.0, 180.0]
+
+    bits = []
+    is_lon = True  # start with longitude (alternating: lon, lat, lon, lat...)
+
+    for _ in range(precision * 5):
+        if is_lon:
+            mid = (lon_range[0] + lon_range[1]) / 2
+            if lon >= mid:
+                bits.append(1)
+                lon_range[0] = mid
+            else:
+                bits.append(0)
+                lon_range[1] = mid
+        else:
+            mid = (lat_range[0] + lat_range[1]) / 2
+            if lat >= mid:
+                bits.append(1)
+                lat_range[0] = mid
+            else:
+                bits.append(0)
+                lat_range[1] = mid
+        is_lon = not is_lon
+
+    # Pack bits into base32
+    result = ""
+    for i in range(0, len(bits), 5):
+        index = int("".join(str(b) for b in bits[i:i+5]), 2)
+        result += BASE32[index]
+
+    return result
+
+
+def decode(geohash: str) -> tuple[float, float]:
+    """Return (lat, lon) center of geohash cell."""
+    lat_range = [-90.0, 90.0]
+    lon_range = [-180.0, 180.0]
+    is_lon = True
+
+    for char in geohash:
+        index = BASE32.index(char)
+        for bit_pos in range(4, -1, -1):
+            bit = (index >> bit_pos) & 1
+            if is_lon:
+                mid = (lon_range[0] + lon_range[1]) / 2
+                if bit:
+                    lon_range[0] = mid
+                else:
+                    lon_range[1] = mid
+            else:
+                mid = (lat_range[0] + lat_range[1]) / 2
+                if bit:
+                    lat_range[0] = mid
+                else:
+                    lat_range[1] = mid
+            is_lon = not is_lon
+
+    lat = (lat_range[0] + lat_range[1]) / 2
+    lon = (lon_range[0] + lon_range[1]) / 2
+    return lat, lon
+
+
+# Example
+print(encode(28.6139, 77.2090, precision=6))  # "ttnfv2" (New Delhi)
+print(encode(19.0760, 72.8777, precision=6))  # "te7udw" (Mumbai)
+# These share no prefix — correct, they are ~1400 km apart`}}
+
+{{think "The alternating longitude/latitude bisection is what makes geographic proximity align with string prefix proximity — but only approximately."
+  (how "base32 encoding works" "5 bits → one of 32 characters (0-9, b-z excluding a, i, l, o to avoid confusion). Precision-6 geohash = 30 bits = 6 chars. Each additional character adds 5 bits, halving cell area twice (one lon split + one lat split). Precision-7 = 35 bits = cell ~150m × 150m.")
+  (whatIf "two points have the same geohash" "They are in the same cell — not necessarily the same location. Geohash is lossy. Two points 100 meters apart with precision-6 may share a cell. Use geohash for coarse spatial filtering, then compute exact Haversine distance for final ranking/filtering.")
+}}
+
+{{phase 3 "Neighbor Lookup" "4 min"}}
+
+{{say "The 8 neighbors of a geohash cell form a 3×3 grid. Computing them requires adjusting the decoded (lat, lon) by the cell dimensions and re-encoding."}}
+
+{{code "python" `def neighbors(geohash: str) -> dict[str, str]:
+    """Return dict of {direction: geohash} for all 8 neighbors."""
+    lat, lon = decode(geohash)
+    precision = len(geohash)
+
+    # Cell dimensions at this precision
+    lat_err = (90 / (2 ** (precision * 5 // 2 - 1)))
+    lon_err = (180 / (2 ** (precision * 5 // 2)))
+
+    return {
+        "n":  encode(lat + lat_err * 2, lon, precision),
+        "ne": encode(lat + lat_err * 2, lon + lon_err * 2, precision),
+        "e":  encode(lat, lon + lon_err * 2, precision),
+        "se": encode(lat - lat_err * 2, lon + lon_err * 2, precision),
+        "s":  encode(lat - lat_err * 2, lon, precision),
+        "sw": encode(lat - lat_err * 2, lon - lon_err * 2, precision),
+        "w":  encode(lat, lon - lon_err * 2, precision),
+        "nw": encode(lat + lat_err * 2, lon - lon_err * 2, precision),
+    }
+
+def nearby_restaurants(lat: float, lon: float,
+                       precision: int = 6) -> list[str]:
+    """
+    Return geohash cells to query for nearby restaurants.
+    Query all 9 cells (self + 8 neighbors) to handle border cases.
+    """
+    center = encode(lat, lon, precision)
+    n = neighbors(center)
+    return [center] + list(n.values())`}}
+
+{{table "9-Cell Query Coverage" (rows
+  (row "Precision" "Cell Size" "9-Cell Coverage" "Radius Covered")
+  (row "5" "~4.9 km" "~44 km × 44 km" "Good for city-scale search")
+  (row "6" "~1.2 km" "~11 km × 11 km" "Food delivery (5 km radius)")
+  (row "7" "~153 m" "~1.4 km × 1.4 km" "Ride-hailing driver matching")
+)}}
+
+{{hint "use precision 6 for food delivery matching" "Precision 6 = cells ~1.2 km wide. 9 cells cover ~11 km × 11 km. For a 5 km restaurant delivery radius, querying 9 cells at precision 6 always contains the search area with margin. Apply Haversine filtering after the cell lookup to exclude restaurants beyond the exact 5 km radius."}}
+
+{{phase 4 "Database Integration" "4 min"}}
+
+{{say `Three integration patterns — choose based on your stack:
+<ul>
+  <li><strong>SQL + B-tree index</strong> — add geohash column, index it, query with LIKE 'prefix%'</li>
+  <li><strong>Redis GEO commands</strong> — GEOADD/GEORADIUS, internally uses geohash at precision 52 bits</li>
+  <li><strong>Elasticsearch geo_point</strong> — geohash grid aggregation + distance queries</li>
+</ul>`}}
+
+{{code "sql" `-- Postgres: add geohash column and index
+ALTER TABLE restaurants ADD COLUMN geohash VARCHAR(12);
+UPDATE restaurants SET geohash = encode_geohash(lat, lon, 6);
+CREATE INDEX idx_restaurants_geohash ON restaurants(geohash);
+
+-- Query: restaurants in the same and neighboring cells
+WITH target AS (
+  SELECT encode_geohash(28.6139, 77.2090, 6) AS center_hash
+),
+neighbor_cells AS (
+  SELECT unnest(get_neighbors(center_hash)) AS cell
+  FROM target
+)
+SELECT r.*,
+       haversine(r.lat, r.lon, 28.6139, 77.2090) AS distance_km
+FROM restaurants r
+JOIN neighbor_cells nc ON r.geohash = nc.cell
+WHERE haversine(r.lat, r.lon, 28.6139, 77.2090) <= 5.0
+ORDER BY distance_km;`}}
+
+{{code "python" `# Redis GEO: built-in geospatial commands (precision-6 equivalent internally)
+import redis
+
+r = redis.Redis()
+
+# Index restaurants (score = restaurant_id, member = restaurant name)
+r.geoadd("restaurants:delhi",
+    [77.2090, 28.6139, "restaurant:1"],  # (lon, lat, member)
+    [77.2150, 28.6200, "restaurant:2"],
+)
+
+# Find restaurants within 5 km
+results = r.georadius(
+    "restaurants:delhi",
+    longitude=77.2090,
+    latitude=28.6139,
+    radius=5,
+    unit="km",
+    withcoord=True,
+    withdist=True,
+    sort="ASC",
+    count=20
+)
+# Returns [(name, distance, (lon, lat)), ...]`}}
+
+{{think "Redis GEO is the production standard for real-time location matching. It uses 52-bit geohash internally (equivalent to precision-12) and provides O(N+log M) GEORADIUS queries where N is results and M is nearby elements."
+  (how "Redis GEO stores locations" "GEOADD converts (lat, lon) to a 52-bit geohash and stores it as the score of a sorted set. GEORADIUS converts the query (lat, lon, radius) to geohash cells, queries the sorted set for elements in those cells, and filters by exact Haversine distance. The sorted set enables O(log M) range queries on geohash scores.")
+  (whatIf "drivers move every 4 seconds and Redis GEO is updated on each move" "At 100K active drivers updating every 4s: 100K / 4 = 25K GEOADD operations/second. A single Redis node handles 100K ops/second comfortably. Driver locations expire via TTL — set TTL 30s on each GEOADD to automatically remove offline drivers.")
+}}
+
+{{phase 5 "Geohash vs S2 vs H3" "3 min"}}
+
+{{table "Geospatial Index Comparison" (rows
+  (row "System" "Cell Shape" "Uniform Area?" "Hierarchy" "Best For")
+  (row "Geohash" "Rectangle (varies near poles)" "No" "Prefix-based" "Simple DB indexing, Redis GEO, Elasticsearch")
+  (row "Google S2" "Spherical quadrilateral" "Near-uniform" "64-level hierarchy" "Google Maps, ride-hailing (Uber uses S2)")
+  (row "Uber H3" "Hexagon" "Uniform (mostly)" "16-level hierarchy" "Surge pricing zones, equal-area analysis")
+  (row "PostGIS" "Any polygon (WGS84)" "N/A" "R-tree index" "Complex GIS queries, polygon intersection")
+)}}
+
+{{think "For system design interviews, geohash is the right answer unless the interviewer specifically asks about Uber (use S2) or equal-area analysis (use H3)."
+  (how "S2 differs from geohash" "S2 maps the sphere to a cube (6 faces), then subdivides each face into a quadtree. Each cell is identified by a 64-bit integer (cell ID). Cells at the same level are nearly equal-area unlike geohash rectangles which shrink near the poles. S2 is used by Uber, Lyft, and Google for routing because equal-area cells mean even load distribution.")
+  (how "H3 uses hexagons" "Hexagons have one distance from center to any neighbor (equidistant), unlike rectangles (closer to edge neighbor than corner neighbor). For surge pricing zones and equal-area heat maps, hexagons give a truer picture. H3 is Uber's open-source system, used for surge multiplier calculation.")
+}}
+
+{{hint "geohash is sufficient for most interviews" "Unless the interviewer asks about Uber's exact architecture or equal-area analysis, geohash + Redis GEO is the right answer. S2 and H3 are implementation details. Say: 'I'd use geohash precision-7 for driver indexing in Redis GEO. For equal-area analysis like surge zones, H3 hexagons are better.'"}}
+
+{{phase 6 "Production: Food Delivery Integration" "3 min"}}
+
+{{say `In a food delivery system, geohash works at two levels:
+<ul>
+  <li><strong>Restaurant indexing</strong> — geohash precision 6 in Redis GEO, find restaurants within 5 km</li>
+  <li><strong>Delivery partner tracking</strong> — geohash precision 7 in Redis GEO with 30s TTL, find nearest available partner within 2 km</li>
+</ul>`}}
+
+{{diagram "algo-geohash-food-delivery"}}
+
+{{code "python" `class FoodDeliveryGeoService:
+    def __init__(self, redis_client):
+        self.r = redis_client
+
+    def index_restaurant(self, restaurant_id: str,
+                         lat: float, lon: float) -> None:
+        """Called when restaurant is onboarded or updates location."""
+        self.r.geoadd("restaurants:global",
+                      [lon, lat, f"restaurant:{restaurant_id}"])
+
+    def update_partner_location(self, partner_id: str,
+                                lat: float, lon: float) -> None:
+        """Called every 4 seconds from partner app."""
+        key = "partners:active"
+        # GEOADD + EXPIRE to auto-remove offline partners
+        self.r.geoadd(key, [lon, lat, f"partner:{partner_id}"])
+        self.r.expire(key, 60)  # Key TTL; individual expiry via sorted set tricks
+
+    def find_restaurants(self, lat: float, lon: float,
+                         radius_km: float = 5.0) -> list[dict]:
+        """Find open restaurants within radius."""
+        results = self.r.georadius(
+            "restaurants:global", lon, lat, radius_km, unit="km",
+            withcoord=True, withdist=True, sort="ASC", count=50
+        )
+        return [
+            {"id": r[0].decode(), "distance_km": r[1],
+             "lat": r[2][1], "lon": r[2][0]}
+            for r in results
+        ]
+
+    def find_nearest_partner(self, lat: float, lon: float,
+                             radius_km: float = 3.0) -> str | None:
+        """Find nearest available delivery partner."""
+        results = self.r.georadius(
+            "partners:active", lon, lat, radius_km, unit="km",
+            sort="ASC", count=1
+        )
+        return results[0].decode() if results else None`}}
+
+{{triggerQs "Food Delivery Geo Questions"
+  "How do you handle the case where no partner is available within 2 km?"
+  "Expand radius progressively: 2 km → 5 km → 8 km. If no partner at 8 km, mark order 'searching' and retry every 30s. Cap the search radius at platform-defined max (e.g., 10 km). Surface ETA based on distance to avoid unrealistic expectations for 8-km matches."
+  "What happens when the GEORADIUS result includes partners who just went offline?"
+  "Partners' locations expire if not updated (TTL 30s). GEORADIUS may return a stale location for a partner who went offline < 30s ago. Validate availability: after GEORADIUS, check partner status in DynamoDB (or a Redis hash 'partner:{id}:status'). If offline, exclude and try next result."
+}}
+
+{{phase 7 "Geohash Boundary Problem" "3 min"}}
+
+{{say `The critical failure mode: two points physically adjacent but with completely different geohash strings.
+<ul>
+  <li>Point A: geohash <strong>ezs42</strong></li>
+  <li>Point B: geohash <strong>u10hf</strong> (right next door but different continent-level parent)</li>
+</ul>
+This happens at the 180° meridian, the equator, and the prime meridian (0°). Always query 9 cells (self + 8 neighbors) to handle all boundary cases.`}}
+
+{{diagram "algo-geohash-boundary"}}
+
+{{think "The boundary problem is unavoidable in geohash because it encodes 2D space into 1D by interleaving bits. Any 1D encoding of 2D space will have discontinuities. S2 has fewer discontinuities because it maps the sphere to a cube first, but no 1D encoding is perfect."
+  (whatIf "you only query the exact cell and skip neighbors" "A restaurant at the border of cell 'dp3w' and cell 'dp3x' (1 meter from the query point) would be in a different cell. You query 'dp3w' only. The nearby restaurant is in 'dp3x'. You miss it. The user sees 'no restaurants nearby' when one exists 1 meter away. Always query 9 cells.")
+}}
+
+{{phase 8 "Interview Summary" "2 min"}}
+
+{{table "Geohash in System Design Problems" (rows
+  (row "Problem" "Geohash Role" "Precision" "Storage")
+  (row "Food Delivery" "Restaurant discovery, partner matching" "6 (restaurants), 7 (partners)" "Redis GEO")
+  (row "Ride-Hailing" "Driver location index, nearest-driver query" "7 (city blocks)" "Redis GEO with 30s TTL")
+  (row "Instagram Explore" "Geotagged photos near location" "6 (neighborhood)" "ES geo_point or Redis GEO")
+  (row "Yelp / Google Maps" "Business search by location" "6-7" "PostGIS or ES geo_point")
+  (row "Twitter/X" "Tweets near location" "6" "ES geo_point")
+)}}
+
+{{checklist
+  "Geohash converts 2D (lat, lon) to 1D string — enables O(log N) spatial queries via B-tree index"
+  "Precision 6 (~1.2 km) for restaurant/business search; precision 7 (~150 m) for driver matching"
+  "Always query 9 cells (self + 8 neighbors) — never just the center cell"
+  "Redis GEORADIUS is the production standard for real-time location matching"
+  "Set TTL on active driver/partner locations — auto-remove stale positions"
+  "Post-filter with exact Haversine distance after geohash lookup to handle cell boundary cases"
+  "Mention S2 for Uber-scale equal-area requirements; H3 for surge pricing heatmaps"
+}}
+
+{{key "Geohash turns a 2D proximity problem into a 1D prefix string problem, enabling O(log N) spatial queries. Use precision 6-7 depending on matching radius, query 9 neighboring cells to handle boundary cases, and use Redis GEO as the production implementation for real-time location indexing."}}

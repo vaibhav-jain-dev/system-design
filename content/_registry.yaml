@@ -73,6 +73,27 @@ problems:
         risk: "Uneven load if virtual node count is too low — monitor shard utilisation"
         caveats: "Jump Consistent Hash or Rendezvous hashing also viable. CH most widely supported."
         nfrs: [scalability]
+      - fundamental: distributed/rate-limiting
+        config: "Token bucket per API key: 100 req/s burst, 10 req/s sustained for URL creation"
+        why: "Abuse prevention requires per-client rate limiting — spam campaigns create millions of malicious short URLs"
+        not_this: "Global rate limit only — a single attacker can exhaust global quota for all legitimate users"
+        risk: "Rate limit bypass via IP rotation — combine with per-user_id and per-IP limits"
+        caveats: "Short URL creation: 10/s per API key. Redirect (read): 10K/s per key (reads are cacheable)."
+        nfrs: [security, performance]
+      - fundamental: messaging/message-queues
+        config: "Kafka for async click-event analytics streaming; Kinesis for real-time analytics dashboards"
+        why: "Click events at 100K req/s must not block the redirect response — async event pipeline"
+        not_this: "Synchronous DB write on every redirect — adds 5-10ms per redirect, throttles throughput"
+        risk: "Kafka consumer lag during viral URL burst = delayed analytics dashboard updates"
+        caveats: "Produce click event to Kafka in <1ms (fire-and-forget). Batch consume into analytics DB."
+        nfrs: [scalability, observability]
+      - fundamental: distributed/circuit-breaker
+        config: "Circuit breaker on cache reads — fall through to DB on Redis failure, not fail-closed"
+        why: "Cache outage should not bring down the redirect service — DB handles reduced capacity"
+        not_this: "Fail-closed on cache miss — blocking all redirects when Redis is unhealthy unacceptable"
+        risk: "DB overwhelmed during cache failover — add request queue + concurrency limit to DB fallback"
+        caveats: "Circuit opens after 5 consecutive Redis timeouts. Half-open probe every 10s."
+        nfrs: [availability]
 
   - slug: instagram
     title: "Instagram"
@@ -154,6 +175,34 @@ problems:
         risk: "Kafka consumer lag during viral post = delayed notifications"
         caveats: "Partition by user_id for ordered delivery. At-least-once with idempotent consumers."
         nfrs: [scalability, availability]
+      - fundamental: storage/s3
+        config: "S3 + CloudFront for photo/video storage and delivery; S3 multipart upload for videos"
+        why: "Instagram serves 1PB+/day of media — object storage is the only cost-effective option"
+        not_this: "Storing media in relational DB or DynamoDB — binary blob storage at Instagram scale is untenable"
+        risk: "S3 PUT → CloudFront propagation lag ~1s — image may be unavailable briefly after upload"
+        caveats: "S3 Transfer Acceleration for uploads from high-latency regions. Intelligent Tiering for old media."
+        nfrs: [durability, cost]
+      - fundamental: networking/websockets
+        config: "WebSocket push for real-time like/comment counts and notification delivery"
+        why: "Real-time engagement counters (likes going from 10K→10M for viral posts) need push, not polling"
+        not_this: "Polling every 5s — 1B users × 1 request/5s = 200M requests/s just for notification polling"
+        risk: "WebSocket fan-out to 1M active users for viral post notification = 1M concurrent pushes per post"
+        caveats: "Server-Sent Events (SSE) sufficient for notification delivery (unidirectional). WebSocket only for bi-directional features."
+        nfrs: [performance, scalability]
+      - fundamental: distributed/consistent-hashing
+        config: "Consistent hashing for user_id-based sharding of follower graph and post metadata DB"
+        why: "Adding a DB shard with modulo routing reshuffles (N-1)/N of all user data — CH limits to K/N"
+        not_this: "Modulo hash sharding — adding one DB node during Instagram growth requires full data migration"
+        risk: "Celebrity user_id concentrates writes on one shard — add shard suffix (user_id#0..7)"
+        caveats: "150 virtual nodes per shard. Monitor shard utilisation. Celebrity accounts get dedicated shards."
+        nfrs: [scalability]
+      - fundamental: distributed/cap-theorem
+        config: "AP for feed/likes (eventual consistency OK), CP for follow relationship (strong consistency required)"
+        why: "Seeing a post liked 10K vs 10,001 times is fine; missing a follow relationship causes wrong feed"
+        not_this: "CP everywhere — follower graph consistency is critical, but like counts don't need linearizability"
+        risk: "Read-your-own-writes violation: user posts and immediately doesn't see own post in feed"
+        caveats: "Cache user's own recent posts locally. Async feed fan-out is eventually consistent by design."
+        nfrs: [consistency, availability]
 
   - slug: rate-limiter
     title: "Rate Limiter"
@@ -203,6 +252,27 @@ problems:
         risk: "Sticky session + node failure = temporary over-limit"
         caveats: "Sticky sessions via ALB cookie, not IP. Duration: 1 day."
         nfrs: [scalability, availability]
+      - fundamental: distributed/rate-limiting
+        config: "Token bucket + sliding window hybrid — burst allowance via token bucket, precise window via sorted set"
+        why: "The core system being designed — understanding algorithm trade-offs is the primary interview focus"
+        not_this: "Fixed window counter — allows 2× the rate at window boundary (last + first second)"
+        risk: "Algorithm mismatch per use case: token bucket for API clients, sliding window for per-user accuracy"
+        caveats: "Fixed window: O(1), 1 Redis key. Sliding window: O(log N), sorted set per key. Choose by accuracy need."
+        nfrs: [performance, scalability]
+      - fundamental: distributed/consistent-hashing
+        config: "Consistent hashing for routing requests to Redis rate-limit shards"
+        why: "Adding Redis nodes with modulo routing invalidates all counter placements — CH limits to K/N remapping"
+        not_this: "Modulo shard routing — adding one Redis node resets (N-1)/N of all rate limit counters"
+        risk: "Uneven counter distribution if virtual node count is too low — use 150 vnodes per node"
+        caveats: "Rate limit key = user_id:window. Virtual node ring ensures same key always routes to same Redis shard."
+        nfrs: [scalability]
+      - fundamental: distributed/circuit-breaker
+        config: "Circuit breaker on Redis rate-limit store — fail-open (allow requests) when Redis is unreachable"
+        why: "Rate limiter outage should never block all traffic — fail-open with local in-memory fallback"
+        not_this: "Fail-closed on Redis outage — blocks all API traffic when rate limiter is unavailable"
+        risk: "Local in-memory fallback is per-node — 10 app servers = 10× the configured rate limit during outage"
+        caveats: "Local fallback at 10% of configured rate. Alert immediately. Circuit half-open every 5s."
+        nfrs: [availability]
 
   - slug: ticket-booking
     title: "BookMyShow Ticket Booking"
@@ -269,6 +339,34 @@ problems:
         risk: "Compensating transaction failure = inconsistent state (seat reserved but payment failed)"
         caveats: "Idempotent compensating transactions required. Use outbox pattern for reliable event publishing."
         nfrs: [consistency]
+      - fundamental: storage/dynamodb
+        config: "Bookings table (PK=event_id, SK=seat_id), Tickets table (PK=booking_id), QR lookup"
+        why: "Ticket records are write-once at booking time and read at gate — DynamoDB single-digit-ms access"
+        not_this: "Postgres — connection pool exhaustion during ticket release rush (100K concurrent sessions)"
+        risk: "Hot partition on popular event_id — write sharding with event_id#shard suffix"
+        caveats: "Conditional writes for seat reservation (UpdateItem with ConditionExpression). GSI on user_id."
+        nfrs: [scalability, durability]
+      - fundamental: messaging/message-queues
+        config: "SQS for booking confirmation emails/SMS; Kafka for seat availability updates to websocket servers"
+        why: "Booking confirmation is async — user gets instant confirmation ID, email follows asynchronously"
+        not_this: "Synchronous email send in booking path — SMTP latency (200-500ms) added to booking response time"
+        risk: "SQS consumer failure means confirmation email is delayed — DLQ for retry with idempotent send"
+        caveats: "Kafka partition by event_id for ordered seat update delivery to all WebSocket servers."
+        nfrs: [scalability, availability]
+      - fundamental: storage/s3
+        config: "S3 for QR code image storage; served via CloudFront pre-signed URL with 24h TTL"
+        why: "QR codes are generated once per booking and read repeatedly at venue — S3+CDN handles millions of scans"
+        not_this: "Generating QR in real-time at gate scan — compute overhead, no offline support"
+        risk: "Pre-signed URL expiry before event date — TTL must exceed event date + 1 day"
+        caveats: "Generate QR at booking confirmation. Store booking_id + HMAC in QR payload for validation."
+        nfrs: [performance, durability]
+      - fundamental: distributed/circuit-breaker
+        config: "Circuit breaker on payment gateway calls — fail-fast after 3 failures, hold seat for retry"
+        why: "Payment gateway outage during show opening rush must not cascade to seat lock service"
+        not_this: "Infinite retry on payment — blocks seat lock thread pool during gateway outage"
+        risk: "Open circuit releases seat after timeout — user must retry, seat may be taken"
+        caveats: "Payment timeout: 5s. Circuit opens at 5 consecutive failures. Half-open after 30s."
+        nfrs: [availability, consistency]
 
   - slug: food-delivery
     title: "Swiggy/Zomato Food Delivery"
@@ -339,6 +437,34 @@ problems:
         risk: "WebSocket disconnect during delivery = stale map. Auto-reconnect in 2s."
         caveats: "NLB for WebSocket connections. ALB idle timeout max 4000s — use NLB for long-lived rides."
         nfrs: [performance, availability]
+      - fundamental: messaging/message-queues
+        config: "Kafka for order lifecycle events: placed → accepted → preparing → picked-up → delivered"
+        why: "Order events fan-out to restaurant, delivery partner, customer, analytics — Kafka decouples producers"
+        not_this: "Direct RPC calls between services — tight coupling; restaurant service downtime blocks customer"
+        risk: "Consumer lag during dinner rush — restaurant confirmation delayed, customer sees stale status"
+        caveats: "Partition by order_id for ordered event processing. Consumer group per downstream service."
+        nfrs: [scalability, durability]
+      - fundamental: storage/dynamodb
+        config: "Orders table (PK=order_id, SK=event_timestamp), Restaurant table, Delivery partner table"
+        why: "Orders are write-heavy during peak (100K orders/hour) with append-only event pattern — DynamoDB scales"
+        not_this: "Postgres — write throughput ceiling at food delivery peak, complex sharding for geo-partitioning"
+        risk: "Hot partition for popular restaurants at lunch peak — add restaurant_id#shard key suffix"
+        caveats: "TTL for order events after 90 days. Archive to S3 for analytics. GSI on partner_id for assignment queries."
+        nfrs: [scalability, durability]
+      - fundamental: distributed/circuit-breaker
+        config: "Circuit breaker on payment gateway and restaurant partner API calls from order service"
+        why: "Restaurant partner API outage should not block order placement — degrade gracefully with 'pending' state"
+        not_this: "Unbounded retries to restaurant — repeated timeout cascades fill thread pools and slow all orders"
+        risk: "Open circuit puts order in 'pending confirmation' state — need compensating timeout + auto-cancel"
+        caveats: "Payment circuit: fail-closed (no pay = no order). Restaurant confirm: fail-open with retry queue."
+        nfrs: [availability]
+      - fundamental: storage/s3
+        config: "S3 for restaurant menu images, dish photos, invoice PDFs, delivery proofs (photos)"
+        why: "Media is write-once, read-many — S3 with CloudFront CDN serves 100K+ concurrent menu loads"
+        not_this: "Storing images in Postgres or DynamoDB — BLOB storage is expensive and unscalable vs S3"
+        risk: "Menu image staleness after restaurant update — CDN cache invalidation required"
+        caveats: "CloudFront for image delivery. TTL 5min for menu data, 24h for dish images."
+        nfrs: [performance, cost]
 
   - slug: ride-hailing
     title: "Ola/Uber Ride-Hailing"
@@ -402,6 +528,41 @@ problems:
         risk: "WebSocket disconnect during ride = map freezes. Client must auto-reconnect within 1s."
         caveats: "NLB for WebSocket connections (not ALB) to avoid L7 overhead on high-frequency location pings."
         nfrs: [performance, availability]
+      - fundamental: messaging/message-queues
+        config: "Kafka for ride lifecycle events: ride-requested → driver-matched → ride-started → completed"
+        why: "Ride state transitions trigger multiple downstream services (billing, analytics, notifications) — Kafka decouples them"
+        not_this: "Synchronous service calls — billing service timeout blocks ride completion confirmation"
+        risk: "Kafka consumer lag during demand surge delays billing events — add consumer autoscaling"
+        caveats: "Partition by ride_id for ordered event delivery. Idempotent consumers for at-least-once."
+        nfrs: [scalability, durability]
+      - fundamental: storage/dynamodb
+        config: "Rides table (PK=ride_id, SK=timestamp), Driver table (PK=driver_id), GPS history"
+        why: "Ride records are write-once (append GPS points) and read occasionally — DynamoDB handles 100K+ WPS"
+        not_this: "Postgres — write throughput bottleneck at 100K concurrent rides with GPS point appends"
+        risk: "GPS history at 4s intervals × 100K rides = 25K writes/sec — use batch writes or DynamoDB streams"
+        caveats: "TTL for GPS history (30 days). Cold storage to S3 Glacier for compliance/audit."
+        nfrs: [scalability, durability]
+      - fundamental: distributed/circuit-breaker
+        config: "Circuit breaker on payment service calls from ride completion — fail-open, queue for retry"
+        why: "Payment gateway outage should not prevent ride completion — defer payment, don't block driver"
+        not_this: "Synchronous payment at ride end — gateway timeout holds driver app frozen during payment"
+        risk: "Open circuit queues unpaid rides — need reconciliation job to clear queue when payment recovers"
+        caveats: "Payment retry queue in SQS with exponential backoff. Alert if queue depth > 1000 rides."
+        nfrs: [availability, consistency]
+      - fundamental: distributed/cap-theorem
+        config: "AP for driver location (stale is OK), CP for ride matching (exactly-once assignment required)"
+        why: "Double-matching a ride is catastrophic — matching requires strong consistency; location is eventually consistent"
+        not_this: "AP everywhere — eventual consistency for matching causes two drivers to accept the same ride"
+        risk: "Network partition during matching — use distributed lock (Redis Redlock) for atomic assignment"
+        caveats: "Location updates: Redis GEO (AP). Ride lock: Redis Redlock across 3 nodes (quasi-CP)."
+        nfrs: [consistency, availability]
+      - fundamental: storage/s3
+        config: "S3 for driver/vehicle photos, KYC documents, trip receipts (PDF), insurance certificates"
+        why: "Binary documents are write-once read-occasionally — S3 object storage at <$0.023/GB vs DB blob overhead"
+        not_this: "Storing documents in DynamoDB or Postgres — binary blobs bloat tables, no content-type support"
+        risk: "GDPR deletion request requires purging S3 objects + DB metadata atomically"
+        caveats: "S3 versioning for KYC documents (audit compliance). Pre-signed URLs expire in 1h for document access."
+        nfrs: [durability, cost]
 
   - slug: chat-system
     title: "WhatsApp/Slack Messaging"
@@ -484,6 +645,20 @@ problems:
         risk: "Eventual consistency means brief duplicate delivery on reconnect — deduplicate client-side"
         caveats: "Use idempotency keys (message_id) for at-least-once deduplication."
         nfrs: [consistency]
+      - fundamental: storage/s3
+        config: "S3 for media attachments (images, video, voice notes); pre-signed URLs for direct upload"
+        why: "Chat media is write-once, read-many — S3 object storage with CDN is optimal, not DB blobs"
+        not_this: "Storing media in DynamoDB — 400KB item limit, much higher cost per GB vs S3"
+        risk: "Pre-signed URL expiry must outlast delivery to offline users — set TTL ≥ 7 days"
+        caveats: "Multipart upload for >5MB. Client compresses images client-side before upload."
+        nfrs: [durability, cost]
+      - fundamental: distributed/circuit-breaker
+        config: "Circuit breaker on presence service calls from chat delivery — fail-open, skip presence check"
+        why: "Presence tracking is non-critical — message delivery must continue even if presence service is down"
+        not_this: "Fail-closed presence check — blocks all message sends when presence service is overloaded"
+        risk: "Messages delivered to 'offline' users when circuit is open — slight read-receipt inaccuracy"
+        caveats: "Presence circuit breaker threshold: 5 failures in 10s. Half-open probe every 30s."
+        nfrs: [availability]
 
   - slug: search-autocomplete
     title: "Search Autocomplete"
@@ -539,6 +714,27 @@ problems:
         risk: "Letter 't' shard receives 10× traffic vs 'x' shard — monitor hot shards"
         caveats: "Only store prefixes up to length 10. Longer strings fall through to Elasticsearch."
         nfrs: [scalability]
+      - fundamental: distributed/consistent-hashing
+        config: "Consistent hashing for trie shard routing — prefix 'th' always routes to same node"
+        why: "Adding a trie shard with modulo routing invalidates all prefix→shard mappings — CH limits to K/N remapping"
+        not_this: "Modulo hash routing — adding one shard reshuffles all prefix lookups"
+        risk: "Hotspot shard for high-frequency letters ('t', 's', 'a') — use virtual nodes for rebalancing"
+        caveats: "150 virtual nodes per trie shard. Monitor query distribution percentile per shard."
+        nfrs: [scalability]
+      - fundamental: storage/elasticsearch
+        config: "Elasticsearch for long-tail prefix matching beyond top-10 chars and fuzzy query fallback"
+        why: "Redis holds only top prefixes ≤10 chars — ES handles longer queries and typo-tolerant fuzzy search"
+        not_this: "Redis for all queries — 100K+ prefix-suggestion pairs exhaust memory for long-tail prefixes"
+        risk: "ES query latency ~20-50ms vs Redis <1ms — only fall through after Redis miss"
+        caveats: "Use ES completion suggester with fuzzy enabled (fuzziness=1). Cache hot ES results in Redis."
+        nfrs: [performance, scalability]
+      - fundamental: storage/dynamodb
+        config: "Query logs table: persist (user_id, query, timestamp) for personalisation and analytics"
+        why: "Click-through and query log analytics drive personalisation ranking — must survive Redis flush"
+        not_this: "Redis for query logs — eviction under memory pressure loses analytics data"
+        risk: "High write volume from every keystroke — batch analytics writes, not per-keystroke"
+        caveats: "Batch writes via Kinesis Firehose → DynamoDB or S3/Athena. Real-time counters in Redis."
+        nfrs: [durability, scalability]
 
   - slug: twitter-feed
     title: "Twitter/X Feed"
@@ -618,6 +814,34 @@ problems:
         risk: "Celebrity user_id = hot shard — use PK=user_id#shard for write distribution"
         caveats: "Scatter-gather on celebrity reads: query all shards, merge results."
         nfrs: [scalability, cost]
+      - fundamental: networking/websockets
+        config: "Persistent WebSocket connections for Twitter streaming API (filtered real-time tweet stream)"
+        why: "Streaming API delivers tweets matching keyword/user filters in real-time — polling adds seconds of lag"
+        not_this: "SSE — unidirectional, no client filter updates without reconnect"
+        risk: "Streaming connection storm during major events (elections, World Cup) — rate limit connections per app"
+        caveats: "Twitter streaming: 1 connection per bearer token. Use webhook alternatives for enterprise."
+        nfrs: [performance, scalability]
+      - fundamental: distributed/consistent-hashing
+        config: "Consistent hashing ring for tweet DB shard routing; virtual nodes for even tweet distribution"
+        why: "tweet_id modulo sharding means adding a node reshuffles (N-1)/N tweets — CH limits to K/N"
+        not_this: "Modulo sharding — catastrophic resharding cost at Twitter scale (25B tweets)"
+        risk: "Celebrity user_id concentrates writes on one shard — add write sharding suffix"
+        caveats: "Use 150 virtual nodes per physical DB. Monitor shard utilisation percentile distribution."
+        nfrs: [scalability]
+      - fundamental: storage/elasticsearch
+        config: "Elasticsearch for tweet full-text search, trending topic aggregations, hashtag index"
+        why: "DynamoDB has no full-text search — ES inverted index handles 500M tweet query volume"
+        not_this: "DynamoDB scan — O(N) scan across 25B tweets is infeasible for search"
+        risk: "ES indexing lag can be 1-2s behind real-time tweet ingest — acceptable for search, not for feed"
+        caveats: "Index tweet text + user_id + timestamp. Shard ES by tweet date for time-range query efficiency."
+        nfrs: [performance, scalability]
+      - fundamental: distributed/circuit-breaker
+        config: "Circuit breaker on Kafka fan-out workers to timeline service — fail-open during fan-out storms"
+        why: "Viral tweet fan-out to 100M followers can overwhelm timeline service — circuit breaker isolates failure"
+        not_this: "Unbounded fan-out retries — cascading timeout as each retry further loads the already-overwhelmed service"
+        risk: "Open circuit means some followers see delayed timeline updates — acceptable for eventual consistency"
+        caveats: "Monitor fan-out lag as leading indicator. Shed celebrity fan-out first (fallback to fan-out-on-read)."
+        nfrs: [availability, scalability]
 
   - slug: google-calendar
     title: "Google Calendar"
@@ -680,6 +904,27 @@ problems:
         risk: "Multi-region: conflict detection requires linearizable writes (quorum or Spanner)"
         caveats: "DynamoDB conditional writes for single-region. Spanner for global consistent calendar."
         nfrs: [consistency]
+      - fundamental: storage/dynamodb
+        config: "Events table (PK=calendar_id, SK=event_id), recurring events materialized view"
+        why: "Calendar events are read-heavy (view) vs write-sparse (create/edit) — DynamoDB auto-scales reads"
+        not_this: "Postgres — connection pooling complexity at 1B+ calendar views/day, sharding overhead"
+        risk: "Recurring event expansion generates millions of rows — use lazy materialization with TTL"
+        caveats: "DynamoDB conditional writes for optimistic locking on event conflicts. GSI on time range for availability checks."
+        nfrs: [scalability, durability]
+      - fundamental: messaging/message-queues
+        config: "SQS for reminder notification queue; Kafka for sync change events across devices"
+        why: "Reminder delivery is async — scheduled at event creation, fired at T-N minutes via queue consumer"
+        not_this: "Cron job polling DB — misses reminders during downtime, O(N) scan per tick"
+        risk: "SQS visibility timeout must exceed reminder processing time or duplicate notifications fire"
+        caveats: "SQS delay queues support up to 15 min delay. For longer windows, store in DB, enqueue at T-15min."
+        nfrs: [availability, scalability]
+      - fundamental: distributed/circuit-breaker
+        config: "Circuit breaker on notification service (email/push) calls from reminder worker"
+        why: "Notification service outage should not cascade and stall calendar CRUD — fail-open for reminders"
+        not_this: "Unbounded retries — a dead notification service fills retry queues and exhausts worker threads"
+        risk: "Open circuit means some reminders are silently dropped — needs DLQ + backfill job"
+        caveats: "Half-open probe every 30s. If notification service recovers, drain DLQ first."
+        nfrs: [availability]
 
 # ─── Fundamentals (hierarchical) ───
 fundamentals:
@@ -764,6 +1009,16 @@ fundamentals:
     description: "Full-duplex protocol, connection management, scaling with sticky sessions, Redis Pub/Sub fan-out"
     path: fundamentals/networking/websockets
 
+  - slug: storage/s3
+    title: "Object Storage (S3)"
+    description: "Binary object storage, pre-signed URLs, multipart upload, S3 lifecycle policies, CDN integration"
+    path: fundamentals/storage/s3
+
+  - slug: storage/elasticsearch
+    title: "Elasticsearch / OpenSearch"
+    description: "Inverted index, full-text search, aggregations, shard routing, relevance scoring, autocomplete"
+    path: fundamentals/storage/elasticsearch
+
 # ─── Algorithms (with LLD implementations) ───
 algorithms:
   - slug: base62-encoding
@@ -776,27 +1031,40 @@ algorithms:
     title: "Consistent Hashing"
     description: "Distribute data across nodes with minimal reshuffling on add/remove"
     path: algorithms/consistent-hashing
-    used_in: [url-shortener, instagram, ride-hailing, food-delivery]
+    used_in: [url-shortener, instagram, ride-hailing, food-delivery, twitter-feed, search-autocomplete, chat-system, ticket-booking]
     related_fundamental: distributed/consistent-hashing
 
   - slug: token-bucket
     title: "Token Bucket"
     description: "Rate limiting algorithm that allows bursts while enforcing average rate"
     path: algorithms/token-bucket
-    used_in: [rate-limiter, ticket-booking, twitter-feed]
+    used_in: [rate-limiter, ticket-booking, twitter-feed, url-shortener, food-delivery, ride-hailing, instagram, chat-system, google-calendar]
     related_fundamental: distributed/rate-limiting
 
   - slug: bloom-filter
     title: "Bloom Filter"
     description: "Space-efficient probabilistic set membership test (no false negatives)"
     path: algorithms/bloom-filter
-    used_in: [url-shortener, instagram, chat-system, search-autocomplete]
+    used_in: [url-shortener, instagram, chat-system, search-autocomplete, twitter-feed, ride-hailing]
 
   - slug: snowflake-id
     title: "Snowflake ID"
     description: "Distributed unique ID generation — time-sorted, no coordination"
     path: algorithms/snowflake-id
-    used_in: [url-shortener, instagram, ticket-booking, chat-system, twitter-feed]
+    used_in: [url-shortener, instagram, ticket-booking, chat-system, twitter-feed, food-delivery, ride-hailing, google-calendar]
+
+  - slug: trie
+    title: "Trie / Prefix Tree"
+    description: "Tree data structure for O(L) prefix lookup — backbone of autocomplete and dictionary search"
+    path: algorithms/trie
+    used_in: [search-autocomplete, twitter-feed]
+
+  - slug: geohash
+    title: "Geohash Encoding"
+    description: "Encode (lat, lon) as a short base32 string — enables proximity search via string prefix matching"
+    path: algorithms/geohash
+    used_in: [food-delivery, ride-hailing]
+    related_fundamental: storage/geospatial
 
 # ─── Design Patterns (for LLM) ───
 patterns:
