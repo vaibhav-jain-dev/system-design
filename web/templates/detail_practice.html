@@ -1,0 +1,505 @@
+{{define "detail_practice.html"}}
+<div class="prac-root">
+
+  <!-- ── Top bar: problem selector + actions ─────────────────────────────── -->
+  <div class="prac-topbar">
+    <div class="prac-topbar-left">
+      <label class="prac-select-label" for="prac-problem-select">Problem</label>
+      <select id="prac-problem-select" class="prac-select">
+        <option value="">— choose a problem —</option>
+        {{range .Problems}}
+        <option value="{{.Slug}}"
+                data-title="{{.Title}}"
+                data-desc="{{.Description}}">
+          {{.Title}}
+        </option>
+        {{end}}
+      </select>
+    </div>
+
+    <div class="prac-topbar-right">
+      <button class="prac-btn prac-btn--ghost" id="prac-clear-btn" title="Clear all sections for this problem">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+        Clear
+      </button>
+      <button class="prac-btn prac-btn--primary" id="prac-copy-btn" title="Copy review prompt to clipboard">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Copy Review Prompt
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Problem description banner ──────────────────────────────────────── -->
+  <div class="prac-desc-banner" id="prac-desc-banner" style="display:none">
+    <div class="prac-desc-title" id="prac-desc-title"></div>
+    <div class="prac-desc-text"  id="prac-desc-text"></div>
+    <a class="prac-desc-link" id="prac-desc-link" target="_blank">
+      View full solution →
+    </a>
+  </div>
+
+  <!-- ── No problem selected placeholder ─────────────────────────────────── -->
+  <div class="prac-empty" id="prac-empty">
+    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".35">
+      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+    </svg>
+    <p>Select a problem above to start practising.</p>
+  </div>
+
+  <!-- ── Practice sections (shown after problem selected) ─────────────────── -->
+  <div class="prac-sections" id="prac-sections" style="display:none">
+
+    <!-- 1. Functional Requirements -->
+    <div class="prac-section" data-section="fr">
+      <div class="prac-section-hdr">
+        <span class="prac-section-num">1</span>
+        <span class="prac-section-title">Functional Requirements</span>
+        <span class="prac-section-hint">Core features the system must do</span>
+      </div>
+      <textarea class="prac-textarea" id="prac-fr" data-field="fr"
+                placeholder="• Users can shorten a long URL&#10;• Users can visit the short URL and get redirected&#10;• URLs can have an optional custom alias&#10;• URLs expire after 30 days by default&#10;…"></textarea>
+    </div>
+
+    <!-- 2. Non-Functional Requirements -->
+    <div class="prac-section" data-section="nfr">
+      <div class="prac-section-hdr">
+        <span class="prac-section-num">2</span>
+        <span class="prac-section-title">Non-Functional Requirements</span>
+        <span class="prac-section-hint">Scalability, latency, availability targets</span>
+      </div>
+      <textarea class="prac-textarea" id="prac-nfr" data-field="nfr"
+                placeholder="• 100ms p99 redirect latency&#10;• 99.99% availability (4 nines)&#10;• 100K writes/day, 10M reads/day&#10;• Horizontally scalable — no single point of failure&#10;…"></textarea>
+    </div>
+
+    <!-- 3. Capacity Estimation -->
+    <div class="prac-section" data-section="cap">
+      <div class="prac-section-hdr">
+        <span class="prac-section-num">3</span>
+        <span class="prac-section-title">Capacity Estimation</span>
+        <span class="prac-section-hint">Back-of-envelope: QPS, storage, bandwidth</span>
+      </div>
+      <textarea class="prac-textarea prac-textarea--mono" id="prac-cap" data-field="cap"
+                placeholder="Writes: 100K / day → ~1.2 QPS&#10;Reads:  10M  / day → ~116 QPS (read:write = 100:1)&#10;&#10;Storage per URL: ~500 bytes&#10;5-year storage: 100K × 365 × 5 × 500B ≈ 91 GB&#10;&#10;Bandwidth (reads): 116 QPS × 500B ≈ 58 KB/s&#10;Cache: 20% of URLs = 80% traffic → cache top 20K URLs"></textarea>
+    </div>
+
+    <!-- 4. API Design -->
+    <div class="prac-section" data-section="api">
+      <div class="prac-section-hdr">
+        <span class="prac-section-num">4</span>
+        <span class="prac-section-title">API Design</span>
+        <span class="prac-section-hint">REST endpoints, request/response contracts</span>
+      </div>
+      <textarea class="prac-textarea prac-textarea--mono" id="prac-api" data-field="api"
+                placeholder="POST /api/v1/urls&#10;  Body: { url: string, alias?: string, ttl_days?: int }&#10;  201: { short_code, short_url, expires_at }&#10;  400: { error: 'invalid_url' }&#10;&#10;GET /{short_code}&#10;  302: Location: <original_url>&#10;  404: { error: 'not_found' }&#10;  410: { error: 'expired' }&#10;&#10;DELETE /api/v1/urls/{short_code}&#10;  204 No Content"></textarea>
+    </div>
+
+    <!-- 5. Database Model -->
+    <div class="prac-section" data-section="db">
+      <div class="prac-section-hdr">
+        <span class="prac-section-num">5</span>
+        <span class="prac-section-title">Database Model</span>
+        <span class="prac-section-hint">Tables / collections, fields, indexes, DB choice + why</span>
+      </div>
+      <textarea class="prac-textarea prac-textarea--mono" id="prac-db" data-field="db"
+                placeholder="DB choice: DynamoDB — scales horizontally, TTL built-in, 1ms reads&#10;&#10;Table: urls&#10;  PK:  short_code  (string, hash key)&#10;  SK:  —&#10;  Attrs: original_url, user_id, created_at, expires_at, hit_count&#10;  TTL:  expires_at (native DynamoDB TTL)&#10;  GSI:  user_id-index (user_id PK, created_at SK) → list user URLs&#10;&#10;Cache (Redis / ElastiCache):&#10;  key:   short_code&#10;  value: original_url&#10;  TTL:   24h (shorter than URL expiry)"></textarea>
+    </div>
+
+    <!-- 6. Component Selection -->
+    <div class="prac-section" data-section="comp">
+      <div class="prac-section-hdr">
+        <span class="prac-section-num">6</span>
+        <span class="prac-section-title">Component Selection &amp; Justification</span>
+        <span class="prac-section-hint">What you chose and why — vs alternatives</span>
+      </div>
+      <textarea class="prac-textarea" id="prac-comp" data-field="comp"
+                placeholder="ALB — distributes traffic, health checks, SSL termination&#10;Redis (ElastiCache) — sub-ms redirect cache; Memcached rejected (no persistence)&#10;DynamoDB — auto-sharding, built-in TTL; RDS rejected (vertical scale limit)&#10;Base62 encoding — 7-char code = 62^7 = 3.5T URLs; MD5 rejected (collision risk)&#10;Kafka — async analytics fanout; SQS rejected (no ordering guarantee needed)&#10;…"></textarea>
+    </div>
+
+    <!-- 7. Architecture Diagram (draw.io embed) -->
+    <div class="prac-section prac-section--diagram" data-section="arch">
+      <div class="prac-section-hdr">
+        <span class="prac-section-num">7</span>
+        <span class="prac-section-title">Architecture Diagram</span>
+        <span class="prac-section-hint">Draw your design — exported XML is included in the review prompt</span>
+        <div class="prac-diagram-actions">
+          <button class="prac-btn prac-btn--sm" id="prac-diag-new" title="Load blank canvas">New diagram</button>
+          <button class="prac-btn prac-btn--sm" id="prac-diag-export" title="Sync XML from diagram editor">Export XML ↓</button>
+          <button class="prac-btn prac-btn--sm" id="prac-diag-fullscreen" title="Open in full screen">⤢ Fullscreen</button>
+        </div>
+      </div>
+      <div class="prac-diagram-wrap" id="prac-diagram-wrap">
+        <iframe
+          id="prac-drawio"
+          class="prac-drawio-frame"
+          src="https://embed.diagrams.net/?embed=1&spin=1&modified=unsavedChanges&proto=json&dark=0&ui=min&noExitBtn=1"
+          allowfullscreen>
+        </iframe>
+        <div class="prac-diagram-overlay" id="prac-diagram-overlay">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".4">
+            <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/>
+          </svg>
+          <p>draw.io canvas — click to start drawing</p>
+        </div>
+      </div>
+      <!-- Hidden storage for exported XML -->
+      <textarea class="prac-xml-store" id="prac-diag-xml" data-field="diag_xml" readonly
+                placeholder="(diagram XML will appear here after Export XML ↓)"></textarea>
+    </div>
+
+    <!-- 8. Low-Level Design — Python -->
+    <div class="prac-section" data-section="lld">
+      <div class="prac-section-hdr">
+        <span class="prac-section-num">8</span>
+        <span class="prac-section-title">Low-Level Design (Python)</span>
+        <span class="prac-section-hint">Key classes, methods, core algorithm — production-style code</span>
+      </div>
+      <div class="prac-code-wrap">
+        <div class="prac-code-lang">python</div>
+        <textarea class="prac-textarea prac-textarea--code" id="prac-lld" data-field="lld"
+                  spellcheck="false" autocorrect="off" autocapitalize="off"
+                  placeholder="import base64, hashlib, time&#10;from dataclasses import dataclass&#10;&#10;@dataclass&#10;class URL:&#10;    short_code: str&#10;    original_url: str&#10;    expires_at: float&#10;&#10;class URLShortener:&#10;    def __init__(self, db, cache):&#10;        self.db    = db&#10;        self.cache = cache&#10;&#10;    def shorten(self, url: str, ttl_days: int = 30) -> URL:&#10;        code = self._generate_code(url)&#10;        entry = URL(code, url, time.time() + ttl_days * 86400)&#10;        self.db.put(entry)&#10;        return entry&#10;&#10;    def redirect(self, code: str) -> str:&#10;        # Cache-aside: check Redis first&#10;        url = self.cache.get(code)&#10;        if url: return url&#10;        entry = self.db.get(code)&#10;        if not entry: raise NotFound&#10;        if entry.expires_at &lt; time.time(): raise Expired&#10;        self.cache.set(code, entry.original_url, ttl=86400)&#10;        return entry.original_url&#10;&#10;    def _generate_code(self, url: str) -> str:&#10;        h = hashlib.md5(url.encode()).digest()[:6]&#10;        return base64.urlsafe_b64encode(h).decode().rstrip('=')"></textarea>
+      </div>
+    </div>
+
+    <!-- 9. Trade-offs & Assumptions -->
+    <div class="prac-section" data-section="tradeoffs">
+      <div class="prac-section-hdr">
+        <span class="prac-section-num">9</span>
+        <span class="prac-section-title">Trade-offs &amp; Assumptions</span>
+        <span class="prac-section-hint">What you knowingly sacrificed and why</span>
+      </div>
+      <textarea class="prac-textarea" id="prac-tradeoffs" data-field="tradeoffs"
+                placeholder="• Eventual consistency for analytics (hit_count) — acceptable, it's non-critical&#10;• No custom domain support — out of scope for v1&#10;• Cache TTL shorter than URL TTL — risk: cold cache after expiry; mitigated by TTL check in DB&#10;• Base62 collisions after 3.5T URLs — rehash with salt&#10;• No rate limiting modelled — would add token-bucket per IP at ALB level&#10;…"></textarea>
+    </div>
+
+    <!-- 10. What I'd say (interview narration) -->
+    <div class="prac-section" data-section="narration">
+      <div class="prac-section-hdr">
+        <span class="prac-section-num">10</span>
+        <span class="prac-section-title">Interview Narration</span>
+        <span class="prac-section-hint">Key phrases / transitions you'd actually say out loud</span>
+      </div>
+      <textarea class="prac-textarea" id="prac-narration" data-field="narration"
+                placeholder="&quot;Let me start by clarifying scope — are we optimising for reads or writes?&quot;&#10;&quot;I'll assume 100:1 read-to-write, so caching is critical.&quot;&#10;&quot;For the short code I'll use Base62 over UUIDs — it's URL-safe and short.&quot;&#10;&quot;The hot path is: ALB → App server → Redis → (miss) DynamoDB → cache-fill → redirect.&quot;&#10;&quot;The risk I'd call out is thundering herd on cache miss — mitigated by request coalescing.&quot;&#10;…"></textarea>
+    </div>
+
+  </div><!-- /prac-sections -->
+
+  <!-- ── Copy-prompt feedback toast ──────────────────────────────────────── -->
+  <div class="prac-toast" id="prac-toast"></div>
+
+</div><!-- /prac-root -->
+
+<script>
+(function () {
+    'use strict';
+
+    var STORE_PREFIX = 'sd-practice-';
+    var fields = ['fr', 'nfr', 'cap', 'api', 'db', 'comp', 'lld', 'tradeoffs', 'narration', 'diag_xml'];
+
+    var select     = document.getElementById('prac-problem-select');
+    var sections   = document.getElementById('prac-sections');
+    var empty      = document.getElementById('prac-empty');
+    var descBanner = document.getElementById('prac-desc-banner');
+    var descTitle  = document.getElementById('prac-desc-title');
+    var descText   = document.getElementById('prac-desc-text');
+    var descLink   = document.getElementById('prac-desc-link');
+    var copyBtn    = document.getElementById('prac-copy-btn');
+    var clearBtn   = document.getElementById('prac-clear-btn');
+    var toast      = document.getElementById('prac-toast');
+
+    // ── draw.io state ─────────────────────────────────────────────────────────
+    var drawioFrame   = document.getElementById('prac-drawio');
+    var diagXmlStore  = document.getElementById('prac-diag-xml');
+    var diagOverlay   = document.getElementById('prac-diagram-overlay');
+    var _drawioReady  = false;
+    var _xmlExportCb  = null;   // callback waiting for export result
+    var _pendingLoad  = null;   // XML to load once frame is ready
+
+    // draw.io embed protocol — see https://www.diagrams.net/doc/faq/embed-mode
+    window.addEventListener('message', function (evt) {
+        if (!evt.data || typeof evt.data !== 'string') return;
+        var msg;
+        try { msg = JSON.parse(evt.data); } catch (e) { return; }
+
+        switch (msg.event) {
+            case 'init':
+                _drawioReady = true;
+                diagOverlay && (diagOverlay.style.display = 'none');
+                // Load saved XML if any, else send a blank configure
+                if (_pendingLoad) {
+                    sendToDiagram({ action: 'load', autosave: 0, xml: _pendingLoad });
+                    _pendingLoad = null;
+                } else if (diagXmlStore.value.trim()) {
+                    sendToDiagram({ action: 'load', autosave: 0, xml: diagXmlStore.value });
+                } else {
+                    sendToDiagram({ action: 'load', autosave: 0, xml: '<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel>' });
+                }
+                break;
+
+            case 'export':
+                // draw.io replied to our export request
+                if (msg.xml) {
+                    diagXmlStore.value = msg.xml;
+                    saveField('diag_xml', msg.xml);
+                    if (_xmlExportCb) { _xmlExportCb(msg.xml); _xmlExportCb = null; }
+                    showToast('Diagram XML synced ✓', 'ok');
+                }
+                break;
+
+            case 'autosave':
+                if (msg.xml) {
+                    diagXmlStore.value = msg.xml;
+                    saveField('diag_xml', msg.xml);
+                }
+                break;
+
+            case 'save':
+                if (msg.xml) {
+                    diagXmlStore.value = msg.xml;
+                    saveField('diag_xml', msg.xml);
+                    showToast('Diagram saved ✓', 'ok');
+                }
+                break;
+        }
+    });
+
+    function sendToDiagram(data) {
+        if (drawioFrame && drawioFrame.contentWindow) {
+            drawioFrame.contentWindow.postMessage(JSON.stringify(data), '*');
+        }
+    }
+
+    function requestDiagramXML(cb) {
+        _xmlExportCb = cb;
+        sendToDiagram({ action: 'export', format: 'xml', spinKey: 'export' });
+        // Timeout fallback — if frame doesn't respond in 2s, use stored value
+        setTimeout(function () {
+            if (_xmlExportCb) { _xmlExportCb(diagXmlStore.value || ''); _xmlExportCb = null; }
+        }, 2000);
+    }
+
+    // Diagram toolbar buttons
+    document.getElementById('prac-diag-export').addEventListener('click', function () {
+        requestDiagramXML(function (xml) {
+            if (xml) showToast('XML exported to prompt ✓', 'ok');
+        });
+    });
+
+    document.getElementById('prac-diag-new').addEventListener('click', function () {
+        var blank = '<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel>';
+        sendToDiagram({ action: 'load', autosave: 0, xml: blank });
+        diagXmlStore.value = '';
+        saveField('diag_xml', '');
+    });
+
+    document.getElementById('prac-diag-fullscreen').addEventListener('click', function () {
+        var wrap = document.getElementById('prac-diagram-wrap');
+        if (!document.fullscreenElement) {
+            wrap.requestFullscreen && wrap.requestFullscreen();
+        } else {
+            document.exitFullscreen && document.exitFullscreen();
+        }
+    });
+
+    // ── Storage ───────────────────────────────────────────────────────────────
+    function storeKey(slug) { return STORE_PREFIX + slug; }
+
+    function loadData(slug) {
+        try { return JSON.parse(localStorage.getItem(storeKey(slug)) || '{}'); }
+        catch (e) { return {}; }
+    }
+
+    function saveField(field, value) {
+        var slug = select.value;
+        if (!slug) return;
+        var data = loadData(slug);
+        data[field] = value;
+        try { localStorage.setItem(storeKey(slug), JSON.stringify(data)); } catch (e) {}
+    }
+
+    function populateFields(slug) {
+        var data = loadData(slug);
+        fields.forEach(function (f) {
+            var el = document.querySelector('[data-field="' + f + '"]');
+            if (el) el.value = data[f] || '';
+        });
+        // Load diagram
+        var xml = data['diag_xml'] || '';
+        if (_drawioReady) {
+            sendToDiagram({ action: 'load', autosave: 0, xml: xml || '<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel>' });
+        } else {
+            _pendingLoad = xml || null;
+        }
+    }
+
+    function clearFields(slug) {
+        try { localStorage.removeItem(storeKey(slug)); } catch (e) {}
+        fields.forEach(function (f) {
+            var el = document.querySelector('[data-field="' + f + '"]');
+            if (el) el.value = '';
+        });
+        var blank = '<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel>';
+        sendToDiagram({ action: 'load', autosave: 0, xml: blank });
+    }
+
+    // ── Problem selector ──────────────────────────────────────────────────────
+    select.addEventListener('change', function () {
+        var slug = select.value;
+        if (!slug) {
+            sections.style.display    = 'none';
+            empty.style.display       = '';
+            descBanner.style.display  = 'none';
+            return;
+        }
+        var opt = select.options[select.selectedIndex];
+        descTitle.textContent     = opt.dataset.title || '';
+        descText.textContent      = opt.dataset.desc  || '';
+        descLink.href             = '/problem/' + slug;
+        descLink.setAttribute('hx-get', '/problem/' + slug);
+        descLink.setAttribute('hx-target', '#detail');
+        descLink.setAttribute('hx-swap', 'innerHTML');
+        descLink.setAttribute('hx-push-url', 'true');
+        if (typeof htmx !== 'undefined') htmx.process(descLink);
+
+        descBanner.style.display  = '';
+        empty.style.display       = 'none';
+        sections.style.display    = '';
+        populateFields(slug);
+    });
+
+    // ── Auto-save on textarea input ───────────────────────────────────────────
+    document.querySelectorAll('.prac-textarea[data-field]').forEach(function (ta) {
+        ta.addEventListener('input', function () {
+            saveField(ta.dataset.field, ta.value);
+        });
+        // Tab key inserts 2 spaces in code textareas
+        if (ta.classList.contains('prac-textarea--code') || ta.classList.contains('prac-textarea--mono')) {
+            ta.addEventListener('keydown', function (e) {
+                if (e.key === 'Tab') {
+                    e.preventDefault();
+                    var s = ta.selectionStart, end = ta.selectionEnd;
+                    ta.value = ta.value.slice(0, s) + '  ' + ta.value.slice(end);
+                    ta.selectionStart = ta.selectionEnd = s + 2;
+                }
+            });
+        }
+    });
+
+    // ── Clear button ──────────────────────────────────────────────────────────
+    clearBtn.addEventListener('click', function () {
+        var slug = select.value;
+        if (!slug) return;
+        if (!confirm('Clear all your answers for "' + (select.options[select.selectedIndex].dataset.title || slug) + '"?')) return;
+        clearFields(slug);
+        showToast('Cleared ✓', 'ok');
+    });
+
+    // ── Copy Review Prompt ────────────────────────────────────────────────────
+    copyBtn.addEventListener('click', function () {
+        var slug = select.value;
+        if (!slug) { showToast('Select a problem first', 'warn'); return; }
+        var opt   = select.options[select.selectedIndex];
+        var title = opt.dataset.title || slug;
+        var desc  = opt.dataset.desc  || '';
+
+        // Request XML then build prompt
+        requestDiagramXML(function (xml) {
+            var prompt = buildPrompt(title, desc, xml);
+            navigator.clipboard.writeText(prompt).then(function () {
+                showToast('Review prompt copied to clipboard ✓', 'ok');
+                copyBtn.textContent = '✓ Copied!';
+                setTimeout(function () {
+                    copyBtn.innerHTML =
+                        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy Review Prompt';
+                }, 2500);
+            }).catch(function () {
+                showToast('Clipboard failed — see console', 'err');
+            });
+        });
+    });
+
+    function val(field) {
+        var el = document.querySelector('[data-field="' + field + '"]');
+        return el ? el.value.trim() : '';
+    }
+
+    function section(num, title, content, lang) {
+        var body = content || '(not filled in)';
+        if (lang) body = '```' + lang + '\n' + body + '\n```';
+        return '\n### ' + num + '. ' + title + '\n\n' + body + '\n';
+    }
+
+    function buildPrompt(title, desc, xml) {
+        var lines = [];
+        lines.push('# System Design Review: ' + title);
+        lines.push('');
+        if (desc) { lines.push('**Problem:** ' + desc); lines.push(''); }
+        lines.push('---');
+        lines.push('## My Solution');
+        lines.push(section(1,  'Functional Requirements',          val('fr')));
+        lines.push(section(2,  'Non-Functional Requirements',      val('nfr')));
+        lines.push(section(3,  'Capacity Estimation',              val('cap'),  'text'));
+        lines.push(section(4,  'API Design',                       val('api'),  'text'));
+        lines.push(section(5,  'Database Model',                   val('db'),   'text'));
+        lines.push(section(6,  'Component Selection & Justification', val('comp')));
+        if (xml && xml.trim()) {
+            lines.push(section(7, 'Architecture Diagram (draw.io XML)', xml, 'xml'));
+        } else {
+            lines.push(section(7, 'Architecture Diagram', '(no diagram provided)'));
+        }
+        lines.push(section(8,  'Low-Level Design (Python)',        val('lld'),  'python'));
+        lines.push(section(9,  'Trade-offs & Assumptions',         val('tradeoffs')));
+        lines.push(section(10, 'Interview Narration Notes',        val('narration')));
+        lines.push('');
+        lines.push('---');
+        lines.push('## Review Request');
+        lines.push('');
+        lines.push('Please evaluate this system design solution comprehensively.\n');
+        lines.push('**Evaluate each section:**');
+        lines.push('1. Functional Requirements — completeness, correctness, appropriate scope');
+        lines.push('2. Non-Functional Requirements — realism, measurability, coverage of all dimensions');
+        lines.push('3. Capacity Estimation — correctness of math, reasonable assumptions, units');
+        lines.push('4. API Design — REST conventions, endpoint coverage, request/response contracts');
+        lines.push('5. Database Model — schema design, indexing strategy, DB choice justification');
+        lines.push('6. Component Selection — technology choices, justification, vs rejected alternatives');
+        lines.push('7. Architecture — scalability, fault tolerance, bottlenecks, single points of failure');
+        lines.push('8. LLD Code — code quality, correctness, edge cases, production-readiness');
+        lines.push('9. Trade-offs — whether trade-offs are acknowledged and well-reasoned');
+        lines.push('');
+        lines.push('**Provide feedback on:**');
+        lines.push('- ✅ What was well done');
+        lines.push('- ❌ What was missing or incomplete');
+        lines.push('- 💡 Specific improvements to make');
+        lines.push('- ⚠️  Scalability or reliability issues');
+        lines.push('- 🏆 Overall score (1–10) with one-sentence justification');
+        return lines.join('\n');
+    }
+
+    // ── Toast ─────────────────────────────────────────────────────────────────
+    var _toastTimer;
+    function showToast(msg, type) {
+        toast.textContent = msg;
+        toast.className   = 'prac-toast prac-toast--' + (type || 'ok') + ' prac-toast--show';
+        clearTimeout(_toastTimer);
+        _toastTimer = setTimeout(function () { toast.classList.remove('prac-toast--show'); }, 2800);
+    }
+
+    // ── Restore last selected problem from localStorage ────────────────────────
+    var lastSlug = localStorage.getItem('sd-practice-last');
+    if (lastSlug) {
+        for (var i = 0; i < select.options.length; i++) {
+            if (select.options[i].value === lastSlug) {
+                select.value = lastSlug;
+                select.dispatchEvent(new Event('change'));
+                break;
+            }
+        }
+    }
+    select.addEventListener('change', function () {
+        if (select.value) localStorage.setItem('sd-practice-last', select.value);
+    });
+
+}());
+</script>
+{{end}}
