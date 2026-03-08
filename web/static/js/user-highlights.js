@@ -1,25 +1,31 @@
 /**
- * user-highlights.js
+ * user-highlights.js  v2
  * User highlight + notes system with right-click context menu.
- * No mouseup toolbar — context menu only (uniform for text and diagram/SVG).
+ *
+ * Features:
+ *  • Right-click text → colour highlight + optional note bubble (visible, dismissible)
+ *  • Right-click diagram container → outline highlight + optional note badge
+ *  • Left-click image inside diagram → pin annotation at X/Y % position
+ *  • Slide-in panel with colour-filter chips, grouped by page → phase
+ *  • "Focus mode" – dim phases without highlights; reset restores all
+ *  • Dismissible note bubbles (X button); dismissed state persisted in localStorage
  *
  * Storage: localStorage key "sd-user-highlights"
- * Highlights panel: slides in from right
- * Clear button: visible in header when current page has highlights
  */
 (function () {
     'use strict';
 
     var STORE_KEY = 'sd-user-highlights';
+    var _colorFilter = 'all';   // current panel colour filter
+    var _focusMode   = false;
+    var _focusDimmed = [];      // elements that got .hl-focus-dim
 
     // ── Utilities ─────────────────────────────────────────────────────────────
 
     function esc(s) {
         return String(s || '')
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
     function genId() {
@@ -38,11 +44,18 @@
         catch (e) {}
     }
 
+    function storeFind(store, id) {
+        for (var i = 0; i < store.highlights.length; i++) {
+            if (store.highlights[i].id === id) return store.highlights[i];
+        }
+        return null;
+    }
+
     // ── Page context ──────────────────────────────────────────────────────────
 
     function pageCtx() {
         var path = window.location.pathname;
-        var h1 = document.querySelector('.detail-header h1, h1.page-title');
+        var h1   = document.querySelector('.detail-header h1, h1.page-title');
         var title = h1
             ? h1.textContent.trim()
             : document.title.replace(' — System Design Prep', '').replace(' | System Design Prep', '').trim();
@@ -53,8 +66,7 @@
         return { path: path, title: title, type: type };
     }
 
-    // ── Find nearest phase header above a node ────────────────────────────────
-    // Walks up the DOM, checking previous siblings at each level for .phase-header.
+    // ── Nearest phase header ──────────────────────────────────────────────────
 
     function nearestPhase(node) {
         var detail = document.getElementById('detail');
@@ -74,87 +86,50 @@
     }
 
     // ── Range serialisation ───────────────────────────────────────────────────
-    // Stores: anchorId (nearest ancestor with ID), selected text, and 40-char
-    // context before/after for reliable restoration via text search.
 
     function serializeRange(range) {
         var text = range.toString();
         if (!text.trim()) return null;
-
-        // Find nearest ancestor element that has an ID
         var startEl = (range.startContainer.nodeType === Node.TEXT_NODE)
-            ? range.startContainer.parentElement
-            : range.startContainer;
+            ? range.startContainer.parentElement : range.startContainer;
         var anchor = startEl;
-        while (anchor && !anchor.id && anchor !== document.body) {
-            anchor = anchor.parentElement;
-        }
-        if (!anchor || anchor === document.body || anchor === document.documentElement) {
+        while (anchor && !anchor.id && anchor !== document.body) anchor = anchor.parentElement;
+        if (!anchor || anchor === document.body || anchor === document.documentElement)
             anchor = document.getElementById('detail');
-        }
-
-        // Capture surrounding context from anchor's full text
         var fullText = anchor ? anchor.textContent : '';
-        var idx = fullText.indexOf(text);
-        var before = (idx >= 0) ? fullText.slice(Math.max(0, idx - 40), idx) : '';
-        var after  = (idx >= 0) ? fullText.slice(idx + text.length, idx + text.length + 40) : '';
-
-        return {
-            anchorId: anchor ? anchor.id : null,
-            text:     text,
-            before:   before,
-            after:    after
-        };
+        var idx   = fullText.indexOf(text);
+        var before = idx >= 0 ? fullText.slice(Math.max(0, idx - 40), idx) : '';
+        var after  = idx >= 0 ? fullText.slice(idx + text.length, idx + text.length + 40) : '';
+        return { anchorId: anchor ? anchor.id : null, text: text, before: before, after: after };
     }
 
-    // Deserialise: find the text in the DOM and return a live Range.
     function deserializeRange(serial) {
         if (!serial || !serial.text) return null;
-
         var container = (serial.anchorId && document.getElementById(serial.anchorId))
             || document.getElementById('detail');
         if (!container) return null;
-
         var fullText = container.textContent;
-        var target   = serial.text;
-
-        // Try with context first for uniqueness, then fallback to text alone
         var startIdx = -1;
         if (serial.before || serial.after) {
-            var searchStr = serial.before + target + serial.after;
+            var searchStr = serial.before + serial.text + serial.after;
             var idx = fullText.indexOf(searchStr);
             if (idx >= 0) startIdx = idx + serial.before.length;
         }
-        if (startIdx < 0) {
-            startIdx = fullText.indexOf(target);
-        }
+        if (startIdx < 0) startIdx = fullText.indexOf(serial.text);
         if (startIdx < 0) return null;
-
-        return charRangeToDOM(container, startIdx, startIdx + target.length);
+        return charRangeToDOM(container, startIdx, startIdx + serial.text.length);
     }
 
-    // Convert start/end char offsets (within container.textContent) to a DOM Range.
     function charRangeToDOM(container, start, end) {
         var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
-        var pos = 0;
-        var startNode = null, startOff = 0, endNode = null, endOff = 0;
-
+        var pos = 0, startNode = null, startOff = 0, endNode = null, endOff = 0;
         while (walker.nextNode()) {
             var node = walker.currentNode;
             var len  = node.textContent.length;
-
-            if (!startNode && pos + len > start) {
-                startNode = node;
-                startOff  = start - pos;
-            }
-            if (startNode && !endNode && pos + len >= end) {
-                endNode = node;
-                endOff  = end - pos;
-                break;
-            }
+            if (!startNode && pos + len > start) { startNode = node; startOff = start - pos; }
+            if (startNode && !endNode && pos + len >= end) { endNode = node; endOff = end - pos; break; }
             pos += len;
         }
-
         if (!startNode || !endNode) return null;
         try {
             var r = document.createRange();
@@ -164,28 +139,45 @@
         } catch (e) { return null; }
     }
 
-    // ── Apply / remove text highlight in DOM ──────────────────────────────────
+    // ── Note bubble (inline after <mark>) ─────────────────────────────────────
 
-    function applyTextMark(range, color, hlId, note) {
+    function createNoteBubble(hlId, note, dismissed) {
+        var bubble = document.createElement('span');
+        bubble.className  = 'hl-note-bubble';
+        bubble.dataset.hlId = hlId;
+        if (dismissed) bubble.classList.add('hl-nb-hidden');
+        bubble.innerHTML =
+            '<span class="hl-nb-text">' + esc(note.slice(0, 120)) + (note.length > 120 ? '\u2026' : '') + '</span>' +
+            '<button class="hl-nb-close" data-hl-id="' + esc(hlId) + '" title="Dismiss note">\u00D7</button>';
+        bubble.querySelector('.hl-nb-close').addEventListener('click', function (e) {
+            e.stopPropagation();
+            bubble.classList.add('hl-nb-hidden');
+            var store = loadStore();
+            var hl = storeFind(store, hlId);
+            if (hl) { hl.noteDismissed = true; saveStore(store); }
+        });
+        return bubble;
+    }
+
+    // ── Apply / remove text highlight ─────────────────────────────────────────
+
+    function applyTextMark(range, color, hlId, note, dismissed) {
         if (!range || range.collapsed) return false;
-        // Don't highlight inside an existing user mark
         var startEl = (range.startContainer.nodeType === Node.TEXT_NODE)
             ? range.startContainer.parentElement : range.startContainer;
         if (startEl && startEl.closest('mark.user-hl')) return false;
 
-        var cls  = 'user-hl user-hl--' + color;
         var mark = null;
         try {
             mark = document.createElement('mark');
-            mark.className    = cls;
+            mark.className    = 'user-hl user-hl--' + color;
             mark.dataset.hlId = hlId;
             range.surroundContents(mark);
         } catch (e) {
-            // Cross-element range: extract → wrap → reinsert
             try {
                 var frag = range.extractContents();
                 mark = document.createElement('mark');
-                mark.className    = cls;
+                mark.className    = 'user-hl user-hl--' + color;
                 mark.dataset.hlId = hlId;
                 mark.appendChild(frag);
                 range.insertNode(mark);
@@ -193,16 +185,9 @@
         }
 
         if (note && mark) {
-            var icon = document.createElement('span');
-            icon.className    = 'user-hl-note-icon';
-            icon.textContent  = '\uD83D\uDCAC'; // 💬
-            icon.title        = note;
-            icon.dataset.hlId = hlId;
-            if (mark.nextSibling) {
-                mark.parentNode.insertBefore(icon, mark.nextSibling);
-            } else {
-                mark.parentNode.appendChild(icon);
-            }
+            var bubble = createNoteBubble(hlId, note, dismissed);
+            if (mark.nextSibling) mark.parentNode.insertBefore(bubble, mark.nextSibling);
+            else mark.parentNode.appendChild(bubble);
         }
         return true;
     }
@@ -215,20 +200,32 @@
             p.removeChild(mark);
             p.normalize();
         }
-        var icon = document.querySelector('.user-hl-note-icon[data-hl-id="' + hlId + '"]');
-        if (icon) icon.parentNode && icon.parentNode.removeChild(icon);
+        var bubble = document.querySelector('.hl-note-bubble[data-hl-id="' + hlId + '"]');
+        if (bubble && bubble.parentNode) bubble.parentNode.removeChild(bubble);
     }
 
-    // ── Apply / remove diagram highlight in DOM ───────────────────────────────
+    // ── Apply / remove diagram highlight ──────────────────────────────────────
 
-    function applyDiagramMark(diagEl, color, hlId, note) {
+    function applyDiagramMark(diagEl, color, hlId, note, dismissed) {
         diagEl.classList.add('user-hl-diagram', 'user-hl-diagram--' + color);
         diagEl.dataset.hlId = hlId;
+        var old = diagEl.querySelector('.user-hl-diagram-note[data-hl-id="' + hlId + '"]');
+        if (old && old.parentNode) old.parentNode.removeChild(old);
         if (note) {
             var badge = document.createElement('div');
             badge.className    = 'user-hl-diagram-note';
             badge.dataset.hlId = hlId;
-            badge.innerHTML    = '\uD83D\uDCAC ' + esc(note.slice(0, 80)) + (note.length > 80 ? '\u2026' : '');
+            if (dismissed) badge.classList.add('hl-nb-hidden');
+            badge.innerHTML =
+                '<span class="hl-nb-text">\uD83D\uDCAC ' + esc(note.slice(0, 100)) + (note.length > 100 ? '\u2026' : '') + '</span>' +
+                '<button class="hl-nb-close" data-hl-id="' + esc(hlId) + '" title="Dismiss note">\u00D7</button>';
+            badge.querySelector('.hl-nb-close').addEventListener('click', function (e) {
+                e.stopPropagation();
+                badge.classList.add('hl-nb-hidden');
+                var store = loadStore();
+                var hl = storeFind(store, hlId);
+                if (hl) { hl.noteDismissed = true; saveStore(store); }
+            });
             diagEl.appendChild(badge);
         }
     }
@@ -247,7 +244,54 @@
         if (note && note.parentNode) note.parentNode.removeChild(note);
     }
 
-    // ── Restore highlights for current page ───────────────────────────────────
+    // ── Apply / remove pin annotation (image X/Y %) ───────────────────────────
+
+    function applyPinMark(diagEl, pctX, pctY, color, hlId, note, dismissed) {
+        // Make container position:relative so pins can be placed
+        var cs = window.getComputedStyle(diagEl);
+        if (cs.position === 'static') diagEl.style.position = 'relative';
+
+        var pin = document.createElement('div');
+        pin.className    = 'hl-pin hl-pin--' + color;
+        pin.dataset.hlId = hlId;
+        pin.style.left   = pctX + '%';
+        pin.style.top    = pctY + '%';
+
+        var bubbleHtml = note
+            ? '<div class="hl-pin-bubble' + (dismissed ? ' hl-nb-hidden' : '') + '">' +
+                '<span class="hl-nb-text">' + esc(note) + '</span>' +
+                '<button class="hl-nb-close" data-hl-id="' + esc(hlId) + '" title="Dismiss">\u00D7</button>' +
+              '</div>'
+            : '';
+
+        pin.innerHTML = '<div class="hl-pin-dot"></div>' + bubbleHtml;
+
+        if (note) {
+            pin.querySelector('.hl-nb-close').addEventListener('click', function (e) {
+                e.stopPropagation();
+                pin.querySelector('.hl-pin-bubble').classList.add('hl-nb-hidden');
+                var store = loadStore();
+                var hl = storeFind(store, hlId);
+                if (hl) { hl.noteDismissed = true; saveStore(store); }
+            });
+        }
+
+        // Right-click pin → delete context menu
+        pin.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            showCtxMenu(e.clientX, e.clientY, { type: 'pin', hlId: hlId });
+        });
+
+        diagEl.appendChild(pin);
+    }
+
+    function removePinMark(hlId) {
+        var pin = document.querySelector('.hl-pin[data-hl-id="' + hlId + '"]');
+        if (pin && pin.parentNode) pin.parentNode.removeChild(pin);
+    }
+
+    // ── Restore page highlights ───────────────────────────────────────────────
 
     function restorePageHighlights() {
         var store = loadStore();
@@ -255,36 +299,34 @@
         store.highlights
             .filter(function (h) { return h.page === path; })
             .forEach(function (hl) {
-                if (hl.isDiagram) {
-                    var diagEl = document.querySelector(
-                        '.diagram-container[data-slug="' + hl.diagramSlug + '"]'
-                    );
-                    if (diagEl && !diagEl.dataset.hlId) {
-                        applyDiagramMark(diagEl, hl.color, hl.id, hl.note);
-                    }
+                if (hl.isPin) {
+                    var d = document.querySelector('.diagram-container[data-slug="' + hl.diagramSlug + '"]');
+                    if (d) applyPinMark(d, hl.pctX, hl.pctY, hl.color, hl.id, hl.note, hl.noteDismissed);
+                } else if (hl.isDiagram) {
+                    var d2 = document.querySelector('.diagram-container[data-slug="' + hl.diagramSlug + '"]');
+                    if (d2 && !d2.dataset.hlId) applyDiagramMark(d2, hl.color, hl.id, hl.note, hl.noteDismissed);
                 } else {
                     var range = deserializeRange(hl.range);
-                    if (range) applyTextMark(range, hl.color, hl.id, hl.note);
+                    if (range) applyTextMark(range, hl.color, hl.id, hl.note, hl.noteDismissed);
                 }
             });
         updateClearBtn();
+        updateFocusBtn();
     }
 
     // ── Clear page highlights ─────────────────────────────────────────────────
 
     function clearPageHighlights() {
         var path = window.location.pathname;
-        // Remove mark elements (unwrap)
+
         document.querySelectorAll('mark.user-hl').forEach(function (m) {
             var p = m.parentNode;
             while (m.firstChild) p.insertBefore(m.firstChild, m);
             p.removeChild(m);
         });
-        // Remove note icons
-        document.querySelectorAll('.user-hl-note-icon').forEach(function (i) {
-            i.parentNode && i.parentNode.removeChild(i);
+        document.querySelectorAll('.hl-note-bubble').forEach(function (b) {
+            b.parentNode && b.parentNode.removeChild(b);
         });
-        // Remove diagram highlights
         document.querySelectorAll('.user-hl-diagram').forEach(function (d) {
             d.classList.remove(
                 'user-hl-diagram',
@@ -296,24 +338,125 @@
         document.querySelectorAll('.user-hl-diagram-note').forEach(function (n) {
             n.parentNode && n.parentNode.removeChild(n);
         });
-        // Merge split text nodes
+        document.querySelectorAll('.hl-pin').forEach(function (p) {
+            p.parentNode && p.parentNode.removeChild(p);
+        });
         var detail = document.getElementById('detail');
         if (detail) detail.normalize();
 
-        // Purge from store
         var store = loadStore();
         store.highlights = store.highlights.filter(function (h) { return h.page !== path; });
         saveStore(store);
         updateClearBtn();
         updatePanelBadge();
+        updateFocusBtn();
+
+        if (_focusMode) exitFocusMode();
     }
 
     window.clearPageHighlights = clearPageHighlights;
 
+    // ── Focus mode: "show highlighted content only" ───────────────────────────
+
+    function enterFocusMode() {
+        if (_focusMode) return;
+        _focusMode = true;
+        document.body.classList.add('hl-focus-mode');
+        updateFocusBtn();
+        _focusDimmed = [];
+
+        var detail = document.getElementById('detail');
+        if (!detail) return;
+
+        // Build phase→content mapping by walking direct children
+        var sections = [];
+        var current  = { header: null, content: [] };
+        Array.prototype.forEach.call(detail.children, function (el) {
+            if (el.classList && el.classList.contains('phase-header')) {
+                sections.push(current);
+                current = { header: el, content: [] };
+            } else {
+                current.content.push(el);
+            }
+        });
+        sections.push(current);
+
+        sections.forEach(function (sec) {
+            if (!sec.header) return; // pre-phase content, always show
+            // Check if any highlight element exists in this section
+            var allEls = [sec.header].concat(sec.content);
+            var hasHighlight = allEls.some(function (el) {
+                return el.querySelector && (
+                    el.querySelector('mark.user-hl') ||
+                    el.querySelector('.hl-pin') ||
+                    el.querySelector('.user-hl-diagram')
+                );
+            });
+            if (!hasHighlight) {
+                sec.header.classList.add('hl-focus-dim');
+                _focusDimmed.push(sec.header);
+                sec.content.forEach(function (el) {
+                    el.classList.add('hl-focus-dim');
+                    _focusDimmed.push(el);
+                });
+            }
+        });
+
+        showFocusBanner();
+    }
+
+    function exitFocusMode() {
+        if (!_focusMode) return;
+        _focusMode = false;
+        document.body.classList.remove('hl-focus-mode');
+        updateFocusBtn();
+        _focusDimmed.forEach(function (el) { el.classList.remove('hl-focus-dim'); });
+        _focusDimmed = [];
+        hideFocusBanner();
+    }
+
+    window.toggleHighlightFocusMode = function () {
+        if (_focusMode) exitFocusMode(); else enterFocusMode();
+    };
+
+    function updateFocusBtn() {
+        var btn = document.getElementById('hl-focus-btn');
+        if (!btn) return;
+        // Only show if there are highlights on the current page
+        var path = window.location.pathname;
+        var has  = loadStore().highlights.some(function (h) { return h.page === path; });
+        btn.style.display = has ? '' : 'none';
+        btn.classList.toggle('hl-focus-btn--active', _focusMode);
+        btn.title = _focusMode ? 'Exit focus mode (show all)' : 'Show only highlighted content';
+    }
+
+    function showFocusBanner() {
+        var banner = document.getElementById('hl-focus-banner');
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.id        = 'hl-focus-banner';
+            banner.className = 'hl-focus-banner';
+            banner.innerHTML =
+                '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+                    '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>' +
+                '</svg>' +
+                '<span>Focus mode &mdash; showing highlighted sections only.</span>' +
+                '<button onclick="window.toggleHighlightFocusMode && window.toggleHighlightFocusMode()">Reset view</button>';
+            var detail = document.getElementById('detail');
+            if (detail) detail.insertBefore(banner, detail.firstChild);
+        }
+        banner.style.display = 'flex';
+    }
+
+    function hideFocusBanner() {
+        var banner = document.getElementById('hl-focus-banner');
+        if (banner) banner.style.display = 'none';
+    }
+
     // ── Context Menu ──────────────────────────────────────────────────────────
 
     var _ctxMenu = null;
-    var _pending = null; // { type:'text'|'diagram', range?, diagramEl?, hlId? }
+    var _pending = null;
 
     function buildCtxMenu() {
         if (_ctxMenu) return _ctxMenu;
@@ -341,15 +484,13 @@
             '<div class="ctx-section ctx-delete-section" style="display:none">' +
                 '<button class="ctx-item ctx-item--danger" id="ctx-del-btn">' +
                     '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">' +
-                        '<polyline points="3 6 5 6 21 6"/>' +
-                        '<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>' +
+                        '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>' +
                     '</svg>' +
                     'Remove highlight' +
                 '</button>' +
             '</div>';
         document.body.appendChild(m);
 
-        // Colour swatches — use mousedown+preventDefault to preserve selection
         m.querySelectorAll('.ctx-swatch').forEach(function (btn) {
             btn.addEventListener('mousedown', function (e) { e.preventDefault(); });
             btn.addEventListener('click', function () {
@@ -357,14 +498,10 @@
                 hideCtxMenu();
             });
         });
-
         document.getElementById('ctx-note-btn').addEventListener('mousedown', function (e) { e.preventDefault(); });
         document.getElementById('ctx-note-btn').addEventListener('click', function () {
-            var saved = _pending;
-            hideCtxMenu();
-            showNoteDialog(saved);
+            var saved = _pending; hideCtxMenu(); showNoteDialog(saved);
         });
-
         document.getElementById('ctx-del-btn').addEventListener('click', function () {
             if (_pending && _pending.hlId) deleteHighlight(_pending.hlId);
             hideCtxMenu();
@@ -377,19 +514,14 @@
     function showCtxMenu(x, y, action) {
         _pending = action;
         var m = buildCtxMenu();
-
-        // Toggle sections based on context
-        var hasNewSelection = !!(action.range || (action.type === 'diagram' && !action.hlId));
-        m.querySelector('.ctx-colors-section').style.display = hasNewSelection ? '' : 'none';
-        m.querySelector('.ctx-note-section').style.display   = hasNewSelection ? '' : 'none';
-        m.querySelector('.ctx-delete-section').style.display = action.hlId    ? '' : 'none';
-
+        var hasNew = !!(action.range || (action.type === 'diagram' && !action.hlId));
+        m.querySelector('.ctx-colors-section').style.display = hasNew     ? '' : 'none';
+        m.querySelector('.ctx-note-section').style.display   = hasNew     ? '' : 'none';
+        m.querySelector('.ctx-delete-section').style.display = action.hlId ? '' : 'none';
         m.style.display = 'block';
-        // Clamp to viewport after layout
         requestAnimationFrame(function () {
-            var mw = m.offsetWidth, mh = m.offsetHeight;
-            m.style.left = Math.min(x, window.innerWidth  - mw - 8) + 'px';
-            m.style.top  = Math.min(y, window.innerHeight - mh - 8) + 'px';
+            m.style.left = Math.min(x, window.innerWidth  - m.offsetWidth  - 8) + 'px';
+            m.style.top  = Math.min(y, window.innerHeight - m.offsetHeight - 8) + 'px';
         });
     }
 
@@ -398,7 +530,7 @@
         _pending = null;
     }
 
-    // ── Note Dialog ───────────────────────────────────────────────────────────
+    // ── Note Dialog (text/diagram highlights) ─────────────────────────────────
 
     var _noteDlg    = null;
     var _noteAction = null;
@@ -415,10 +547,10 @@
                     '<button class="hl-note-close" id="hl-note-close">&#x2715;</button>' +
                 '</div>' +
                 '<div class="hl-note-colors">' +
-                    '<button class="hl-nc-btn hl-nc-btn--yellow active" data-color="yellow" title="Yellow"></button>' +
-                    '<button class="hl-nc-btn hl-nc-btn--green"         data-color="green"  title="Green"></button>' +
-                    '<button class="hl-nc-btn hl-nc-btn--blue"          data-color="blue"   title="Blue"></button>' +
-                    '<button class="hl-nc-btn hl-nc-btn--pink"          data-color="pink"   title="Pink"></button>' +
+                    '<button class="hl-nc-btn hl-nc-btn--yellow active" data-color="yellow"></button>' +
+                    '<button class="hl-nc-btn hl-nc-btn--green"         data-color="green"></button>' +
+                    '<button class="hl-nc-btn hl-nc-btn--blue"          data-color="blue"></button>' +
+                    '<button class="hl-nc-btn hl-nc-btn--pink"          data-color="pink"></button>' +
                 '</div>' +
                 '<textarea class="hl-note-txt" id="hl-note-txt" placeholder="Add a note (optional)..." rows="3"></textarea>' +
                 '<div class="hl-note-footer">' +
@@ -436,7 +568,6 @@
                 selColor = btn.dataset.color;
             });
         });
-
         document.getElementById('hl-note-close').addEventListener('click',  closeNoteDialog);
         document.getElementById('hl-note-cancel').addEventListener('click', closeNoteDialog);
         document.getElementById('hl-note-save').addEventListener('click', function () {
@@ -444,9 +575,7 @@
             commitHighlight(_noteAction, selColor, note);
             closeNoteDialog();
         });
-        // Backdrop click closes
         d.addEventListener('click', function (e) { if (e.target === d) closeNoteDialog(); });
-
         _noteDlg = d;
         return d;
     }
@@ -454,21 +583,112 @@
     function showNoteDialog(action) {
         _noteAction = action;
         var d = buildNoteDialog();
-        // Reset colour selection
         d.querySelectorAll('.hl-nc-btn').forEach(function (b) {
             b.classList.toggle('active', b.dataset.color === 'yellow');
         });
         document.getElementById('hl-note-txt').value = '';
         d.style.display = 'flex';
         setTimeout(function () {
-            var txt = document.getElementById('hl-note-txt');
-            if (txt) txt.focus();
+            var t = document.getElementById('hl-note-txt'); if (t) t.focus();
         }, 30);
     }
 
     function closeNoteDialog() {
         if (_noteDlg) _noteDlg.style.display = 'none';
         _noteAction = null;
+    }
+
+    // ── Pin Dialog (image click annotations) ──────────────────────────────────
+
+    var _pinDlg    = null;
+    var _pinAction = null;
+
+    function buildPinDialog() {
+        if (_pinDlg) return _pinDlg;
+        var d = document.createElement('div');
+        d.id        = 'hl-pin-dialog';
+        d.className = 'hl-pin-dialog';
+        d.innerHTML =
+            '<div class="hl-pin-inner">' +
+                '<div class="hl-pin-hdr">' +
+                    '<span class="hl-pin-hdr-title">\uD83D\uDCCD Pin Annotation</span>' +
+                    '<button class="hl-note-close" id="hl-pin-close">&#x2715;</button>' +
+                '</div>' +
+                '<div class="hl-note-colors">' +
+                    '<button class="hl-nc-btn hl-nc-btn--yellow active" data-color="yellow"></button>' +
+                    '<button class="hl-nc-btn hl-nc-btn--green"         data-color="green"></button>' +
+                    '<button class="hl-nc-btn hl-nc-btn--blue"          data-color="blue"></button>' +
+                    '<button class="hl-nc-btn hl-nc-btn--pink"          data-color="pink"></button>' +
+                '</div>' +
+                '<textarea class="hl-note-txt" id="hl-pin-txt" placeholder="Note for this spot (optional)..." rows="2"></textarea>' +
+                '<div class="hl-note-footer">' +
+                    '<button class="btn btn-sm btn-secondary" id="hl-pin-cancel">Cancel</button>' +
+                    '<button class="btn btn-sm btn-primary"   id="hl-pin-save">Add Pin</button>' +
+                '</div>' +
+            '</div>';
+        document.body.appendChild(d);
+
+        var selColor = 'yellow';
+        d.querySelectorAll('.hl-nc-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                d.querySelectorAll('.hl-nc-btn').forEach(function (b) { b.classList.remove('active'); });
+                btn.classList.add('active');
+                selColor = btn.dataset.color;
+            });
+        });
+        document.getElementById('hl-pin-close').addEventListener('click',  closePinDialog);
+        document.getElementById('hl-pin-cancel').addEventListener('click', closePinDialog);
+        document.getElementById('hl-pin-save').addEventListener('click', function () {
+            var note = (document.getElementById('hl-pin-txt').value || '').trim();
+            commitPinAnnotation(_pinAction, selColor, note);
+            closePinDialog();
+        });
+        d.addEventListener('click', function (e) { if (e.target === d) closePinDialog(); });
+        _pinDlg = d;
+        return d;
+    }
+
+    function showPinDialog(action) {
+        _pinAction = action;
+        var d = buildPinDialog();
+        d.querySelectorAll('.hl-nc-btn').forEach(function (b) {
+            b.classList.toggle('active', b.dataset.color === 'yellow');
+        });
+        document.getElementById('hl-pin-txt').value = '';
+        d.style.display = 'flex';
+        setTimeout(function () {
+            var t = document.getElementById('hl-pin-txt'); if (t) t.focus();
+        }, 30);
+    }
+
+    function closePinDialog() {
+        if (_pinDlg) _pinDlg.style.display = 'none';
+        _pinAction = null;
+    }
+
+    function commitPinAnnotation(action, color, note) {
+        if (!action) return;
+        var ctx   = pageCtx();
+        var store = loadStore();
+        var id    = genId();
+        var phase = nearestPhase(action.diagEl);
+        var titleEl = action.diagEl.querySelector('.diagram-title');
+        var hl = {
+            id: id,
+            page: ctx.path, pageTitle: ctx.title, pageType: ctx.type,
+            color: color, note: note, createdAt: new Date().toISOString(),
+            isPin: true, isDiagram: false,
+            diagramSlug: action.diagEl.dataset.slug || '',
+            pctX: action.pctX, pctY: action.pctY,
+            text: '\uD83D\uDCCD ' + (titleEl ? titleEl.textContent.trim() : 'Image annotation'),
+            phase: phase
+        };
+        applyPinMark(action.diagEl, action.pctX, action.pctY, color, id, note, false);
+        store.highlights.push(hl);
+        saveStore(store);
+        updateClearBtn();
+        updatePanelBadge();
+        updateFocusBtn();
     }
 
     // ── Commit a highlight ────────────────────────────────────────────────────
@@ -479,11 +699,12 @@
         var store = loadStore();
         var id    = genId();
 
-        if (action.type === 'diagram') {
+        if (action.type === 'pin') {
+            // Pin right-click = delete only, not commit
+            return;
+        } else if (action.type === 'diagram') {
             var diagEl = action.diagramEl;
-            if (!diagEl) return;
-            // Skip if already highlighted
-            if (diagEl.dataset.hlId) return;
+            if (!diagEl || diagEl.dataset.hlId) return;
             var slug    = diagEl.dataset.slug || '';
             var titleEl = diagEl.querySelector('.diagram-title');
             var phase   = nearestPhase(diagEl);
@@ -491,61 +712,57 @@
                 id: id,
                 page: ctx.path, pageTitle: ctx.title, pageType: ctx.type,
                 color: color, note: note, createdAt: new Date().toISOString(),
-                isDiagram: true,
+                isDiagram: true, isPin: false,
                 diagramSlug: slug,
                 text: (titleEl ? titleEl.textContent.trim() : slug) || 'Diagram',
                 phase: phase
             };
-            applyDiagramMark(diagEl, color, id, note);
+            applyDiagramMark(diagEl, color, id, note, false);
             store.highlights.push(hl);
-
         } else {
             var range = action.range;
             if (!range || range.collapsed) return;
-            var text = range.toString().trim();
+            var text  = range.toString().trim();
             if (!text) return;
-
             var startEl = (range.startContainer.nodeType === Node.TEXT_NODE)
-                ? range.startContainer.parentElement
-                : range.startContainer;
+                ? range.startContainer.parentElement : range.startContainer;
             var phase2  = nearestPhase(startEl);
             var serial  = serializeRange(range);
             if (!serial) return;
-
-            // Clear browser selection before DOM modification
             window.getSelection().removeAllRanges();
-
             var hl2 = {
                 id: id,
                 page: ctx.path, pageTitle: ctx.title, pageType: ctx.type,
                 color: color, note: note, createdAt: new Date().toISOString(),
-                isDiagram: false,
+                isDiagram: false, isPin: false,
                 text:  text.slice(0, 200),
                 range: serial,
                 phase: phase2
             };
-            if (applyTextMark(range, color, id, note)) {
-                store.highlights.push(hl2);
-            }
+            if (applyTextMark(range, color, id, note, false)) store.highlights.push(hl2);
         }
 
         saveStore(store);
         updateClearBtn();
         updatePanelBadge();
+        updateFocusBtn();
     }
 
-    // ── Delete a single highlight ─────────────────────────────────────────────
+    // ── Delete a highlight ────────────────────────────────────────────────────
 
     function deleteHighlight(hlId) {
         var store = loadStore();
-        var hl    = store.highlights.filter(function (h) { return h.id === hlId; })[0];
-        if (hl && hl.isDiagram) removeDiagramMark(hlId);
-        else                    removeTextMark(hlId);
+        var hl    = storeFind(store, hlId);
+        if (hl) {
+            if (hl.isPin)     removePinMark(hlId);
+            else if (hl.isDiagram) removeDiagramMark(hlId);
+            else              removeTextMark(hlId);
+        }
         store.highlights = store.highlights.filter(function (h) { return h.id !== hlId; });
         saveStore(store);
         updateClearBtn();
         updatePanelBadge();
-        // Re-render panel if it's open
+        updateFocusBtn();
         var panel = document.getElementById('hl-panel');
         if (panel && panel.classList.contains('open')) renderPanel();
     }
@@ -555,8 +772,7 @@
     function updateClearBtn() {
         var btn  = document.getElementById('hl-clear-btn');
         if (!btn) return;
-        var path = window.location.pathname;
-        var has  = loadStore().highlights.some(function (h) { return h.page === path; });
+        var has  = loadStore().highlights.some(function (h) { return h.page === window.location.pathname; });
         btn.style.display = has ? '' : 'none';
     }
 
@@ -571,7 +787,7 @@
     // ── Highlights Panel ──────────────────────────────────────────────────────
 
     var _dragSelecting = false;
-    var _selected      = {};   // hlId → true
+    var _selected      = {};
 
     function openPanel() {
         var panel = buildPanel();
@@ -598,8 +814,7 @@
             '<div class="hl-panel-hdr">' +
                 '<span class="hl-panel-title">' +
                     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
-                        '<path d="M12 20h9"/>' +
-                        '<path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>' +
+                        '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>' +
                     '</svg>' +
                     ' My Highlights' +
                 '</span>' +
@@ -608,6 +823,13 @@
                     '<button class="hl-panel-btn hl-clear-all-btn" id="hl-clear-all">Clear all</button>' +
                     '<button class="hl-panel-close" id="hl-panel-close">&#x2715;</button>' +
                 '</div>' +
+            '</div>' +
+            '<div class="hl-panel-filters" id="hl-panel-filters">' +
+                '<button class="hl-filter-chip hl-filter-chip--all active" data-filter="all">All</button>' +
+                '<button class="hl-filter-chip" data-filter="yellow"><span class="hl-fc-dot hl-fc-dot--yellow"></span>Yellow</button>' +
+                '<button class="hl-filter-chip" data-filter="green"><span class="hl-fc-dot hl-fc-dot--green"></span>Green</button>' +
+                '<button class="hl-filter-chip" data-filter="blue"><span class="hl-fc-dot hl-fc-dot--blue"></span>Blue</button>' +
+                '<button class="hl-filter-chip" data-filter="pink"><span class="hl-fc-dot hl-fc-dot--pink"></span>Pink</button>' +
             '</div>' +
             '<div class="hl-panel-body" id="hl-panel-body"></div>';
         document.body.appendChild(panel);
@@ -626,6 +848,16 @@
             Object.keys(_selected).forEach(function (hlId) { deleteHighlight(hlId); });
             _selected = {};
             updateDelSelBtn();
+        });
+
+        // Colour filter chips
+        panel.querySelectorAll('.hl-filter-chip').forEach(function (chip) {
+            chip.addEventListener('click', function () {
+                panel.querySelectorAll('.hl-filter-chip').forEach(function (c) { c.classList.remove('active'); });
+                chip.classList.add('active');
+                _colorFilter = chip.dataset.filter;
+                renderPanel();
+            });
         });
 
         // Close on outside mousedown
@@ -650,18 +882,24 @@
         var store = loadStore();
         var hls   = store.highlights;
 
+        // Apply colour filter
+        if (_colorFilter !== 'all') {
+            hls = hls.filter(function (h) { return h.color === _colorFilter; });
+        }
+
         if (!hls.length) {
             body.innerHTML =
                 '<p class="hl-panel-empty">' +
-                'No highlights yet.<br>' +
-                'Right-click any text or diagram to highlight it.' +
+                (_colorFilter !== 'all'
+                    ? 'No ' + _colorFilter + ' highlights.'
+                    : 'No highlights yet.<br>Right-click any text or diagram to highlight it.') +
                 '</p>';
             return;
         }
 
-        // Group by page, preserve insertion order
+        // Group by page
         var pageOrder = [];
-        var pages = {};
+        var pages     = {};
         hls.forEach(function (h) {
             if (!pages[h.page]) {
                 pages[h.page] = { title: h.pageTitle || h.page, type: h.pageType || 'page', items: [] };
@@ -691,11 +929,14 @@
                 var gotoHref = pg + (phaseId ? '#' + phaseId : '');
                 var snippet  = (hl.text || '').slice(0, 100);
                 var ellipsis = (hl.text && hl.text.length > 100) ? '\u2026' : '';
+                var dotClass = hl.isPin
+                    ? 'hl-pin-dot-sm'
+                    : 'hl-item-dot hl-item-dot--' + esc(hl.color);
 
                 html +=
                     '<div class="hl-item" data-hl-id="' + esc(hl.id) + '">' +
                         '<input type="checkbox" class="hl-item-cb" data-hl-id="' + esc(hl.id) + '">' +
-                        '<div class="hl-item-dot hl-item-dot--' + esc(hl.color) + '"></div>' +
+                        '<div class="' + dotClass + '"></div>' +
                         '<div class="hl-item-body">' +
                             (hl.phase ? '<div class="hl-item-phase">' + esc(hl.phase.title) + '</div>' : '') +
                             '<div class="hl-item-text">' + esc(snippet + ellipsis) + '</div>' +
@@ -715,20 +956,16 @@
 
         body.innerHTML = html;
 
-        // ── Wire checkboxes for multi-select (+ drag-to-select) ──────────────
-        var items = body.querySelectorAll('.hl-item');
-        items.forEach(function (item) {
+        // Wire checkboxes and drag-select
+        body.querySelectorAll('.hl-item').forEach(function (item) {
             var cb = item.querySelector('.hl-item-cb');
             if (!cb) return;
-
             cb.addEventListener('change', function () {
                 if (cb.checked) _selected[cb.dataset.hlId] = true;
                 else            delete _selected[cb.dataset.hlId];
                 item.classList.toggle('hl-item--selected', cb.checked);
                 updateDelSelBtn();
             });
-
-            // Click anywhere on item (except links/buttons) toggles checkbox
             item.addEventListener('click', function (e) {
                 if (e.target === cb) return;
                 if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON') return;
@@ -737,16 +974,12 @@
             });
         });
 
-        // Drag-to-select: hold mousedown and drag over items
-        var dragStart = null;
         body.addEventListener('mousedown', function (e) {
             if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT') return;
-            dragStart = e.target.closest('.hl-item');
-            if (dragStart) _dragSelecting = true;
+            if (e.target.closest('.hl-item')) _dragSelecting = true;
         });
-        // mousemove wired globally (see bottom of file)
 
-        // ── Wire "Go to" links ───────────────────────────────────────────────
+        // "Go to" links — scroll to phase after navigation
         body.querySelectorAll('.hl-goto').forEach(function (a) {
             a.addEventListener('click', function () {
                 var phaseId = a.dataset.phaseId;
@@ -760,7 +993,7 @@
             });
         });
 
-        // ── Wire delete buttons ──────────────────────────────────────────────
+        // Delete buttons
         body.querySelectorAll('.hl-del-btn').forEach(function (btn) {
             btn.addEventListener('click', function (e) {
                 e.stopPropagation();
@@ -779,7 +1012,7 @@
         if (btn) btn.style.display = Object.keys(_selected).length > 0 ? '' : 'none';
     }
 
-    // Global mousemove / mouseup for drag-select in panel
+    // Global drag-select mousemove / mouseup
     document.addEventListener('mousemove', function (e) {
         if (!_dragSelecting) return;
         var item = e.target && e.target.closest && e.target.closest('.hl-item');
@@ -793,42 +1026,70 @@
     });
     document.addEventListener('mouseup', function () { _dragSelecting = false; });
 
-    // ── Context menu event wiring (attached once, globally) ──────────────────
+    // ── Context menu + image click wiring ────────────────────────────────────
 
-    var _ctxAttached = false;
+    var _ctxAttached  = false;
+    var _imgMousedown = null; // track mousedown pos to distinguish click vs drag
 
     function attachContextMenu() {
         if (_ctxAttached) return;
         _ctxAttached = true;
 
+        // Image click → pin annotation (only if mouse didn't move significantly)
+        document.addEventListener('mousedown', function (e) {
+            var img = e.target.closest('.diagram-container img');
+            if (img) _imgMousedown = { x: e.clientX, y: e.clientY };
+            else     _imgMousedown = null;
+        });
+
+        document.addEventListener('click', function (e) {
+            if (!_imgMousedown) return;
+            var img = e.target.closest('.diagram-container img');
+            if (!img) { _imgMousedown = null; return; }
+            // Ignore if mouse moved too much (panning)
+            var dx = Math.abs(e.clientX - _imgMousedown.x);
+            var dy = Math.abs(e.clientY - _imgMousedown.y);
+            _imgMousedown = null;
+            if (dx > 5 || dy > 5) return;
+            // Ignore if text is selected
+            var sel = window.getSelection();
+            if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+
+            var diagEl = img.closest('.diagram-container');
+            if (!diagEl) return;
+            var rect = img.getBoundingClientRect();
+            var pctX = ((e.clientX - rect.left)  / rect.width  * 100).toFixed(1);
+            var pctY = ((e.clientY - rect.top)   / rect.height * 100).toFixed(1);
+            showPinDialog({ diagEl: diagEl, pctX: parseFloat(pctX), pctY: parseFloat(pctY) });
+        });
+
+        // Right-click context menu (text selection, existing marks, diagrams)
         document.addEventListener('contextmenu', function (e) {
             var detail = document.getElementById('detail');
             if (!detail || !detail.contains(e.target)) return;
-            // Pass through on form fields
             if (['INPUT', 'TEXTAREA', 'SELECT'].indexOf(e.target.tagName) >= 0) return;
 
-            var sel         = window.getSelection();
-            var hasText     = sel && !sel.isCollapsed && sel.toString().trim().length > 0;
-            var existMark   = e.target.closest('mark.user-hl');
-            var diagEl      = e.target.closest('.diagram-container');
+            var sel       = window.getSelection();
+            var hasText   = sel && !sel.isCollapsed && sel.toString().trim().length > 0;
+            var existMark = e.target.closest('mark.user-hl');
+            var existPin  = e.target.closest('.hl-pin');
+            var diagEl    = e.target.closest('.diagram-container');
 
-            if (!hasText && !existMark && !diagEl) return; // no highlight target → native menu
-
+            if (!hasText && !existMark && !existPin && !diagEl) return;
             e.preventDefault();
 
             var action;
             if (hasText) {
-                // New text selection (may overlap an existing mark)
                 action = {
                     type:  'text',
                     range: sel.getRangeAt(0).cloneRange(),
                     hlId:  existMark ? existMark.dataset.hlId : null
                 };
+            } else if (existPin) {
+                action = { type: 'pin', hlId: existPin.dataset.hlId };
             } else if (existMark) {
-                // Right-click on existing text highlight → delete only
                 action = { type: 'text', hlId: existMark.dataset.hlId };
             } else if (diagEl) {
-                // Diagram: highlight or delete existing
                 action = {
                     type:      'diagram',
                     diagramEl: diagEl,
@@ -838,24 +1099,28 @@
             if (action) showCtxMenu(e.clientX, e.clientY, action);
         });
 
-        // Close menu on any click outside
+        // Close context menu on outside click
         document.addEventListener('click', function (e) {
             if (_ctxMenu && !e.target.closest('#hl-ctx-menu')) hideCtxMenu();
         });
 
-        // Close on Escape
+        // Escape closes everything
         document.addEventListener('keydown', function (e) {
-            if (e.key === 'Escape') { hideCtxMenu(); closeNoteDialog(); }
+            if (e.key === 'Escape') {
+                hideCtxMenu();
+                closeNoteDialog();
+                closePinDialog();
+            }
         });
     }
 
-    // ── Initialise ───────────────────────────────────────────────────────────
+    // ── Initialise ────────────────────────────────────────────────────────────
 
     function init() {
         attachContextMenu();
         updateClearBtn();
         updatePanelBadge();
-        // Restore after next paint so content is fully laid out
+        updateFocusBtn();
         requestAnimationFrame(restorePageHighlights);
     }
 
@@ -865,12 +1130,13 @@
         init();
     }
 
-    // Re-run after every HTMX page swap
+    // Re-run after every HTMX swap into #detail
     document.addEventListener('htmx:afterSwap', function (e) {
         if (e.detail && e.detail.target && e.detail.target.id === 'detail') {
+            if (_focusMode) exitFocusMode();
             updateClearBtn();
             updatePanelBadge();
-            // Small delay lets HTMX fully settle the new DOM before we scan it
+            updateFocusBtn();
             setTimeout(restorePageHighlights, 150);
         }
     });
