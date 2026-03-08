@@ -56,8 +56,7 @@
         <span class="prac-section-title">Functional Requirements</span>
         <span class="prac-section-hint">Core features the system must do</span>
       </div>
-      <textarea class="prac-textarea" id="prac-fr" data-field="fr"
-                placeholder="• Users can shorten a long URL&#10;• Users can visit the short URL and get redirected&#10;• URLs can have an optional custom alias&#10;• URLs expire after 30 days by default&#10;…"></textarea>
+      <textarea class="prac-textarea" id="prac-fr" data-field="fr" placeholder="Write your answer here…"></textarea>
     </div>
 
     <!-- 2. Non-Functional Requirements -->
@@ -67,8 +66,7 @@
         <span class="prac-section-title">Non-Functional Requirements</span>
         <span class="prac-section-hint">Scalability, latency, availability targets</span>
       </div>
-      <textarea class="prac-textarea" id="prac-nfr" data-field="nfr"
-                placeholder="• 100ms p99 redirect latency&#10;• 99.99% availability (4 nines)&#10;• 100K writes/day, 10M reads/day&#10;• Horizontally scalable — no single point of failure&#10;…"></textarea>
+      <textarea class="prac-textarea" id="prac-nfr" data-field="nfr" placeholder="Write your answer here…"></textarea>
     </div>
 
     <!-- 3. Capacity Estimation -->
@@ -78,8 +76,7 @@
         <span class="prac-section-title">Capacity Estimation</span>
         <span class="prac-section-hint">Back-of-envelope: QPS, storage, bandwidth</span>
       </div>
-      <textarea class="prac-textarea prac-textarea--mono" id="prac-cap" data-field="cap"
-                placeholder="Writes: 100K / day → ~1.2 QPS&#10;Reads:  10M  / day → ~116 QPS (read:write = 100:1)&#10;&#10;Storage per URL: ~500 bytes&#10;5-year storage: 100K × 365 × 5 × 500B ≈ 91 GB&#10;&#10;Bandwidth (reads): 116 QPS × 500B ≈ 58 KB/s&#10;Cache: 20% of URLs = 80% traffic → cache top 20K URLs"></textarea>
+      <textarea class="prac-textarea prac-textarea--mono" id="prac-cap" data-field="cap" placeholder="Write your answer here…"></textarea>
     </div>
 
     <!-- 4. API Design -->
@@ -89,8 +86,7 @@
         <span class="prac-section-title">API Design</span>
         <span class="prac-section-hint">REST endpoints, request/response contracts</span>
       </div>
-      <textarea class="prac-textarea prac-textarea--mono" id="prac-api" data-field="api"
-                placeholder="POST /api/v1/urls&#10;  Body: { url: string, alias?: string, ttl_days?: int }&#10;  201: { short_code, short_url, expires_at }&#10;  400: { error: 'invalid_url' }&#10;&#10;GET /{short_code}&#10;  302: Location: <original_url>&#10;  404: { error: 'not_found' }&#10;  410: { error: 'expired' }&#10;&#10;DELETE /api/v1/urls/{short_code}&#10;  204 No Content"></textarea>
+      <textarea class="prac-textarea prac-textarea--mono" id="prac-api" data-field="api" placeholder="Write your answer here…"></textarea>
     </div>
 
     <!-- 5. Database Model -->
@@ -100,8 +96,7 @@
         <span class="prac-section-title">Database Model</span>
         <span class="prac-section-hint">Tables / collections, fields, indexes, DB choice + why</span>
       </div>
-      <textarea class="prac-textarea prac-textarea--mono" id="prac-db" data-field="db"
-                placeholder="DB choice: DynamoDB — scales horizontally, TTL built-in, 1ms reads&#10;&#10;Table: urls&#10;  PK:  short_code  (string, hash key)&#10;  SK:  —&#10;  Attrs: original_url, user_id, created_at, expires_at, hit_count&#10;  TTL:  expires_at (native DynamoDB TTL)&#10;  GSI:  user_id-index (user_id PK, created_at SK) → list user URLs&#10;&#10;Cache (Redis / ElastiCache):&#10;  key:   short_code&#10;  value: original_url&#10;  TTL:   24h (shorter than URL expiry)"></textarea>
+      <textarea class="prac-textarea prac-textarea--mono" id="prac-db" data-field="db" placeholder="Write your answer here…"></textarea>
     </div>
 
     <!-- 6. Component Selection -->
@@ -111,8 +106,7 @@
         <span class="prac-section-title">Component Selection &amp; Justification</span>
         <span class="prac-section-hint">What you chose and why — vs alternatives</span>
       </div>
-      <textarea class="prac-textarea" id="prac-comp" data-field="comp"
-                placeholder="ALB — distributes traffic, health checks, SSL termination&#10;Redis (ElastiCache) — sub-ms redirect cache; Memcached rejected (no persistence)&#10;DynamoDB — auto-sharding, built-in TTL; RDS rejected (vertical scale limit)&#10;Base62 encoding — 7-char code = 62^7 = 3.5T URLs; MD5 rejected (collision risk)&#10;Kafka — async analytics fanout; SQS rejected (no ordering guarantee needed)&#10;…"></textarea>
+      <textarea class="prac-textarea" id="prac-comp" data-field="comp" placeholder="Write your answer here…"></textarea>
     </div>
 
     <!-- 7. Architecture Diagram (draw.io embed) -->
@@ -157,7 +151,7 @@
         <div class="prac-code-lang">python</div>
         <textarea class="prac-textarea prac-textarea--code" id="prac-lld" data-field="lld"
                   spellcheck="false" autocorrect="off" autocapitalize="off"
-                  placeholder="import base64, hashlib, time&#10;from dataclasses import dataclass&#10;&#10;@dataclass&#10;class URL:&#10;    short_code: str&#10;    original_url: str&#10;    expires_at: float&#10;&#10;class URLShortener:&#10;    def __init__(self, db, cache):&#10;        self.db    = db&#10;        self.cache = cache&#10;&#10;    def shorten(self, url: str, ttl_days: int = 30) -> URL:&#10;        code = self._generate_code(url)&#10;        entry = URL(code, url, time.time() + ttl_days * 86400)&#10;        self.db.put(entry)&#10;        return entry&#10;&#10;    def redirect(self, code: str) -> str:&#10;        # Cache-aside: check Redis first&#10;        url = self.cache.get(code)&#10;        if url: return url&#10;        entry = self.db.get(code)&#10;        if not entry: raise NotFound&#10;        if entry.expires_at &lt; time.time(): raise Expired&#10;        self.cache.set(code, entry.original_url, ttl=86400)&#10;        return entry.original_url&#10;&#10;    def _generate_code(self, url: str) -> str:&#10;        h = hashlib.md5(url.encode()).digest()[:6]&#10;        return base64.urlsafe_b64encode(h).decode().rstrip('=')"></textarea>
+                  placeholder="Write your code here…">
       </div>
     </div>
 
@@ -168,8 +162,7 @@
         <span class="prac-section-title">Trade-offs &amp; Assumptions</span>
         <span class="prac-section-hint">What you knowingly sacrificed and why</span>
       </div>
-      <textarea class="prac-textarea" id="prac-tradeoffs" data-field="tradeoffs"
-                placeholder="• Eventual consistency for analytics (hit_count) — acceptable, it's non-critical&#10;• No custom domain support — out of scope for v1&#10;• Cache TTL shorter than URL TTL — risk: cold cache after expiry; mitigated by TTL check in DB&#10;• Base62 collisions after 3.5T URLs — rehash with salt&#10;• No rate limiting modelled — would add token-bucket per IP at ALB level&#10;…"></textarea>
+      <textarea class="prac-textarea" id="prac-tradeoffs" data-field="tradeoffs" placeholder="Write your answer here…"></textarea>
     </div>
 
     <!-- 10. What I'd say (interview narration) -->
@@ -179,8 +172,7 @@
         <span class="prac-section-title">Interview Narration</span>
         <span class="prac-section-hint">Key phrases / transitions you'd actually say out loud</span>
       </div>
-      <textarea class="prac-textarea" id="prac-narration" data-field="narration"
-                placeholder="&quot;Let me start by clarifying scope — are we optimising for reads or writes?&quot;&#10;&quot;I'll assume 100:1 read-to-write, so caching is critical.&quot;&#10;&quot;For the short code I'll use Base62 over UUIDs — it's URL-safe and short.&quot;&#10;&quot;The hot path is: ALB → App server → Redis → (miss) DynamoDB → cache-fill → redirect.&quot;&#10;&quot;The risk I'd call out is thundering herd on cache miss — mitigated by request coalescing.&quot;&#10;…"></textarea>
+      <textarea class="prac-textarea" id="prac-narration" data-field="narration" placeholder="Write your answer here…"></textarea>
     </div>
 
   </div><!-- /prac-sections -->

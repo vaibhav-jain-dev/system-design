@@ -139,23 +139,45 @@
         } catch (e) { return null; }
     }
 
-    // ── Note bubble (inline after <mark>) ─────────────────────────────────────
+    // ── Note bubble (inline after <mark>, comic speech bubble style) ─────────
+    // Expanded: shows note text + × to minimize.
+    // Minimized: shrinks to small 💬 icon that re-expands on click.
 
-    function createNoteBubble(hlId, note, dismissed) {
+    function createNoteBubble(hlId, note, minimized) {
         var bubble = document.createElement('span');
-        bubble.className  = 'hl-note-bubble';
+        bubble.className    = 'hl-note-bubble';
         bubble.dataset.hlId = hlId;
-        if (dismissed) bubble.classList.add('hl-nb-hidden');
+        if (minimized) bubble.classList.add('hl-nb-minimized');
+
+        var preview = esc(note.slice(0, 100)) + (note.length > 100 ? '\u2026' : '');
+
         bubble.innerHTML =
-            '<span class="hl-nb-text">' + esc(note.slice(0, 120)) + (note.length > 120 ? '\u2026' : '') + '</span>' +
-            '<button class="hl-nb-close" data-hl-id="' + esc(hlId) + '" title="Dismiss note">\u00D7</button>';
+            // ── full state ──
+            '<span class="hl-nb-full">' +
+                '<span class="hl-nb-text">' + preview + '</span>' +
+                '<button class="hl-nb-close" title="Minimize note">\u00D7</button>' +
+            '</span>' +
+            // ── minimized state ──
+            '<button class="hl-nb-mini" title="Show note">\uD83D\uDCAC</button>';
+
+        // × → minimize
         bubble.querySelector('.hl-nb-close').addEventListener('click', function (e) {
             e.stopPropagation();
-            bubble.classList.add('hl-nb-hidden');
+            bubble.classList.add('hl-nb-minimized');
             var store = loadStore();
             var hl = storeFind(store, hlId);
             if (hl) { hl.noteDismissed = true; saveStore(store); }
         });
+
+        // 💬 → re-expand
+        bubble.querySelector('.hl-nb-mini').addEventListener('click', function (e) {
+            e.stopPropagation();
+            bubble.classList.remove('hl-nb-minimized');
+            var store = loadStore();
+            var hl = storeFind(store, hlId);
+            if (hl) { hl.noteDismissed = false; saveStore(store); }
+        });
+
         return bubble;
     }
 
@@ -215,16 +237,27 @@
             var badge = document.createElement('div');
             badge.className    = 'user-hl-diagram-note';
             badge.dataset.hlId = hlId;
-            if (dismissed) badge.classList.add('hl-nb-hidden');
+            if (dismissed) badge.classList.add('hl-nb-minimized');
+            var preview = esc(note.slice(0, 100)) + (note.length > 100 ? '\u2026' : '');
             badge.innerHTML =
-                '<span class="hl-nb-text">\uD83D\uDCAC ' + esc(note.slice(0, 100)) + (note.length > 100 ? '\u2026' : '') + '</span>' +
-                '<button class="hl-nb-close" data-hl-id="' + esc(hlId) + '" title="Dismiss note">\u00D7</button>';
+                '<span class="hl-nb-full">' +
+                    '<span class="hl-nb-text">\uD83D\uDCAC ' + preview + '</span>' +
+                    '<button class="hl-nb-close" title="Minimize">\u00D7</button>' +
+                '</span>' +
+                '<button class="hl-nb-mini" title="Show note">\uD83D\uDCAC</button>';
             badge.querySelector('.hl-nb-close').addEventListener('click', function (e) {
                 e.stopPropagation();
-                badge.classList.add('hl-nb-hidden');
+                badge.classList.add('hl-nb-minimized');
                 var store = loadStore();
                 var hl = storeFind(store, hlId);
                 if (hl) { hl.noteDismissed = true; saveStore(store); }
+            });
+            badge.querySelector('.hl-nb-mini').addEventListener('click', function (e) {
+                e.stopPropagation();
+                badge.classList.remove('hl-nb-minimized');
+                var store = loadStore();
+                var hl = storeFind(store, hlId);
+                if (hl) { hl.noteDismissed = false; saveStore(store); }
             });
             diagEl.appendChild(badge);
         }
@@ -399,6 +432,28 @@
                     el.classList.add('hl-focus-dim');
                     _focusDimmed.push(el);
                 });
+            } else {
+                // Phase has highlights — collapse non-highlighted diagrams inside it
+                sec.content.forEach(function (el) {
+                    if (!el.classList) return;
+                    var diags = el.querySelectorAll
+                        ? el.querySelectorAll('.diagram-container:not(.user-hl-diagram)')
+                        : [];
+                    Array.prototype.forEach.call(diags, function (d) {
+                        if (!d.querySelector('.hl-pin')) {
+                            d.classList.add('hl-diagram-collapsed');
+                            _focusDimmed.push({ el: d, isCollapsed: true });
+                            // Wire title click to expand
+                            var titleEl = d.querySelector('.diagram-title');
+                            if (titleEl && !titleEl._focusClickWired) {
+                                titleEl._focusClickWired = true;
+                                titleEl.addEventListener('click', function () {
+                                    d.classList.remove('hl-diagram-collapsed');
+                                });
+                            }
+                        }
+                    });
+                });
             }
         });
 
@@ -410,7 +465,13 @@
         _focusMode = false;
         document.body.classList.remove('hl-focus-mode');
         updateFocusBtn();
-        _focusDimmed.forEach(function (el) { el.classList.remove('hl-focus-dim'); });
+        _focusDimmed.forEach(function (item) {
+            if (item && item.isCollapsed) {
+                item.el.classList.remove('hl-diagram-collapsed');
+            } else if (item && item.classList) {
+                item.classList.remove('hl-focus-dim');
+            }
+        });
         _focusDimmed = [];
         hideFocusBanner();
     }
