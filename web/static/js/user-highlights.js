@@ -1125,17 +1125,16 @@
         if (_ctxAttached) return;
         _ctxAttached = true;
 
-        // Image click → pin annotation (only if mouse didn't move significantly)
+        // Image diagram click → pin annotation (only if mouse didn't move significantly)
         document.addEventListener('mousedown', function (e) {
-            var img = e.target.closest('.diagram-container img');
-            if (img) _imgMousedown = { x: e.clientX, y: e.clientY };
-            else     _imgMousedown = null;
+            if (e.button !== 0) { _imgMousedown = null; return; } // left-click only
+            var c = e.target.closest('.diagram-container');
+            if (c && c.querySelector('img.diagram-img')) _imgMousedown = { x: e.clientX, y: e.clientY };
+            else _imgMousedown = null;
         });
 
         document.addEventListener('click', function (e) {
             if (!_imgMousedown) return;
-            var img = e.target.closest('.diagram-container img');
-            if (!img) { _imgMousedown = null; return; }
             // Ignore if mouse moved too much (panning)
             var dx = Math.abs(e.clientX - _imgMousedown.x);
             var dy = Math.abs(e.clientY - _imgMousedown.y);
@@ -1144,12 +1143,26 @@
             // Ignore if text is selected
             var sel = window.getSelection();
             if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+            // Ignore clicks on existing pins, header, zoom controls
+            if (e.target.closest('.hl-pin') || e.target.closest('.diagram-header') ||
+                e.target.closest('.diagram-zoom-controls') || e.target.closest('.hl-note-bubble')) return;
 
-            var diagEl = img.closest('.diagram-container');
+            // Accept click on the <img> itself OR anywhere in a TypeImage diagram body
+            var diagEl = null;
+            var img = e.target.closest('.diagram-container img.diagram-img');
+            if (img) {
+                diagEl = img.closest('.diagram-container');
+            } else {
+                var c = e.target.closest('.diagram-container');
+                // Only allow pins on image-type diagrams (those containing a .diagram-img)
+                if (c && c.querySelector('img.diagram-img')) diagEl = c;
+            }
             if (!diagEl) return;
-            var rect = img.getBoundingClientRect();
-            var pctX = ((e.clientX - rect.left)  / rect.width  * 100).toFixed(1);
-            var pctY = ((e.clientY - rect.top)   / rect.height * 100).toFixed(1);
+
+            // Calculate pin position relative to diagEl (pin is absolute-positioned within it)
+            var rect = diagEl.getBoundingClientRect();
+            var pctX = ((e.clientX - rect.left) / rect.width  * 100).toFixed(1);
+            var pctY = ((e.clientY - rect.top)  / rect.height * 100).toFixed(1);
             showPinDialog({ diagEl: diagEl, pctX: parseFloat(pctX), pctY: parseFloat(pctY) });
         });
 
