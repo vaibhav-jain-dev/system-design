@@ -604,11 +604,15 @@
         m.querySelector('.ctx-colors-section').style.display = hasNew     ? '' : 'none';
         m.querySelector('.ctx-note-section').style.display   = hasNew     ? '' : 'none';
         m.querySelector('.ctx-delete-section').style.display = action.hlId ? '' : 'none';
+        // Position off-screen first so we can measure dimensions without a flash
+        m.style.left    = '-9999px';
+        m.style.top     = '-9999px';
         m.style.display = 'block';
-        requestAnimationFrame(function () {
-            m.style.left = Math.min(x, window.innerWidth  - m.offsetWidth  - 8) + 'px';
-            m.style.top  = Math.min(y, window.innerHeight - m.offsetHeight - 8) + 'px';
-        });
+        // Synchronous layout — read dimensions, then position at click point
+        var w = m.offsetWidth;
+        var h = m.offsetHeight;
+        m.style.left = Math.min(x, window.innerWidth  - w - 8) + 'px';
+        m.style.top  = Math.min(y, window.innerHeight - h - 8) + 'px';
     }
 
     function hideCtxMenu() {
@@ -1150,6 +1154,8 @@
         });
 
         // Right-click context menu (text selection, existing marks, diagrams)
+        // Use CAPTURE phase (true) so we intercept before the browser shows
+        // its native image context menu (Save Image, Copy Image, etc.)
         document.addEventListener('contextmenu', function (e) {
             var detail = document.getElementById('detail');
             if (!detail || !detail.contains(e.target)) return;
@@ -1159,10 +1165,12 @@
             var hasText   = sel && !sel.isCollapsed && sel.toString().trim().length > 0;
             var existMark = e.target.closest('mark.user-hl');
             var existPin  = e.target.closest('.hl-pin');
+            // For <img> elements inside a diagram, walk up from the img itself
             var diagEl    = e.target.closest('.diagram-container');
 
             if (!hasText && !existMark && !existPin && !diagEl) return;
             e.preventDefault();
+            e.stopPropagation();
 
             var action;
             if (hasText) {
@@ -1183,7 +1191,7 @@
                 };
             }
             if (action) showCtxMenu(e.clientX, e.clientY, action);
-        });
+        }, true); // capture phase — intercepts before browser native image menu
 
         // Close context menu on outside click
         document.addEventListener('click', function (e) {
