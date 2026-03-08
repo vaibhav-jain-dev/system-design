@@ -1,0 +1,218 @@
+{{define "detail_highlights.html"}}
+<div class="hldb-root">
+
+  <!-- ── Header ──────────────────────────────────────────────────────────── -->
+  <div class="hldb-header">
+    <div class="hldb-header-left">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+      <h1 class="hldb-title">My Highlights</h1>
+      <span class="hldb-count" id="hldb-total-count"></span>
+    </div>
+    <div class="hldb-header-right">
+      <button class="hldb-btn hldb-btn--danger" id="hldb-clear-all-btn" style="display:none">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+        Clear All
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Color filter chips ───────────────────────────────────────────────── -->
+  <div class="hldb-filters" id="hldb-filters">
+    <button class="hldb-chip hldb-chip--active" data-color="all">All</button>
+    <button class="hldb-chip" data-color="yellow"><span class="hldb-dot hldb-dot--yellow"></span>Yellow</button>
+    <button class="hldb-chip" data-color="green"><span class="hldb-dot hldb-dot--green"></span>Green</button>
+    <button class="hldb-chip" data-color="blue"><span class="hldb-dot hldb-dot--blue"></span>Blue</button>
+    <button class="hldb-chip" data-color="pink"><span class="hldb-dot hldb-dot--pink"></span>Pink</button>
+    <button class="hldb-chip hldb-chip--notes" data-color="notes">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      With notes
+    </button>
+  </div>
+
+  <!-- ── Empty state ──────────────────────────────────────────────────────── -->
+  <div class="hldb-empty" id="hldb-empty" style="display:none">
+    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".3">
+      <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+    </svg>
+    <p>No highlights yet — right-click any text on a page to highlight it.</p>
+  </div>
+
+  <!-- ── Highlight list ───────────────────────────────────────────────────── -->
+  <div class="hldb-list" id="hldb-list"></div>
+
+</div>
+
+<script>
+(function () {
+    'use strict';
+
+    var STORE_KEY    = 'sd-user-highlights';
+    var _colorFilter = 'all';
+
+    // ── Utilities ──────────────────────────────────────────────────────────
+
+    function esc(s) {
+        return String(s || '')
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function loadStore() {
+        try { return JSON.parse(localStorage.getItem(STORE_KEY) || '{"highlights":[]}'); }
+        catch (e) { return { highlights: [] }; }
+    }
+
+    function saveStore(s) {
+        try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch(e) {}
+    }
+
+    // Derive a human-readable page title from a URL path
+    function pathToTitle(p) {
+        if (!p) return 'Unknown Page';
+        if (p === '/') return 'Welcome';
+        if (p === '/practice') return 'Practice';
+        if (p === '/highlights') return 'Highlights';
+        var m;
+        m = p.match(/^\/problem\/(.+)/);
+        if (m) return m[1].replace(/-/g,' ').replace(/\b\w/g, function(c){return c.toUpperCase();}) + ' (Problem)';
+        m = p.match(/^\/fund\/(.+)/);
+        if (m) return m[1].replace(/\//g,' › ').replace(/-/g,' ').replace(/\b\w/g, function(c){return c.toUpperCase();}) + ' (Fundamental)';
+        m = p.match(/^\/algo\/(.+)/);
+        if (m) return m[1].replace(/-/g,' ').replace(/\b\w/g, function(c){return c.toUpperCase();}) + ' (Algorithm)';
+        m = p.match(/^\/pattern\/(.+)/);
+        if (m) return m[1].replace(/-/g,' ').replace(/\b\w/g, function(c){return c.toUpperCase();}) + ' (Pattern)';
+        return p;
+    }
+
+    // ── Render ─────────────────────────────────────────────────────────────
+
+    function colorLabel(c) {
+        var map = { yellow: 'Yellow', green: 'Green', blue: 'Blue', pink: 'Pink' };
+        return map[c] || c;
+    }
+
+    function render() {
+        var store = loadStore();
+        var all   = store.highlights || [];
+
+        // Filter
+        var items = all.filter(function (h) {
+            if (_colorFilter === 'all')   return true;
+            if (_colorFilter === 'notes') return !!(h.note && h.note.trim());
+            return h.color === _colorFilter;
+        });
+
+        var totalEl = document.getElementById('hldb-total-count');
+        var emptyEl = document.getElementById('hldb-empty');
+        var listEl  = document.getElementById('hldb-list');
+        var clearAllBtn = document.getElementById('hldb-clear-all-btn');
+
+        totalEl.textContent = all.length ? all.length + ' highlight' + (all.length === 1 ? '' : 's') : '';
+        clearAllBtn.style.display = all.length ? '' : 'none';
+
+        if (items.length === 0) {
+            emptyEl.style.display = '';
+            listEl.innerHTML = '';
+            return;
+        }
+        emptyEl.style.display = 'none';
+
+        // Group by page
+        var pages = {};
+        var pageOrder = [];
+        items.forEach(function (h) {
+            var p = h.page || '/';
+            if (!pages[p]) { pages[p] = []; pageOrder.push(p); }
+            pages[p].push(h);
+        });
+        // De-dup pageOrder (filter preserves first occurrence)
+        var seen = {};
+        pageOrder = pageOrder.filter(function(p){ if(seen[p]) return false; seen[p]=true; return true; });
+
+        var html = '';
+        pageOrder.forEach(function (page) {
+            var hls = pages[page];
+            var title = pathToTitle(page);
+            html += '<div class="hldb-page-group">';
+            html += '<div class="hldb-page-hdr">';
+            html += '<a class="hldb-page-title" href="' + esc(page) + '" hx-get="' + esc(page) + '" hx-target="#detail" hx-swap="innerHTML" hx-push-url="true">' + esc(title) + '</a>';
+            html += '<span class="hldb-page-count">' + hls.length + '</span>';
+            html += '</div>';
+            html += '<div class="hldb-page-items">';
+            hls.forEach(function (h) {
+                html += '<div class="hldb-item" data-hl-id="' + esc(h.id) + '">';
+                // Color swatch
+                html += '<span class="hldb-swatch hldb-swatch--' + esc(h.color) + '"></span>';
+                // Content
+                html += '<div class="hldb-item-body">';
+                if (h.isPin) {
+                    html += '<div class="hldb-item-type">📌 Image pin</div>';
+                } else if (h.isDiagram) {
+                    html += '<div class="hldb-item-type">🖼 Diagram — ' + esc(h.diagramSlug || '') + '</div>';
+                } else {
+                    var text = h.text || h.range && h.range.text || '';
+                    if (text) html += '<div class="hldb-item-text">' + esc(text.slice(0, 200)) + (text.length > 200 ? '…' : '') + '</div>';
+                }
+                if (h.note && h.note.trim()) {
+                    html += '<div class="hldb-item-note"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> ' + esc(h.note) + '</div>';
+                }
+                html += '</div>';
+                // Delete button
+                html += '<button class="hldb-del-btn" data-hl-id="' + esc(h.id) + '" title="Remove highlight">×</button>';
+                html += '</div>';
+            });
+            html += '</div></div>';
+        });
+
+        listEl.innerHTML = html;
+
+        // Wire HTMX on dynamically rendered links
+        if (typeof htmx !== 'undefined') {
+            listEl.querySelectorAll('[hx-get]').forEach(function(el){ htmx.process(el); });
+        }
+
+        // Wire delete buttons
+        listEl.querySelectorAll('.hldb-del-btn').forEach(function (btn) {
+            btn.addEventListener('click', function (e) {
+                e.stopPropagation();
+                var id = btn.dataset.hlId;
+                var s  = loadStore();
+                s.highlights = s.highlights.filter(function(h){ return h.id !== id; });
+                saveStore(s);
+                render();
+                // Update panel badge if the main highlights system is loaded
+                if (window.refreshHighlightsBadge) window.refreshHighlightsBadge();
+            });
+        });
+    }
+
+    // ── Filter chips ───────────────────────────────────────────────────────
+
+    document.getElementById('hldb-filters').addEventListener('click', function (e) {
+        var btn = e.target.closest('.hldb-chip');
+        if (!btn) return;
+        _colorFilter = btn.dataset.color;
+        document.querySelectorAll('.hldb-chip').forEach(function(c){ c.classList.remove('hldb-chip--active'); });
+        btn.classList.add('hldb-chip--active');
+        render();
+    });
+
+    // ── Clear all ──────────────────────────────────────────────────────────
+
+    document.getElementById('hldb-clear-all-btn').addEventListener('click', function () {
+        if (!confirm('Delete all highlights across all pages?')) return;
+        saveStore({ highlights: [] });
+        render();
+        if (window.refreshHighlightsBadge) window.refreshHighlightsBadge();
+    });
+
+    render();
+
+    // Re-render if user navigates away and back (storage events)
+    window.addEventListener('storage', function (e) {
+        if (e.key === STORE_KEY) render();
+    });
+
+}());
+</script>
+{{end}}

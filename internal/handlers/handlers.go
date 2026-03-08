@@ -40,6 +40,7 @@ func New(reg *registry.Registry, templateFS, contentFS fs.FS, funcMap template.F
 			"web/templates/detail_quick.html",
 			"web/templates/detail_quick_all.html",
 			"web/templates/detail_practice.html",
+			"web/templates/detail_highlights.html",
 		))
 
 	return &Handler{
@@ -94,6 +95,25 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 	data["Content"] = template.HTML("")
 	data["ActiveSlug"] = ""
 	data["PageType"] = "welcome"
+	if err := h.templates.ExecuteTemplate(w, "base.html", data); err != nil {
+		log.Printf("Template error: %v", err)
+		http.Error(w, "Internal error", 500)
+	}
+}
+
+// HighlightsDashboard renders the central highlights review page.
+func (h *Handler) HighlightsDashboard(w http.ResponseWriter, r *http.Request) {
+	data := h.baseData()
+	data["ActiveSlug"] = "highlights"
+	data["PageType"] = "highlights"
+	tmpl := "detail_highlights.html"
+	if isHTMX(r) {
+		if err := h.templates.ExecuteTemplate(w, tmpl, data); err != nil {
+			log.Printf("Template error: %v", err)
+			http.Error(w, "Internal error", 500)
+		}
+		return
+	}
 	if err := h.templates.ExecuteTemplate(w, "base.html", data); err != nil {
 		log.Printf("Template error: %v", err)
 		http.Error(w, "Internal error", 500)

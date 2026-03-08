@@ -189,6 +189,23 @@
             ? range.startContainer.parentElement : range.startContainer;
         if (startEl && startEl.closest('mark.user-hl')) return false;
 
+        // Clamp cross-cell table selections to the start cell only
+        var startTd = startEl && startEl.closest('td,th');
+        if (startTd) {
+            var endEl = (range.endContainer.nodeType === Node.TEXT_NODE)
+                ? range.endContainer.parentElement : range.endContainer;
+            var endTd = endEl && endEl.closest('td,th');
+            if (endTd && endTd !== startTd) {
+                // Rebuild range within start cell only
+                try {
+                    var newRange = document.createRange();
+                    newRange.setStart(range.startContainer, range.startOffset);
+                    newRange.setEnd(startTd, startTd.childNodes.length);
+                    range = newRange;
+                } catch (e) { /* use original range */ }
+            }
+        }
+
         var mark = null;
         try {
             mark = document.createElement('mark');
@@ -206,10 +223,10 @@
             } catch (e2) { return false; }
         }
 
+        // Bubble is a CHILD of mark so position:relative on mark is the containing block
         if (note && mark) {
             var bubble = createNoteBubble(hlId, note, dismissed);
-            if (mark.nextSibling) mark.parentNode.insertBefore(bubble, mark.nextSibling);
-            else mark.parentNode.appendChild(bubble);
+            mark.appendChild(bubble);
         }
         return true;
     }
@@ -217,11 +234,15 @@
     function removeTextMark(hlId) {
         var mark = document.querySelector('mark.user-hl[data-hl-id="' + hlId + '"]');
         if (mark) {
+            // Remove bubble child first (so it doesn't get re-inserted during unwrap)
+            var bubbleChild = mark.querySelector('.hl-note-bubble');
+            if (bubbleChild) mark.removeChild(bubbleChild);
             var p = mark.parentNode;
             while (mark.firstChild) p.insertBefore(mark.firstChild, mark);
             p.removeChild(mark);
             p.normalize();
         }
+        // Backwards compat: bubble may be a sibling on older highlights
         var bubble = document.querySelector('.hl-note-bubble[data-hl-id="' + hlId + '"]');
         if (bubble && bubble.parentNode) bubble.parentNode.removeChild(bubble);
     }
@@ -353,10 +374,14 @@
         var path = window.location.pathname;
 
         document.querySelectorAll('mark.user-hl').forEach(function (m) {
+            // Remove bubble child first so it's not re-inserted during unwrap
+            var bc = m.querySelector('.hl-note-bubble');
+            if (bc) m.removeChild(bc);
             var p = m.parentNode;
             while (m.firstChild) p.insertBefore(m.firstChild, m);
             p.removeChild(m);
         });
+        // Remove any remaining sibling bubbles (backwards compat)
         document.querySelectorAll('.hl-note-bubble').forEach(function (b) {
             b.parentNode && b.parentNode.removeChild(b);
         });
