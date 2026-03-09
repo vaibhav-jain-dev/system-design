@@ -37,6 +37,8 @@
   "Approximate is fine. Snowflake guarantees IDs generated later have higher values within the same worker. Across workers and datacenters, IDs generated within the same millisecond may have any relative order. For strict ordering, you'd need a centralized sequencer — much higher latency."
 }}
 
+{{mustKnow "Snowflake IDs are 64-bit, time-ordered, and require no coordination after startup — unlike UUIDs (128-bit, random) or DB auto-increment (single bottleneck)" "The ID space is partitioned by worker ID — each server owns a unique slice, eliminating the need for distributed consensus on every ID" "Custom epoch maximizes usable timestamp range — 41 bits = 69.7 years from your chosen start date" "1M+ IDs/sec across the fleet with zero network calls per ID generation"}}
+
 {{phase 2 "API Design" "5 min"}}
 
 {{say `The API is simple — this is an internal service, not user-facing:
@@ -98,6 +100,8 @@
 
 {{hint "why return ID as string in JSON?" "JavaScript's Number type uses IEEE 754 double-precision float — only 53 bits of integer precision. Snowflake IDs use 63 bits, so large IDs lose precision when parsed as JSON numbers. Always return as string: {\"id\": \"1503238553034547201\"} not {\"id\": 1503238553034547201}. Twitter learned this the hard way."}}
 
+{{mustKnow "Always return IDs as strings in JSON — JavaScript MAX_SAFE_INTEGER is 2^53, Snowflake IDs use up to 63 bits" "The API is internal (service-to-service) — batch endpoint reduces network overhead by 1000x for high-throughput callers"}}
+
 {{phase 3 "64-Bit Snowflake Layout" "8 min"}}
 
 {{say `The key insight is bit partitioning — we split 64 bits into four fields, each responsible for one aspect of uniqueness:
@@ -133,6 +137,10 @@
   "Can you adjust the bit split for different needs?"
   "Yes — it's a design parameter. For fewer datacenters but more workers per DC: use 3 DC bits + 7 worker bits = 8 DCs × 128 workers. For higher per-node throughput: use 10 sequence bits + 3 worker bits = 1024 IDs/ms per node × 8 nodes. The total must stay at 22 bits (63 bits - 41 timestamp)."
 }}
+
+{{caveat "The sign bit must always be 0 — if you accidentally set it, the ID becomes negative in signed integer representations (Java long, SQL BIGINT), breaking sorting and comparisons."}}
+
+{{mustKnow "Bit layout: 1 sign + 41 timestamp + 5 datacenter + 5 worker + 12 sequence = 64 bits" "41-bit timestamp = 2^41 ms = 69.7 years; 12-bit sequence = 4096 IDs/ms/worker; 10-bit worker = 1024 total nodes" "Timestamp in the most-significant bits ensures numeric sorting equals approximate time ordering" "Max theoretical throughput: 1024 workers x 4096 IDs/ms = 4.19 billion IDs/sec"}}
 
 {{phase 4 "Generation Algorithm" "8 min"}}
 
@@ -206,6 +214,8 @@ class SnowflakeGenerator:
   "Why busy-wait for the next millisecond instead of Thread.sleep(1)?"
   "Thread.sleep(1) often oversleeps by 10-15ms due to OS scheduler resolution, especially under load. Busy-wait (spin until current_ms > last_ms) guarantees we advance exactly one millisecond. The spin loop is brief — at most 1ms — and only activates when sequence overflows, which is rare."
 }}
+
+{{mustKnow "Generation is O(1) — one lock, one timestamp read, three bit shifts, two ORs; sub-microsecond on modern hardware" "Sequence mask (& 0xFFF) prevents overflow into timestamp bits — without it, sequence > 4095 corrupts the ID" "When sequence exhausts (4096 IDs in 1ms), busy-wait for next millisecond — Thread.sleep(1) oversleeps by 10-15ms due to OS scheduler" "Clock backward detection (current_ts < last_ts) is mandatory — generating IDs with a past timestamp breaks time ordering"}}
 
 {{phase 5 "High-Level Architecture" "10 min"}}
 

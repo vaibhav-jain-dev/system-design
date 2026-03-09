@@ -35,6 +35,12 @@
   "Redis wins in almost every production scenario: supports data structures (lists, sets, sorted sets, hashes), optional persistence (RDB/AOF), replication with Sentinel, clustering, pub/sub, Lua scripting. Memcached: simpler, slightly faster for pure string caching (less overhead), multi-threaded. Choose Memcached only if you exclusively cache plain strings and every microsecond matters."
 }}
 
+{{mustKnow
+  "Caches are volatile by design — cache miss falls through to DB, which is the source of truth"
+  "Target metrics: <span class='hl'>1TB data</span>, <span class='hl'>500K ops/sec</span>, <span class='hl'>&lt;1ms P99</span>"
+  "Sub-ms reads require serving from RAM only — no disk I/O on the hot path"
+}}
+
 {{phase 2 "API Design" "5 min"}}
 
 {{say `Simple key-value API — the challenge is what happens underneath:
@@ -99,6 +105,11 @@
   </div>
 </div>
 
+{{mustKnow
+  "Client library handles routing via consistent hash ring — no proxy on the hot path (client-side load balancing)"
+  "Core API is GET/SET/DEL/INCR with optional TTL — wire protocol is RESP (Redis Serialization Protocol)"
+}}
+
 {{phase 3 "Data Partitioning" "8 min"}}
 
 {{say `1TB of data can't fit on one node — we need to split it across multiple nodes:
@@ -123,6 +134,14 @@
   "When Node 2 fails, all keys that mapped to Node 2 now map to Node 3 (the next clockwise node on the ring). Node 3 handles the extra load temporarily. When Node 2 recovers, it rejoins the ring and reclaims its keys — they're cache misses until repopulated from the source of truth. No manual key migration needed."
   "What's the performance impact of the virtual node ring lookup?"
   "Ring lookup is O(log N) binary search on a sorted array of virtual node positions. With 4 physical nodes × 150 virtual nodes = 600 entries. Binary search on 600 entries = 10 comparisons. This happens per cache operation but is pure CPU (no I/O) and takes ~100ns — negligible compared to the network round-trip."
+}}
+
+{{caveat "Modulo hashing (<code>hash % N</code>) is the classic interview trap — adding one node to a 4-node cluster remaps ~80% of keys, equivalent to a full cache invalidation. Always use consistent hashing."}}
+
+{{mustKnow
+  "Consistent hashing moves only <span class='hl'>K/N keys</span> when adding/removing a node (vs ~80% with modulo hashing)"
+  "150 virtual nodes per physical node ensures balanced distribution — each node handles ~25% of the ring with 4 nodes"
+  "Ring lookup is O(log N) binary search on sorted virtual node positions — ~100ns, negligible vs network RTT"
 }}
 
 {{phase 4 "Consistent Hashing Deep Dive" "8 min"}}
@@ -174,6 +193,12 @@ class ConsistentHashRing:
 
 {{hint "bisect for O(log N) ring lookup" "bisect.bisect() performs binary search on a sorted array — O(log N) where N is the number of virtual nodes. For 600 virtual nodes, that's 10 comparisons. The ring is stored in memory as a sorted array — no disk I/O, no network. Ring lookup adds effectively zero latency to cache operations."}}
 
+{{mustKnow
+  "Hash ring uses a sorted array of virtual node positions — <code>bisect.bisect()</code> gives O(log N) lookup with zero I/O"
+  "When a node is added, its 150 virtual nodes each steal a small portion of the ring from neighboring nodes"
+  "Key migration is passive — new node gets cache misses that fall through to DB and repopulate naturally"
+}}
+
 {{phase 5 "Architecture & Replication" "10 min"}}
 
 {{say `The cluster architecture has three layers:
@@ -197,6 +222,12 @@ class ConsistentHashRing:
   "For financial counters (account balances), inventory counts, or any value where data loss on failover means incorrect business state. Sync replication adds replica RTT (~0.5ms intra-DC) to every write — acceptable for critical data, unacceptable for a generic cache."
   "How does Redis Cluster differ from Sentinel?"
   "Sentinel: single primary per shard, Sentinel manages failover — simple, good for small clusters. Redis Cluster: built-in sharding (16384 hash slots), automatic failover, no Sentinel needed — better for large clusters needing horizontal scale. Sentinel = HA for a single Redis instance. Cluster = HA + sharding for distributed cache."
+}}
+
+{{mustKnow
+  "Async replication is the default for caches — primary ACKs write before replica confirms, giving sub-ms writes"
+  "Redis Sentinel provides HA via quorum-based failover (3 Sentinel nodes vote); failover takes 5-30 seconds"
+  "Redis Cluster = sharding + HA (16384 hash slots); Sentinel = HA only for single instance"
 }}
 
 {{phase 6 "Eviction Policies" "8 min"}}
@@ -251,6 +282,14 @@ class LRUCache:
   "True LRU requires a doubly-linked list across all 100M keys, which is expensive memory overhead. Redis uses approximated LRU: on eviction, sample 5-10 random keys, evict the oldest among the sample. With a sample of 10, the approximation is very close to true LRU with much lower overhead. The maxmemory-samples config controls sample size."
 }}
 
+{{goodToKnow "Redis uses <strong>approximated LRU</strong>, not true LRU — it samples 5-10 random keys and evicts the oldest among the sample. This avoids the memory overhead of maintaining a doubly-linked list across all 100M+ keys while achieving near-identical hit rates."}}
+
+{{mustKnow
+  "LRU = HashMap + doubly-linked list → O(1) for both get and put — this is a common interview coding question"
+  "LRU is the best default for web caches (temporal locality); LFU protects against scan attacks from batch jobs"
+  "Redis approximated LRU samples 5-10 random keys on eviction — much lower overhead than true LRU at scale"
+}}
+
 {{phase 7 "Consistency Models" "5 min"}}
 
 {{say `Caches are fundamentally eventual consistent systems — understanding the models prevents surprises:
@@ -263,6 +302,12 @@ class LRUCache:
 {{diagram "dc-consistency-model"}}
 
 {{hint "read-your-own-writes pattern" "After a write, route subsequent reads for the same key to the same primary for 1-2 seconds. Implementation: client library tags the write with a write_version, subsequent reads check if version > replica's version → if yes, redirect to primary. This gives read-after-write consistency without making all reads go to the primary."}}
+
+{{mustKnow
+  "Caches are fundamentally eventual consistent — accept brief staleness for sub-ms latency"
+  "Read-your-own-writes pattern: route reads to primary for 1-2 seconds after a write to guarantee consistency"
+  "Strong consistency (always read from primary) eliminates replica read benefit — only use for critical data"
+}}
 
 {{phase 8 "Failure Handling" "8 min"}}
 

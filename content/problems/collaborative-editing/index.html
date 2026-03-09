@@ -37,6 +37,12 @@
   "Start with rich text (like Google Docs) — it's more realistic. Rich text operations include insert, delete, retain, and attribute changes (bold, italic, heading). The OT algorithm must handle all operation types. Plain text is simpler but rarely the final requirement in interviews."
 }}
 
+{{mustKnow
+  "OT transforms concurrent operations to preserve consistency — two users editing the same position won't corrupt the document"
+  "CRDTs are commutative by design (no central server needed) but cost 50-100x more memory per character than OT"
+  "Google Docs uses OT (Jupiter protocol); Figma and Notion use CRDTs — know both approaches and their tradeoffs"
+}}
+
 {{phase 2 "API Design" "5 min"}}
 
 {{say `Three categories: document management, real-time operations, and sharing:
@@ -162,6 +168,14 @@
 
 {{hint "why WebSocket over HTTP long-polling?" "Long-polling: client sends request → server holds it until data available → client immediately sends next request. Creates N concurrent HTTP requests for N clients. WebSocket: one persistent TCP connection per client. At 100 clients × 5 ops/sec = 500 messages/sec, WebSocket handles this with 1 connection per client vs 500 HTTP requests/sec. Also: WebSocket has lower latency (no HTTP headers per message)."}}
 
+{{caveat "The revision field in every WebSocket message is essential — without it, the server cannot determine which concurrent operations to transform against. A missing or stale revision causes silent document corruption or forces a full resync."}}
+
+{{mustKnow
+  "WebSocket for real-time bidirectional op streaming; REST for document CRUD and history"
+  "Every operation message includes a revision number — the server uses this to determine which ops to transform against"
+  "Ack messages return the transformed op so the client can reconcile its local state"
+}}
+
 {{phase 3 "Data Model" "8 min"}}
 
 {{say `Two key design choices for storage: operation log (source of truth) + periodic snapshots (for fast load):
@@ -224,6 +238,12 @@ CREATE TABLE active_sessions (
 {{think "The revision number is the key concurrency primitive. Each operation has a unique (doc_id, revision) pair. When two users submit operations concurrently, both claim the same revision. The server serializes them: first one wins that revision, second gets the next revision with its ops transformed. The UNIQUE constraint enforces exactly-once revision assignment."
   (whyNot "store document as a single JSON blob, update in-place" "Concurrent updates to a single JSON blob require row-level locking — only one user can write at a time. At 100 simultaneous editors, 99 are always waiting. Also: no history, no ability to undo specific operations. The append-only operation log is the foundation of both collaboration and history.")
   (how "snapshot compaction works" "Every 1000 operations (or every 10 minutes of activity), replay all operations since last snapshot → save the result as a new snapshot. New clients load the snapshot + operations since snapshot (at most ~1000 ops) instead of potentially millions of historical operations. Snapshots are stored in S3 for large documents.")
+}}
+
+{{mustKnow
+  "Operation log is append-only and immutable — the single source of truth for all edits"
+  "Snapshots taken every ~1000 ops keep document load time bounded (load snapshot + replay recent ops)"
+  "UNIQUE(doc_id, revision) enforces exactly-once revision assignment — the core concurrency primitive"
 }}
 
 {{phase 4 "Operational Transformation" "10 min"}}
@@ -319,6 +339,15 @@ class OTServer:
   "OT handles this: if User A deletes characters 5-10 and User B also deletes characters 5-10, after transformation, User B's operation becomes a no-op (those characters are already gone). The document remains consistent — neither gets an error, the result is that the text is deleted once."
 }}
 
+{{mustKnow
+  "OT transform function takes two concurrent ops and returns transformed versions — both application orders produce the same final state"
+  "Server serializes operations with a per-document lock — OT requires strict total ordering"
+  "Transform complexity is O(N) where N is concurrent ops since client's revision — sub-millisecond for typical workloads"
+  "Simultaneous deletes of the same text become no-ops after transformation — no error, no data loss"
+}}
+
+{{caveat "OT's 'intention preservation' is imperfect: if User A appends to a word and User B deletes that word, OT preserves position but not semantic intent. Google Docs addresses this with the Jupiter protocol that tracks character identity, not just position."}}
+
 {{phase 5 "High-Level Architecture" "10 min"}}
 
 {{say `The key insight: each document has exactly one OT server at any time — this is the central coordinator:
@@ -337,6 +366,14 @@ class OTServer:
 }}
 
 {{hint "connection gateway separation" "The connection gateway (WebSocket → OT server message routing) is separate from the OT server. This allows WebSocket connections to survive OT server restarts — the connection stays up, and the gateway just updates its routing table to point to the new OT server. Users experience a brief hiccup (operations queued during failover) not a full disconnect."}}
+
+{{mustKnow
+  "Each document has exactly ONE OT server at any time — consistent hashing assigns doc_id to a specific node"
+  "Stateful architecture: OT server holds document state and pending op queue in memory — stateless OT is impractical (requires replaying all history per request)"
+  "Connection gateway is separate from OT server — WebSocket connections survive OT server restarts"
+}}
+
+{{goodToKnow "Clients buffer unacknowledged operations locally. On OT server crash, the new server reconstructs state from Postgres (snapshot + op log), and clients resend buffered ops on reconnect. Deduplication via (doc_id, client_id) prevents double-application."}}
 
 {{phase 6 "Conflict Resolution at Scale" "8 min"}}
 
@@ -357,6 +394,11 @@ class OTServer:
 )}}
 
 {{hint "hot document eviction" "When the last user leaves a document, the OT server takes a snapshot, flushes pending ops to Postgres, and evicts the document from memory. If a new user opens the document within 5 minutes, it's still warm (fast reload from Postgres). The snapshot ensures load time is bounded by ops-since-snapshot, not total document history."}}
+
+{{mustKnow
+  "Hot/warm/cold document tiers: hot = in-memory (<1ms), warm = Postgres (~100ms), cold = S3 (1-5s)"
+  "Document eviction: when last user leaves, snapshot is taken, ops flushed, state evicted from memory"
+}}
 
 {{phase 7 "Presence & Cursor Sharing" "5 min"}}
 
