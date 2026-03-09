@@ -241,6 +241,14 @@ func (h *Hub) Publish(userID string, payload []byte) {
   "During a rolling deploy, the server sends a WebSocket close frame (1001 Going Away) to all connected clients before shutdown. Clients receive the close, trigger their reconnect logic with backoff, and connect to a different healthy server. The new server re-subscribes to Redis channels for that user. Messages during the reconnect window are buffered client-side or fetched from history on reconnect. Total disruption: 1-3 seconds."
 }}
 
+{{caveat "WebSocket connections are stateful — horizontal scaling is NOT as simple as adding servers. You need sticky sessions AND a shared pub/sub layer (Redis). This is the #1 interview trap for WebSocket questions."}}
+
+{{mustKnow
+  "Core scaling problem: client A on server 1, message arrives at server 2. Solution: Redis Pub/Sub for cross-server routing"
+  "Sticky sessions reduce Redis traffic but do NOT eliminate the cross-server routing problem"
+  "At 1M+ connections: shard Redis by user_id range across multiple Redis instances"
+}}
+
 {{qa "How do you load balance WebSocket connections?" "You can't use round-robin per request because WebSockets are long-lived connections, not individual requests. Use the initial HTTP upgrade request for load balancing — once upgraded, the connection stays on that server. ALB supports WebSocket natively and routes the upgrade to a target. For even distribution, use least-connections algorithm." "What happens if one WebSocket server becomes overloaded?" "Unlike HTTP where a load balancer distributes individual requests, WebSocket connections are sticky to a server. If server A has 50K connections and server B has 10K, new connections should go to B. Use connection-count-aware load balancing (least connections). For rebalancing, the overloaded server can proactively disconnect clients with a 1001 close code, forcing reconnection to a less loaded server."}}
 
 {{phase 5 "Redis Pub/Sub Fan-Out" "5 min"}}
