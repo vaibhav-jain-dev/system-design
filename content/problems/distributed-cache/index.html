@@ -325,6 +325,14 @@ class LRUCache:
   "All requests fall through to the DB. If DB is sized only for cache-assisted load, it gets overwhelmed — cascade failure. Mitigation: (1) Size DB to handle 20-30% of peak load (rest should be cache hits). (2) Circuit breaker on DB to fail fast rather than overwhelming it. (3) Background pre-warming: populate cache from DB dump after cluster recovery."
 }}
 
+{{caveat "Cache stampede (thundering herd) is the most dangerous failure mode in distributed caches. A single popular key expiring can send 10,000 simultaneous requests to the DB — always have a mitigation strategy ready (mutex lock, probabilistic early expiration, or background refresh)."}}
+
+{{mustKnow
+  "Three stampede mitigations: (1) mutex lock via SETNX — one fetcher, rest wait; (2) probabilistic early expiration — refresh before TTL hits zero; (3) background refresh thread for keys near expiry"
+  "If entire cache cluster fails, DB must handle full load — size DB for 20-30% of peak, add circuit breaker"
+  "Probabilistic early expiration formula: <code>p = exp(-&beta; &times; remaining_ttl / compute_time)</code> — no locking needed"
+}}
+
 {{phase 9 "Hot Key Problem" "5 min"}}
 
 {{say `Hot keys are a common production incident — one key getting millions of requests per second:
@@ -339,6 +347,12 @@ class LRUCache:
 
 {{hint "local L1 cache pattern" "Each application server maintains an in-process LRU cache (e.g., Caffeine in Java, lru-cache in Node.js) for the top 1000 hot keys with a short TTL (1-5 seconds). This absorbs the hottest traffic before it even hits the cache cluster. Netflix does this with Hollow — a read-only in-memory dataset replicated to every service instance. The tradeoff: 1-5 second staleness for hot keys."}}
 
+{{mustKnow
+  "Hot key solutions: L1 in-process cache (top 1000 keys, 1-5s TTL), key splitting across N shards, dedicated read replicas"
+  "Local L1 cache absorbs 80% of hot key traffic with zero network hop — tradeoff is 1-5 second staleness"
+  "Detect hot keys proactively: <code>redis-cli --hotkeys</code> or instrument client library to track per-key request counts"
+}}
+
 {{phase 10 "Write Policies" "5 min"}}
 
 {{diagram "dc-write-policies"}}
@@ -350,6 +364,14 @@ class LRUCache:
 )}}
 
 {{hint "write-behind risks" "Write-behind (write-back) means data exists in cache but hasn't been persisted to DB yet. If the cache node crashes before the async write completes, that data is lost forever. Only use write-behind for data where loss is acceptable: metrics counters, view counts, non-critical analytics. Never for financial transactions or user data."}}
+
+{{caveat "Write-behind (write-back) caching means data exists only in cache until the async DB write completes. If the cache node crashes before persistence, that data is permanently lost. Never use write-behind for financial transactions or user-critical data — only for metrics, view counts, and analytics where loss is acceptable."}}
+
+{{mustKnow
+  "Write-through: cache + DB synchronously (consistent, +2ms latency) — use for critical data"
+  "Write-behind: cache immediately, DB async (low latency, risk of data loss) — use for analytics/counters only"
+  "Write-around: bypass cache on write, populate on first read — use for write-heavy, rarely-read data"
+}}
 
 {{phase 11 "Memory Management & Cost" "5 min"}}
 

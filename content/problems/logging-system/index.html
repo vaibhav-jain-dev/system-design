@@ -1,3 +1,13 @@
+{{mustKnow
+  "Log aggregation pipeline has three tiers: Collection (agents/SDKs) → Transport (Kafka) → Storage/Query (Elasticsearch or ClickHouse). Know each tier's failure modes."
+  "Structured logging (JSON) is non-negotiable — unstructured text logs are unparseable at scale and break downstream indexing."
+  "Kafka decouples producers from consumers: handles backpressure, enables replay, and allows multiple consumers (alerting, archival, search) from a single stream."
+  "Elasticsearch inverted index enables full-text search in O(1) per term but costs ~10x more storage than columnar alternatives like ClickHouse."
+}}
+
+{{caveat "Log volume grows faster than your business — a 10x traffic increase can cause 50-100x log growth if debug logging is left on. Always enforce log level controls and sampling at the collection tier, not the storage tier."}}
+
+{{goodToKnow "OpenTelemetry is becoming the industry standard for instrumentation. It provides a vendor-neutral SDK that emits logs, traces, and metrics in a unified format — meaning you can switch backends (Datadog → SigNoz → Loki) without re-instrumenting application code."}}
 
 <div class="alt-section">
   <div class="alt-section-hdr">
@@ -26,6 +36,8 @@
           <div class="alt-diff"><strong>Key difference:</strong> Unified traces + metrics + logs in a single tool (vs ELK for logs + Prometheus for metrics + Jaeger for traces) — one query interface, one retention policy, one bill. Used by Indian unicorns as the cost-effective Datadog alternative at 1/10th the cost.</div>
         </div>
       </div>
+{{caveat "ClickHouse is excellent for analytical log queries (aggregations, time-range scans) but poor for point lookups by log ID. If your system needs both full-text search and analytics, you may need two storage backends — Elasticsearch for search, ClickHouse for dashboards — which doubles operational complexity."}}
+
       <div class="alt-card">
         <div class="alt-card-top">
           <div class="alt-card-name">Freshworks</div>
@@ -67,6 +79,8 @@
           <div class="alt-diff"><strong>Key difference:</strong> PCI-DSS compliance is built into the ingestion pipeline, not bolted on after. Cardholder data never reaches Elasticsearch in plaintext — the Logstash filter runs a regex to detect and redact PAN patterns before the log event leaves the collection tier. Datadog is avoided due to data residency concerns (logs leaving India) and cost at PCI-scale volume.</div>
         </div>
       </div>
+{{goodToKnow "Retention policies in logging systems are often driven by compliance, not engineering preference. PCI-DSS requires 1-year retention, GDPR requires deletion on request, and SOC 2 requires immutable audit logs. In an interview, always ask about compliance requirements before proposing a retention strategy."}}
+
       <div class="alt-card">
         <div class="alt-card-top">
           <div class="alt-card-name">Grafana Loki</div>
@@ -101,6 +115,14 @@
         <div class="alt-oss-item"><strong>Elastic Cloud</strong> — managed ELK, reduces ops burden but retains ELK cost structure</div>
       </div>
     </div>
+{{mustKnow
+  "Loki indexes only labels (not log content) — 10x cheaper storage but requires label-based filtering before full-text search. Know when this tradeoff is acceptable."
+  "Sampling (e.g., keeping 1 in 10 debug logs) is the primary cost control lever — a well-tuned sampling strategy can cut storage costs by 80% with minimal observability loss."
+  "Hot/warm/cold tiering is essential: recent logs on SSDs (hot), older logs on HDDs (warm), archived to S3/GCS (cold). Each tier has different query latency and cost characteristics."
+}}
+
+{{caveat "Never log sensitive data (PII, tokens, passwords) — redaction must happen at the collection tier before data enters the pipeline. Retrofitting redaction after logs are stored in Elasticsearch is nearly impossible at scale because you cannot efficiently update or delete individual fields in an inverted index."}}
+
     <div class="alt-verdict"><strong>Market verdict:</strong> Indian startups follow a predictable journey: CloudWatch → ELK → Loki/SigNoz. CloudWatch for early stage (free with AWS), ELK at Series A (full-featured, complex ops), then Loki or SigNoz at Series B (cost optimization — ELK at scale costs $50K+/month). SigNoz is the proudest Indian contribution to the observability space — OpenTelemetry-native, ClickHouse-backed, and competitive with Datadog at 1/10th the cost.</div>
   </div>
 </div>

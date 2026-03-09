@@ -31,6 +31,8 @@
   "Fail fast with a clear error to the merchant. We cannot queue payments and retry later — the authorization window is time-limited (typically 7 days but card data cannot be stored). Merchant must retry from their side."
 }}
 
+{{mustKnow "Idempotency is the single most critical requirement — never charge a customer twice, even on retries" "Scale target is ~13 TPS average but 1,000 TPS peak (Black Friday) — design for the peak" "99.999% availability = 5.26 minutes downtime per year — requires multi-region active-active" "Never use floats for money — store amounts as integer cents (IEEE 754 rounding causes real financial discrepancies)"}}
+
 {{phase 2 "API Design" "5 min"}}
 
 {{say `Three surfaces: payment creation, status lookup, and refunds. Every write endpoint requires an idempotency key in the header:
@@ -237,6 +239,10 @@
 
 {{hint "why integer amounts?" "Floating-point representation of 0.1 in IEEE 754 is 0.100000000000000005551... Summing 1000 payments of $0.10 gives $100.00000000000000555... — a real financial discrepancy. Store <span class='hl-red'>never floats</span>, always integer cents."}}
 
+{{caveat "Returning 201 with 'pending' status means the client must poll or listen for webhooks. If you return a synchronous 200 after capture, you hold HTTP connections for 200-800ms per request — at 1000 TPS that's 800 concurrent connections minimum, and timeouts cause duplicate charge risk."}}
+
+{{mustKnow "Every write endpoint requires an Idempotency-Key header — format is {client_id}:{uuid}" "POST /payments returns 201 with status 'pending' immediately — capture is async via Kafka" "Refunds create new ledger entries — the original transaction is never mutated (append-only ledger)" "Amount field is always integer in smallest currency unit (cents) — ISO 4217 currency codes"}}
+
 {{phase 3 "Double-Entry Ledger Design" "10 min"}}
 
 {{say `Every transaction in our system follows double-entry bookkeeping — the same principle that has governed accounting for 700 years:
@@ -280,6 +286,8 @@
   "Can you reconstruct the balance from ledger_entries alone?"
   "Yes — SELECT SUM(amount) FROM ledger_entries WHERE account_id = X gives the current balance. The denormalized balance_after column is for audit speed. The authoritative balance is always the SUM query."
 }}
+
+{{mustKnow "Double-entry bookkeeping: every payment = exactly two ledger entries (debit + credit), SUM(all entries) must always = 0" "PostgreSQL with SERIALIZABLE isolation — the only level that prevents phantom reads in concurrent balance checks" "Lock accounts in ascending account_id order to prevent deadlocks deterministically" "Ledger is append-only — no UPDATE, no DELETE; corrections are new entries"}}
 
 {{phase 4 "Payment Processing Flow" "10 min"}}
 

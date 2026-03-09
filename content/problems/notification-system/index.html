@@ -38,6 +38,10 @@
   "Critical distinction. Transactional (OTP, purchase confirmation, password reset): never rate-limited, always delivered, user cannot opt out via the channel. Marketing: rate-limited (3/day max), respect quiet hours, user can opt out. CAN-SPAM requires a physical mailing address and one-click unsubscribe in every marketing email."
 }}
 
+{{caveat "Transactional notifications (OTP, payment) must NEVER be rate-limited or subject to opt-out — blocking an OTP delivery because of a rate limit is a critical bug that can lock users out of their accounts."}}
+
+{{mustKnow "Notification systems must be fully asynchronous — synchronous delivery blocks the triggering action and is unacceptable at scale (10M fan-out would take minutes)" "At-least-once delivery is the only practical guarantee — exactly-once is impossible across FCM/APNs boundaries" "Priority separation via distinct Kafka topics ensures OTP is never starved by marketing volume" "Transactional vs marketing is a legal distinction (CAN-SPAM/GDPR), not just a UX choice"}}
+
 {{phase 2 "API Design" "5 min"}}
 
 {{say `Two APIs: one for producers (services that trigger notifications) and one for consumers (users managing preferences):
@@ -127,6 +131,8 @@
 
 {{hint "idempotency key for notification sends" "If the triggering service retries (network failure), it sends the same notification twice. The idempotency_key prevents double delivery: Redis SET NX with 24h TTL. Second call with same key returns the original notification_id and status without re-queuing. Format: {service_id}:{event_id}."}}
 
+{{mustKnow "API returns 202 Accepted (not 200 OK) — delivery is async, the caller does not wait for send confirmation" "Idempotency keys prevent duplicate sends on producer retries — Redis SET NX with 24h TTL" "Notification type (otp/payment/marketing) drives priority routing, rate limiting, and opt-out behavior downstream"}}
+
 {{phase 3 "Data Model & Storage" "8 min"}}
 
 {{diagram "notif-data-model"}}
@@ -142,6 +148,10 @@
 )}}
 
 {{hint "why TTL on the notification log?" "Users don't need notification history older than 30 days (and most don't care after 7 days). DynamoDB TTL automatically deletes expired items in the background — no cron job needed, no storage cost for old data. Set TTL at 30 days on creation. Also prevents the table from growing unboundedly."}}
+
+{{goodToKnow "Device tokens expire and change frequently — APNs tokens rotate on app reinstall, OS update, or device restore. A stale token registry causes silent delivery failures, so you need a token refresh mechanism triggered by provider error responses (e.g., FCM's NotRegistered error)."}}
+
+{{mustKnow "DynamoDB for append-heavy notification logs — high write throughput with TTL for automatic cleanup" "Redis for ephemeral state: rate limit counters and dedup cache (no durability needed)" "Device token table is one-to-many (user has multiple devices) — critical for multi-device push delivery" "TTL on notification logs prevents unbounded table growth — 30 days is the standard retention"}}
 
 {{phase 4 "Message Queue Architecture" "8 min"}}
 

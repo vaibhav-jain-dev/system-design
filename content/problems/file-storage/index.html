@@ -38,6 +38,8 @@
   "No — that's a separate problem (see collaborative editing). File storage is about uploading a complete file and syncing it. Concurrent edits to the same file create conflict copies, not merged versions."
 }}
 
+{{mustKnow "50M users x 10 GB = 500 PB logical storage; actual ~200 PB after dedup" "Files are chunked (4 MB default) for resumable upload, parallel transfer, and chunk-level dedup" "Durability > availability > performance — 11 nines durability via S3 cross-AZ replication" "Sync target: changes appear on all devices within 30 seconds"}}
+
 {{phase 2 "API Design" "5 min"}}
 
 {{say `Three categories of APIs: file operations, sync protocol, and sharing:
@@ -162,6 +164,8 @@
 
 {{hint "why presigned S3 URLs for chunk upload?" "The client uploads chunks directly to S3, not through your API servers. This bypasses your application tier entirely for the actual bytes — no proxy overhead, no double bandwidth cost, S3 handles parallel chunk acceptance. Your API only issues the presigned URLs (valid for 1 hour) and tracks which chunks have been received."}}
 
+{{mustKnow "Three-step chunked upload: start session (get presigned URLs) → parallel chunk upload to S3 → complete" "Presigned S3 URLs let clients upload directly to S3, bypassing your API servers for file bytes" "Upload start endpoint checks content_hash for instant dedup — zero bytes uploaded if file exists"}}
+
 {{phase 3 "Data Model" "8 min"}}
 
 {{say `Three separate concerns: metadata (in a relational DB), content (in object storage), and the mapping between them:
@@ -230,6 +234,10 @@ CREATE TABLE file_permissions (
 }}
 
 {{hint "why soft delete instead of hard delete?" "Soft delete (setting deleted_at) enables trash functionality — users can recover accidentally deleted files within 30 days. Hard delete from S3 also needs GC to decrement chunk ref_counts first. With soft delete, the GC job handles both: it finds files where deleted_at > 30 days, decrements chunk refs, then actually removes the file row."}}
+
+{{mustKnow "Three stores: Postgres for metadata, S3 for file bytes (content-addressed by SHA256), chunk table maps files to chunks" "Content-addressable storage: S3 key IS the SHA256 hash — same content always maps to same key" "ref_count on chunks enables safe garbage collection — only delete when ref_count=0 AND 7-day safety window passed" "Soft delete enables 30-day trash recovery; hard delete requires GC to decrement chunk refs first"}}
+
+{{caveat "Never decrement chunk ref_count and delete the S3 object in the same transaction. If the delete fails, the ref_count is already wrong. Instead: decrement ref_count first, then let a separate GC job handle S3 deletion for ref_count=0 chunks after a safety window."}}
 
 {{phase 4 "File Upload & Chunking" "10 min"}}
 
@@ -304,6 +312,8 @@ class FileUploader:
   "The start_upload endpoint checks content_hash against existing files atomically. If two users upload the same file simultaneously, one wins the INSERT and gets upload_id, the other gets 200 with existing file_id. For the same user uploading the same file twice concurrently, the upload_id is idempotent — both clients share the same upload session."
 }}
 
+{{mustKnow "Client computes SHA256 of full file and each chunk before uploading — enables both file-level and chunk-level dedup" "Resumable uploads: on crash, client polls upload status and retries only missing chunks" "Delta sync for modifications: only upload changed chunks, not the entire file — Dropbox reports 80% bandwidth savings"}}
+
 {{phase 5 "High-Level Architecture" "10 min"}}
 
 {{say `Five main services, each with a clear responsibility:
@@ -330,6 +340,8 @@ class FileUploader:
   "How do you handle 50 million simultaneous connections to the Sync Service?"
   "SSE connections are long-lived but low-bandwidth. Use a connection gateway that maps user_id → SSE connection. The gateway nodes handle millions of idle connections cheaply (they're just file descriptors). When a sync event fires, look up the user's connection in Redis and forward. This is the same pattern as WhatsApp's connection management."
 }}
+
+{{mustKnow "Upload path: client → presigned URL → S3 directly (API server never touches file bytes)" "Download path: client → CDN (CloudFront) → S3 origin (CDN caches popular files at edge)" "Five services: API, Upload, Storage, Sync, CDN — each scales independently" "Versioned CDN URLs (content hash in URL) eliminate cache invalidation entirely"}}
 
 {{phase 6 "Deduplication & Storage Efficiency" "8 min"}}
 

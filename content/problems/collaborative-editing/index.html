@@ -431,6 +431,12 @@ def update_cursor(doc_id: str, user_id: str, position: int):
 
 {{hint "cursor position transformation" "When another user inserts text before your cursor, your cursor appears to jump. The client adjusts cursor positions locally: when a remote insert arrives at position P with length L, all cursors at position >P shift right by L. This is the same transformation logic as OT — applied to cursor positions. No server round-trip needed for cursor adjustment."}}
 
+{{mustKnow
+  "Presence is ephemeral — stored in Redis with 30-second TTL, never persisted to Postgres"
+  "Cursor positions must be transformed when remote inserts arrive (same OT logic applied to positions)"
+  "Heartbeat every 15 seconds keeps presence alive; expired TTL = user appears offline"
+}}
+
 {{phase 8 "Offline Support & Sync" "5 min"}}
 
 {{diagram "collab-offline-support"}}
@@ -445,6 +451,14 @@ def update_cursor(doc_id: str, user_id: str, position: int):
 
 {{hint "why IndexedDB for offline buffer?" "localStorage is synchronous and limited to 5 MB. IndexedDB is async, supports large storage, and survives browser crashes. Operations accumulated offline can be gigabytes of keystrokes. The IndexedDB store acts as a WAL: operations are written before sending to server. On ack, delete from IndexedDB. On crash, resend from IndexedDB."}}
 
+{{mustKnow
+  "Offline ops buffered in IndexedDB (async, large storage, crash-safe) — not localStorage (sync, 5MB limit)"
+  "On reconnect: client sends buffered ops with original revision numbers, server transforms against all server ops since those revisions"
+  "Worst-case transform cost on reconnect: O(offline_ops x server_ops) — bounded and typically sub-second"
+}}
+
+{{caveat "If the user's revision falls before the oldest retained operation in the log (30+ days offline), incremental OT merge is impossible. The server falls back to sending a full snapshot and presenting offline edits as a conflict copy requiring manual merge."}}
+
 {{phase 9 "Access Control & Sharing" "5 min"}}
 
 {{diagram "collab-access-control"}}
@@ -458,6 +472,11 @@ def update_cursor(doc_id: str, user_id: str, position: int):
 </ul>`}}
 
 {{hint "suggestions mode vs direct editing" "Commenter permission enables 'suggesting' not 'editing' — operations are marked as suggestions, not applied directly. The owner/editor accepts or rejects suggestions. Implementation: suggestion ops are stored with status='suggested' in the operation log. When accepted: status becomes 'applied'. When rejected: status becomes 'rejected' and the inverse op is applied. This requires no changes to the OT algorithm — just a flag on each op."}}
+
+{{mustKnow
+  "Four permission levels: owner, editor, commenter, viewer — same model as Google Docs"
+  "Suggestions mode for commenters: ops stored with status='suggested', accepted/rejected by editors"
+}}
 
 {{phase 10 "Version History" "5 min"}}
 
@@ -478,6 +497,14 @@ def update_cursor(doc_id: str, user_id: str, position: int):
 )}}
 
 {{hint "named version snapshots" "Named versions bypass the retention policy — they're never GC'd. A user who names a version 'Published draft v1' can restore it 5 years later. Implementation: named_versions table with doc_id + revision + snapshot_content. The snapshot is materialized at naming time and stored durably (S3), independent of the operation log retention."}}
+
+{{mustKnow
+  "Version history is free — replay the append-only operation log to reconstruct any past state"
+  "Tiered retention: full ops for 30 days, hourly snapshots for 1 year, daily snapshots in S3 Glacier after that"
+  "Named versions are never garbage collected — the snapshot is materialized and stored durably at naming time"
+}}
+
+{{goodToKnow "Named version snapshots are stored independently in S3, decoupled from the operation log retention policy. This means a user can restore 'Published draft v1' even 5 years later, regardless of whether the fine-grained operation history has been GC'd."}}
 
 {{phase 11 "Scaling & Performance" "5 min"}}
 
