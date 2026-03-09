@@ -282,6 +282,29 @@ spec:
 
 {{qa "Should I use Kafka or SQS for a new project?" "SQS for simple task queues where you need at-least-once delivery without managing infrastructure. Kafka for event streaming where you need replay, multiple independent consumers, or high throughput (100K+ msg/sec). SQS maxes out at ~3K msg/sec per queue without batching. SQS is fully managed; Kafka requires cluster management (or use MSK/Confluent Cloud)." "What about <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> Streams vs Kafka?" "Redis Streams work well for lightweight streaming with &lt;10K msg/sec and short retention. Kafka is for production event pipelines: it handles millions of msg/sec, multi-day retention, and has a mature ecosystem (Connect, Schema Registry, ksqlDB). Redis Streams lack built-in replication across clusters."}}
 
+{{collapseSection "Kafka Sizing Formulas" "
+<ul>
+  <li><strong>Storage</strong>: daily_msgs x avg_msg_size x retention_days x replication_factor</li>
+  <li><strong>Partitions</strong>: target_throughput / per_partition_throughput (add 2-3x headroom)</li>
+  <li><strong>Brokers</strong>: total_write_throughput / per_broker_network_bandwidth</li>
+  <li><strong>SQS break-even</strong>: ~20-30K msgs/sec — below that SQS is cheaper and simpler</li>
+  <li><strong>S3 Tiered Storage</strong>: offloads cold segments at $0.023/GB vs $0.08/GB EBS — 70% storage cost reduction</li>
+</ul>
+"}}
+
+{{collapseSection "MSK Instance Type Selection" "
+<ul>
+  <li><strong>m5.xlarge</strong> (4 vCPU, 16GB) — up to 50MB/sec per broker, good for development and low-throughput topics</li>
+  <li><strong>m5.4xlarge</strong> (16 vCPU, 64GB) — up to 200MB/sec per broker with gp3 EBS, standard production choice</li>
+  <li><strong>i3en.2xlarge</strong> (8 vCPU, 64GB, NVMe) — 2.5GB/sec local storage, best for high-throughput (>500MB/sec) at lower per-MB cost</li>
+  <li>Never use burstable instances (T series) for Kafka — throughput is sustained, not bursty</li>
+</ul>
+"}}
+
+{{mustKnow "Sizing: raw throughput x RF = total write throughput; 100K msgs/sec x 1KB x 3 = 300MB/sec" "MSK m5.4xlarge x 3 = ~$8,400/month for 100K msgs/sec workload" "Isolate by domain: payments cluster, analytics cluster, logging cluster — prevent blast radius from misconfigured producers"}}
+
+{{goodToKnow "S3 Tiered Storage cuts Kafka storage costs by ~70% — offloads cold segments to S3 at $0.023/GB" "LinkedIn runs 7 trillion msgs/day; Uber runs 4000+ brokers — Kafka scales to planetary levels"}}
+
 {{phase 8 "Interview Summary" "3 min"}}
 
 {{say "Message queues decouple producers from consumers. Kafka is the default choice for high-throughput, replayable, multi-consumer event streams. SQS for simple AWS Lambda pipelines. Size by throughput × replication factor, then pick instances. Always discuss exactly-once end-to-end — not just the Kafka layer."}}
