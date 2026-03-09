@@ -485,7 +485,14 @@ LIMIT 20;
 
 {{diagram "ig-feed-query-result"}}
 
-{{avoid "Do not over-engineer the MVP. No Kafka, no DynamoDB, no microservices. Postgres handles 5K QPS easily. Instagram ran on a single Django/Postgres stack until 10M users."}}
+{{avoid `Do not over-engineer the MVP. At &lt;1M users:
+<ul>
+  <li><span class='hl-red'>No Kafka</span> — SQS is fine; Kafka adds a broker cluster ($800/mo MSK) and operational complexity you cannot afford to maintain</li>
+  <li><span class='hl-red'>No DynamoDB</span> — Postgres handles 5K QPS with ACID, JOINs for feed queries, costs $200/month on RDS. DynamoDB is $0 benefit but all the schema rigidity cost at this scale</li>
+  <li><span class='hl-red'>No microservices</span> — gRPC between services, service discovery, distributed tracing, multiple CI/CD pipelines — all of that needs 3–5 engineers just to maintain. A monolith deploys in minutes and debugs in seconds</li>
+  <li><span class='hl-red'>No Redis yet</span> — add Redis caching when Postgres CPU exceeds 60% or P99 feed query exceeds 100ms (typically around 500K DAU)</li>
+</ul>
+Instagram ran on a single Django/Postgres stack until 10M+ users. Every component you add is a component that can fail.`}}
 
 {{hint "why S3 for media storage?" "S3 gives you 11 nines durability, automatic cross-AZ replication, and lifecycle policies to move old photos to Glacier. EBS or local disk would require manual replication and has single-AZ blast radius. At $0.023/GB with unlimited storage, S3 is cheaper than any self-managed option at scale."}}
 
@@ -639,7 +646,7 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
   (row "Total"           "All components"                      "~$12,500/mo")
 )}}
 
-{{hint "why SQS for async likes/comments?" "Likes on viral posts spike to 100K+/sec. Writing each directly to the DB would exhaust connections. SQS absorbs the burst, and a Lambda consumer batch-writes at a steady 1K/sec. Users see an optimistic UI update instantly while the actual write is queued — the 2-3 second delay is invisible."}}
+{{hint "why SQS for async likes/comments — not Kafka yet?" "At Stage 2 (10M DAU), SQS is the right choice: managed, zero ops overhead, point-to-point delivery for each event type. Kafka would add a broker cluster to operate (~$800/mo for MSK) and requires partitioning strategy, consumer group management, and retention tuning — complexity not justified here. SQS absorbs viral like spikes (100K+/sec) and Lambda batch-writes at a steady 1K/sec. Switch to Kafka at Stage 3 (50M+ users) when you need multi-consumer fan-out: the same post_created event must reach feed service, notification service, and ML pipeline simultaneously — SQS cannot do that without duplicating the message to separate queues."}}
 
 {{triggerQs "Questions about feed design"
   "How do you handle feed for inactive users?"
@@ -658,7 +665,12 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
 
 {{phase 6 "Stage 3: Scaling (50M-500M users)" "8 min"}}
 
-{{say "At 50M+ users, Postgres becomes the bottleneck. We need to shard the database, move to microservices, and add Kafka for async event processing."}}
+{{say `At 50M+ users, Postgres becomes the bottleneck. This is the stage where three changes become necessary — not before:
+<ul>
+  <li><strong>Microservices</strong>: a monolith handles ~10M DAU. At 50M+, independent services need to scale independently (Post Service sees 5K WPS, User Service sees 2K, Feed Service sees 58K RPS). Coupling them in one binary means scaling everything for the hottest path. Split only when scaling independently matters and team size justifies the ops overhead (8–10 engineers per service).</li>
+  <li><strong>Kafka over SQS</strong>: at Stage 2, SQS was enough — one producer, one consumer. Now the same event (post_created) must reach Feed Service, Notification Service, and ML pipeline simultaneously. Kafka's consumer group model lets each service consume independently at its own pace. SQS would require 3 separate queues with duplicated messages.</li>
+  <li><strong>DynamoDB for posts</strong>: Postgres with sharding works, but at 5K WPS with unpredictable viral spikes, DynamoDB's auto-scaling is simpler to operate than managing multiple Postgres shard instances with consistent hashing.</li>
+</ul>`}}
 
 {{table "Microservices Split" (rows
   (row "Service"            "Owns"                                "Database"                           "Why This DB")
