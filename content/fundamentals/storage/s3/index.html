@@ -69,6 +69,17 @@ S3 stores objects in <strong>buckets</strong>. A bucket is a flat namespace — 
 
 {{qa "Why use pre-signed URLs instead of proxying uploads through your server?" "Direct upload to S3 via pre-signed URL eliminates your server as a bandwidth bottleneck. A 100MB file upload through your API server consumes 100MB of server memory/bandwidth. With a pre-signed URL, the client uploads directly to S3 — your server only generates the URL (microseconds of work). This scales to thousands of concurrent uploads without adding servers." "What about security — can someone abuse a pre-signed URL?" "Pre-signed URLs expire (typically 5-15 minutes). They are scoped to a specific key (file path), HTTP method, and content-type. The signer's IAM permissions are checked at upload time. You can also set a max content-length condition to prevent oversized uploads."}}
 
+{{mustKnow
+  "Pre-signed URLs: server generates URL in < 1ms (pure crypto), client uploads/downloads directly to S3"
+  "Never proxy media through app servers — pre-signed URLs remove your server from the data path"
+  "CloudFront + OAC for public media — S3 bucket stays private, CDN serves at edge"
+}}
+
+{{goodToKnow
+  "Pre-signed URL TTL: 15 min for uploads, 1-24h for downloads — balance security vs UX"
+  "OAC (Origin Access Control) replaces OAI — supports SSE-KMS; always use OAC for new distributions"
+}}
+
 {{phase 3 "Multipart Upload" "4 min"}}
 
 {{say `For files > 5 MB, use multipart upload. The client:
@@ -122,6 +133,14 @@ def upload_large_file(bucket, key, filepath):
 {{hint "content-type and metadata must be set at upload start" "Content-Type and custom metadata (x-amz-meta-*) are set in the CreateMultipartUpload call, not per-part. If you forget to set Content-Type at initiation, the assembled object defaults to application/octet-stream — images will download instead of displaying in browsers."}}
 
 {{qa "How do you resume a failed multipart upload?" "Each part has an ETag returned on successful upload. Store part numbers and ETags as you go. On failure, call &lt;span class='hl-blue'>ListParts&lt;/span> to get already-uploaded parts, then continue uploading only the missing parts. The upload_id remains valid for 7 days unless you set an AbortIncompleteMultipartUploads lifecycle rule." "What about client-side upload to S3 from a browser?" "Generate a pre-signed POST policy with conditions: max file size, allowed content types, target key prefix. The browser uploads directly to S3 using a multipart form POST. Your server never touches the file bytes. Use &lt;span class='hl-blue'>S3 Transfer Acceleration&lt;/span> for uploads from distant regions — routes through <a class="dqa-link" href="/fund/networking/cdn">CloudFront</a> edge locations for &lt;span class='hl'>50-500%&lt;/span> faster uploads."}}
+
+{{mustKnow
+  "Multipart upload for files > 100 MB: parallel parts, resume on failure, up to 5 TB per object"
+  "Always set AbortIncompleteMultipartUploads lifecycle rule — incomplete parts accumulate storage charges silently"
+  "Content-Type must be set at CreateMultipartUpload — not per-part; forgotten = application/octet-stream default"
+}}
+
+{{caveat "Incomplete multipart uploads are billed indefinitely. At $0.023/GB, millions of abandoned uploads add up fast. Set a lifecycle rule to auto-abort after 7 days."}}
 
 {{phase 4 "Storage Classes & Lifecycle" "4 min"}}
 
