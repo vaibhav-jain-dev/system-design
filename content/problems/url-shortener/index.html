@@ -339,19 +339,21 @@
 <ul>
   <li><span class='hl'>99%</span> of reads are single-key lookups by short_code — no joins, no aggregations needed</li>
   <li>Writes are single-row inserts with a conditional uniqueness check</li>
-  <li>This maps perfectly to a key-value store — at this scale, <span class='hl-blue'>DynamoDB</span> is a stronger fit than Postgres</li>
+  <li><strong>Start with Postgres</strong> — it handles this access pattern well up to ~10K QPS on a single instance. At our stated scale of <span class='hl'>57K RPS</span>, DynamoDB becomes the right call: manual sharding with Postgres at this volume is painful to operate, and DynamoDB handles it automatically.</li>
+  <li>Rule of thumb: <span class='hl-blue'>Postgres up to 10K QPS → read replicas up to 30K QPS → DynamoDB when you'd be managing multiple shard instances</span></li>
 </ul>`}}
 
 {{compare "Database Choice" (options
-  (best "DynamoDB" "Every read is a single-key lookup — DynamoDB's strong point. Auto-scales from 0 to millions of QPS with no manual sharding. Built-in TTL for URL expiration. On-demand pricing at low scale, provisioned with auto-scaling at high scale. Global Tables for multi-region. $0.25/M reads, $1.25/M writes.")
-  (alt "Postgres" "Works at MVP (&lt; 10K QPS). ACID transactions help analytics. But at 50K+ QPS, manual sharding needed. Connection pooling (PgBouncer) required. Read replicas help reads but writes bottleneck on primary.")
-  (nofit "Cassandra" "Handles writes well but operational complexity is high: compaction tuning, repair cycles, JVM garbage collection pauses. DynamoDB gives the same key-value performance without the ops burden.")
-  (nofit "MongoDB" "Replica set management, config servers, mongos routing. No advantage over DynamoDB for simple key-value lookups. WiredTiger storage engine adds unnecessary complexity.")
+  (best "Postgres (start here)" "Single instance handles 5–10K QPS easily — enough for most URL shorteners. Add read replicas (RDS) to reach 30K+ QPS. Zero sharding complexity, full SQL, ACID transactions, and $200/month on RDS vs DynamoDB variable pricing. Start here; migrate to DynamoDB only when write throughput consistently exceeds 10–15K WPS or you need auto-managed global replication.")
+  (alt "DynamoDB (at our stated 57K RPS scale)" "Every read is a single-key lookup — DynamoDB's strong point. Auto-scales with no manual sharding. Built-in TTL for URL expiration. Global Tables for multi-region. At 57K RPS with a 10:1 read:write ratio: ~52K reads/s + ~5K writes/s — DynamoDB handles this without any sharding config. Switch to this when Postgres read replicas are no longer enough.")
+  (nofit "Cassandra" "Handles writes well but operational complexity is high: compaction tuning, repair cycles, JVM GC pauses. DynamoDB gives the same key-value performance without the ops burden. Only consider Cassandra if you need multi-cloud or are already running it.")
+  (nofit "MongoDB" "Replica set management, config servers, mongos routing. No advantage over DynamoDB for simple key-value lookups. Postgres JSONB gives all the flexibility MongoDB offers without losing SQL.")
 )}}
 
-{{think "The access pattern is 99% single-key lookup (GET /{code}). No JOINs, no aggregations on the hot path. SQL's relational capabilities are unnecessary here. DynamoDB's single-digit-millisecond point reads at any scale are exactly what this system needs."
-  (whyNot "Postgres with read replicas" "Read replicas improve read throughput, but each replica requires a full copy of the data. At 100K+ QPS, you need 10+ replicas plus PgBouncer for connection pooling. Replication lag (typically 10-100ms) means a newly created URL might return 404 on a replica. DynamoDB handles this natively with strongly consistent reads.")
-  (whatIf "you need ad-hoc SQL queries for analytics" "Never force analytics queries into the hot-path database. Instead, stream click events through Kinesis into S3 as Parquet files, then query with Athena (serverless Presto) at $5/TB scanned. You get full SQL power for analytics without adding any load to DynamoDB.")
+{{think "The access pattern is 99% single-key lookup (GET /{code}). No JOINs, no aggregations on the hot path. Postgres handles this well with a B-tree index on short_code — at 10K QPS on a db.r6g.large it is totally fine. At 57K RPS (our stated scale), the write path would need sharding if staying on Postgres; DynamoDB avoids that entirely."
+  (whyNot "starting with DynamoDB from day one" "DynamoDB requires upfront access pattern design, has no ad-hoc SQL for debugging, and costs more at low scale ($1.25/M writes vs Postgres flat monthly fee). If your URL shortener does 5K QPS, a $200/month RDS instance is all you need — no DynamoDB, no sharding, just Postgres. Over-engineering from day one wastes money and adds cognitive overhead.")
+  (whyNot "Postgres with read replicas at 57K RPS" "Read replicas improve read throughput, but at 50K+ reads/s you need 10+ replicas plus PgBouncer for connection pooling. Replication lag (10–100ms) means a newly created URL might return 404 on a replica. At this specific scale, DynamoDB's managed sharding makes more sense than operating a 10-replica Postgres cluster.")
+  (whatIf "you need ad-hoc SQL queries for analytics" "Never force analytics queries into the hot-path database. Stream click events through Kinesis into S3 as Parquet files, then query with Athena at $5/TB scanned. You get full SQL power for analytics without adding load to DynamoDB — or Postgres.")
 }}
 
 {{hint "why single-table design?" "DynamoDB charges per request, not per table. But each table has its own auto-scaling configuration, alarms, and backup policies. One table with a clean partition key (short_code) is simpler to operate than splitting URLs and metadata across multiple tables. Single-table design also enables DynamoDB transactions across URL creation and idempotency tracking."}}
@@ -426,9 +428,9 @@ CREATE INDEX idx_urls_expires ON urls(expires_at) WHERE expires_at IS NOT NULL;
 
 {{say `Short code generation is the most important design decision — three approaches, each with different collision risk, guessability, and coordination overhead:
 <ul>
-  <li><strong>Counter + Base62</strong> — zero collisions but sequential (guessable) and needs a centralized counter</li>
+  <li><strong>Counter + Base62 with Redis INCR</strong> — zero collisions, simple to operate; sequential (guessable) but Redis INCR handles <span class='hl'>100K+ ops/s</span> on a single node — sufficient for our 1,157 writes/s</li>
   <li><strong>MD5/SHA hash truncation</strong> — deterministic per input but Birthday paradox makes collisions frequent at scale</li>
-  <li><strong>Key Generation Service (KGS)</strong> — pre-generates unique random keys in batches, zero collisions, non-guessable</li>
+  <li><strong>Key Generation Service (KGS)</strong> — pre-generates unique random keys in batches, zero collisions, non-guessable; adds an extra service to operate — justified only when writes exceed 10K/s or you need multi-region non-overlapping ranges</li>
 </ul>`}}
 
 {{hint "why key generation matters most" "Key generation determines collision risk, guessability, coordination overhead, and failure modes. Get it wrong and you either lose data (collisions), expose private URLs (guessable sequences), or create a single point of failure (centralized counter). This is the section interviewers dig deepest into."}}
@@ -451,7 +453,7 @@ CREATE INDEX idx_urls_expires ON urls(expires_at) WHERE expires_at IS NOT NULL;
   (row "Dimension"          "Counter + Base62"                    "MD5/SHA + Truncate"                  "Key Generation Service (KGS)")
   (row "Collision risk"     "Zero — monotonically increasing counter" "~1 in 62^7 per attempt; at 100B URLs, Birthday paradox makes collisions frequent" "Zero — keys are unique by construction")
   (row "Guessability"       "Sequential (Ab3xK0, Ab3xK1...) — attackers can enumerate and scrape all URLs" "Deterministic — same long URL always produces same hash, so attacker with the original URL can derive the short code" "Random, non-sequential — cannot predict next key; best for security")
-  (row "Distributed coord." "Requires global atomic counter (bottleneck). Range allocation helps but needs Zookeeper/Redis coordination" "No coordination needed — hash is deterministic per input. But collision check still requires a DB round-trip" "KGS allocates batches of 1000 keys per server. No coordination during normal operation; only batch refill contacts KGS")
+  (row "Distributed coord." "Redis INCR is the counter — handles 100K+ ops/s on a single node, plenty for 1,157 writes/s. Range allocation adds zero coordination overhead during normal ops; only needs ZooKeeper/etcd if you must span multiple write regions without a shared Redis" "No coordination needed — hash is deterministic per input. But collision check still requires a DB round-trip" "KGS allocates batches of 1000 keys per server. No coordination during normal operation; only batch refill contacts KGS — justified when writes exceed ~10K/s or you need multi-region unique ranges")
   (row "Latency"            "1-5ms per counter increment (Redis INCR or DynamoDB atomic ADD). Counter becomes a hot key at high QPS" "Hash: under 0.1ms. But collision check adds 5ms DB read; retries compound at high collision rates" "Under 0.01ms from local batch. Batch refill every 1000 requests: one DynamoDB read. Amortized latency near zero")
   (row "Failure mode"       "Counter service dies → all writes stop. Must have standby counter with failover" "DB down → collision check fails → writes fail. But servers can still generate hashes independently" "KGS dies → servers use local batch (~1000 keys). At 1,157 QPS, that's ~15 minutes of buffer before any impact")
   (row "Idempotency"        "Not idempotent — same long URL gets different short codes on retry" "Idempotent — same long URL always produces same hash (good for deduplication)" "Not idempotent by default. Can add dedup layer: check if long_url exists before assigning new key")
@@ -460,9 +462,9 @@ CREATE INDEX idx_urls_expires ON urls(expires_at) WHERE expires_at IS NOT NULL;
 {{diagram "url-collision-resolution"}}
 
 {{compare "Key Generation Strategy" (options
-  (best "Key Generation Service (KGS)" "Pre-generates batches of unique keys in background. Each app server requests batch of 1000 keys. Zero collisions, non-guessable, decoupled from DB auto-increment. Best balance of simplicity, security, and performance.")
-  (alt "Counter + Base62 with Range Allocation" "Each server gets a non-overlapping range (server1: 1-1M, server2: 1M-2M). Zero collisions within range. But: sequential URLs are guessable, range coordination needs Zookeeper/etcd, and server crash wastes its unallocated range.")
-  (nofit "Random generation + DB check" "Generate random 7-char string, check DB for collision. At 100B URLs, collision probability rises via Birthday paradox. Wasteful DB queries. Not suitable at scale.")
+  (best "Counter + Base62 with Redis INCR" "At 1,157 writes/s (our stated scale), Redis INCR is all you need — single node handles 100K+ ops/s, zero collisions, no extra service to operate. Sequential codes are guessable, but that is an acceptable trade-off for most URL shorteners. <strong>Once writes exceed ~5K/s or you need multi-region unique key ranges, add range allocation — still no ZooKeeper needed if a single Redis is reachable from all write nodes.</strong>")
+  (alt "Key Generation Service (KGS)" "Pre-generates batches of 1000 unique random keys per app server. Zero collisions, non-guessable, fully decoupled from the DB write path. Justified when: writes exceed 10K/s (Redis INCR hot-key risk), you need non-guessable codes for security, or you operate across multiple write regions without a shared Redis. Trade-off: an extra service to deploy, monitor, and scale.")
+  (nofit "Random generation + DB check" "Generate random 7-char string, check DB for collision. At 100B URLs, the Birthday paradox makes collisions frequent. Every write needs a DB read. Not suitable at scale — use KGS if you need non-guessable random codes.")
 )}}
 
 {{details "View Base62 Encoding Implementation" "python" `import string
@@ -496,7 +498,7 @@ def base62_decode(s: str) -> int:
   "The unused keys in that range are lost — perhaps a few hundred thousand out of 3.5 trillion total keys. That's negligible. The coordination service marks the range as allocated so it's never reassigned to another server. No collision is possible."
 }}
 
-{{followup "What if the KGS is a single point of failure?" "Run two KGS instances with separate DynamoDB tables. Each pre-generates keys into its own table. App servers request from primary KGS. If primary is down, switch to secondary. Keys are pre-generated, so even if both KGS are down, servers use their local batch of 1000 keys — at 1,157 QPS that is ~15 minutes of buffer."}}
+{{followup "What if Redis INCR is a bottleneck? When would you add KGS?" "Redis INCR on a single r6g.large node handles ~100K ops/s. At 1,157 writes/s that is only 1.2% utilization — not a bottleneck. You would only switch to KGS when: (a) writes consistently exceed 10K/s (Redis becomes a hot key), (b) you need non-guessable codes for security reasons, or (c) you have multiple write regions that cannot share a single Redis without cross-region latency. For most URL shorteners, Counter+Redis INCR is permanent, not a stepping stone to KGS."}}
 
 {{triggerQs "Questions about key generation"
   "How do you handle hash collisions for custom aliases?"
@@ -523,12 +525,18 @@ def base62_decode(s: str) -> int:
 
 {{phase 5 "High-Level Architecture" "8 min"}}
 
-{{say `Seven core components — each with a specific job:
+{{say `Before the full-scale design — <strong>what would this look like at different scales?</strong>
 <ul>
-  <li><strong>CloudFront</strong> absorbs <span class='hl'>60%+</span> of redirects at the edge before reaching origin</li>
+  <li><strong>&lt;10K QPS</strong>: Single ECS service + Postgres + ElastiCache. No CDN. No KGS. No Kinesis. Simple &amp; cheap (~$500/mo).</li>
+  <li><strong>10K–30K QPS</strong>: Add CloudFront for edge caching. Switch to DynamoDB (Postgres sharding pain begins). Add Kinesis for async analytics.</li>
+  <li><strong>30K–60K QPS (our stated scale)</strong>: Full stack below — 7 components, each with a specific job.</li>
+</ul>
+At our stated <span class='hl'>57K RPS</span> (100M URLs/day, 10:1 read:write):
+<ul>
+  <li><strong>CloudFront</strong> absorbs <span class='hl'>60%+</span> of redirects at the edge — only justified when CDN savings outweigh the added hop for cache misses</li>
   <li><strong>ECS + ElastiCache</strong> handle the remaining reads — Redis absorbs <span class='hl'>95%</span> of origin hits</li>
   <li><strong>DynamoDB</strong> is the source of truth; only <span class='hl'>~5%</span> of peak traffic reaches it</li>
-  <li><strong>KGS</strong> pre-generates keys in batches — zero collisions, decoupled from the write path</li>
+  <li><strong>Counter + Redis INCR</strong> handles key generation — no separate KGS service needed at 1,157 writes/s</li>
   <li><strong>Kinesis + Lambda</strong> handle analytics async — redirect latency is never touched</li>
 </ul>`}}
 
@@ -544,7 +552,7 @@ def base62_decode(s: str) -> int:
   (row "API Servers (ECS)"      "Shorten URLs, resolve redirects"                   "Stateless, auto-scaling on CPU/RPS"                "Unhealthy task drained + replaced in 30s")
   (row "ElastiCache Redis"      "L3 regional cache for URL lookups"                 "Sub-ms reads. 95% cache hit rate."                 "Multi-AZ failover to replica in 30s")
   (row "DynamoDB"               "Source of truth for all URL mappings"              "Single-digit ms point reads at any scale"           "99.999% SLA. Throttle &#8594; retry w/ backoff")
-  (row "KGS (Key Gen Service)"  "Pre-generate unique short codes in batches"        "Zero collisions, non-guessable, decoupled"          "Servers use local batch (~15 min buffer)")
+  (row "Redis INCR (counter)"   "Atomic counter for Base62 key generation"          "100K+ ops/s on single node; no extra service"       "Redis down → app servers use last known counter range (minutes of buffer)")
   (row "Kinesis + Lambda"       "Async click analytics pipeline"                    "Decouple analytics from redirect latency"           "Kinesis buffers 24h. Analytics delayed, not lost.")
 )}}
 
@@ -733,7 +741,7 @@ async def resolve_short_url(short_code: str) -> str:
   (row "ElastiCache node failure"    "Cache miss spike, DB load rises" "Multi-AZ failover to replica"                  "&lt; 30 seconds")
   (row "DynamoDB throttling"         "Write failures for new URLs"     "On-demand mode auto-scales, or SQS buffer"    "1-2 minutes")
   (row "CloudFront outage"           "All redirects hit origin"        "ALB handles directly, higher latency"          "Rare, minutes")
-  (row "KGS service down"           "Cannot generate new short codes" "App servers use local batch (1000 keys &#8776; 15 min)" "Minutes")
+  (row "Redis counter down"          "Cannot generate new sequential keys" "App servers cache last counter range locally (~1K keys buffer); Redis Multi-AZ failover in 30s" "30s failover; buffer covers gap")
   (row "Kinesis consumer lag"        "Analytics delayed"               "Click data buffered 24h, no redirect impact"   "Catches up")
 )}}
 

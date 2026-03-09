@@ -91,11 +91,12 @@
 
 {{phase 2 "Capacity Estimation" "3 min"}}
 
-{{say `Throughput math first — it drives the storage choice:
+{{say `Throughput math first — it drives the storage and topology choice:
 <ul>
-  <li>At <span class='hl'>500K req/s</span> peak, one rate limit check per request = <span class='hl'>500K Redis ops/s</span></li>
-  <li>Redis handles <strong>100K+ ops/s per node</strong> — a 3-node cluster gives 300K+ ops/s; 6 nodes or Lua scripts handle 500K</li>
-  <li>This eliminates DynamoDB (<span class='hl-red'>10–20ms latency</span>) before we even look at features</li>
+  <li><strong>&lt;1K req/s</strong>: In-process counters (HashMap) work fine — no external store needed. Single server, no distribution problem yet.</li>
+  <li><strong>1K–100K req/s</strong>: Single Redis node (r6g.medium) handles <span class='hl'>100K+ ops/s</span>. No Lua scripts, no clustering — just INCR with TTL.</li>
+  <li><strong>100K–500K req/s (our stated scale)</strong>: Redis Cluster (3+ shards) + Lua scripts to batch ZREMRANGEBYSCORE/ZCARD/ZADD into one round trip.</li>
+  <li>At <span class='hl'>500K req/s</span> peak = <span class='hl'>500K Redis ops/s</span>. DynamoDB (<span class='hl-red'>10–20ms latency</span>) is eliminated before we even look at features.</li>
 </ul>`}}
 
 {{diagram "rl-capacity-estimation"}}
@@ -820,7 +821,13 @@ return {1, limit - count - 1, 0}
 
 {{phase 8 "Redis Configuration" "3 min"}}
 
-{{say "ElastiCache (managed Redis) configuration optimized for rate limiting workloads — key settings and why each matters:"}}
+{{say `ElastiCache configuration depends on your throughput — start with the simplest topology that handles your load:
+<ul>
+  <li><strong>&lt;100K req/s</strong>: Single Redis node (r6g.large, $120/mo). No Cluster mode, no hash tags, no complexity. Lua scripts still recommended for atomicity but not for round-trip reduction.</li>
+  <li><strong>100K–500K req/s (our stated scale)</strong>: 3-shard Cluster mode. Lua scripts halve round trips. Hash tags required to co-locate user keys on the same shard.</li>
+  <li><strong>&gt;500K req/s</strong>: 6+ shards, or move hot keys to in-process counters with periodic Redis sync (accept slight over-counting).</li>
+</ul>
+At our stated <span class='hl'>500K req/s</span>, configuration optimized for rate limiting workloads:`}}
 
 {{diagram "rl-elasticache-topology"}}
 
@@ -857,7 +864,7 @@ activedefrag: yes                 # Defragment memory proactively
 
 {{avoid "Do not enable Redis persistence (&lt;span class='hl-blue'>RDB&lt;/span> snapshots or &lt;span class='hl-blue'>AOF&lt;/span> log) for rate limiting. Rate limit counters are ephemeral — persistence adds disk I/O latency with zero benefit. Counters reset on window expiry anyway, and if Redis restarts, they rebuild naturally from incoming requests."}}
 
-{{qa "Should you use Cluster mode or a single shard with replicas for rate limiting?" "Cluster mode for any production deployment beyond a single team's API. A single shard maxes out at ~100K ops/sec and 13 GB memory. With 50M active rate limit keys at 100 bytes each = 5 GB, a single shard works — but you have no horizontal scaling runway. Cluster mode with 3 shards gives 300K ops/sec and 39 GB, and you can add shards without downtime. The trade-off: Lua scripts must use hash tags to ensure all keys for a single rate check land on the same shard." "What about Sentinel instead of Cluster?" "Sentinel provides high availability (automatic failover) but not horizontal scaling — it is still a single shard with replicas. Use Sentinel only if your rate limit key count fits in one node and your ops/sec is under 100K. Beyond that, Cluster mode is required. In ElastiCache, 'Cluster Mode Enabled' gives you both: automatic failover per shard plus horizontal scaling across shards."}}
+{{qa "Should you use Cluster mode or a single node for rate limiting?" "Start with a single node (r6g.large, ~100K ops/s) — it handles the vast majority of real-world rate limiter deployments. Move to Cluster mode when sustained throughput exceeds ~80K ops/s (leaving headroom). A single shard maxes at ~100K ops/s with 13 GB memory; Cluster mode with 3 shards gives 300K+ ops/s and you can add shards without downtime. The trade-off: Lua scripts in Cluster mode must use hash tags to keep user keys on one shard, adding complexity." "What about Sentinel instead of Cluster?" "Sentinel provides high availability (automatic failover) but not horizontal scaling — it is still a single shard with replicas. Sentinel is the right choice when you need HA but throughput is under 80K ops/s. Cluster mode adds horizontal scaling for throughput-bound deployments. In ElastiCache, 'Cluster Mode Enabled' gives both: failover per shard plus horizontal throughput scaling."}}
 
 {{hint "why volatile-lru over allkeys-lru?" "&lt;span class='hl-blue'>volatile-lru&lt;/span> only evicts keys that have a TTL set. Our rate limit keys all have TTLs (by design), so they're eligible for eviction. Any config or schema data sharing this Redis instance without a TTL is protected. &lt;span class='hl-red'>allkeys-lru evicts anything&lt;/span> — including non-ephemeral data — which causes subtle data loss bugs in mixed-use Redis instances."}}
 
