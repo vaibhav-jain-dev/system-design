@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"system-design/internal/registry"
+	"system-design/internal/search"
 )
 
 type Handler struct {
@@ -21,9 +22,10 @@ type Handler struct {
 	templates *template.Template
 	contentFS fs.FS
 	funcMap   template.FuncMap
+	search    *search.Index
 }
 
-func New(reg *registry.Registry, templateFS, contentFS fs.FS, funcMap template.FuncMap) *Handler {
+func New(reg *registry.Registry, templateFS, contentFS fs.FS, funcMap template.FuncMap, searchIdx *search.Index) *Handler {
 	// Parse layout templates
 	tmpl := template.Must(
 		template.New("").Funcs(funcMap).ParseFS(templateFS,
@@ -41,6 +43,7 @@ func New(reg *registry.Registry, templateFS, contentFS fs.FS, funcMap template.F
 			"web/templates/detail_quick_all.html",
 			"web/templates/detail_practice.html",
 			"web/templates/detail_highlights.html",
+			"web/templates/search_results.html",
 		))
 
 	return &Handler{
@@ -48,6 +51,7 @@ func New(reg *registry.Registry, templateFS, contentFS fs.FS, funcMap template.F
 		templates: tmpl,
 		contentFS: contentFS,
 		funcMap:   funcMap,
+		search:    searchIdx,
 	}
 }
 
@@ -467,6 +471,37 @@ func (h *Handler) QuickAll(w http.ResponseWriter, r *http.Request) {
 	if err := h.templates.ExecuteTemplate(w, "base.html", data); err != nil {
 		log.Printf("Template error: %v", err)
 		http.Error(w, "Internal error", 500)
+	}
+}
+
+// Search handles GET /search?q=... — returns the search_results.html partial.
+func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	// Index still building
+	if !h.search.IsReady() {
+		h.templates.ExecuteTemplate(w, "search_results.html", map[string]interface{}{
+			"Indexing": true,
+		})
+		return
+	}
+
+	// Empty query — return nothing (sidebar shows normal tree)
+	if q == "" {
+		return
+	}
+
+	results, _ := h.search.Search(q, 15)
+
+	data := map[string]interface{}{
+		"Query":   q,
+		"Results": results,
+		"Empty":   len(results) == 0,
+	}
+	if err := h.templates.ExecuteTemplate(w, "search_results.html", data); err != nil {
+		log.Printf("search template error: %v", err)
 	}
 }
 

@@ -1449,59 +1449,190 @@
             }
         });
 
-        // ── Sidebar Search / Filter ──────────────────────────────────────
+        // ── Sidebar Search (fuzzy global + in-page) ──────────────────────
         function initSidebarSearch() {
-            var input = document.getElementById('sidebar-search');
-            var clearBtn = document.getElementById('sidebar-search-clear');
+            var input      = document.getElementById('sidebar-search');
+            var clearBtn   = document.getElementById('sidebar-search-clear');
+            var panel      = document.getElementById('search-results-panel');
+            var scopeBtn   = document.getElementById('search-scope-btn');
+            var pageCount  = document.getElementById('search-page-counter');
             if (!input) return;
 
-            function doFilter() {
-                var q = input.value.toLowerCase().trim();
+            // ── scope state ──
+            var scope = 'global'; // 'global' | 'page'
+            var pageMarks = [];   // {node, original} for in-page highlights
+            var pageMarkIdx = -1;
 
-                // Show/hide clear button
-                if (clearBtn) clearBtn.classList.toggle('visible', q.length > 0);
-
-                // Show everything when query is empty
-                if (!q) {
-                    document.querySelectorAll('.sidebar-section').forEach(function(s) {
-                        s.classList.remove('sidebar-section-hidden');
-                    });
-                    document.querySelectorAll('.sidebar-list > li, .sidebar-children > li').forEach(function(li) {
-                        li.classList.remove('sidebar-item-hidden');
-                    });
-                    return;
-                }
-
-                // Filter each section
-                document.querySelectorAll('.sidebar-section').forEach(function(section) {
-                    var anyMatch = false;
-                    section.querySelectorAll('.sidebar-item').forEach(function(item) {
-                        var label = item.querySelector('.item-label, .sidebar-category-label');
-                        var text = label ? label.textContent.toLowerCase() : item.textContent.toLowerCase();
-                        var matches = text.includes(q);
-                        var li = item.closest('li');
-                        if (li) li.classList.toggle('sidebar-item-hidden', !matches);
-                        if (matches) anyMatch = true;
-                    });
-                    section.classList.toggle('sidebar-section-hidden', !anyMatch);
-                    // Expand sections with matches
-                    if (anyMatch && section.classList.contains('collapsed')) {
-                        section.classList.remove('collapsed');
+            if (scopeBtn) {
+                scopeBtn.addEventListener('click', function() {
+                    scope = (scope === 'global') ? 'page' : 'global';
+                    scopeBtn.dataset.scope = scope;
+                    var iconG = scopeBtn.querySelector('.scope-icon-global');
+                    var iconP = scopeBtn.querySelector('.scope-icon-page');
+                    if (scope === 'page') {
+                        if (iconG) iconG.style.display = 'none';
+                        if (iconP) iconP.style.display = '';
+                        input.placeholder = 'Search this page…';
+                        // Hide global results panel
+                        if (panel) panel.innerHTML = '';
+                        showSidebarTree(true);
+                        if (pageCount) pageCount.style.display = '';
+                    } else {
+                        if (iconG) iconG.style.display = '';
+                        if (iconP) iconP.style.display = 'none';
+                        input.placeholder = 'Search all… (press /)';
+                        clearPageMarks();
+                        if (pageCount) pageCount.style.display = 'none';
+                        showSidebarTree(true);
                     }
+                    // Re-run with current query
+                    if (input.value.trim()) handleInput();
                 });
             }
 
-            input.addEventListener('input', doFilter);
+            // ── page navigation buttons ──
+            var prevBtn = document.getElementById('search-page-prev');
+            var nextBtn = document.getElementById('search-page-next');
+            if (prevBtn) prevBtn.addEventListener('click', function() { navigateMark(-1); });
+            if (nextBtn) nextBtn.addEventListener('click', function() { navigateMark(1); });
 
+            function navigateMark(dir) {
+                if (pageMarks.length === 0) return;
+                pageMarkIdx = (pageMarkIdx + dir + pageMarks.length) % pageMarks.length;
+                var el = pageMarks[pageMarkIdx].mark;
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                pageMarks.forEach(function(m, i) {
+                    if (m.mark) m.mark.classList.toggle('search-mark-active', i === pageMarkIdx);
+                });
+            }
+
+            // ── clear page highlights ──
+            function clearPageMarks() {
+                pageMarks.forEach(function(m) {
+                    var mark = m.mark;
+                    if (!mark || !mark.parentNode) return;
+                    var parent = mark.parentNode;
+                    parent.replaceChild(document.createTextNode(mark.textContent), mark);
+                    parent.normalize();
+                });
+                pageMarks = [];
+                pageMarkIdx = -1;
+                var counter = document.getElementById('search-page-count');
+                if (counter) counter.textContent = '0 matches';
+            }
+
+            // ── in-page highlight ──
+            function applyPageSearch(q) {
+                clearPageMarks();
+                if (!q || q.length < 2) return;
+                var detail = document.getElementById('detail');
+                if (!detail) return;
+
+                var walker = document.createTreeWalker(detail, NodeFilter.SHOW_TEXT, {
+                    acceptNode: function(node) {
+                        var p = node.parentNode;
+                        if (!p) return NodeFilter.FILTER_REJECT;
+                        var tag = p.nodeName.toUpperCase();
+                        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'MARK') return NodeFilter.FILTER_REJECT;
+                        return node.textContent.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+                    }
+                });
+
+                var lq = q.toLowerCase();
+                var nodes = [];
+                var node;
+                while ((node = walker.nextNode())) nodes.push(node);
+
+                nodes.forEach(function(textNode) {
+                    var text = textNode.textContent;
+                    var lower = text.toLowerCase();
+                    var idx = lower.indexOf(lq);
+                    if (idx === -1) return;
+
+                    var frag = document.createDocumentFragment();
+                    var last = 0;
+                    while (idx !== -1) {
+                        if (idx > last) frag.appendChild(document.createTextNode(text.slice(last, idx)));
+                        var mark = document.createElement('mark');
+                        mark.className = 'search-mark';
+                        mark.textContent = text.slice(idx, idx + lq.length);
+                        frag.appendChild(mark);
+                        pageMarks.push({ mark: mark });
+                        last = idx + lq.length;
+                        idx = lower.indexOf(lq, last);
+                    }
+                    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+                    textNode.parentNode.replaceChild(frag, textNode);
+                });
+
+                var counter = document.getElementById('search-page-count');
+                if (counter) counter.textContent = pageMarks.length + ' match' + (pageMarks.length !== 1 ? 'es' : '');
+
+                // Jump to first match
+                if (pageMarks.length > 0) {
+                    pageMarkIdx = 0;
+                    pageMarks[0].mark.classList.add('search-mark-active');
+                    pageMarks[0].mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            }
+
+            // ── sidebar tree show/hide ──
+            function showSidebarTree(show) {
+                var nav = document.querySelector('.sidebar-nav');
+                if (nav) nav.style.display = show ? '' : 'none';
+            }
+
+            // ── main input handler ──
+            function handleInput() {
+                var q = input.value.trim();
+
+                if (clearBtn) clearBtn.classList.toggle('visible', q.length > 0);
+
+                if (scope === 'page') {
+                    // In-page mode: highlight text in #detail, hide global panel
+                    if (panel) panel.innerHTML = '';
+                    showSidebarTree(true);
+                    applyPageSearch(q);
+                    return;
+                }
+
+                // Global mode
+                clearPageMarks();
+
+                if (!q) {
+                    if (panel) panel.innerHTML = '';
+                    showSidebarTree(true);
+                    return;
+                }
+
+                // Hide sidebar tree while showing results
+                showSidebarTree(false);
+                // HTMX fires the /search request automatically via hx-trigger
+            }
+
+            input.addEventListener('input', handleInput);
+
+            // When HTMX loads results, show sidebar tree state accordingly
+            document.addEventListener('htmx:afterSwap', function(e) {
+                if (e.detail && e.detail.target && e.detail.target.id === 'search-results-panel') {
+                    var q = input.value.trim();
+                    showSidebarTree(!q);
+                }
+            });
+
+            // Clear everything
             if (clearBtn) {
                 clearBtn.addEventListener('click', function() {
                     input.value = '';
-                    doFilter();
+                    if (panel) panel.innerHTML = '';
+                    clearPageMarks();
+                    showSidebarTree(true);
+                    clearBtn.classList.remove('visible');
                     input.focus();
                 });
             }
 
-            // Keyboard shortcut: / focuses the search
+            // / key focuses search
             document.addEventListener('keydown', function(e) {
                 if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
                 if (e.key === '/') {
@@ -1514,24 +1645,38 @@
                 }
                 if (e.key === 'Escape' && document.activeElement === input) {
                     input.value = '';
-                    doFilter();
+                    if (panel) panel.innerHTML = '';
+                    clearPageMarks();
+                    showSidebarTree(true);
+                    clearBtn && clearBtn.classList.remove('visible');
                     input.blur();
+                }
+                // Page-mode navigation shortcuts
+                if (scope === 'page' && pageMarks.length > 0) {
+                    if (e.key === 'F3' || (e.key === 'n' && !e.ctrlKey && !e.metaKey && document.activeElement === input)) {
+                        e.preventDefault();
+                        navigateMark(1);
+                    }
+                    if (e.key === 'F3' && e.shiftKey) {
+                        e.preventDefault();
+                        navigateMark(-1);
+                    }
+                }
+            });
+
+            // Clear in-page marks when user navigates to a new page
+            document.addEventListener('htmx:afterSwap', function(e) {
+                if (e.detail && e.detail.target && e.detail.target.id === 'detail') {
+                    clearPageMarks();
+                    // If in page-mode with an active query, re-apply to new content
+                    if (scope === 'page' && input.value.trim()) {
+                        setTimeout(function() { applyPageSearch(input.value.trim()); }, 50);
+                    }
                 }
             });
         }
 
         initSidebarSearch();
-
-        // Re-init sidebar search after HTMX swaps (sidebar persists, no re-init needed)
-        // but clear search state when navigating
-        document.addEventListener('htmx:afterSwap', function(e) {
-            if (e.detail && e.detail.target && e.detail.target.id === 'detail') {
-                var input = document.getElementById('sidebar-search');
-                if (input && input.value) {
-                    // Keep filter active if user typed something
-                }
-            }
-        });
     })();
     </script>
 </body>

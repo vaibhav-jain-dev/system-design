@@ -14,6 +14,7 @@ import (
 	"system-design/internal/handlers"
 	"system-design/internal/macros"
 	"system-design/internal/registry"
+	"system-design/internal/search"
 )
 
 //go:embed web/static/*
@@ -39,8 +40,12 @@ func main() {
 	log.Printf("Loaded %d diagrams", diagramReg.Count())
 	funcMap := macros.FuncMap(diagramReg)
 
+	// Build search index in background (server starts immediately)
+	searchIdx := search.New()
+	searchIdx.BuildInBackground(reg, contentFS, funcMap)
+
 	// Create handler with dependencies
-	h := handlers.New(reg, templateFS, contentFS, funcMap)
+	h := handlers.New(reg, templateFS, contentFS, funcMap, searchIdx)
 
 	// Router
 	r := chi.NewRouter()
@@ -62,6 +67,9 @@ func main() {
 	r.Get("/highlights", h.HighlightsDashboard)
 	r.Get("/quick", h.QuickAll)
 	r.Get("/quick/{slug}", h.QuickCategoryDetail)
+
+	// Search
+	r.Get("/search", h.Search)
 
 	// API routes
 	r.Post("/api/generate/{slug}", h.GeneratePDF)
