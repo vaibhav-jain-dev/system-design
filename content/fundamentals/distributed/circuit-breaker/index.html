@@ -429,6 +429,31 @@ def on_state_change(dependency: str, old_state, new_state):
 
 {{qa "How do you set up alerts for circuit breaker events?" "Three alerts: (1) &lt;strong>circuit_breaker_state == OPEN for > 5 minutes&lt;/strong> — sustained outage, page on-call. (2) &lt;strong>circuit_breaker_failure_rate > 0.3 for > 2 minutes&lt;/strong> — early warning before circuit trips, investigate now. (3) &lt;strong>circuit_breaker_opened_total rate > 3/hour&lt;/strong> — thrashing, misconfigured parameters or chronically unstable dependency. Route to the team that owns the failing dependency, not the calling team." "Should circuit breaker dashboards be per-service or centralized?" "Centralized. Create one Grafana dashboard with a row per dependency: state, failure rate, open duration, fallback rate. During an incident, operators need to see all circuit states at once — not hunt through 20 service dashboards. Add a single &lt;span class='hl-blue'>circuit_breaker_state == 1&lt;/span> alert rule that catches all dependencies."}}
 
+{{collapseSection "Prometheus Alert Rules" "
+<pre>
+# Alert: circuit open > 5 minutes (sustained outage)
+- alert: CircuitBreakerOpen
+  expr: circuit_breaker_state == 1
+  for: 5m
+  labels: { severity: page }
+
+# Alert: high failure rate (early warning)
+- alert: CircuitBreakerDegrading
+  expr: circuit_breaker_failure_rate > 0.3
+  for: 2m
+  labels: { severity: warn }
+
+# Alert: thrashing (misconfigured or unstable dependency)
+- alert: CircuitBreakerThrashing
+  expr: rate(circuit_breaker_opened_total[1h]) > 3
+  labels: { severity: warn }
+</pre>
+"}}
+
+{{mustKnow "Emit metrics on every state transition — circuit_state gauge, circuit_opened counter, failure_rate gauge" "Alert when circuit stays OPEN > 5 minutes (sustained outage) and when failure_rate > 0.3 for 2 minutes (early warning)" "Monitor fallback invocation rate as a signal of degraded operation"}}
+
+{{goodToKnow "Track false open rate (opens that close within 30 seconds) — if > 20%, min_requests or failure_threshold is too low" "Each instance maintains its own circuit breaker — shared state via Redis adds complexity and a new failure dependency"}}
+
 {{phase 8 "Interview Summary" "3 min"}}
 
 {{say `Circuit breaker prevents cascading failures by detecting sustained dependency failures and failing fast:
