@@ -926,6 +926,540 @@ problems:
         caveats: "Half-open probe every 30s. If notification service recovers, drain DLQ first."
         nfrs: [availability]
 
+  # ─── Distributed Systems Problems ───
+  - slug: id-generator
+    title: "Distributed ID Generator"
+    description: "Design a Snowflake-like ID service: unique IDs across servers without coordination, billions/day"
+    path: problems/id-generator
+    category: distributed
+    nfrs:
+      - slug: scalability
+        phases: [3, 4, 5, 7]        # bit layout, clock sync, architecture, multi-DC
+      - slug: performance
+        phases: [2, 4, 5, 6]        # API design, generation algorithm, architecture, throughput
+      - slug: availability
+        phases: [5, 8, 9]           # architecture, failure modes, multi-DC
+      - slug: consistency
+        phases: [3, 7]              # uniqueness guarantees, multi-DC ordering
+      - slug: durability
+        phases: [3, 8]              # ID space exhaustion, failure modes
+      - slug: security
+        phases: [9]                 # ID enumeration attacks, privacy
+      - slug: cost
+        phases: [6, 10]             # throughput optimizations, monitoring
+      - slug: observability
+        phases: [10, 11]            # monitoring & alerting, cost
+    functional_requirements:
+      - slug: id-generation
+        title: "ID Generation"
+        phases: [3, 4, 5]           # bit layout, algorithm, architecture
+      - slug: monotonic-ordering
+        title: "Time Ordering"
+        phases: [3, 4, 7]           # bit layout, generation, multi-DC
+      - slug: high-throughput
+        title: "High Throughput"
+        phases: [4, 6]              # generation algorithm, throughput tuning
+      - slug: no-coordination
+        title: "No Central Coordination"
+        phases: [5, 7, 8]           # architecture, multi-DC, failure modes
+    uses:
+      - fundamental: distributed/consistent-hashing
+        config: "Worker ID assignment via consistent hashing ring — 1024 worker IDs (10 bits)"
+        why: "Deterministic worker ID assignment without central registry — each node derives its own ID"
+        not_this: "Central ZooKeeper for worker ID — ZK is single point of failure for ID generation"
+        risk: "Worker ID collision if two nodes hash to same ID — use MAC address + datacenter prefix"
+        caveats: "10-bit worker ID = 1024 nodes max. Enough for most deployments. Need datacenter bits for multi-DC."
+        nfrs: [scalability, availability]
+      - fundamental: storage/redis
+        config: "Redis INCR for sequence fallback; atomic counter for pre-allocated ID blocks"
+        why: "When clock skew makes Snowflake unsafe, Redis atomic INCR provides collision-free fallback"
+        not_this: "Redis as primary ID source — Redis latency (~0.1ms) vs in-memory Snowflake (<1μs)"
+        risk: "Redis becomes bottleneck at >1M IDs/sec — use only as fallback or for block pre-allocation"
+        caveats: "Pre-allocate blocks of 1000 IDs per node from Redis. Node uses block locally without Redis calls."
+        nfrs: [availability, consistency]
+      - fundamental: distributed/cap-theorem
+        config: "AP within datacenter: trade ordering for availability. CP between datacenters: use NTP + drift detection"
+        why: "ID uniqueness is non-negotiable (C), but cross-DC ordering is eventual (A over C)"
+        not_this: "Global CP system — waiting for cross-DC quorum adds 100ms latency to every ID generation"
+        risk: "Clock drift > 5ms between DCs causes IDs to appear out-of-order when sorted globally"
+        caveats: "Use logical clocks for cross-DC ordering guarantees. Snowflake gives time-ordered within one DC."
+        nfrs: [consistency, availability]
+
+  - slug: distributed-cache
+    title: "Distributed Cache"
+    description: "Design a Redis-like distributed cache: eviction, replication, consistent hashing, hot-key handling"
+    path: problems/distributed-cache
+    category: distributed
+    nfrs:
+      - slug: scalability
+        phases: [3, 4, 5, 7, 8]     # data partitioning, consistent hashing, architecture, replication, sharding
+      - slug: performance
+        phases: [2, 4, 6]           # API design, partitioning, eviction policies
+      - slug: availability
+        phases: [5, 8, 9]           # architecture, replication, failure modes
+      - slug: consistency
+        phases: [4, 7, 8]           # partitioning, replication, consistency models
+      - slug: durability
+        phases: [7, 8]              # replication, persistence options
+      - slug: cost
+        phases: [6, 10, 11]         # eviction, memory management, monitoring
+      - slug: observability
+        phases: [10, 11]            # monitoring & alerting, cost analysis
+    functional_requirements:
+      - slug: get-set
+        title: "GET/SET Operations"
+        phases: [2, 3, 4]           # API design, data model, partitioning
+      - slug: eviction
+        title: "Eviction Policy"
+        phases: [6]                 # eviction deep dive
+      - slug: replication
+        title: "Replication"
+        phases: [7, 8]              # replication, failure handling
+      - slug: hot-key
+        title: "Hot Key Handling"
+        phases: [5, 9]              # architecture, failure scenarios
+    uses:
+      - fundamental: distributed/consistent-hashing
+        config: "Consistent hash ring with 150 virtual nodes per physical cache node"
+        why: "Adding/removing cache nodes only invalidates K/N keys instead of all keys"
+        not_this: "Modulo hashing (key % N) — adding one node invalidates nearly all cached data"
+        risk: "Virtual node count too low causes uneven distribution — monitor node load variance"
+        caveats: "Jump consistent hash or Rendezvous hashing also viable. CH most understood by interviewers."
+        nfrs: [scalability]
+      - fundamental: storage/redis
+        config: "Redis cluster with 3 primary + 3 replica nodes; Sentinel for failover"
+        why: "Redis is the gold standard for distributed caching — battle-tested at massive scale"
+        not_this: "Memcached — no replication, no persistence, no data structures beyond strings"
+        risk: "Redis cluster requires all key lookups to hit the correct slot — client-side routing complexity"
+        caveats: "Redis Cluster uses 16384 hash slots. CRC16(key) % 16384 determines slot. client must redirect."
+        nfrs: [performance, availability]
+      - fundamental: networking/load-balancing
+        config: "NLB in front of cache cluster — L4 routing for lowest latency, no HTTP overhead"
+        why: "Cache reads are the hottest path in the system — L4 routing adds <0.1ms vs L7's ~0.5ms"
+        not_this: "ALB — HTTP header parsing overhead not justified for sub-ms cache operations"
+        risk: "NLB does not terminate TLS — cache cluster must handle TLS termination directly"
+        caveats: "Use client-side consistent hashing instead of NLB for cache — avoids extra network hop."
+        nfrs: [performance, availability]
+      - fundamental: distributed/cap-theorem
+        config: "AP cache: reads from replica (stale OK), writes to primary (strong consistency on writes)"
+        why: "Cache staleness is acceptable — stale data means one extra DB hit, not data corruption"
+        not_this: "CP cache with read-your-own-writes everywhere — sync replication adds 2-5ms per write"
+        risk: "Replication lag during high-write burst causes stale reads longer than expected TTL"
+        caveats: "Redis async replication: primary ack's write before replica confirms. Potential data loss on failover."
+        nfrs: [consistency, availability]
+
+  - slug: notification-system
+    title: "Notification System"
+    description: "Design push/email/SMS notifications: fan-out, delivery guarantees, rate limiting, 1B users"
+    path: problems/notification-system
+    category: distributed
+    nfrs:
+      - slug: scalability
+        phases: [3, 5, 6, 7]        # data model, architecture, fan-out, multi-channel
+      - slug: performance
+        phases: [2, 4, 6]           # API design, priority queues, fan-out
+      - slug: availability
+        phases: [5, 8, 9]           # architecture, failure modes, retry
+      - slug: consistency
+        phases: [4, 8]              # deduplication, delivery guarantees
+      - slug: durability
+        phases: [4, 8]              # message persistence, retry queues
+      - slug: security
+        phases: [9, 10]             # opt-out, rate limiting abuse prevention
+      - slug: cost
+        phases: [6, 10, 11]         # channel cost, batching, monitoring
+      - slug: observability
+        phases: [10, 11]            # delivery metrics, alerting
+    functional_requirements:
+      - slug: push-notification
+        title: "Push Notification"
+        phases: [3, 5, 6]           # data model, architecture, delivery
+      - slug: email-sms
+        title: "Email / SMS"
+        phases: [5, 6, 7]           # architecture, delivery, multi-channel
+      - slug: fan-out
+        title: "Fan-Out"
+        phases: [6, 7]              # fan-out, multi-channel delivery
+      - slug: delivery-guarantees
+        title: "Delivery Guarantees"
+        phases: [4, 8]              # at-least-once, retry
+    uses:
+      - fundamental: messaging/message-queues
+        config: "Kafka topics per channel (push/email/sms); priority queue via separate high-priority topic"
+        why: "Notification fan-out must be async — synchronous delivery to 10M followers blocks the triggering action"
+        not_this: "Direct HTTP calls from notification service — timeouts cascade when third-party providers are slow"
+        risk: "Kafka consumer lag during news event = notifications delayed by hours — needs priority queueing"
+        caveats: "Use Kafka for durability. SQS for simplicity at smaller scale. Redis Streams as middle ground."
+        nfrs: [scalability, durability]
+      - fundamental: storage/redis
+        config: "Deduplication window (SET NX with 24h TTL per notification_id); user preference cache"
+        why: "At-least-once delivery causes duplicates — Redis NX check prevents duplicate push sends"
+        not_this: "DB-level deduplication — 1B notifications/day = 1B unique constraint checks = DB bottleneck"
+        risk: "Redis NX key expires before dedup window ends — increase TTL or use DB for critical channels"
+        caveats: "Dedup key: SHA256(user_id + event_id + channel). SET NX EX 86400. ~50 bytes per key."
+        nfrs: [consistency, performance]
+      - fundamental: storage/dynamodb
+        config: "Notification log (PK=user_id, SK=notification_id) with TTL=30 days"
+        why: "Users expect notification history — DynamoDB handles write-heavy append pattern at scale"
+        not_this: "Postgres — notification writes spike 100x during viral events, Postgres connection pool exhausts"
+        risk: "Hot partition on user_id for viral events — batch writes, use DynamoDB write sharding"
+        caveats: "Use DynamoDB streams to trigger Lambda for additional processing (e.g., updating unread counts)."
+        nfrs: [scalability, durability]
+      - fundamental: distributed/rate-limiting
+        config: "Rate limit per channel: email 3/hour, push 5/hour, SMS 1/hour per user"
+        why: "Unbounded notification fan-out creates spam — rate limits preserve user trust"
+        not_this: "No rate limiting — a single viral post triggers 100M+ notifications overwhelming providers"
+        risk: "Rate limit misses during Redis failover — notifications burst through until Redis recovers"
+        caveats: "Separate rate limits by notification type (transactional vs. marketing). Never rate-limit OTP/2FA."
+        nfrs: [security, availability]
+      - fundamental: distributed/circuit-breaker
+        config: "Circuit breaker on FCM, APNs, SendGrid, Twilio — fail-open with retry queue"
+        why: "Third-party provider outage should not cascade to block all notifications across all channels"
+        not_this: "Infinite retry loop — fills queue, starves other notifications, cascades to all consumers"
+        risk: "Open circuit silently drops notifications — DLQ required to replay after provider recovers"
+        caveats: "Circuit opens after 5 consecutive 5xx responses. Half-open probe every 60s. DLQ retention 7 days."
+        nfrs: [availability]
+
+  - slug: file-storage
+    title: "Distributed File Storage"
+    description: "Design Google Drive / Dropbox: file chunking, sync, versioning, conflict resolution, 1B users"
+    path: problems/file-storage
+    category: distributed
+    nfrs:
+      - slug: scalability
+        phases: [3, 4, 5, 7, 8]     # data model, upload flow, architecture, scaling, multi-DC
+      - slug: performance
+        phases: [2, 4, 6]           # API design, upload flow, sync optimization
+      - slug: availability
+        phases: [5, 8, 9]           # architecture, multi-DC, failure modes
+      - slug: consistency
+        phases: [4, 7, 8]           # conflict resolution, versioning, multi-DC
+      - slug: durability
+        phases: [3, 5, 8]           # storage reliability, replication, failure modes
+      - slug: security
+        phases: [9, 10]             # encryption, access control
+      - slug: cost
+        phases: [4, 10, 11]         # storage tiers, deduplication, monitoring
+      - slug: observability
+        phases: [10, 11]            # sync metrics, monitoring
+    functional_requirements:
+      - slug: upload-download
+        title: "Upload / Download"
+        phases: [2, 3, 4]           # API, data model, upload flow
+      - slug: sync
+        title: "Device Sync"
+        phases: [6, 7]              # sync optimization, conflict resolution
+      - slug: versioning
+        title: "File Versioning"
+        phases: [3, 7]              # data model, versioning strategy
+      - slug: sharing
+        title: "Sharing & Permissions"
+        phases: [2, 9]              # API design, security
+    uses:
+      - fundamental: storage/s3
+        config: "S3 for chunk storage; multipart upload for files >5MB; S3 Intelligent-Tiering for cold files"
+        why: "Files are write-once, read-many — object storage is 10x cheaper than block storage for this pattern"
+        not_this: "EBS block storage — $0.10/GB/mo vs S3 $0.023/GB/mo. File storage at PB scale = 4x cost penalty"
+        risk: "S3 eventual consistency for overwrite operations — use versioning to avoid stale reads"
+        caveats: "S3 multipart: minimum 5MB per part, max 10,000 parts = max 5TB per object. Split larger files."
+        nfrs: [durability, cost]
+      - fundamental: storage/dynamodb
+        config: "Metadata DB: files table (PK=user_id, SK=file_id), chunks table (PK=content_hash, SK=chunk_seq)"
+        why: "File metadata is access-by-user-id pattern — DynamoDB single-table design handles at scale"
+        not_this: "Postgres — file metadata at 1B users × avg 10K files = 10T rows, Postgres sharding complexity"
+        risk: "Content-addressed chunks (dedup by hash) require separate lookup — two-table design needed"
+        caveats: "Use content-addressable storage: SHA256(chunk) as key. Identical chunks stored once across all users."
+        nfrs: [scalability, durability]
+      - fundamental: networking/cdn/cloudfront
+        config: "CloudFront for file download — S3 as origin, signed URLs for private files"
+        why: "Downloads are read-heavy and globally distributed — CDN reduces origin load by 70%+"
+        not_this: "Direct S3 download — no edge caching, all traffic hits origin, higher latency globally"
+        risk: "Signed URL expiry while large file downloading — use longer TTL for large files (1 hour)"
+        caveats: "Pre-signed S3 URLs bypass CloudFront — use CloudFront signed URLs for CDN + access control."
+        nfrs: [performance, cost]
+      - fundamental: messaging/message-queues
+        config: "SQS for async chunk processing (virus scan, thumbnail generation, search indexing)"
+        why: "Post-upload processing must not block the upload response — async queue decouples concerns"
+        not_this: "Synchronous virus scan on upload — adds 2-5 seconds to upload response, unacceptable UX"
+        risk: "SQS queue depth spikes during mass upload events — auto-scale consumers by queue depth"
+        caveats: "Use SQS FIFO for guaranteed ordering of version chunks. Standard queue for parallel processing."
+        nfrs: [scalability, availability]
+      - fundamental: distributed/cap-theorem
+        config: "AP for uploads (accept upload, sync later). CP for access control (never grant access with stale perms)"
+        why: "File uploads should succeed even during network partition. Security decisions cannot be eventually consistent."
+        not_this: "Fully AP — eventual consistency in permissions would allow temporarily unauthorized access to files"
+        risk: "AP upload during partition creates conflict when sync resolves — needs conflict resolution strategy"
+        caveats: "Dropbox conflict copy strategy: keep both versions, rename conflicted file, notify user."
+        nfrs: [consistency, availability]
+
+  - slug: collaborative-editing
+    title: "Collaborative Editing (Google Docs)"
+    description: "Design real-time collaborative document editing: OT, conflict resolution, WebSockets, offline support"
+    path: problems/collaborative-editing
+    category: distributed
+    nfrs:
+      - slug: scalability
+        phases: [3, 5, 7, 8]        # data model, architecture, scaling, multi-DC
+      - slug: performance
+        phases: [2, 4, 5, 6]        # API design, OT algorithm, architecture, sync optimization
+      - slug: availability
+        phases: [5, 8, 9]           # architecture, failure modes, offline support
+      - slug: consistency
+        phases: [4, 7]              # OT algorithm, convergence guarantees
+      - slug: durability
+        phases: [3, 8]              # data model, persistence
+      - slug: cost
+        phases: [10, 11]            # operational costs, monitoring
+      - slug: observability
+        phases: [10, 11]            # latency metrics, monitoring
+    functional_requirements:
+      - slug: real-time-edit
+        title: "Real-Time Editing"
+        phases: [2, 4, 5]           # API, OT algorithm, architecture
+      - slug: conflict-resolution
+        title: "Conflict Resolution"
+        phases: [4, 7]              # OT, CRDT comparison
+      - slug: offline-support
+        title: "Offline Support"
+        phases: [8, 9]              # failure modes, offline editing
+      - slug: version-history
+        title: "Version History"
+        phases: [3, 6]              # data model, history traversal
+    uses:
+      - fundamental: networking/websockets
+        config: "WebSocket per document session; sticky sessions to document server via consistent hashing"
+        why: "Real-time collaborative editing requires sub-100ms propagation — HTTP polling is unacceptable"
+        not_this: "HTTP polling every 500ms — 200ms average staleness, 2x bandwidth overhead, poor UX"
+        risk: "Document server failure drops all WebSocket connections — reconnect must replay missed operations"
+        caveats: "Sticky sessions: hash doc_id to server. Client reconnects to same server on disconnect."
+        nfrs: [performance]
+      - fundamental: storage/redis
+        config: "Active document state in Redis (current doc snapshot + in-flight operations log)"
+        why: "Sub-ms read of current document state for OT transformation — DB too slow for every keystroke"
+        not_this: "Postgres for hot document state — 2-5ms read latency causes OT transformation bottleneck"
+        risk: "Redis eviction of active documents — set no-eviction policy for document namespace"
+        caveats: "Redis key: 'doc:{doc_id}:ops' sorted set of operations by sequence number. Persist to Postgres async."
+        nfrs: [performance, availability]
+      - fundamental: distributed/cap-theorem
+        config: "CP for operation ordering (causal consistency via OT). AP for read replicas (viewing)"
+        why: "OT requires all clients to see operations in the same order — causal consistency is non-negotiable"
+        not_this: "AP with eventual consistency for operations — divergent operation ordering causes document corruption"
+        risk: "Network partition during collaborative session — one partition may process different op sequences"
+        caveats: "Use single authoritative server per document to linearize operations. Scale by document sharding."
+        nfrs: [consistency]
+      - fundamental: storage/dynamodb
+        config: "Document versions table (PK=doc_id, SK=version_id), operations log with TTL=30 days"
+        why: "Version history is append-only — DynamoDB GSI on version_id supports time-travel queries"
+        not_this: "Storing full document snapshots per version — 100 edits = 100 full document copies, huge waste"
+        risk: "Operation log unbounded growth — take checkpoint snapshots every 1000 operations, prune log"
+        caveats: "Checkpoint: snapshot doc state every 1000 ops. Restore = latest checkpoint + ops since checkpoint."
+        nfrs: [durability, scalability]
+
+  - slug: payment-system
+    title: "Payment System (Stripe / PayPal)"
+    description: "Design a payment processor: idempotency, distributed transactions, ledger, fraud detection, ACID"
+    path: problems/payment-system
+    category: distributed
+    nfrs:
+      - slug: scalability
+        phases: [3, 5, 7, 8]        # data model, architecture, scaling, multi-DC
+      - slug: performance
+        phases: [2, 4, 6]           # API design, processing flow, optimization
+      - slug: availability
+        phases: [5, 8, 9]           # architecture, failure handling, multi-DC
+      - slug: consistency
+        phases: [3, 4, 7]           # ledger design, ACID, distributed transactions
+      - slug: durability
+        phases: [3, 4, 8]           # ledger, WAL, failure recovery
+      - slug: security
+        phases: [9, 10]             # fraud detection, PCI DSS, encryption
+      - slug: cost
+        phases: [6, 10, 11]         # payment network fees, infrastructure, monitoring
+      - slug: observability
+        phases: [10, 11]            # payment success rate, latency, monitoring
+    functional_requirements:
+      - slug: payment-processing
+        title: "Payment Processing"
+        phases: [2, 3, 4]           # API, data model, processing flow
+      - slug: idempotency
+        title: "Idempotency"
+        phases: [4, 8]              # processing flow, failure handling
+      - slug: ledger
+        title: "Double-Entry Ledger"
+        phases: [3, 7]              # data model, accounting
+      - slug: fraud-detection
+        title: "Fraud Detection"
+        phases: [9]                 # security deep dive
+    uses:
+      - fundamental: distributed/saga-pattern
+        config: "Saga for payment flow: authorize → capture → settle → reconcile (choreography with compensating tx)"
+        why: "Payment spans multiple services (auth, fraud, bank API, ledger) — 2PC across all is too slow/fragile"
+        not_this: "Two-phase commit (2PC) — coordinator becomes SPOF; bank API doesn't support 2PC protocol"
+        risk: "Saga partial failure: authorize succeeds, capture fails — must trigger compensating rollback reliably"
+        caveats: "Idempotency keys on every step. Compensating transactions must be idempotent too."
+        nfrs: [consistency, durability]
+      - fundamental: storage/dynamodb
+        config: "Idempotency table (PK=idempotency_key, TTL=24h) for deduplication of retried payments"
+        why: "Network retries cause duplicate payment attempts — idempotency keys prevent double charging"
+        not_this: "DB unique constraint on payment_id — doesn't handle retries that arrive after partial failure"
+        risk: "DynamoDB conditional write race condition — two concurrent retries both pass NX check"
+        caveats: "Idempotency key: PUT NX with TTL. Second attempt returns cached result. Key format: client_id:request_id."
+        nfrs: [consistency, durability]
+      - fundamental: distributed/cap-theorem
+        config: "CP for ledger writes (ACID, never lose money). AP for payment status reads (eventual is OK)"
+        why: "Double-spending requires strong consistency — two concurrent payments cannot both see the same balance"
+        not_this: "AP ledger — eventual consistency allows double-spending window between replicas syncing"
+        risk: "CP under network partition means some payments fail rather than risk double-charging"
+        caveats: "PostgreSQL with row-level locking for balance updates. Spanner for global CP ledger."
+        nfrs: [consistency]
+      - fundamental: messaging/message-queues
+        config: "Kafka for async settlement and reconciliation; exactly-once semantics via idempotent producer"
+        why: "Bank settlement is async — publishing to Kafka decouples the payment UX from bank API latency"
+        not_this: "Synchronous bank API call in payment flow — bank API can take 2-10 seconds, kills UX"
+        risk: "Kafka exactly-once relies on transaction API — adds 10-20% overhead, necessary for financial data"
+        caveats: "Kafka idempotent producer: enable.idempotence=true. Use transactions for atomic multi-topic writes."
+        nfrs: [durability, scalability]
+      - fundamental: distributed/circuit-breaker
+        config: "Circuit breaker on bank/card network APIs — fail-fast with clear payment error message to user"
+        why: "Bank API is the most unreliable dependency — a 30s timeout blocks payment thread, cascades to all payments"
+        not_this: "Unbounded timeout on bank API — one slow bank brings down entire payment processing fleet"
+        risk: "Open circuit = payment failures — must communicate clearly to user, not silently drop"
+        caveats: "Short timeout on bank API (3s). Open after 3 consecutive failures. Route to backup bank API if available."
+        nfrs: [availability]
+
+  - slug: logging-system
+    title: "Logging & Metrics System"
+    description: "Design a Datadog/ELK-like observability platform: log ingestion, search, alerting, 1M servers"
+    path: problems/logging-system
+    category: distributed
+    nfrs:
+      - slug: scalability
+        phases: [3, 4, 5, 7, 8]     # data model, ingestion pipeline, architecture, storage, scaling
+      - slug: performance
+        phases: [2, 4, 6]           # API design, ingestion pipeline, query performance
+      - slug: availability
+        phases: [5, 8, 9]           # architecture, failure modes, durability
+      - slug: consistency
+        phases: [4, 7]              # ingestion ordering, query consistency
+      - slug: durability
+        phases: [4, 5, 8]           # pipeline durability, replication, failure recovery
+      - slug: cost
+        phases: [7, 10, 11]         # storage tiers, compression, monitoring costs
+      - slug: observability
+        phases: [10, 11]            # meta-monitoring, alerting
+    functional_requirements:
+      - slug: log-ingestion
+        title: "Log Ingestion"
+        phases: [3, 4, 5]           # data model, pipeline, architecture
+      - slug: log-search
+        title: "Log Search"
+        phases: [2, 6, 7]           # API, query, storage optimization
+      - slug: metrics-alerting
+        title: "Metrics & Alerting"
+        phases: [4, 8, 9]           # metrics pipeline, alerting, failure handling
+      - slug: retention
+        title: "Retention Policy"
+        phases: [7, 10]             # storage tiers, cost management
+    uses:
+      - fundamental: messaging/message-queues
+        config: "Kafka for log ingestion buffer: 30-day retention, partitioned by service_name"
+        why: "Log agents push at >1M events/sec — Kafka buffers burst traffic before indexing pipeline"
+        not_this: "Direct write to Elasticsearch — ES indexing throughput 100K/node, Kafka buffers the gap"
+        risk: "Kafka disk fill during indexing pipeline outage — size retention by 24h of peak ingest"
+        caveats: "Kafka producer: acks=1 (fire-and-forget). ES indexer: consumer group per index, batch 10K docs."
+        nfrs: [scalability, durability]
+      - fundamental: storage/elasticsearch
+        config: "Elasticsearch for log search: ILM policy (hot 7 days SSD, warm 30 days HDD, cold 90 days S3)"
+        why: "Full-text log search with field filtering — Elasticsearch inverted index handles arbitrary log queries"
+        not_this: "ClickHouse — better for metrics/time-series, not full-text search across arbitrary log fields"
+        risk: "ES shard explosion — one index per day × 30 days × 10 services = 300 shards, degrades performance"
+        caveats: "One index per service per day. ILM policy moves index to warm after 7 days, cold after 30."
+        nfrs: [performance, scalability]
+      - fundamental: storage/dynamodb
+        config: "Metrics time-series table (PK=metric_name+host, SK=timestamp); alert rules config table"
+        why: "Metrics are simple numeric time-series — DynamoDB TTL handles automatic retention cleanup"
+        not_this: "Elasticsearch for metrics — overkill, high cost for numeric time-series data"
+        risk: "DynamoDB hot partition on high-cardinality metric keys during peak traffic"
+        caveats: "Write sharding: append random suffix to PK, query all shards and merge. Or use InfluxDB/Prometheus."
+        nfrs: [scalability, durability]
+      - fundamental: storage/s3
+        config: "S3 for cold log archival: Parquet format, Athena for ad-hoc historical queries"
+        why: "Cold logs (>90 days) cost $0.023/GB on S3 vs $0.10/GB on ES SSD — 4x cheaper"
+        not_this: "Keep everything in Elasticsearch — ES hot storage at $0.10/GB × 1PB = $100K/mo"
+        risk: "Athena query on 1PB S3: $5/TB scanned — partition by date and service to limit scan"
+        caveats: "Parquet compression 10:1 over raw JSON. Partition S3 prefix: /logs/{service}/{date}/. Athena auto-discovers."
+        nfrs: [cost, durability]
+
+  - slug: recommendation-system
+    title: "Recommendation System (YouTube / Netflix)"
+    description: "Design a personalized recommendation engine: collaborative filtering, real-time signals, A/B testing"
+    path: problems/recommendation-system
+    category: distributed
+    nfrs:
+      - slug: scalability
+        phases: [3, 5, 6, 7, 8]     # data model, architecture, ML pipeline, candidate generation, scaling
+      - slug: performance
+        phases: [2, 4, 6]           # API design, retrieval, real-time ranking
+      - slug: availability
+        phases: [5, 8, 9]           # architecture, failure modes, fallback
+      - slug: consistency
+        phases: [4, 7]              # feature freshness, model-serving consistency
+      - slug: durability
+        phases: [3, 5]              # data model, feature store
+      - slug: cost
+        phases: [6, 10, 11]         # ML serving cost, batching, monitoring
+      - slug: observability
+        phases: [10, 11]            # CTR metrics, A/B testing, monitoring
+    functional_requirements:
+      - slug: candidate-generation
+        title: "Candidate Generation"
+        phases: [6, 7]              # candidate retrieval, ML pipeline
+      - slug: ranking
+        title: "Ranking & Scoring"
+        phases: [4, 6]              # real-time ranking, feature computation
+      - slug: real-time-signals
+        title: "Real-Time Signals"
+        phases: [4, 5]              # signal ingestion, feature store
+      - slug: ab-testing
+        title: "A/B Testing"
+        phases: [9, 10]             # experimentation, monitoring
+    uses:
+      - fundamental: storage/redis
+        config: "Serving cache: pre-computed top-K recs per user (LRANGE, TTL=1h); real-time feature vectors"
+        why: "Recommendation serving must be <100ms — pre-computing and caching candidates avoids live ML inference"
+        not_this: "Live model inference per request — transformer models take 50-200ms, unacceptable for every page load"
+        risk: "Cache miss for new users (cold start) — fallback to popularity-based recommendations"
+        caveats: "Pre-compute recs hourly per user. Blend with real-time signals (last 5 clicks) at serve time."
+        nfrs: [performance, availability]
+      - fundamental: storage/elasticsearch
+        config: "Item index for content-based retrieval: dense vector search (ANN) for embedding similarity"
+        why: "Candidate generation via embedding ANN search — find 100 candidates from 100M items in <50ms"
+        not_this: "Brute-force cosine similarity on 100M items — O(N) per query, 10 seconds per user request"
+        risk: "ANN approximate results miss some relevant items — trade recall for latency (90% recall is acceptable)"
+        caveats: "Elasticsearch kNN with HNSW index. Tune ef_search for recall vs latency. Pre-filter by user's country."
+        nfrs: [performance, scalability]
+      - fundamental: messaging/message-queues
+        config: "Kafka for user event stream (clicks, watch time, skips); feature pipeline trigger"
+        why: "Real-time signals (user just clicked video X) must update recommendations within minutes"
+        not_this: "Batch signal processing — daily batch means new preferences take 24h to appear in recs"
+        risk: "Kafka consumer lag during viral content — real-time signals delayed, recommendations lag behind trends"
+        caveats: "Flink consumer on Kafka: compute sliding window features (clicks in last 1h, 24h). Write to feature store."
+        nfrs: [scalability, durability]
+      - fundamental: storage/dynamodb
+        config: "User interaction history (PK=user_id, SK=timestamp#item_id); model serving metadata"
+        why: "User history lookups are by user_id — DynamoDB single-partition query for all of a user's history"
+        not_this: "Postgres for user history — 1B users × 10K interactions = 10T rows, join-heavy queries slow"
+        risk: "User interaction table unbounded growth — TTL=90 days, archive older to S3 for offline training"
+        caveats: "Limit stored interactions to last 10K per user. Older interactions have diminishing signal value."
+        nfrs: [scalability, durability]
+      - fundamental: distributed/cap-theorem
+        config: "AP for recommendation serving (stale recs for 1h acceptable). CP for A/B experiment assignment."
+        why: "Showing slightly stale recommendations is fine. Seeing different experiment variants inconsistently is not."
+        not_this: "CP for recommendations — waiting for global consistency adds latency, recommendations degrade"
+        risk: "AP A/B assignment causes user to switch experiment buckets — ruins statistical validity of experiment"
+        caveats: "Sticky A/B assignment: hash(user_id + experiment_id) % 100. Same user always in same bucket."
+        nfrs: [consistency, availability]
+
 # ─── Fundamentals (hierarchical) ───
 fundamentals:
   - slug: networking/load-balancing

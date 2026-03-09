@@ -77,15 +77,27 @@ func countChildFundamentals(children []registry.Fundamental) int {
 
 // baseData returns common template data shared by all handlers.
 func (h *Handler) baseData() map[string]interface{} {
+	// Split problems into core and distributed categories for sidebar grouping
+	var coreProblems, distributedProblems []*registry.Problem
+	for _, p := range h.reg.Problems {
+		if p.Category == "distributed" {
+			distributedProblems = append(distributedProblems, p)
+		} else {
+			coreProblems = append(coreProblems, p)
+		}
+	}
+
 	return map[string]interface{}{
-		"Problems":          h.reg.Problems,
-		"Fundamentals":      h.reg.Fundamentals,
-		"FundamentalGroups": h.reg.GroupedFundamentals(),
-		"Algorithms":        h.reg.Algorithms,
-		"Patterns":          h.reg.Patterns,
-		"Concepts":          h.reg.Concepts,
-		"QuickCategories":   h.reg.QuickCategories,
-		"TotalFundamentals": countFundamentals(h.reg.Fundamentals),
+		"Problems":             h.reg.Problems, // all problems (for templates that need full list)
+		"CoreProblems":         coreProblems,
+		"DistributedProblems":  distributedProblems,
+		"Fundamentals":         h.reg.Fundamentals,
+		"FundamentalGroups":    h.reg.GroupedFundamentals(),
+		"Algorithms":           h.reg.Algorithms,
+		"Patterns":             h.reg.Patterns,
+		"Concepts":             h.reg.Concepts,
+		"QuickCategories":      h.reg.QuickCategories,
+		"TotalFundamentals":    countFundamentals(h.reg.Fundamentals),
 	}
 }
 

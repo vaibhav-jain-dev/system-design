@@ -1,0 +1,458 @@
+{{stageNav "Requirements & Problem Scope" 1 "API Design" 2 "Data Model & Storage" 3 "Message Queue Architecture" 4 "High-Level Architecture" 5 "Fan-Out & Delivery" 6 "Multi-Channel Routing" 7 "Delivery Guarantees & Deduplication" 8 "Opt-Out, Rate Limiting & Compliance" 9 "Failure Handling & Retry" 10 "Monitoring & SLAs" 11 "Interview Deep-Dive Q&A" 12}}
+
+{{phase 1 "Requirements & Problem Scope" "5 min"}}
+
+{{say `Let me scope this — notification systems vary enormously in complexity:
+<ul>
+  <li>Channels: <strong>push</strong> (FCM/APNs), <strong>email</strong> (SendGrid/SES), <strong>SMS</strong> (Twilio), <strong>in-app</strong></li>
+  <li>Scale: <span class="hl">1B users</span>, <span class="hl">10M notifications/minute</span> during peak (viral events)</li>
+  <li>Delivery semantics: <strong>at-least-once</strong> — some duplicates acceptable, zero misses not acceptable</li>
+  <li>I'll focus on push + email first (90% of volume), then layer SMS</li>
+</ul>`}}
+
+{{diagram "notif-requirements"}}
+
+{{table "Functional Requirements" (rows
+  (row "Requirement"          "Description"                                       "Priority"  "Drives")
+  (row "Push notifications"   "FCM (Android), APNs (iOS) delivery"               "P0"        "Device token management, provider API")
+  (row "Email"                "SendGrid/SES templated delivery"                   "P0"        "Template engine, bounce handling")
+  (row "SMS"                  "Twilio delivery for OTP, alerts"                   "P1"        "Phone number routing, cost control")
+  (row "Fan-out"              "1 event → N user notifications"                    "P0"        "Kafka, async consumer architecture")
+  (row "At-least-once"        "Retry until delivered or max retries"              "P0"        "DLQ, retry queue, idempotency")
+  (row "Rate limiting"        "Max N notifications/hour per user per channel"     "P1"        "Redis token bucket")
+  (row "Opt-out"              "Global/channel/category unsubscribe"               "P0"        "Preference service, CAN-SPAM/GDPR")
+  (row "Priority"             "OTP &gt; transactional &gt; marketing"            "P1"        "Separate Kafka topics by priority")
+)}}
+
+{{hint "why at-least-once instead of exactly-once?" "Exactly-once delivery across push networks is impossible — you can't prevent FCM from delivering twice during retries. Instead: send with at-least-once semantics (retry on failure), deduplicate at the receiver side using notification_id. FCM has built-in 14-day dedup window. APNs collapses duplicate push identifiers. This is the industry standard."}}
+
+{{think "The most important design decision upfront: should the notification system be synchronous (caller waits for delivery confirmation) or asynchronous (caller fires and forgets, system handles delivery)? Synchronous blocks the triggering action — if you're posting on Instagram, the post can't complete until 10M notification deliveries are confirmed. Async is the only viable design."
+  (whyNot "synchronous delivery in the request path" "An Instagram post to 10M followers would take 10M × 1ms FCM API call = 2.7 hours synchronously. Even parallel: 10M calls at 10K concurrent = 1000 batches × 100ms each = 100 seconds. Unacceptable. The triggering action (post) must complete in <500ms.")
+  (whatIf "Kafka is down when a notification event arrives" "Triggering services write to a local outbox table (transactional outbox pattern). A background poller reads the outbox and writes to Kafka when available. Notifications may be delayed but not lost — the outbox table persists across service restarts.")
+}}
+
+{{triggerQs "Scope clarifications"
+  "How do you handle different notification priorities?"
+  "Use separate Kafka topics: high_priority (OTP, payment alerts), medium_priority (likes, comments), low_priority (marketing). Consumers poll high_priority first — if empty, check medium, then low. This ensures OTP always gets through even during a notification storm from marketing campaigns."
+  "Do you differentiate between transactional and marketing notifications?"
+  "Critical distinction. Transactional (OTP, purchase confirmation, password reset): never rate-limited, always delivered, user cannot opt out via the channel. Marketing: rate-limited (3/day max), respect quiet hours, user can opt out. CAN-SPAM requires a physical mailing address and one-click unsubscribe in every marketing email."
+}}
+
+{{phase 2 "API Design" "5 min"}}
+
+{{say `Two APIs: one for producers (services that trigger notifications) and one for consumers (users managing preferences):
+<ul>
+  <li>Producers call a simple <strong>send notification</strong> endpoint — the system handles routing, channel selection, retry</li>
+  <li>Users call preferences API to manage opt-outs and quiet hours</li>
+</ul>`}}
+
+{{diagram "notif-architecture"}}
+
+<div class="api-doc">
+  <div class="api-view-tabs">
+    <button class="api-view-tab active" data-view="quick">Quick</button>
+    <button class="api-view-tab" data-view="detailed">Detailed</button>
+  </div>
+  <div class="api-view-pane active" data-view="quick">
+    <div class="api-quick">
+      <div class="api-quick-block">
+        <div class="api-quick-section"># P0 — Core</div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/notifications</span>
+          <span class="api-quick-comment"># Trigger notification (async) — returns notification_id</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/notifications/<span class="pp">{id}</span>/status</span>
+          <span class="api-quick-comment"># Check delivery status</span>
+        </div>
+      </div>
+      <div class="api-quick-block">
+        <div class="api-quick-section"># P1 — Preferences</div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/users/<span class="pp">{user_id}</span>/preferences</span>
+          <span class="api-quick-comment"># Get notification preferences</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method PUT">PUT</span>
+          <span class="api-quick-path">/users/<span class="pp">{user_id}</span>/preferences</span>
+          <span class="api-quick-comment"># Update opt-outs, quiet hours</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="api-view-pane" data-view="detailed">
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>
+          <span class="api-path">/notifications</span>
+          <span class="api-desc">Trigger a notification (async delivery)</span>
+        </div>
+        <span class="api-auth">🔑 Service key</span>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Request Body</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">user_id</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Target user</td></tr>
+              <tr><td><span class="rf">type</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Notification type: otp | payment | like | marketing</td></tr>
+              <tr><td><span class="rf">channels</span><span class="rbadge opt">optional</span></td><td><span class="rt">string[]</span></td><td class="rd">Preferred channels; system selects if omitted</td></tr>
+              <tr><td><span class="rf">template_id</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Template slug from template library</td></tr>
+              <tr><td><span class="rf">variables</span><span class="rbadge opt">optional</span></td><td><span class="rt">object</span></td><td class="rd">Template variable substitution</td></tr>
+              <tr><td><span class="rf">idempotency_key</span><span class="rbadge opt">optional</span></td><td><span class="rt">string</span></td><td class="rd">Prevents duplicate sends on retry</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="202">202 Accepted</span>
+            <span class="api-tab s4" data-code="400">400 Bad Request</span>
+          </div>
+          <div class="api-response-body active" data-code="202"><span class="jp">{</span>
+  <span class="jk">"notification_id"</span><span class="jp">:</span> <span class="jv">"notif_abc123"</span><span class="jp">,</span>
+  <span class="jk">"status"</span><span class="jp">:</span> <span class="jv">"queued"</span>
+<span class="jp">}</span></div>
+          <div class="api-response-body" data-code="400"><span class="jp">{</span><span class="jk">"error"</span><span class="jp">:</span> <span class="jv">"invalid_template"</span><span class="jp">}</span></div>
+        </div>
+        <div class="api-card-note">Returns 202 Accepted immediately — delivery is async. Use status endpoint to poll.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{{hint "idempotency key for notification sends" "If the triggering service retries (network failure), it sends the same notification twice. The idempotency_key prevents double delivery: Redis SET NX with 24h TTL. Second call with same key returns the original notification_id and status without re-queuing. Format: {service_id}:{event_id}."}}
+
+{{phase 3 "Data Model & Storage" "8 min"}}
+
+{{diagram "notif-data-model"}}
+
+{{table "Storage Technology Choices" (rows
+  (row "Data"               "Storage"       "Why")
+  (row "Notification log"   "DynamoDB"      "Append-only, high write throughput, TTL for auto-cleanup")
+  (row "User preferences"   "DynamoDB"      "Simple key-value by user_id, infrequent updates")
+  (row "Device tokens"      "DynamoDB"      "One-to-many: user has multiple devices, FK to user")
+  (row "Templates"          "DynamoDB"      "Read-heavy, version history needed, small records")
+  (row "Rate limit state"   "Redis"         "Sub-ms counter, TTL-based window, no durability needed")
+  (row "Dedup cache"        "Redis"         "SET NX, 24h TTL, fast existence check")
+)}}
+
+{{hint "why TTL on the notification log?" "Users don't need notification history older than 30 days (and most don't care after 7 days). DynamoDB TTL automatically deletes expired items in the background — no cron job needed, no storage cost for old data. Set TTL at 30 days on creation. Also prevents the table from growing unboundedly."}}
+
+{{phase 4 "Message Queue Architecture" "8 min"}}
+
+{{say `Kafka is the backbone — it decouples notification triggers from delivery workers:
+<ul>
+  <li>Each notification type gets its own topic: <code>notif.push.high</code>, <code>notif.email.medium</code>, <code>notif.sms.high</code></li>
+  <li>Consumer groups: one group per channel (push consumers, email consumers, SMS consumers)</li>
+  <li>Partitioning: by <code>user_id</code> — ensures all notifications for a user are processed in order by one consumer</li>
+</ul>`}}
+
+{{diagram "notif-priority-queue"}}
+
+{{think "Partition by user_id for ordering, not by notification_id. This ensures: if user_id=123 gets 5 notifications triggered at the same time, they're all processed by the same consumer in the order they were produced. Without user-id partitioning, notifications for the same user could arrive out of order — a 'you have a new follower' arriving after 'like on your post' from the same event sequence."
+  (whyNot "one global Kafka topic for all notifications" "At 10M notifications/minute = 167K/sec, one topic requires hundreds of partitions to handle throughput. Priority becomes impossible — you can't poll high-priority messages first from a single topic without complex consumer group coordination. Separate topics give clean priority semantics.")
+  (how "separate topics give priority semantics" "Three topics: high, medium, low. Consumer loop: while(true) { msg = poll(high_topic, timeout=0ms); if(!msg) msg = poll(medium_topic, timeout=0ms); if(!msg) msg = poll(low_topic, timeout=100ms); process(msg); } High-priority messages are always processed first. Marketing messages accumulate in low-priority topic during a spike but drain when high priority is quiet.")
+}}
+
+{{hint "Kafka retention for notification replay" "Set Kafka retention to 7 days for all notification topics. This allows: (1) replaying failed notifications after a delivery system outage, (2) auditing which notifications were sent, (3) backfilling mobile apps that were offline. 10M notifications/day × 100 bytes avg × 7 days = 7GB retention — negligible cost."}}
+
+{{triggerQs "Kafka design questions"
+  "Why Kafka instead of SQS for notifications?"
+  "Kafka: 7-day replay, multiple consumer groups (each channel has its own consumer group reading the same topic), ordered delivery per partition, high throughput (millions/sec). SQS: simpler operational model, managed, scales automatically, better for isolated queues. For notification systems: Kafka's replay capability and multi-consumer-group support are worth the operational overhead at scale. SQS is fine for smaller systems."
+  "How do you handle Kafka consumer lag during a viral event?"
+  "Auto-scale consumers based on consumer lag metric. High lag → scale out more consumer pods. AWS MSK (Managed Kafka) integrates with ECS/Kubernetes horizontal autoscaling based on Kafka consumer lag. Also: high-priority topics have dedicated consumers that don't starve — marketing consumers scale separately from transactional consumers."
+}}
+
+{{phase 5 "High-Level Architecture" "10 min"}}
+
+{{diagram "notif-architecture"}}
+
+{{think "The critical path: triggering service → Kafka (durable) → consumer batch → FCM/APNs/SendGrid API → delivery receipt → update status in DB. The system must handle FCM being slow (200ms per batch), APNs batching restrictions (no true batch, just parallel single sends), and SendGrid rate limits (100 emails/sec on starter plan, 1500/sec on Pro)."
+  (whatIf "FCM API is down for 30 minutes" "Circuit breaker opens. Kafka consumer stops calling FCM but keeps polling. Messages accumulate in Kafka. When FCM recovers, circuit half-opens → test call → if success, circuit closes → consumer catches up with accumulated messages. Users get notifications ~30 minutes late. Monitoring alerts immediately.")
+  (how "template rendering works at scale" "Templates stored in DynamoDB. Template: 'Hi {{name}}, your order {{order_id}} is ready!' At render time: fetch template from DynamoDB (or Redis cache), interpolate variables, render as push title/body + email HTML. Cache templates in Redis with 1h TTL — templates change rarely. Localization: template has locale_code field, render with user's locale.")
+}}
+
+{{diagram "notif-push-flow"}}
+
+{{hint "FCM vs APNs differences" "FCM (Android): single HTTP/2 connection handles thousands of pushes/sec, true batch via multicast (up to 1000 tokens per request). APNs (iOS): per-device connection required, HTTP/2 persistent connection per device, no multicast — must send individually but can pipeline. Push workers need separate logic for each provider. Use firebase-admin SDK (FCM) and apns2 library (APNs)."}}
+
+{{phase 6 "Fan-Out & Delivery" "8 min"}}
+
+{{diagram "notif-fan-out"}}
+
+{{think "The celebrity fan-out problem for notifications: an influencer with 10M followers posts → 10M notifications triggered. The fan-out table is pre-built (subscribers are stored by influencer_id). Consumer reads influencer_id from event → queries subscribers table → gets 10M user_ids → batches into 10K-user chunks → enqueues each chunk as a Kafka message. This keeps the triggering event lightweight; actual fan-out happens in the consumer."
+  (whyNot "querying subscribers inline in the triggering service" "If Instagram post service queries 10M subscribers synchronously, the post endpoint takes 10+ seconds. Async: post service writes one event to Kafka (user_id=influencer, event=new_post). Fan-out consumer reads event, queries subscribers in batches of 10K, enqueues notification batches. Post endpoint returns in <100ms.")
+}}
+
+{{triggerQs "Fan-out design"
+  "How do you handle a celebrity with 100M followers without overwhelming Kafka?"
+  "Batch the fan-out: don't produce 100M individual Kafka messages. Instead: fan-out consumer reads subscriber IDs in batches of 10K → produces one Kafka message per batch of 10K user_ids → delivery consumer reads batch → sends 10K push notifications. 100M followers = 10K Kafka messages (batch of 10K each) = manageable throughput."
+  "How long does it take to deliver to all 10M followers?"
+  "FCM allows 1000 device tokens per multicast request. 10M users × 1 push each = 10K FCM requests. At 100 concurrent consumers × 100ms per FCM batch = 10K / (100 × 10/sec) = 10 seconds for all 10M followers. With more consumers: horizontally scalable to under 5 seconds."
+}}
+
+{{phase 7 "Multi-Channel Routing" "5 min"}}
+
+{{say `Channel selection is based on user preferences, notification type, and device availability:
+<ul>
+  <li><strong>OTP/2FA:</strong> always SMS (highest reliability), never push (device might be offline)</li>
+  <li><strong>Transactional (payment, order):</strong> push first, email as backup if no device token</li>
+  <li><strong>Marketing:</strong> email (cheaper), push if user opted in, never SMS (too expensive)</li>
+  <li>Delivery channel hierarchy: try primary → if fails/unavailable → fall back to secondary</li>
+</ul>`}}
+
+{{diagram "notif-template-engine"}}
+
+{{table "Channel Cost Comparison" (rows
+  (row "Channel"  "Cost/Notification"  "Reliability"  "Best For")
+  (row "Push"     "Free (FCM/APNs)"    "95%"          "Engagement, alerts (device must be online)")
+  (row "Email"    "$0.0004 (SendGrid)" "99%"          "Transactional, marketing, rich content")
+  (row "SMS"      "$0.0075 (Twilio)"   "99.9%"        "OTP, critical alerts, authentication")
+  (row "In-app"   "Free"               "100% (online)" "Non-urgent, social notifications")
+)}}
+
+{{phase 8 "Delivery Guarantees & Deduplication" "8 min"}}
+
+{{diagram "notif-delivery-guarantee"}}
+
+{{code "python" `class NotificationDeliveryService:
+    def send_with_retry(self, notification: Notification, max_retries=3):
+        """At-least-once delivery with exponential backoff"""
+
+        # Deduplication check
+        dedup_key = f"notif:{notification.id}:{notification.channel}"
+        if not redis.set(dedup_key, "1", nx=True, ex=86400):  # 24h TTL
+            logger.info(f"Duplicate notification {notification.id}, skipping")
+            return
+
+        for attempt in range(max_retries):
+            try:
+                response = self._call_provider(notification)
+                if response.success:
+                    db.update_status(notification.id, "delivered")
+                    return
+            except ProviderError as e:
+                if attempt < max_retries - 1:
+                    wait_ms = (2 ** attempt) * 1000  # 1s, 2s, 4s
+                    time.sleep(wait_ms / 1000)
+                else:
+                    # Max retries exhausted → DLQ
+                    dlq.publish(notification)
+                    db.update_status(notification.id, "failed")
+                    raise`}}
+
+{{hint "why 24-hour dedup TTL?" "FCM's own deduplication window is 14 days (by collapse_key). But within our system, the dedup window only needs to cover our retry period — max 3 retries × max 8s total = about 15 seconds. Using 24h gives a comfortable buffer for rare edge cases (Kafka consumer restart, delayed retry) without excessive Redis memory use. Key size: SHA256(notification_id + channel) = 64 chars × 50B overhead ≈ 5.7GB for 100M daily notifications."}}
+
+{{triggerQs "Delivery guarantee questions"
+  "What's in the Dead Letter Queue (DLQ) and how is it handled?"
+  "DLQ contains notifications that failed after all retries — usually due to: provider extended outage, invalid device token (app uninstalled), permanent user opt-out detected mid-delivery. Operations team monitors DLQ size. On provider recovery, notifications are replayed (with freshness check — don't send a 3-day-old marketing email). Invalid token errors trigger token cleanup in the device_tokens table."
+  "How do you handle delivery receipts from FCM/APNs?"
+  "FCM: push result includes per-token status (success, invalid_registration, not_registered). Parse response → remove invalid tokens from device_tokens table. APNs: HTTP/2 stream response per push with error code. apns-id header for correlation. Both providers have no guaranteed 'delivered to device' receipt — only 'delivered to provider's queue.' Actual device delivery is unconfirmable in most cases."
+}}
+
+{{phase 9 "Opt-Out, Rate Limiting & Compliance" "5 min"}}
+
+{{diagram "notif-rate-limiting"}}
+
+{{diagram "notif-opt-out"}}
+
+{{hint "CAN-SPAM and GDPR requirements" "CAN-SPAM (US): every marketing email must include physical mailing address, one-click unsubscribe link, and honor opt-out within 10 business days. GDPR (EU): users must explicitly opt IN to marketing (not opt-out by default), right to erasure. Storing opt-out in DynamoDB: user_preferences(user_id, channel, category, opted_out, opted_out_at). Never send to opted-out users — check preferences cache (Redis) before every send."}}
+
+{{phase 10 "Failure Handling & Retry" "5 min"}}
+
+{{diagram "notif-failure-handling"}}
+
+{{compare "Retry Strategy" (options
+  (best "Exponential backoff with jitter (1s, 2s, 4s)" "Prevents thundering herd on provider recovery — jitter spreads retries over time")
+  (alt "Fixed interval retry (every 30s)" "Simple but causes synchronized retry storm when provider recovers")
+  (nofit "Immediate retry (loop)" "Overwhelms provider, causes cascading failures, burns through rate limits instantly")
+)}}
+
+{{phase 11 "Monitoring & SLAs" "5 min"}}
+
+{{diagram "notif-monitoring"}}
+
+{{table "SLAs and Alert Thresholds" (rows
+  (row "Metric"                     "Target"          "Alert Threshold"         "Action")
+  (row "Push delivery rate"         "&gt;99%"         "&lt;95%"                 "Check FCM/APNs status, open DLQ")
+  (row "Email delivery rate"        "&gt;99.5%"       "&lt;98%"                 "Check SendGrid, sender reputation")
+  (row "OTP delivery latency"       "&lt;10s"         "&gt;30s"                 "Page on-call immediately")
+  (row "Kafka consumer lag"         "&lt;1K messages"  "&gt;100K messages"       "Scale out consumers")
+  (row "DLQ size"                   "0"               "&gt;1K"                  "Investigate failure cause")
+  (row "Invalid token rate"         "&lt;1%"          "&gt;5%"                  "Audit token refresh logic")
+)}}
+
+{{key "Notification system design: async Kafka fan-out decouples the triggering action from delivery, priority topics ensure OTP always gets through, at-least-once delivery with Redis dedup prevents double-sends, and circuit breakers on FCM/APNs/SendGrid prevent cascading failures during provider outages."}}
+
+{{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
+
+{{deepQA "Critical Interview Questions" `
+<div class="dqa-item">
+  <div class="dqa-q">How do you guarantee at-least-once delivery without double-sending?</div>
+  <div class="dqa-a">Two-layer approach: (1) <span class="dqa-key">Kafka persistence</span> — messages are durable in Kafka for 7 days. Consumer commits offset only after successful delivery — if consumer crashes, Kafka replays from last commit. (2) <span class="dqa-key">Redis deduplication</span> — before sending, check SET NX with notification_id + channel. If key exists, message was already sent — skip. TTL=24h. Together: Kafka guarantees delivery attempt, Redis prevents actual double-send.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What if Redis fails during the dedup check?</div>
+    <div class="dqa-sub-a">Fail open: if Redis is unreachable, send the notification anyway and accept the risk of a duplicate. Fail closed (blocking all sends until Redis recovers) is worse — users miss OTP codes, payment confirmations, critical alerts. Most notification systems prioritize delivery over perfect dedup. Log the Redis failure for investigation. The duplicate risk is low if Redis has proper HA (Sentinel or Cluster).</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">FCM says it delivers messages at-least-once itself — does that mean you can get triplicated notifications?</div>
+      <div class="dqa-deep-a">Yes, technically. Your system sends once (after dedup), FCM delivers at-least-once internally. In practice, FCM internal duplicates are rare (occurs on server-side retries during transient errors). To protect fully: use FCM's <code>collapse_key</code> — FCM holds only the latest message with the same collapse key per device, discarding older ones. Set collapse_key to notification_type + user_id. This reduces FCM-side duplicates to zero — only the latest message per type is delivered.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How do you fan out to 10 million followers without blocking the post action?</div>
+  <div class="dqa-a">Async two-stage fan-out: (1) Post service writes ONE event to Kafka: <code>{type: new_post, user_id: influencer_id, post_id}</code> — completes in &lt;5ms. (2) Fan-out consumer reads event → queries subscriber list in batches of <span class="dqa-key">10K user_ids</span> → for each batch, enqueues to notification Kafka topic. Produces 1,000 Kafka messages (10M / 10K). (3) Delivery consumers process notification batches in parallel → call FCM/APNs. Total: &lt;30 seconds for all 10M notifications with 100 delivery workers.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What if the influencer's subscriber list is 100M users?</div>
+    <div class="dqa-sub-a">Pre-shard the subscriber list. Instead of one query for 100M records, shard the subscribers table by influencer_id % 1000. Fan-out consumer queries all 1000 shards in parallel. Also: for mega-celebrities (100M+ followers), consider a <strong>fan-out-on-read</strong> hybrid — store the notification event and have clients pull it when they open the app, rather than pushing to 100M devices. This trades notification immediacy for infrastructure savings.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you ensure notification ordering for the same user (e.g., "Alice liked your post" before "Alice commented on your post")?</div>
+      <div class="dqa-deep-a">Partition Kafka by <code>user_id</code> (the recipient, not the sender). All notifications for the same user land on the same partition, processed by one consumer in order. This gives per-user ordering. Cross-user ordering (Alice's notifications before Bob's) is undefined — acceptable since users don't see each other's notification feeds. Critical: partition key must be the recipient's user_id, not the triggering event's user_id, to maintain ordering from the receiver's perspective.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How does the priority queue work for OTP vs marketing?</div>
+  <div class="dqa-a">Three separate Kafka topics: <span class="dqa-key">notif.high</span> (OTP, payment alerts), <span class="dqa-key">notif.medium</span> (likes, comments, follows), <span class="dqa-key">notif.low</span> (marketing, promotions). Consumers poll in order: poll high first (timeout=0ms) → if empty, poll medium → if empty, poll low (timeout=100ms to avoid busy-spin). Dedicated consumers for high-priority ensure OTP is never starved by marketing volume.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What SLA would you commit to for OTP delivery?</div>
+    <div class="dqa-sub-a"><strong>&lt;10 seconds end-to-end for OTP</strong> (notification trigger → user receives SMS). Breakdown: trigger to Kafka: &lt;50ms. Kafka consume: &lt;100ms. Dedup + preference check: &lt;50ms. SMS API call (Twilio): &lt;3s. Total: ~4s. SLA of 10s gives 2.5x buffer. Alert if P99 exceeds 10s. Note: SMS is preferred for OTP over push because SMS works when phone is offline (queued at carrier) and doesn't require app installed.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you prevent marketing notifications from delaying OTP by hours during a campaign?</div>
+      <div class="dqa-deep-a">Dedicated consumer pods per priority tier with isolated resource pools. Marketing consumer pods: auto-scale based on low-priority queue lag. OTP consumer pods: fixed minimum capacity of 50 pods, never scaled below that, isolated from marketing autoscaling. Resource isolation via Kubernetes: OTP pods on dedicated nodes (priority class), marketing pods on spot instances. Even if marketing pods are all at max load, OTP pods have guaranteed CPU/network.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How do you prevent notification spam while still guaranteeing OTP delivery?</div>
+  <div class="dqa-a">Two-tier rate limiting: (1) <span class="dqa-key">Per-user, per-channel rate limits</span> via Redis token bucket — push: 5/hour, email: 3/hour, SMS: 1/hour. Applied to marketing/social notifications only. (2) <span class="dqa-key">Type-based bypass</span> — OTP, payment confirmations, security alerts bypass rate limits entirely. Classification: notification_type enum determines which tier. Also: global rate limit per sender (service) to prevent one service from spamming all users.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">How do you implement the Redis token bucket for per-user rate limiting?</div>
+    <div class="dqa-sub-a">Redis key: <code>ratelimit:push:{user_id}</code>. Lua script (atomic): <code>INCR key; if value == 1 → EXPIRE key 3600; if value &gt; limit → return 0 (rate limited)</code>. This is a fixed window counter — simpler than sliding window but has boundary burst issue (user can send 5 at 11:59pm + 5 at 12:01am = 10 in 2 minutes). For notifications (not security-critical), fixed window is acceptable. Sliding window via Redis sorted sets for stricter control.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">What about quiet hours — how do you respect them without losing the notification?</div>
+      <div class="dqa-deep-a">Buffer notifications during quiet hours rather than dropping them. When a notification would be sent during user's quiet hours (e.g., 10pm-8am local time): store in a scheduled_notifications table with send_at = next allowed time. A scheduler job runs every minute, queries notifications where send_at &lt;= now, enqueues to Kafka for delivery. Use user's timezone from profile. Exception: OTP and critical security notifications always sent immediately — never buffered.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How do you handle FCM going down for an hour?</div>
+  <div class="dqa-a">Circuit breaker on FCM API calls: opens after 5 consecutive 5xx errors (threshold), half-open probe every 60s. During open state: (1) Push notifications queue in Kafka (they're not dropped). (2) Fall back to email for non-push-only users. (3) Alert on-call team. When FCM recovers: circuit closes, Kafka consumer catches up — users get delayed push notifications. For notifications older than 2 hours in DLQ, send as email instead of delayed push.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What about APNs — should you fail over to FCM for iOS?</div>
+    <div class="dqa-sub-a">You can't — APNs and FCM are Apple and Google's respective push systems. iOS devices only receive pushes via APNs; Android via FCM. Cross-fail-over is impossible. Instead: for APNs outage, fall back to email if user has email on file, or queue and deliver when APNs recovers. If APNs outage is extended (&gt;1 hour), prioritize critical notifications (OTP, payments) via SMS as backup channel.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you measure notification delivery rate if you can't get individual delivery receipts?</div>
+      <div class="dqa-deep-a">Use proxy metrics: (1) FCM/APNs response codes — <code>success</code> means delivered to provider queue, not device. Track success% as "provider delivery rate." (2) Open rate — if user taps notification, it was delivered. Track tap events via deep link. (3) Unsubscribe rate spike — if users suddenly mass-unsubscribe after a campaign, notifications may have been received as spam (over-delivery). (4) Invalid token rate — rising rate means devices are churning (app uninstall), a leading indicator of stale user base.</div>
+    </div>
+  </div>
+</div>
+`}}
+
+<div class="alt-section">
+  <div class="alt-section-hdr">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+    Market Reality: How Indian Startups &amp; Products Solve This
+  </div>
+  <div class="alt-section-body">
+    <div class="alt-cards">
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">Gupshup</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge indian">🇮🇳 Messaging Platform</span>
+            <span class="alt-scale">10B+ messages/month</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> Largest WhatsApp Business Service Provider (BSP) globally. Custom message queue with proprietary ordering guarantees, Redis for per-message delivery state, and webhook callbacks for status updates to customers.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Custom message queue</span>
+            <span class="alt-tech">Redis (delivery state)</span>
+            <span class="alt-tech">Webhook callbacks</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> WhatsApp enforces strict per-second rate limits per WABA account — Gupshup implements a token bucket per WABA at their layer before hitting Meta's API, preventing 429s that would pause the entire account rather than just one sender.</div>
+        </div>
+      </div>
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">MSG91</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge indian">🇮🇳 Notification API</span>
+            <span class="alt-scale">5B+ messages/year</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> Unified SMS, WhatsApp, Email, and Voice platform. Kafka for message ingestion, PostgreSQL for delivery logs, Redis for per-client rate limiting. Intelligent fallback routing — SMS first, then WhatsApp if unreachable, then email.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Kafka</span>
+            <span class="alt-tech">PostgreSQL</span>
+            <span class="alt-tech">Redis</span>
+            <span class="alt-tech">Multi-channel fallback</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> Configurable per-customer fallback chain (SMS → WhatsApp → email) reduces failed delivery rate from 12% to 2% — the fallback logic is a first-class feature, not an afterthought, and is the primary reason enterprises choose MSG91 over single-channel providers.</div>
+        </div>
+      </div>
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">Exotel</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge indian">🇮🇳 Cloud Telephony</span>
+            <span class="alt-scale">500M+ API calls/year</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> SMS and voice call notifications with direct telco connections. Routes each SMS through the cheapest/fastest path using a lookup table of carrier routes updated every 15 minutes.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Direct telco integrations</span>
+            <span class="alt-tech">Dynamic route lookup</span>
+            <span class="alt-tech">Jio / Airtel / BSNL / Vi</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> Direct connections with all 4 Indian telcos (Jio, Airtel, BSNL, Vi) allow per-destination-number route selection — an OTP to a Jio number routes via Jio's own network for guaranteed delivery, bypassing inter-carrier delays that cause 5-15 second OTP delays on other providers.</div>
+        </div>
+      </div>
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">OneSignal</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge">🌐 Global (Meesho, Zepto, Blinkit)</span>
+            <span class="alt-scale">ML-timed push delivery</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> Push notification platform using Redis for delivery queues and AWS SNS for APNs/FCM relay. Smart delivery timing uses ML to predict the best send time per user based on historical open patterns, improving open rates by 30%.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Redis queues</span>
+            <span class="alt-tech">AWS SNS</span>
+            <span class="alt-tech">FCM / APNs</span>
+            <span class="alt-tech">ML delivery timing</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> Per-user ML-predicted send time — instead of blasting all users at once (which causes push fatigue and low open rates), each notification is scheduled individually for the time that user historically opens their phone, turning a broadcast into a timed personal nudge.</div>
+        </div>
+      </div>
+    </div>
+    <div class="alt-oss-row">
+      <div class="alt-oss-label">OSS &amp; Managed Alternatives</div>
+      <div class="alt-oss-items">
+        <div class="alt-oss-item"><strong>Apache Kafka</strong> — fan-out backbone; partitioned topics per channel; at-least-once delivery; used by MSG91, Flipkart</div>
+        <div class="alt-oss-item"><strong>Bull / BullMQ</strong> — Redis-based Node.js job queue; priority queues, retries, rate limiting built-in; popular at Indian startups</div>
+        <div class="alt-oss-item"><strong>Sidekiq</strong> — Ruby background job processing with Redis; used by older Rails-based Indian SaaS products</div>
+        <div class="alt-oss-item"><strong>Celery</strong> — Python distributed task queue; common in Django-based notification pipelines</div>
+        <div class="alt-oss-item"><strong>AWS SNS</strong> — managed push/SMS fanout; integrates with FCM and APNs; zero infrastructure; default for startups</div>
+        <div class="alt-oss-item"><strong>Firebase FCM</strong> — Google's push platform; universal for Android; free; zero alternative for Android push in India</div>
+        <div class="alt-oss-item"><strong>Amazon Pinpoint</strong> — managed campaigns (email, SMS, push); analytics built-in; used for marketing notifications</div>
+        <div class="alt-oss-item"><strong>Twilio</strong> — SMS/WhatsApp/voice API; dominant globally; expensive at Indian scale, often replaced by MSG91 or Gupshup</div>
+      </div>
+    </div>
+    <div class="alt-verdict"><strong>Market verdict:</strong> Indian consumer apps universally use FCM (Android) and APNs (iOS) for push — there is no alternative. The differentiation is in the fan-out layer above: startups use OneSignal for simplicity, scale-ups build Kafka → worker → FCM/APNs pipelines. For WhatsApp notifications (hugely popular in India due to 500M+ users), Gupshup and MSG91 are the dominant BSPs. SMS remains critical for OTPs despite WhatsApp penetration — every Indian app maintains a multi-provider SMS fallback because UPI payment OTPs must not fail.</div>
+  </div>
+</div>
