@@ -68,6 +68,8 @@
 
 {{hint "One ALB for all microservices saves money" "Each ALB costs $16.43/mo base. Ten microservices behind one ALB with path rules costs the same base fee as one service."}}
 
+{{caveat "Listener rules are evaluated in priority order — first match wins. A misplaced catch-all rule at priority 1 will swallow all traffic and bypass specific path rules below it. Always put specific rules at low priority numbers and catch-alls at 99."}}
+
 {{diagram "fund-alb-path-routing"}}
 
 {{code "hcl" `# Terraform: ALB with path-based routing
@@ -141,6 +143,21 @@ resource "aws_lb_target_group" "api" {
   }
 }
 `}}
+
+{{collapseSection "Terraform Configuration Details" "
+<ul>
+  <li><strong>ssl_policy</strong> — use <code>ELBSecurityPolicy-TLS13-1-2-2021-06</code> for TLS 1.3 + 1.2 minimum. Never allow TLS 1.0/1.1.</li>
+  <li><strong>target_type = ip</strong> — required for ECS Fargate, cross-VPC targets, and peered VPC routing. Use <code>instance</code> only for EC2 auto-scaling groups.</li>
+  <li><strong>deregistration_delay</strong> — set to your longest request timeout. 30s for APIs, 300s for file uploads.</li>
+  <li><strong>enable_deletion_protection</strong> — always true in production to prevent accidental <code>terraform destroy</code>.</li>
+</ul>
+"}}
+
+{{mustKnow
+  "Rules evaluated in priority order — first match wins. Put specific rules first, catch-all last"
+  "Path-based routing lets one ALB serve dozens of microservices — no need for one ALB per service"
+  "Default rule fires when no rule matches — always configure it explicitly (404 for APIs, SPA frontend for web apps)"
+}}
 
 {{phase 3 "WebSocket and gRPC Support" "3 min"}}
 

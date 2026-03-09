@@ -682,6 +682,10 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
   "Stagger rebuilds with a <span class=\"hl-blue\">random jitter</span> of 0–15 minutes. In a 10-node cluster, rebuilds are spread across 10 non-overlapping windows. A <strong>Redis distributed lock</strong> (background mutex) ensures at most 1–2 nodes rebuild simultaneously — the others serve the current trie while waiting. This caps the number of S3 download streams and prevents synchronized CPU spikes."
 }}
 
+{{goodToKnow "Multi-region trie distribution: push snapshots to regional S3 buckets; accept 1-2 hours staleness between regions" "If trie grows beyond 5GB, shard by prefix range (A-M / N-Z) to keep rebuild times under 60 seconds"}}
+
+{{mustKnow "CDN absorbs 90% of traffic — the single most important scaling lever" "Trie service is stateless with full replicas — horizontal scaling is trivial, no coordination needed" "Three independent scaling axes: CDN edge capacity, stateless trie replicas, Kafka partition count" "Stagger trie rebuilds with random jitter to avoid thundering herd on S3 downloads"}}
+
 {{phase 11 "Failure Modes" "4 min"}}
 
 {{say `Autocomplete is non-critical — degraded suggestions are better than a broken search box:
@@ -716,6 +720,20 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
   "What if personalization data (Redis) is unavailable — do you serve 503?"
   "No. We degrade gracefully: if Redis is unreachable, we skip personalization and return global top-10. The user gets slightly less tailored suggestions but doesn't see an error. This is a UX tradeoff we've explicitly chosen — availability > personalization freshness."
 }}
+
+{{caveat "A bug in the trending detector can inject garbage queries globally within 60 seconds. Always validate trending writes (query length, character set, count sanity bounds) and have a circuit breaker that skips bad writes."}}
+
+{{collapseSection "Elasticsearch Fallback Sizing" `
+<ul>
+  <li>ES handles cold-path misses and full trie outage fallback</li>
+  <li>Size for <strong>30K QPS</strong> (10% of total traffic)</li>
+  <li><strong>5 ES nodes</strong> with 16 vCPU each</li>
+  <li>Keep autocomplete index warm with background ping job</li>
+  <li>Response time: 40-60ms — acceptable for fallback, not for hot path</li>
+</ul>
+`}}
+
+{{mustKnow "Graceful degradation order: Redis cache → in-memory trie → Elasticsearch fallback → empty []" "Never let autocomplete block search — always return something in under 200ms, even if stale or empty" "Circuit breaker on trending writes prevents garbage injection propagating globally" "Three sanity checks after trie rebuild: known-query verification, top-result stability, node count within 20% of previous"}}
 
 {{qa "What if the Kafka query log pipeline falls behind?" "Trie freshness degrades. A <span class=\"hl\">4-hour Kafka lag</span> means new trending queries take 4 hours to appear in the trie. This is a <strong>freshness SLO violation</strong>, not an availability failure — users still get suggestions, just not the most recent ones. Alert on consumer group lag <span class=\"hl\">&gt; 30 minutes</span>. The mitigation: increase <span class=\"hl-blue\">consumer group parallelism</span> to match partition count — 10 consumers per 10 partitions. If lag is structural (sustained throughput > consumer capacity), add partitions to the query-log topic and scale consumers to match." "How do you prevent Kafka lag from cascading into trie staleness permanently?" "The Flink job that processes the query log is stateless — it only needs to process the <em>current window</em> to compute new trie weights. If lag spikes during a traffic event, the job catches up by processing historical events in bulk (Flink's event-time processing handles out-of-order arrival). The trie is only swapped when a full rebuild completes — if the job crashes mid-rebuild, the previous snapshot remains live. Lag &gt; 2 hours triggers an auto-scaling event on the Flink cluster."}}
 

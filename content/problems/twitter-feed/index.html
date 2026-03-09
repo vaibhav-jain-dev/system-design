@@ -527,6 +527,12 @@ def merge_celebrity_tweets(precomputed_ids: list, user_id: str) -> list:
   "Remove followed_id from the user's follow list in the follows table. Update the follow graph cache. At next timeline load, the celebrity merge step no longer includes Taylor Swift's tweets. No need to retroactively remove her tweets from the pre-computed timeline — they will naturally scroll off as new tweets push them below the cursor. For immediate removal, delete from Redis sorted set: ZREM user:{id}:timeline tweet_ids_from_taylor. This is a background job triggered by the unfollow event."
 }}
 
+{{caveat "The celebrity problem is about total write amplification, not parallelism. Even with 1000 parallel workers, 150M Redis writes still take 2.5 minutes. The fundamental solution is to skip writes entirely and merge at read time."}}
+
+{{collapseSection "Celebrity Threshold Transition Edge Cases" "When a user crosses the 50K threshold: (1) Future tweets skip fanout — detected by checking follower_count at fanout time. (2) Already-fanned-out tweet IDs remain in followers' caches — no retroactive cleanup needed. (3) The celebrity_ids Redis Set is updated by a background job that recalculates follower counts periodically (every 5 minutes). (4) Race condition during threshold crossing is benign: a tweet might get partial fanout to some followers, and the read-time merge fills the gap for the rest."}}
+
+{{mustKnow "150M followers × ZADD = 25 minutes of fanout — completely unacceptable. Celebrity tweets MUST skip fanout and merge at read time." "Read-time merge uses parallel Cassandra queries (50 celebrities × 1ms each = 1ms wall time) + heap-based sorted merge in O(N log K)." "Maintain a celebrity_ids Redis Set updated on follow/unfollow events — avoids querying user service for follower counts at read time." "Cap celebrity fetches to 50 per merge to bound latency — users following 100+ celebrities still get a representative feed."}}
+
 {{phase 9 "Feed Ranking Algorithm" "5 min"}}
 
 {{say "Chronological is the default and simplest. For algorithmic ranking, we score each tweet in the candidate set using engagement signals and personalization features, then re-sort the 200-tweet candidate pool before slicing the top 20 for the response."}}

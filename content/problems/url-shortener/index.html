@@ -928,6 +928,21 @@ Error Responses:
   "On creation, extract features: domain age (WHOIS), URL entropy, path depth, IP vs domain, homoglyph detection. Feed into a pre-trained logistic regression model (~1ms inference). Score >80: reject. Score 50-80: serve via 302 (retain ability to block). Score &lt;50: normal 301. Re-score all URLs weekly as threat intel updates. Catches ~85% of zero-day phishing at creation time."
 }}
 
+{{caveat "Your domain reputation is your most valuable asset. A single phishing campaign through your shortener can get your domain blocklisted by Gmail, Chrome, and corporate firewalls — effectively killing the entire service. Invest in abuse prevention proportionally."}}
+
+{{collapseSection "QR Code Generation Details" `<p>QR code generation is a P3 feature — unlikely to be discussed in depth during an interview. Key points if asked: Lambda@Edge generates on-the-fly, CloudFront caches 24h, cost is negligible ($0.00006 per 10K requests). Three sizes: 150px (business card), 300px (poster), 600px (billboard). Supports PNG and SVG formats.</p>`}}
+
+{{mustKnow
+  "Five security layers: rate limiting, CAPTCHA (anonymous only), alias validation, domain reputation (Google Safe Browsing), bot detection"
+  "Nightly re-scans catch bait-and-switch attacks where URLs become malicious after creation"
+  "Custom alias validation pipeline: regex → reserved words → profanity → homoglyph → conditional DB write"
+}}
+
+{{goodToKnow
+  "Risk scoring (0-100) with tiered response: >80 reject, 50-80 allow with 302 (retain blocking ability), <50 normal 301"
+  "Aho-Corasick algorithm checks all 5,000 profanity patterns in O(n) — a single pass through the input string"
+}}
+
 {{phase 10 "Analytics Deep Dive" "5 min"}}
 
 {{say `Analytics differentiates a production system from a toy. The key rule:
@@ -999,6 +1014,19 @@ Error Responses:
   "Use MaxMind GeoLite2 (free) or GeoIP2 City database (from ~$288/year, updated weekly). Load into Lambda memory at startup (~65MB). IP-to-geo lookup is O(1) via trie search, adds under 1ms per event. Accuracy: ~95% at country level, ~75% at city level. For GDPR compliance, hash the IP after geo lookup — never store raw IPs in the analytics table."
   "How do you distinguish bot clicks from human clicks?"
   "Three signals: (1) TLS fingerprint — headless browsers (Puppeteer, Selenium) have distinctive JA3 hashes. (2) User-Agent consistency — a Chrome UA with a curl TLS fingerprint is a bot. (3) Click velocity — 100 clicks from the same IP in 10 seconds is not human. Assign a bot_score 0-1 and exclude >0.7 from analytics. Typically filters out 15-25% of all clicks."
+}}
+
+{{caveat "Never increment a counter synchronously on every redirect. At 57K RPS, that creates a write hotspot and adds 5-10ms latency to the most critical path. Always use async streaming (Kinesis/SQS)."}}
+
+{{mustKnow
+  "Analytics must be async (fire-and-forget to Kinesis) — never block the redirect hot path"
+  "Composite partition key (short_code#date) prevents hot partitions by distributing across dates"
+  "Bot filtering is essential: 15-25% of clicks are bots — include/exclude them changes your metrics drastically"
+}}
+
+{{goodToKnow
+  "MaxMind GeoLite2 (free) provides ~95% accuracy at country level for IP-to-geo lookups in under 1ms"
+  "For GDPR compliance, hash the IP after geo lookup — never store raw IPs in the analytics table"
 }}
 
 {{phase 11 "Monitoring, Observability & Cost" "5 min"}}

@@ -494,6 +494,12 @@ def dequeue_batch(show_id: str, batch_size=1000):
   "Queue position is server-side only — the client gets a position number but cannot modify it. The dequeue process runs server-side and emits 'your turn' notifications based on position order. There is no client-side trust in the queue logic. Additionally, one user_id gets one queue position — duplicate entries are rejected via the Redis SETNX pattern."
 }}
 
+{{caveat "Without a virtual queue, 100K simultaneous lock attempts create a thundering herd on Redis and the booking service. The queue is not just a UX feature — it is a load protection mechanism that meters admission to 1K/sec."}}
+
+{{goodToKnow "~15% of seat locks expire without payment completion — these seats re-enter the pool automatically via TTL, feeding the waitlist" "Queue position is calculated as (position - available_seats) / dequeue_rate — gives users an accurate wait estimate"}}
+
+{{mustKnow "Virtual queue with metered dequeue (1K/sec) prevents thundering herd — converts 100K simultaneous requests into a controlled flow" "Queue is backed by Redis INCR (1M+ ops/sec) — the queue itself is never the bottleneck" "Queue position is server-side only; one user_id gets one position (SETNX prevents duplicates)" "Users who get 'your turn' have 5 minutes to complete seat selection — expired turns are recycled"}}
+
 {{phase 7 "Payment Flow" "5 min"}}
 
 {{say `Payment is <strong>async and webhook-driven</strong>:
