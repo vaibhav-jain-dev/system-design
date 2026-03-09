@@ -230,6 +230,14 @@ if stale:
 
 {{qa "How do <a class="dqa-link" href="/problem/food-delivery">food delivery</a> apps show nearby restaurants?" "Pre-compute restaurant GeoHash at onboarding and store it in Redis. When a user opens the app, compute their GeoHash prefix, query Redis GEORADIUS within 5km, and return sorted by distance. The restaurant list is relatively static (thousands, not millions), so this is a simple GEORADIUS call — not the complex driver-matching problem." "What about geofencing (e.g., 'user entered zone X')?" "Geofencing checks if a point is inside a polygon, not proximity search. Use S2 or H3 to cover the polygon with cells, then check if the user's cell overlaps the polygon's cell set. Redis doesn't support polygon queries natively — use PostGIS ST_Contains or a dedicated geofencing service."}}
 
+{{mustKnow
+  "Redis GEO stores coordinates as 52-bit GeoHash in sorted set score — GEOSEARCH finds nearest-N in sub-ms"
+  "~0.6 meter accuracy — sufficient for ride-sharing, not centimeter-scale surveying"
+  "No per-member TTL — manage stale entries externally via parallel hash of timestamps + background cleanup"
+}}
+
+{{caveat "GEORADIUS is deprecated since Redis 6.2 — always use GEOSEARCH. At 500K concurrent drivers sending updates every second, a single Redis node maxes out at ~100K ops/sec. Shard by city or geographic region."}}
+
 {{phase 6 "PostGIS & Fallback" "4 min"}}
 
 {{say `<span class="hl-blue">PostGIS</span> is PostgreSQL's spatial extension — the right choice when you need durability, SQL joins, or historical queries:
@@ -299,6 +307,17 @@ def find_nearby_drivers(lng: float, lat: float, radius_m: int = 5000, limit: int
   "With a GIST index and ST_DWithin on a geography column, roughly 5-15ms for a 5km radius returning 10-100 rows. The GIST index prunes the candidate set to a few thousand rows using a bounding-box filter; exact distance is computed only on that small set. Without the GIST index it would be a full sequential scan — 2-5 seconds."
   "When would you choose PostGIS over Redis GEO for a production system?"
   "Four scenarios: (1) You need durability — Redis GEO loses data on restart without persistence configured. (2) You need historical queries — 'where was driver X at 3pm last Tuesday'. (3) You need complex spatial joins — 'drivers in the downtown zone who have completed > 100 trips'. (4) Your query rate is low enough that 10ms is acceptable — internal ops tooling, analytics dashboards, not the critical dispatch path."
+}}
+
+{{mustKnow
+  "PostGIS GIST index on GEOGRAPHY(POINT): ~10ms for 5km radius on 1M rows — 10x slower than Redis but durable"
+  "Best as write-through store: write to both PostGIS (durability) and Redis GEO (speed), reads go to Redis"
+  "PostGIS is the source of truth for billing, audit, and historical trip replay"
+}}
+
+{{goodToKnow
+  "Without GIST index, ST_DWithin does a full sequential scan — 2-5 seconds on 1M rows"
+  "Use GEOGRAPHY type (not GEOMETRY) for ST_DWithin — geography uses meters, geometry uses degrees"
 }}
 
 {{phase 7 "Choosing the Right Index" "4 min"}}
