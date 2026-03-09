@@ -668,6 +668,21 @@ Redis is sharded by <strong>show_id</strong> (hash tags) so one popular show doe
   "The bottleneck is PostgreSQL write throughput for booking confirmations. A tuned Postgres primary on db.r6g.2xlarge handles approximately 2,000 confirmed writes/sec with connection pooling. At 2 seats per booking, that is 4,000 seats confirmed per second. For events larger than this, batch multiple seat confirmations into a single transaction or use DynamoDB for the confirmation layer."
 }}
 
+{{collapseSection "Infrastructure Cost Estimates" `
+<ul>
+  <li><strong>Redis Cluster (6 nodes, r6g.large):</strong> ~$550/mo — handles all seat locks + cache + Pub/Sub</li>
+  <li><strong>PostgreSQL (db.r6g.2xlarge primary + 3 read replicas):</strong> ~$2,400/mo</li>
+  <li><strong>ECS Booking Service (50 tasks at peak, 10 baseline):</strong> ~$800/mo average with auto-scaling</li>
+  <li><strong>CloudFront:</strong> ~$2K/mo for 500M browse requests</li>
+  <li><strong>WebSocket fleet (20 instances at peak):</strong> ~$600/mo</li>
+  <li><strong>Total:</strong> ~$6,350/mo for a system handling 500K bookings/day</li>
+</ul>
+`}}
+
+{{goodToKnow "Redis hash tags ({show_id}:seat:{seat_id}) isolate one show's locks to one shard — a dedicated Redis cluster can be spun up for extreme events like Taylor Swift tours" "Postgres write bottleneck at ~2,000 confirms/sec can be extended with batched transactions or DynamoDB conditional writes for the confirmation layer"}}
+
+{{mustKnow "Read path scales horizontally: CDN → Redis cache → read replicas; write path has two bottlenecks: Redis Cluster and Postgres primary" "Redis sharding by show_id via hash tags keeps all seat locks for one show on one shard — enables atomic multi-seat operations" "Postgres primary handles ~2,000 confirmed writes/sec — this is the hard ceiling for booking throughput" "WebSocket fleet scales independently; sticky sessions route clients to the same server for Pub/Sub subscription continuity"}}
+
 {{phase 10 "QR Generation" "3 min"}}
 
 {{say `QR codes generated <strong>asynchronously</strong> after payment confirmation:
