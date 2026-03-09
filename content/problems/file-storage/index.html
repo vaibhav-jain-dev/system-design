@@ -361,6 +361,10 @@ class FileUploader:
 
 {{hint "SHA256 collision risk" "SHA256 has 2^256 possible values. The birthday paradox collision probability for 10^18 chunks (1 exabyte at 4 MB chunks = 250 billion chunks) is negligible — effectively zero. No known SHA256 collision exists. Dropbox, Git, and most content-addressable systems rely on SHA256 as a unique identifier."}}
 
+{{goodToKnow "Content-defined chunking (Rabin fingerprinting) creates boundaries based on content rather than fixed offsets, giving 20-30% better dedup ratios for files with insertions. Fixed-size chunking is simpler but any insertion shifts all subsequent chunk boundaries, invalidating downstream chunks."}}
+
+{{mustKnow "File-level dedup: SHA256 of entire file — instant zero-upload if hash matches" "Chunk-level dedup: SHA256 per 4 MB chunk — partial file changes only upload changed chunks" "Dropbox achieves 60-70% storage savings from chunk-level dedup across their user base" "ref_count GC invariant: never delete a chunk any file references; 7-day safety window handles upload races"}}
+
 {{phase 7 "Sync Protocol" "8 min"}}
 
 {{say `Sync is the hard part — multiple devices modifying the filesystem, offline edits, slow connections:
@@ -389,6 +393,10 @@ CREATE INDEX idx_sync_events_user_seq ON sync_events (user_id, seq);
 
 {{hint "why sequence numbers instead of timestamps for cursors?" "Timestamps have gaps and can be ambiguous — two events can have the same timestamp. Sequence numbers are monotonically increasing, unique, and deterministic. A device that last synced at sequence 5000 asks for events since 5000 — guaranteed to get all events, in order, with no duplicates. This is exactly how Kafka offsets work."}}
 
+{{mustKnow "Cursor-based change feed with monotonically increasing sequence numbers — not timestamps" "Each device tracks its own cursor; reconnecting resumes from last cursor position" "SSE for real-time push notifications; polling fallback when SSE unavailable or on reconnect"}}
+
+{{caveat "Using timestamps as sync cursors is a common interview mistake. Two events can share the same timestamp, causing missed updates. Sequence numbers are unique, monotonic, and deterministic — exactly like Kafka offsets."}}
+
 {{phase 8 "Versioning & Conflict Resolution" "5 min"}}
 
 {{say `File versioning is straightforward — conflict resolution is the hard case:
@@ -405,6 +413,8 @@ CREATE INDEX idx_sync_events_user_seq ON sync_events (user_id, seq);
   (how "detecting a conflict" "Each file has a vector clock or simply a version number. When device A syncs, it uploads with base_version=5. If the server's current version is also 5, apply the update (version becomes 6). If the server's version is already 6 (device B synced first), create a conflict copy instead of overwriting.")
 }}
 
+{{mustKnow "Conflict resolution for binary files: create conflict copies, never silently merge or use last-write-wins" "Conflict detection: client sends base_version with upload; if server version > base_version, it's a conflict" "Last 30 versions retained per file; version history enables accidental deletion recovery"}}
+
 {{phase 9 "Permissions & Sharing" "5 min"}}
 
 {{diagram "fs-permissions"}}
@@ -417,6 +427,8 @@ CREATE INDEX idx_sync_events_user_seq ON sync_events (user_id, seq);
 </ul>`}}
 
 {{hint "permission inheritance for folders" "Sharing a folder with 'edit' permission grants edit on all current and future files inside it. Implementation: when checking file permission, walk up the folder tree until you find an explicit permission. This is a recursive parent lookup — optimize by caching the permission chain in Redis with a short TTL (5 min) to handle revocations quickly."}}
+
+{{mustKnow "Three permission levels: view, comment, edit — checked on every API call (no permission caching)" "Folder permissions inherit to all children; walk up folder tree to find explicit permission" "Share links use opaque tokens in the URL for unauthenticated access"}}
 
 {{phase 10 "Caching Strategy" "5 min"}}
 
@@ -440,6 +452,10 @@ CREATE INDEX idx_sync_events_user_seq ON sync_events (user_id, seq);
 
 {{hint "why 24h CDN TTL is safe" "File content is immutable — we use content hash in the URL. /files/abc?v=sha256hash never changes content for that URL. If the file is updated, the new version gets a new hash → new URL → CDN fetches fresh. The old URL might still be in cache but nobody requests it anymore. This eliminates all CDN invalidation calls."}}
 
+{{mustKnow "Three cache layers: CDN (file bytes, 24h), Redis (metadata/permissions, 30s-5min), client disk (7 days LRU)" "Content hash in CDN URL means cached content is never stale — file update = new hash = new URL" "Redis caches permission lookups with 5-min TTL; invalidate on permission change for near-real-time revocation"}}
+
+{{goodToKnow "CDN egress costs dominate at scale. At 100 TB/month, S3 egress via CloudFront costs ~$8,500/month. Cloudflare R2 with zero egress fees is increasingly adopted as an alternative for read-heavy file storage workloads."}}
+
 {{phase 11 "Failure Modes" "5 min"}}
 
 {{diagram "fs-failure-handling"}}
@@ -453,6 +469,10 @@ CREATE INDEX idx_sync_events_user_seq ON sync_events (user_id, seq);
   (row "Chunk upload partial fail" "Upload session incomplete"  "Resumable upload — retry missing chunks only")
   (row "Corrupted chunk"          "File integrity failure"     "SHA256 verify on download; re-fetch from S3 if mismatch")
 )}}
+
+{{mustKnow "S3 unavailability blocks uploads but CDN still serves cached downloads" "Resumable chunked upload is the primary mitigation for upload failures — retry only missing chunks" "Metadata DB (Postgres) is the single point of failure — Multi-AZ RDS with automatic failover under 1 minute" "SHA256 verification on download detects corrupted chunks; re-fetch from S3 replicas on mismatch"}}
+
+{{caveat "The Sync Service going down does not cause data loss — all events persist in the change log DB. But without real-time push, devices fall back to polling every 30 seconds, which increases API load by orders of magnitude. Size your polling endpoint for this burst scenario."}}
 
 {{key "Distributed file storage separates concerns: metadata in Postgres, bytes in S3 (content-addressed by SHA256), sync via cursor-based change feed. Chunked upload enables 5 GB files with resumability; deduplication at both file and chunk level reduces storage by 60-70%."}}
 

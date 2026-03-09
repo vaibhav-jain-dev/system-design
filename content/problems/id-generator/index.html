@@ -326,6 +326,8 @@ class SnowflakeGenerator:
 
 {{hint "ID enumeration attack" "If your user profile URL is /user/1001, an attacker can try /user/1002, /user/1003... and scrape your entire user base. Use: 1) Non-enumerable IDs at the API layer (hash the internal ID), 2) Authorization checks (even if ID is guessed, user can't access without permission), 3) Rate limiting on resource lookups. Snowflake IDs are fine internally — just don't expose them in URLs."}}
 
+{{mustKnow "Raw Snowflake IDs leak creation timestamp, datacenter ID, worker ID, and approximate creation rate — never expose in public APIs" "Mitigation: hash or encode IDs at the API boundary (Hashids, SHA256+secret, or separate UUID for public URLs)"}}
+
 {{phase 10 "Monitoring & Alerting" "5 min"}}
 
 {{diagram "idgen-monitoring"}}
@@ -340,6 +342,8 @@ class SnowflakeGenerator:
 )}}
 
 {{hint "sequence utilization as a capacity signal" "Sequence utilization = (peak IDs generated in a 1ms window) / 4096. At 80%, you're getting close to sequence exhaustion, which causes brief wait periods (added latency). Solution: add more workers so each handles fewer requests, or implement batch pre-allocation to smooth traffic."}}
+
+{{mustKnow "Key metrics: IDs/sec per worker, clock drift (alert >5ms), sequence utilization (alert >80%), worker ID conflicts (alert >0), ZK session health" "Sequence utilization = peak IDs in a 1ms window / 4096 — approaching 80% means add workers or enable batch pre-allocation"}}
 
 {{phase 11 "Alternatives & Trade-offs" "5 min"}}
 
@@ -356,6 +360,12 @@ class SnowflakeGenerator:
   (row "DB auto-incr"    "8 bytes"  "Yes"           "~100K/sec"    "Every ID")
   (row "MongoDB ObjectID" "12 bytes" "Approximate"  "High"         "None")
 )}}
+
+{{goodToKnow "UUID v7 (IETF RFC) is the modern time-ordered UUID alternative — 128-bit but sortable, no coordination needed. Best for systems where simplicity matters more than storage efficiency. ULID is another option: 48-bit ms timestamp + 80-bit random, lexicographically sortable, language-agnostic."}}
+
+{{caveat "MongoDB ObjectID is 12 bytes (96 bits) — not 64-bit, so it doesn't fit in BIGINT. It includes a 4-byte timestamp (seconds, not milliseconds), 5-byte random, and 3-byte counter. Time precision is only 1 second vs Snowflake's 1 millisecond."}}
+
+{{mustKnow "Snowflake: 64-bit, time-ordered, 4B+/sec, coordination at startup only — best for high-volume systems needing sortability" "UUID v4: 128-bit, random, unlimited throughput, no coordination — best when you cannot coordinate at all (offline clients)" "DB auto-increment: sequential, simple, but single bottleneck at ~100K/sec and SPOF — never use for distributed systems" "UUID v7: 128-bit, time-ordered, no coordination — a good middle ground when 128-bit storage is acceptable"}}
 
 {{key "Snowflake IDs solve distributed ID generation with 64 bits: 41-bit timestamp for time-ordering + 10-bit worker ID for uniqueness across servers + 12-bit sequence for 4096 IDs/ms per worker — all generated in-memory in under 1 microsecond with no coordination after startup."}}
 
