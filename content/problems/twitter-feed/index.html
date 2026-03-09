@@ -634,6 +634,12 @@ def get_trending_hashtags(top_n: int = 50) -> list:
   "For the author's own tweets, return results directly from Cassandra (strong consistency). For general search, ES handles it. The 5-second indexing lag is invisible to users in practice — they don't search for tweets posted in the last 5 seconds. For breaking news search, prioritize higher-engagement tweets which are indexed first due to Kafka partition ordering."
 }}
 
+{{collapseSection "Elasticsearch Index Mapping Details" "The tweet index uses 'english' analyzer for the text field (stemming, stop words). Hashtags are keyword type for exact match. like_count and retweet_count are integers for boosting popular tweets in search results. Sync flow: Cassandra → Kafka → ES consumer with <5s lag target. Only non-deleted, non-spam tweets are indexed (filtered by moderation service)."}}
+
+{{mustKnow "Trending topics: sliding 1-hour window using 5-minute Redis sorted set buckets. ZUNIONSTORE across 12 buckets gives the trending hashtags. 5-minute granularity is sufficient for trend detection." "Full-text search: Elasticsearch synced from Cassandra via Kafka with <5s indexing lag." "Spam prevention for trending: velocity damping (0 → 100K mentions in 5 minutes = anomalous) + geographic normalization."}}
+
+{{goodToKnow "5-minute buckets (12 keys/hour) vs 1-second buckets (3600 keys/hour) — the granularity trade-off is about Redis key count, not accuracy."}}
+
 {{phase 11 "Scaling & Failure Modes" "5 min"}}
 
 {{say "horizontal scaling for each layer and the top failure modes with mitigations. Three highest-risk failure modes: Redis timeline cache failure, Cassandra partition hotspot, and fanout worker backlog during viral events."}}
