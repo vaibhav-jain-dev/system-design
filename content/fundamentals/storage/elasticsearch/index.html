@@ -198,6 +198,17 @@ The result: full-text search across millions of documents in <span class='hl'>< 
   "Index only the fields you will search or aggregate — do not index everything"
 }}
 
+{{mustKnow
+  "CDC (Debezium/DynamoDB Streams) over dual writes — dual writes have no distributed transaction, causing inconsistencies"
+  "1-second refresh interval: documents indexed in the last <1s are not yet searchable (near-real-time, not real-time)"
+  "During bulk reindex: set refresh_interval=-1 to disable auto-refresh — reduces I/O by ~40%, speeds up 2-3x"
+}}
+
+{{goodToKnow
+  "At 10K writes/sec, even 0.1% dual-write failure rate = ~860 inconsistencies/day"
+  "Force refresh with ?refresh=true costs ~50ms — use only for critical paths, never as default"
+}}
+
 {{phase 5 "Autocomplete with ES" "4 min"}}
 
 {{say `ES provides three approaches for autocomplete — choose based on scale and accuracy:
@@ -271,6 +282,14 @@ The result: full-text search across millions of documents in <span class='hl'>< 
   "Use separate analyzers per language — each language has different tokenization and stemming rules. Create a &lt;code>title_suggest_en&lt;/code> and &lt;code>title_suggest_ja&lt;/code> field, each with its own analyzer. At query time, detect the user's language (from browser locale or explicit setting) and target the correct field. For CJK languages, use the &lt;span class='hl-blue'>ICU tokenizer&lt;/span> — standard tokenizer splits Chinese characters incorrectly."
   "What about typo-tolerant autocomplete?"
   "The completion suggester supports &lt;code>fuzzy&lt;/code> with configurable edit distance. Set &lt;code>fuzziness: 1&lt;/code> to match 'rdis' → 'redis'. Cost: fuzzy completion is &lt;span class='hl'>~3-5x slower&lt;/span> than exact prefix because it expands the FST traversal. For &lt;span class='hl'>&lt; 10M&lt;/span> completion terms, this is still under &lt;span class='hl'>5ms&lt;/span>."}}
+
+{{mustKnow
+  "Completion suggester: FST in memory, sub-ms prefix autocomplete — the fastest option for prefix matching"
+  "search_as_you_type: n-gram fields for infix matching ~10ms — use when users type middle-of-word queries"
+  "match_phrase_prefix: slowest (20-50ms) — avoid in production autocomplete"
+}}
+
+{{caveat "N-gram fields grow index size 5-8x. For 10M documents with 3 text fields, n-grams generate ~500M tokens. Use completion suggester (FST: ~200-500 MB heap for 10M terms) for prefix-only matching."}}
 
 {{phase 6 "Scaling Elasticsearch" "4 min"}}
 

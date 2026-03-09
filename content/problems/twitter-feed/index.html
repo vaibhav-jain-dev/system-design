@@ -699,6 +699,12 @@ def get_trending_hashtags(top_n: int = 50) -> list:
 
 {{checklist "Fan-out strategy accounts for celebrity threshold (50K followers)" "Timeline capped at 800 tweets to bound Redis memory" "Celebrity merge uses parallel Cassandra reads with 50-celebrity cap" "Trending uses sliding window buckets (ZUNIONSTORE), not a single counter" "Snowflake IDs enable time-sortable cursor pagination" "Redis pipeline for fanout writes (not individual ZADD per follower)" "Like counts in Redis with periodic sync to Cassandra (eventual consistency)" "SSE for real-time push + 30s polling fallback" "Cold-start fallback: seed timeline from Cassandra on Redis miss" "Elasticsearch for full-text search, synced via Kafka under 5s lag"}}
 
+{{caveat "Never assume Redis is durable. Timeline caches are ephemeral — if Redis loses data, the system must fall back to Cassandra cold-start queries. Without this fallback, a Redis restart means 300M users see empty feeds."}}
+
+{{caveat "Cache stampede on viral tweets is a real production issue. When a hot tweet's cache expires and 10K requests simultaneously hit Cassandra, use singleflight (request collapsing) + probabilistic early expiration to prevent thundering herd."}}
+
+{{mustKnow "Redis Cluster shards timelines by user_id with consistent hashing (128 virtual nodes per shard). Failover promotes replica to primary in 1-10 seconds — fanout workers retry with backoff, timeline reads fall back to Cassandra." "Three critical failure modes: Redis cache loss (cold-start fallback), Cassandra partition hotspot (random shard prefix), fanout worker backlog (Kafka consumer lag monitoring)." "Singleflight pattern prevents cache stampede: first request fetches from DB, all concurrent requestors wait for the same result." "Total infra cost: ~$236K/month for 500M DAU = $0.00047/user/day — less than 1% of revenue per user."}}
+
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 
 {{say "These questions challenge the core trade-offs: hybrid fan-out strategy for celebrities, feed ranking latency budgets, and cache invalidation at billion-user scale."}}
