@@ -808,6 +808,18 @@ CREATE TABLE order_events (
 
 {{hint "event_date in Cassandra partition key" "Without date in the key, a single partner row would accumulate all location pings forever — unbounded partition growth. Adding the date caps partition size to (1 update/4s × 86400s/day × 50 bytes) = 1.08 MB per partner per day. Well within Cassandra's 100MB partition limit."}}
 
+{{caveat "Cassandra partition key must include event_date alongside partner_id. Without it, a single partner row grows unbounded — exceeding Cassandra's 100MB partition limit within weeks. This is a common Cassandra modeling mistake interviewers test for."}}
+
+{{collapseSection "Full PostgreSQL Schema Details" `Additional indexes and constraints for production:
+<ul>
+  <li><code>idx_orders_status_zone</code> — compound index for surge zone analytics queries</li>
+  <li><code>idx_orders_partner_status</code> — partial index (only active states) for partner workload queries</li>
+  <li>Cassandra location_history has 30-day TTL (2592000s) — auto-purges cold data</li>
+  <li>Cassandra order_events uses order_id as partition key with ASC clustering on timestamp for event sourcing replay</li>
+</ul>`}}
+
+{{mustKnow "Three stores: PostgreSQL (orders, ACID), Redis (live locations, geospatial), Cassandra (location history, append-only)" "Cassandra partition key = (partner_id, event_date) — caps partition at ~1 MB/day, prevents unbounded growth" "PostgreSQL at 125K writes/sec is impossible — Cassandra with LSM-tree handles this write load trivially" "Partial index on partner status (WHERE status = AVAILABLE) keeps matching queries fast"}}
+
 {{phase 10 "Batch Delivery & Failure Handling" "5 min"}}
 
 {{say `Batch delivery — one partner carries 2–3 orders, improving utilization and reducing cost:

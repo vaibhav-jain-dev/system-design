@@ -793,6 +793,12 @@ def get_events_delta(calendar_id, sync_token=None, page_token=None):
 
 {{hint "CDN for static calendar assets" "The calendar UI (JS, CSS, locale data) is static. Serve from CloudFront with 1-year cache headers. Reduces origin load for the ~350K static asset requests per second at peak."}}
 
+{{mustKnow "Shard events table by user_id — keeps all user events on one shard for single-shard sync queries" "46K write RPS (peak), 460K read RPS (peak) — Redis absorbs 95% of reads, reducing PostgreSQL load to ~23K RPS across 5 shards" "2TB/day new event data — hot data (90 days) on SSD, cold data streams to S3 via time partitioning" "Celebrity problem for calendars: 10K-attendee all-hands = async write fanout via Kafka, not synchronous"}}
+
+{{caveat "Cache hit rate is your primary scaling metric. If Redis cache hit rate drops below 90%, PostgreSQL becomes the bottleneck and your entire read path degrades. Monitor per-shard cache hit rate continuously."}}
+
+{{goodToKnow "shard_id = hash(user_id) % 5 — at 2TB/day across 5 shards = 400GB/shard/day, 50 days of raw capacity on 20TB NVMe SSDs" "Shared calendars require cross-shard reads — shard by calendar owner's user_id, not by calendar_id"}}
+
 {{phase 11 "Sharing & Permissions" "4 min"}}
 
 {{say `Calendar sharing uses a <strong>4-level ACL</strong>:
