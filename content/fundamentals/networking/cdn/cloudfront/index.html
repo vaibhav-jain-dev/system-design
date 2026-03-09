@@ -29,6 +29,12 @@
   "Unlimited bandwidth at flat rate (Cloudflare Pro is $20/mo unlimited). Sub-150ms purge times (Fastly has instant purge, CloudFront takes 1-2 minutes). Stack not on AWS and you want simpler integration."
 }}
 
+{{mustKnow
+  "CloudFront = AWS CDN with 750+ PoPs, native S3/ALB/API Gateway integration"
+  "Free S3-to-CloudFront transfer — always cheaper than serving S3 directly to users"
+  "Key differentiators: OAC for private S3, Lambda@Edge for edge compute, free Shield Standard DDoS"
+}}
+
 {{phase 2 "Architecture: Origins and Behaviors" "5 min"}}
 
 {{say `CloudFront sits in front of your origin servers. You configure <strong>distributions</strong> with one or more origins and <strong>behaviors</strong> that define:
@@ -131,6 +137,23 @@ resource "aws_cloudfront_distribution" "main" {
 
 {{key "Always use Origin Access Control (OAC), not the legacy Origin Access Identity (OAI). OAC supports SSE-KMS encryption and S3 bucket policies. OAI is being deprecated."}}
 
+{{caveat "Forwarding too many headers in a cache policy silently kills caching. Forwarding User-Agent (thousands of variants) creates a separate cache entry per variant — effective hit rate drops to ~0%. Only include headers that genuinely change the response."}}
+
+{{collapseSection "Terraform Multi-Origin Configuration Details" "
+<ul>
+  <li><strong>origin_access_control_id</strong> — use OAC for S3 origins. The S3 bucket policy must grant <code>s3:GetObject</code> to the CloudFront service principal.</li>
+  <li><strong>custom_origin_config</strong> — for ALB/EC2 origins. Set <code>origin_protocol_policy = https-only</code> and <code>origin_ssl_protocols = [TLSv1.2]</code>.</li>
+  <li><strong>ordered_cache_behavior</strong> — evaluated in order, most specific path pattern first. Default behavior is the catch-all.</li>
+  <li><strong>price_class</strong> — PriceClass_100 for US/EU/Asia only (saves ~30%). PriceClass_All for global coverage.</li>
+</ul>
+"}}
+
+{{mustKnow
+  "Behaviors route paths to origins: /api/* → ALB (no cache), /static/* → S3 (aggressive cache)"
+  "Cache policy = what gets cached (TTL, cache key). Origin request policy = what gets forwarded to origin on miss"
+  "OAC (not OAI) for all S3 origins — OAC supports SSE-KMS, OAI is deprecated"
+}}
+
 {{phase 3 "Lambda@Edge vs CloudFront Functions" "5 min"}}
 
 {{say `CloudFront has two edge compute options:
@@ -228,6 +251,17 @@ def handler(event, context):
     return response
 `}}
 
+{{mustKnow
+  "CloudFront Functions: <1ms, no network, $0.10/1M — for URL rewrites, header manipulation, simple JWT validation"
+  "Lambda@Edge: up to 30s, network access, $0.60/1M — for DynamoDB lookups, image resize, OAuth flows"
+  "CloudFront Functions handle 90% of edge compute needs — only use Lambda@Edge when you need network or body access"
+}}
+
+{{goodToKnow
+  "CloudFront Functions run at all 218+ edge locations; Lambda@Edge runs at 13 regional edge caches"
+  "CloudFront Functions support ES 2024+ with the cloudfront-js-2.0 runtime — not limited to ES 5.1"
+}}
+
 {{phase 4 "Security: OAC, Signed URLs, WAF" "5 min"}}
 
 {{say `CloudFront security has three layers:
@@ -291,6 +325,17 @@ url = cf_signer.generate_presigned_url(
 
 {{avoid "Never use Origin Access Identity (OAI) for new distributions. OAI does not support SSE-KMS, does not work with S3 bucket policies properly, and AWS is deprecating it. Use OAC."}}
 
+{{mustKnow
+  "OAC makes S3 bucket private — only CloudFront can access it. Prevents bypassing CDN/WAF/signed URLs via direct S3 URL"
+  "Signed URLs for single files, signed cookies for section access — both time-limited"
+  "Minimum WAF config: AWSManagedRulesCommonRuleSet + rate-based rule = ~$2/mo"
+}}
+
+{{goodToKnow
+  "Prevent ALB bypass: add a custom header in CloudFront origin config, reject requests without it at ALB listener rule"
+  "Field-level encryption: encrypt specific POST fields (credit card, SSN) at the edge before they reach your origin"
+}}
+
 {{phase 5 "Origin Shield and Request Collapsing" "3 min"}}
 
 {{say `<strong>Origin Shield</strong> is an additional caching layer between edge PoPs and your origin:
@@ -331,6 +376,14 @@ Enables <strong>request collapsing</strong>: concurrent misses for the same obje
   "Can I use Origin Shield with a non-AWS origin?"
   "Yes. Origin Shield works with any custom origin (your own data center, another cloud provider). Pick the Shield region closest to your origin's physical location. The benefit is the same — collapsed requests and a warm regional cache layer between 750+ PoPs and your origin."
 }}
+
+{{mustKnow
+  "Origin Shield collapses 750+ PoP cache misses into 1 origin request — prevents cache stampede"
+  "Enable Origin Shield in the region closest to your origin (e.g., us-east-1 for S3 in us-east-1)"
+  "Request collapsing: concurrent misses for the same object become a single origin fetch"
+}}
+
+{{caveat "Origin Shield only helps with cacheable content. For purely dynamic uncacheable responses (no-cache), it adds a network hop without reducing origin load. Fix your Cache-Control headers before enabling Origin Shield."}}
 
 {{phase 6 "Cost Optimization" "3 min"}}
 
@@ -379,6 +432,21 @@ Enables <strong>request collapsing</strong>: concurrent misses for the same obje
 }}
 
 {{key "The biggest CloudFront cost mistake: serving media from EC2 instead of S3. EC2-to-CloudFront costs $0.09/GB. S3-to-CloudFront is free. Move static assets to S3 first."}}
+
+{{collapseSection "CloudFront Reserved Capacity and Savings Bundles" "
+<ul>
+  <li><strong>CloudFront Savings Bundle</strong> — commit to a monthly spend amount (e.g., $100/mo) for 30% discount on usage charges.</li>
+  <li><strong>Security Savings Bundle</strong> — bundle CloudFront + WAF + Shield Advanced + Bot Control for a discounted rate.</li>
+  <li><strong>Break-even</strong> — reserved capacity pays off at ~$200+/month in CloudFront spend. Below that, pay-as-you-go is fine.</li>
+  <li><strong>1-year commitment</strong> — no upfront payment, just a minimum monthly spend agreement.</li>
+</ul>
+"}}
+
+{{mustKnow
+  "S3-to-CloudFront = free. EC2-to-CloudFront = $0.09/GB. Always use S3 for static origins"
+  "PriceClass_100 limits PoPs to US/EU/Asia — saves ~30% if your users are concentrated there"
+  "Compression (Gzip + Brotli) reduces transfer costs by 30-70% with one toggle"
+}}
 
 {{phase 7 "Failure Scenarios" "3 min"}}
 
@@ -434,6 +502,12 @@ resource "aws_cloudfront_distribution" "main" {
   "By default, CloudFront caches error responses for &lt;span class='hl'>10 seconds&lt;/span> (error_caching_min_ttl). This prevents a failing origin from being hammered with retries. You can override this per error code — set it to &lt;span class='hl'>30-60 seconds&lt;/span> for 503s to give your origin time to recover, but keep 404s shorter since they may resolve quickly after a deployment."
 }}
 
+{{mustKnow
+  "stale-if-error keeps your site alive during origin outages — set it on all cacheable responses"
+  "Origin groups with primary/secondary origin provide automatic failover on 5xx or timeout"
+  "Three resilience layers: stale-if-error (cached content), origin failover (fresh from backup), custom error pages (static fallback)"
+}}
+
 {{phase 8 "Interview Q&A" "3 min"}}
 
 {{say "Three CloudFront topics that come up consistently in interviews: &lt;strong>multi-origin setup&lt;/strong>, &lt;strong>cache invalidation strategy&lt;/strong>, and &lt;strong>multi-region failover&lt;/strong>."}}
@@ -453,6 +527,12 @@ resource "aws_cloudfront_distribution" "main" {
 }}
 
 {{followup "How would you handle multi-region failover with CloudFront?" "Use CloudFront origin groups with primary and secondary origins. If the primary origin returns 5xx or times out, CloudFront automatically fails over to the secondary. Configure health checks on both. For active-active multi-region, use Route 53 latency-based routing as the CloudFront origin — Route 53 routes to the nearest healthy region."}}
+
+{{mustKnow
+  "In interviews: introduce CloudFront early in high-level architecture, not as an afterthought"
+  "Show depth: what is cacheable vs not, versioned URLs vs invalidation, Origin Shield, OAC for S3 security"
+  "One distribution with multiple origins and path-based behaviors serves an entire microservices architecture"
+}}
 
 {{checklist
   "Use OAC (not OAI) for all S3 origins"

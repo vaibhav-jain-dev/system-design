@@ -35,6 +35,12 @@ func FuncMap(diagramReg *diagrams.Registry) template.FuncMap {
 		"think":     think,
 		"triggerQs": triggerQs,
 
+		// Interview insight macros
+		"mustKnow":       mustKnow,
+		"goodToKnow":     goodToKnow,
+		"caveat":         caveat,
+		"collapseSection": collapseSection,
+
 		// Helpers for building structured data in templates
 		"options": optionsList,
 		"best":    optBest,
@@ -527,6 +533,48 @@ func deepQA(title, content string) template.HTML {
 			</div>
 			%s
 		</div>`, title, content))
+}
+
+// ── Interview Insight Macros ───────────────────────────────────
+
+// mustKnow renders a "Must Know" box with critical interview knowledge.
+// Usage: {{mustKnow "point1" "point2" "point3"}}
+func mustKnow(items ...string) template.HTML {
+	var sb strings.Builder
+	sb.WriteString(`<div class="must-know-box"><div class="must-know-header"><svg class="box-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg> Must Know</div><ul>`)
+	for _, item := range items {
+		sb.WriteString(fmt.Sprintf(`<li>%s</li>`, item))
+	}
+	sb.WriteString(`</ul></div>`)
+	return template.HTML(sb.String())
+}
+
+// goodToKnow renders a "Good to Know" box with supplementary knowledge.
+// Usage: {{goodToKnow "point1" "point2" "point3"}}
+func goodToKnow(items ...string) template.HTML {
+	var sb strings.Builder
+	sb.WriteString(`<div class="good-to-know-box"><div class="good-to-know-header"><svg class="box-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg> Good to Know</div><ul>`)
+	for _, item := range items {
+		sb.WriteString(fmt.Sprintf(`<li>%s</li>`, item))
+	}
+	sb.WriteString(`</ul></div>`)
+	return template.HTML(sb.String())
+}
+
+// caveat renders a caveat/warning callout box.
+// Usage: {{caveat "Important caveat text here"}}
+func caveat(text string) template.HTML {
+	return template.HTML(fmt.Sprintf(
+		`<div class="caveat-box"><span class="caveat-label"><svg class="box-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> Caveat</span> %s</div>`, text))
+}
+
+// collapseSection renders a collapsible section (closed by default) for content
+// that's supplementary or less relevant for core interview prep.
+// Usage: {{collapseSection "Section Title" "HTML content here"}}
+func collapseSection(title, content string) template.HTML {
+	return template.HTML(fmt.Sprintf(
+		`<details class="collapse-section"><summary class="collapse-section-summary"><svg class="collapse-section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg> %s</summary><div class="collapse-section-body">%s</div></details>`,
+		title, content))
 }
 
 // ── Thought Process Macros ─────────────────────────────────────

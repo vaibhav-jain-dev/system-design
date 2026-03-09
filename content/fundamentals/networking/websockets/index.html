@@ -34,6 +34,12 @@
   "Both sides can send data simultaneously on the same connection. With HTTP, the client sends a request, then waits. With WebSockets, the server can push a message while the client is also sending data — both directions are independent. TCP supports this natively; WebSocket exposes it at the application layer."
 }}
 
+{{mustKnow
+  "WebSocket = persistent full-duplex TCP connection. Latency drops from 100-300ms (polling) to 1-5ms"
+  "Use WebSocket when client AND server send data. Use SSE when only server pushes (simpler, HTTP/2 native)"
+  "HTTP upgrade handshake: client sends Upgrade: websocket, server returns 101 Switching Protocols"
+}}
+
 {{phase 2 "Handshake & Protocol" "4 min"}}
 
 {{say `<span class="hl-blue">WebSocket handshake</span> starts as an HTTP/1.1 request and upgrades in-place:
@@ -80,6 +86,14 @@ Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`}}
   "The server returns a normal HTTP response (e.g., 400 Bad Request or 403 Forbidden). The connection remains a regular HTTP connection. The client falls back to polling or SSE. This is the standard graceful degradation path."
   "Can WebSockets go through HTTP proxies?"
   "Yes, if the proxy supports the CONNECT method and passes through Upgrade headers. Many corporate proxies and some CDNs strip Upgrade headers or block CONNECT tunneling — this is why WebSocket fallback to long polling matters. Use WSS (TLS) to reduce proxy interference; encrypted traffic is less likely to be intercepted."
+}}
+
+{{caveat "WebSocket over HTTP/2 is not widely supported yet (RFC 8441). In practice, WebSocket uses HTTP/1.1 upgrade. This matters because HTTP/2 multiplexing does not apply to WebSocket connections — each WebSocket still takes a separate TCP connection."}}
+
+{{mustKnow
+  "Handshake: HTTP/1.1 GET with Upgrade: websocket → 101 Switching Protocols → same TCP connection reused for frames"
+  "Client frames are masked (XOR key) to prevent cache poisoning through intermediary proxies"
+  "A single server can hold ~50K concurrent connections (c5.2xlarge) — bottleneck is memory, not CPU"
 }}
 
 {{qa "How many WebSocket connections can one server handle?" "A Linux server can hold ~1M concurrent TCP connections with proper tuning (file descriptor limits, ephemeral port range, memory for buffers). Each idle WebSocket uses ~2-4KB of RAM. 1M connections × 4KB = 4GB. The bottleneck is usually message throughput, not connection count." "What about mobile devices with unreliable networks?" "Mobile connections drop frequently (cell tower switches, WiFi to cellular). Implement automatic reconnect with exponential backoff (1s, 2s, 4s, max 30s). Buffer messages client-side during disconnection. On reconnect, send the last received message timestamp and fetch missed messages from the server's message history."}}
@@ -159,6 +173,17 @@ class ReconnectingWebSocket {
   "A ghost connection is a server-side WebSocket entry where the client has disconnected (network drop, device sleep) but the server hasn't been notified — TCP RST wasn't sent. The server holds state for a connection that's effectively dead. Heartbeat ping/pong detects ghosts within the ping interval + response timeout. Without heartbeats, ghosts accumulate until the server OOMs."
 }}
 
+{{mustKnow
+  "Heartbeat: ping every 30s, expect pong within 5s. Without this, ghost connections accumulate and OOM the server"
+  "Exponential backoff reconnect: 1s → 2s → 4s, cap at 60s, add ±20% jitter to prevent thundering herd"
+  "TCP keepalive alone takes up to 10 minutes to detect dead connections — application-level ping catches it in 35s"
+}}
+
+{{goodToKnow
+  "File descriptor limit (ulimit -n) default is 1024 — must be raised to 1M+ for WebSocket servers"
+  "Each idle WebSocket uses ~2-4KB RAM; with read/write buffers, active connections use ~10-50KB"
+}}
+
 {{phase 4 "Scaling WebSockets" "6 min"}}
 
 {{say `The fundamental scaling problem: <strong>client A is connected to server 1; a message for client A arrives at server 2</strong>. How does server 2 deliver it?
@@ -216,6 +241,14 @@ func (h *Hub) Publish(userID string, payload []byte) {
   "During a rolling deploy, the server sends a WebSocket close frame (1001 Going Away) to all connected clients before shutdown. Clients receive the close, trigger their reconnect logic with backoff, and connect to a different healthy server. The new server re-subscribes to Redis channels for that user. Messages during the reconnect window are buffered client-side or fetched from history on reconnect. Total disruption: 1-3 seconds."
 }}
 
+{{caveat "WebSocket connections are stateful — horizontal scaling is NOT as simple as adding servers. You need sticky sessions AND a shared pub/sub layer (Redis). This is the #1 interview trap for WebSocket questions."}}
+
+{{mustKnow
+  "Core scaling problem: client A on server 1, message arrives at server 2. Solution: Redis Pub/Sub for cross-server routing"
+  "Sticky sessions reduce Redis traffic but do NOT eliminate the cross-server routing problem"
+  "At 1M+ connections: shard Redis by user_id range across multiple Redis instances"
+}}
+
 {{qa "How do you load balance WebSocket connections?" "You can't use round-robin per request because WebSockets are long-lived connections, not individual requests. Use the initial HTTP upgrade request for load balancing — once upgraded, the connection stays on that server. ALB supports WebSocket natively and routes the upgrade to a target. For even distribution, use least-connections algorithm." "What happens if one WebSocket server becomes overloaded?" "Unlike HTTP where a load balancer distributes individual requests, WebSocket connections are sticky to a server. If server A has 50K connections and server B has 10K, new connections should go to B. Use connection-count-aware load balancing (least connections). For rebalancing, the overloaded server can proactively disconnect clients with a 1001 close code, forcing reconnection to a less loaded server."}}
 
 {{phase 5 "Redis Pub/Sub Fan-Out" "5 min"}}
@@ -271,6 +304,18 @@ async def handler(websocket, path):
   "Redis Pub/Sub is ephemeral — if no subscriber is listening, the message is dropped. Redis Streams persist messages in an append-only log with consumer group offsets, similar to Kafka. Use Pub/Sub for live delivery to online clients. Use Streams (or Kafka) for durable messaging where offline clients need to catch up. Many systems use both: Streams for durability, Pub/Sub for low-latency online delivery."
 }}
 
+{{mustKnow
+  "Redis Pub/Sub: O(1) publish to channel, fire-and-forget — missed messages are gone forever"
+  "Channel design: fine-grained (user:{id}, room:{id}) not coarse — prevents fan-out waste"
+  "For offline message delivery: pair Pub/Sub with Redis Streams or Kafka for durability"
+  "Throughput: ~1M publishes/sec on a single Redis r6g.xlarge node"
+}}
+
+{{goodToKnow
+  "Slack uses Redis Pub/Sub for real-time delivery across multiple browser tabs per user"
+  "Redis Streams provide consumer group offsets (like Kafka) — clients can catch up on missed messages"
+}}
+
 {{phase 6 "Fallback Strategies" "4 min"}}
 
 {{say `Some environments block WebSockets — corporate firewalls, Zscaler, Cisco Umbrella proxies:
@@ -324,6 +369,12 @@ async function startLongPolling(userId, onMessage) {
 
 {{hint "Socket.IO handles fallback automatically" "Socket.IO starts with long polling, upgrades to WebSocket if available, and handles reconnection. It adds ~40KB client bundle. For production systems, implementing the fallback yourself gives you more control — but Socket.IO is a pragmatic choice for teams without WebSocket expertise."}}
 
+{{mustKnow
+  "Fallback order: WebSocket → SSE → Long Polling. Each step adds latency but maintains functionality"
+  "Corporate proxies (Zscaler, Cisco Umbrella) frequently block WebSocket upgrades — fallback is not optional for enterprise"
+  "WSS (TLS) reduces proxy interference — encrypted traffic is less likely to be intercepted or blocked"
+}}
+
 {{phase 7 "Security & Health" "3 min"}}
 
 {{say `<span class="hl-red">Always use WSS</span> — WebSocket over TLS — never plain WS:
@@ -361,6 +412,19 @@ async function startLongPolling(userId, onMessage) {
   "Pass a short-lived JWT (15-minute TTL) as a query parameter or Subprotocol header during the upgrade request. The server validates the JWT before returning 101. Once the connection is established, the user is trusted for the connection lifetime — no per-message auth overhead. For long-lived connections (>15min), implement a re-auth flow: server sends an auth-challenge message, client responds with a refreshed token."
 }}
 
+{{caveat "Cookie-only authentication makes WebSocket connections vulnerable to CSRF — cookies are sent automatically on the upgrade request. Always use JWT in headers or query params, and validate the Origin header to restrict to your domain."}}
+
+{{mustKnow
+  "Always WSS (TLS) — never plain WS. Plain WS is as insecure as plain HTTP"
+  "JWT auth at upgrade time: validate before returning 101. For connections >15min, implement re-auth flow"
+  "Rate limit per connection AND per user_id to prevent DoS via message flood"
+}}
+
+{{goodToKnow
+  "ALB idle timeout default is 60s — set to 3600s for WebSocket workloads or connections will be silently dropped"
+  "Max 5 concurrent connections per user_id prevents resource exhaustion from automated clients"
+}}
+
 {{qa "Is gRPC streaming better than WebSockets?" "For service-to-service communication, gRPC bidirectional streaming is usually better — it has built-in protobuf serialization, deadline propagation, and works well with service meshes. For browser-to-server, WebSockets are the only full-duplex option since browsers don't natively support gRPC streaming without grpc-web (which is unidirectional)." "When should I use MQTT instead of WebSockets?" "MQTT is purpose-built for IoT: tiny packet overhead (2-byte header vs WebSocket's variable header), built-in QoS levels (0=fire-forget, 1=at-least-once, 2=exactly-once), and last-will messages for disconnect detection. Use MQTT for thousands of low-bandwidth IoT devices. Use WebSockets for interactive applications (chat, gaming, collaboration) where you need arbitrary message formats."}}
 
 {{phase 8 "Interview Summary" "2 min"}}
@@ -377,6 +441,12 @@ async function startLongPolling(userId, onMessage) {
 {{avoid "Don't say WebSockets scale easily horizontally. They don't — connections are stateful. You need sticky sessions AND a shared pub/sub layer. Say both. The interviewer is specifically testing whether you know this."}}
 
 {{avoid "Don't confuse WebSockets with SSE. SSE is server-to-client only. WebSockets are bidirectional. If the interviewer asks about a live dashboard (no client sends), SSE is the better answer — simpler, HTTP/2 multiplexed, no special proxy handling needed."}}
+
+{{mustKnow
+  "WebSocket scaling = sticky sessions + Redis Pub/Sub. Say BOTH — interviewers test if you know connections are stateful"
+  "SSE for server→client only (dashboards, notifications). WebSocket for bidirectional (chat, gaming, collaboration)"
+  "Redis Pub/Sub is fire-and-forget. Pair with Streams/Kafka for durable offline message delivery"
+}}
 
 {{table "Real Company Usage" (rows
   (row "Company" "Use Case" "Scale")

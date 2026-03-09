@@ -29,6 +29,14 @@
   (nofit "Multi-master replication" "Conflict resolution is unsolved in general. PostgreSQL BDR exists but is complex. Most teams shard instead of using multi-master.")
 )}}
 
+{{mustKnow
+  "Sharding is horizontal partitioning — splitting data across multiple DB instances for write throughput"
+  "Shard key is chosen at design time and cannot change without full re-sharding"
+  "Always exhaust vertical scaling + read replicas + caching before sharding — sharding adds massive complexity"
+}}
+
+{{caveat "Instagram ran on a single Postgres primary for 1.5 years with replicas for reads. Vertical scaling + read replicas handle 10x growth; sharding handles 100x-1000x. Do not shard too early."}}
+
 {{phase 2 "Range Sharding" "4 min"}}
 
 {{say `<span class="hl-blue">Range sharding</span> assigns rows to shards based on a key range:
@@ -62,6 +70,14 @@
 }}
 
 {{hint "Range sharding is ideal for time-series with cold historical data" "If writes are recent and reads span historical ranges, range sharding by time means you can archive old shards to cheaper storage (S3, Glacier) while recent shards stay on fast SSDs."}}
+
+{{mustKnow
+  "Range sharding assigns rows by key range — efficient range queries but creates hotspots on monotonic/time-based keys"
+  "All new writes go to the latest shard with auto-increment IDs or timestamps"
+  "Ideal for time-series with cold historical data — old shards can be archived to cheaper storage"
+}}
+
+{{caveat "Uneven range distributions cause uneven storage and load. Range sharding requires monitoring per-shard size and splitting hot ranges manually — operationally expensive compared to hash sharding."}}
 
 {{phase 3 "Hash Sharding" "5 min"}}
 
@@ -138,6 +154,17 @@ def get_tweet_key(user_id: int, shard_suffix: int) -> str:
   "What shard key would you choose for a Twitter-like system?" "user_id. Tweets by the same user co-locate on one shard, making timeline reads for a user's own tweets a single-shard query. Follower timelines still require scatter-gather (fan-out on read) but that is addressed by denormalization, not shard key choice."
 }}
 
+{{mustKnow
+  "Hash sharding: shard_id = hash(key) mod N — uniform distribution, eliminates hotspots"
+  "Tradeoff: range queries scatter to all N shards; ORDER BY requires merge-sort across shards"
+  "Simple modulo: adding 1 shard moves (N-1)/N ≈ 80% of keys — use consistent hashing (moves 1/N) instead"
+}}
+
+{{goodToKnow
+  "DynamoDB, Cassandra, and Redis Cluster all use consistent hashing variants internally"
+  "For Twitter-like systems: shard by user_id so a user's own tweets co-locate on one shard"
+}}
+
 {{phase 4 "Directory-Based Sharding" "4 min"}}
 
 {{say `<span class="hl-blue">Directory-based sharding</span> uses a lookup table mapping each key to a specific shard:
@@ -169,6 +196,17 @@ def get_tweet_key(user_id: int, shard_suffix: int) -> str:
 {{triggerQs "Directory Sharding Questions"
   "What is the main advantage of directory sharding over hash sharding?" "Zero-math re-sharding. To move a user from shard2 to shard3, you migrate their data, then update one row in the lookup table. With hash sharding, moving one key requires changing the hash function or consistent hash ring — affecting routing for all keys."
   "How do you avoid making the directory a bottleneck?" "Cache aggressively. Shard assignments are stable for months at a time. Each app server caches the full mapping in a local dictionary. On re-sharding events, push invalidation to all servers. P99 lookup is a local hash map read: nanoseconds."
+}}
+
+{{mustKnow
+  "Directory-based: lookup table maps each key to a shard — most flexible but lookup service is a potential SPOF"
+  "Cache the mapping in each app server (shard assignments rarely change) — lookup becomes local hash map read"
+  "Re-sharding = update the lookup table and migrate data; no key-space math required"
+}}
+
+{{goodToKnow
+  "Vitess (MySQL sharding proxy) uses directory-based sharding with automated tooling"
+  "Fall back to hash sharding if lookup service fails — provides degraded but functional routing"
 }}
 
 {{phase 5 "Hotspot Mitigation" "5 min"}}
@@ -253,6 +291,14 @@ def get_dynamo_partition_key(user_id: str, is_celebrity: bool = False) -> str:
 {{hint "DynamoDB burst capacity absorbs transient hotspots" "DynamoDB partitions have a sustained write limit (~1000 WCU/partition) but bank up to 5 minutes of unused capacity for bursts. A sudden spike that would overflow a partition is often absorbed. Design for sustained load, not single-second peaks."}}
 
 {{qa "How do you handle transactions that span multiple shards?" "You generally don't — that's the core tradeoff of sharding. Options: (1) avoid cross-shard transactions by choosing a shard key that co-locates related data, (2) use the Saga pattern for eventually-consistent cross-shard workflows, (3) use a database with native distributed transactions like CockroachDB or Google Spanner." "What about foreign keys across shards?" "Foreign keys cannot span shards. Enforce referential integrity in the application layer — check existence before insert, use soft deletes with async cleanup. This is why sharding is a last resort: you lose SQL guarantees."}}
+
+{{mustKnow
+  "Write sharding for hot keys: split key across N suffixes (key#0...key#9) — writes spread, reads scatter-gather"
+  "Replicas help reads, not writes — adding replicas does not reduce write load on the primary"
+  "Celebrity list pattern: flag hot users, apply write sharding only to them; misses new viral events"
+}}
+
+{{caveat "Cross-shard transactions are effectively eliminated by sharding. Options: co-locate related data on same shard, use Saga pattern for eventual consistency, or use CockroachDB/Spanner for native distributed transactions."}}
 
 {{phase 6 "Re-Sharding (Zero Downtime)" "6 min"}}
 
@@ -353,6 +399,14 @@ class ResharderService:
   "What managed databases handle re-sharding automatically?" "DynamoDB: auto-splits partitions when they exceed 10GB or 3000 RCU/1000 WCU. Cassandra: vnodes allow adding nodes and the ring re-balances automatically. CockroachDB: automatic range splitting and rebalancing. Vitess: manual re-sharding but automated tooling. These are strong arguments to use managed databases over self-managed sharding."
 }}
 
+{{mustKnow
+  "Re-sharding: dual-write → backfill → verify checksums → cutover reads → stop old writes → decommission"
+  "1TB shard takes 28-48 hours to backfill and verify — 2x write cost during entire migration"
+  "Checksum verification is non-negotiable before cutover — a backfill bug means silent data loss"
+}}
+
+{{caveat "This operational nightmare is the primary argument for managed databases (DynamoDB, Cassandra, CockroachDB) that re-shard automatically. If you are designing a new system, strongly prefer managed over self-managed sharding."}}
+
 {{phase 7 "Cross-Shard Queries" "4 min"}}
 
 {{say `Sharding eliminates cross-shard joins at the database layer. Three strategies for queries spanning multiple shards:
@@ -431,6 +485,17 @@ def lookup_user_by_email(email: str, index_shard, db_pool):
   "What is the latency impact of scatter-gather across 10 shards?" "In parallel: P99 latency = P99 of the slowest shard + merge overhead. If each shard P99 is 5ms, scatter-gather P99 is ~8ms (slowest shard + merge). In series it would be 50ms. Always parallelize scatter-gather — never query shards sequentially."
 }}
 
+{{mustKnow
+  "Three strategies for cross-shard queries: scatter-gather (parallel fan-out), global secondary index (2 round trips), denormalization"
+  "Scatter-gather latency = max(slowest shard), not sum — always parallelize, never query shards sequentially"
+  "Global secondary index is itself a potential hotspot on writes — may need its own sharding or use Elasticsearch"
+}}
+
+{{goodToKnow
+  "Instagram maintains a separate inverted index (Cassandra/ES) for hashtag search across user_id shards"
+  "10-shard scatter-gather with 5ms per-shard P99: overall P99 is ~8ms (max + merge), not 50ms"
+}}
+
 {{phase 8 "Interview Summary" "3 min"}}
 
 {{say `Key decisions when designing a sharded system:
@@ -459,6 +524,14 @@ def lookup_user_by_email(email: str, index_shard, db_pool):
   (row "<a class="dqa-link" href="/problem/twitter-feed">Twitter</a>"      "Tweets"          "user_id"            "Hash + write sharding for celebs")
   (row "Shopify"      "Orders"          "shop_id (tenant)"   "Hash (tenant isolation)")
 )}}
+
+{{mustKnow
+  "Shard key is the most critical decision — hash on user_id for social/user-centric systems"
+  "Hash sharding: even distribution, no range queries; Range sharding: locality, hotspot risk"
+  "Managed databases (DynamoDB, Cassandra, CockroachDB) re-shard automatically — strong preference for new systems"
+}}
+
+{{collapseSection "Sharded Postgres vs DynamoDB Decision Guide" "Sharded Postgres: manual re-sharding (days of ops work), manual scatter-gather in app code, full SQL per shard, ~$800/mo for 4x db.r6g.large primaries at 1TB/10K WPS. Choose when you have existing Postgres and need complex joins. DynamoDB: automatic partition splits, managed GSIs for alternate access, no joins, ~$650/mo at same scale, zero ops overhead. Choose for greenfield, scale-first designs where access patterns are known."}}
 
 {{checklist
   "Exhaust vertical scaling and read replicas before sharding — sharding adds massive complexity."

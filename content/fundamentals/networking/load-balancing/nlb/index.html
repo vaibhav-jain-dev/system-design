@@ -31,6 +31,12 @@
   "Under 100 microseconds (0.1ms) — NLB operates at Layer 4 and forwards packets without inspecting content. ALB adds ~1ms because it parses HTTP headers, evaluates routing rules, and terminates TLS. For most web APIs, 1ms is irrelevant; for HFT or gaming tick loops where microseconds matter, NLB is required."
 }}
 
+{{mustKnow
+  "NLB = Layer 4, TCP/UDP forwarding — no content inspection, <100us latency, millions of conn/s"
+  "Four valid NLB reasons: static IP, non-HTTP protocol, TLS passthrough, PrivateLink"
+  "NLB preserves source IP automatically — backends see the real client IP without proxy protocol"
+}}
+
 {{phase 2 "When to Use NLB" "3 min"}}
 
 {{say "&lt;span class=\"hl-blue\">NLB&lt;/span> is a deliberate choice for specific constraints — not a default. Here are the scenarios where NLB is the right tool."}}
@@ -59,6 +65,17 @@
 )}}
 
 {{diagram "fund-nlb-architecture"}}
+
+{{mustKnow
+  "NLB is a deliberate choice for specific constraints — never the default for HTTP workloads"
+  "For HTTP needing static IP: chain NLB -> ALB rather than losing all L7 features"
+  "NLB scales instantly with no pre-warming — unlike ALB which needs 1-5 min ramp time"
+}}
+
+{{goodToKnow
+  "NLB supports security groups directly since August 2023 — simplifies network rule management"
+  "NLB can target ALB as a first-class target type — the NLB -> ALB chain is officially supported"
+}}
 
 {{phase 3 "TLS Passthrough vs Termination" "3 min"}}
 
@@ -92,6 +109,14 @@
   "TLS passthrough: NLB forwards encrypted TCP packets directly to targets — the target handles TLS. Use when compliance requires end-to-end encryption or when you need client certificate authentication (mTLS). TLS termination: NLB decrypts at the load balancer using an ACM certificate, then forwards plain TCP to targets. Lower target CPU usage but NLB sees unencrypted traffic."
   "Can NLB do health checks on non-HTTP services?"
   "Yes — NLB supports TCP health checks (can the target accept a TCP connection on the specified port?) and HTTP/HTTPS health checks (does GET /health return 200?). For non-HTTP services like databases or custom TCP protocols, use TCP health checks. Detection time: interval × unhealthy threshold, typically 10s × 3 = 30 seconds."
+}}
+
+{{caveat "TLS passthrough means NLB cannot do HTTP health checks — it cannot read encrypted traffic. Use TCP health checks only (can the port accept a connection?). This gives less visibility than HTTP health checks but is the only option with passthrough."}}
+
+{{mustKnow
+  "TLS passthrough: NLB never decrypts — required for mTLS and end-to-end encryption compliance (PCI-DSS, HIPAA)"
+  "TLS termination at NLB: ACM handles auto-renewal, backends run plain TCP — less CPU but NLB sees cleartext"
+  "Different listeners on the same NLB can use different TLS modes (passthrough on port 8443, termination on 443)"
 }}
 
 {{phase 4 "PrivateLink" "3 min"}}
@@ -172,6 +197,21 @@ resource "aws_vpc_endpoint_service" "main" {
 }
 `}}
 
+{{collapseSection "PrivateLink Terraform Configuration Notes" "
+<ul>
+  <li><strong>acceptance_required = true</strong> — manually approve each consumer connection. Set false for trusted accounts only.</li>
+  <li><strong>allowed_principals</strong> — restrict which AWS accounts can create endpoints. Use account-level ARNs.</li>
+  <li><strong>Private DNS</strong> — optionally associate a domain name so consumers use your API domain instead of the vpce-* endpoint URL.</li>
+  <li><strong>Cost split</strong> — consumer pays $0.01/hr per AZ + $0.01/GB processed. Provider pays NLB costs.</li>
+</ul>
+"}}
+
+{{mustKnow
+  "PrivateLink requires NLB — ALB cannot serve as a PrivateLink target. This is the #1 reason SaaS companies use NLB"
+  "Traffic stays entirely within the AWS network — never touches the public internet"
+  "Consumer creates a VPC endpoint, provider approves it — each side controls their own network"
+}}
+
 {{phase 5 "Cost Breakdown" "3 min"}}
 
 {{say "NLB pricing follows the same structure as ALB: a base hourly charge plus a variable NLCU charge. &lt;small>NLCUs are priced at $0.006/hr vs ALB LCUs at $0.008/hr — slightly cheaper per unit.&lt;/small>"}}
@@ -200,6 +240,14 @@ resource "aws_vpc_endpoint_service" "main" {
 {{triggerQs "NLB Cost Questions"
   "How does NLB cost compare to ALB for the same traffic?" "Base fee is identical at &lt;strong>$0.0225/hr&lt;/strong> ($16.43/mo). NLCUs are &lt;span class='hl'>25% cheaper&lt;/span> than ALB LCUs ($0.006 vs $0.008). NLB is typically cheaper for raw throughput, but cross-AZ data transfer can reverse that if cross-zone LB is enabled."
   "When does cross-zone load balancing become too expensive?" "Calculate your daily cross-AZ data volume. At &lt;span class='hl'>100 GB/day&lt;/span> bidirectional, cross-AZ costs ~$60/mo — manageable. At &lt;span class='hl'>1 TB/day&lt;/span>, it hits $600/mo. If targets are evenly distributed across AZs, disable cross-zone and let per-AZ routing handle it."
+}}
+
+{{caveat "Cross-zone load balancing is OFF by default on NLB (unlike ALB where it is ON). If targets are unevenly distributed across AZs and cross-zone is off, some AZs will be overloaded while others are underutilized."}}
+
+{{mustKnow
+  "NLB base fee is identical to ALB ($16.43/mo). NLCUs are 25% cheaper ($0.006 vs $0.008/hr)"
+  "Cross-zone LB is OFF by default on NLB — enable explicitly if targets are unevenly distributed"
+  "Cross-AZ data transfer ($0.01/GB each way) can dwarf the NLCU savings at high throughput"
 }}
 
 {{phase 6 "NLB vs ALB Summary" "2 min"}}
@@ -249,6 +297,12 @@ resource "aws_vpc_endpoint_service" "main" {
   "Does NLB support security groups?" "Yes, since &lt;strong>August 2023&lt;/strong>. NLB now supports security groups directly, simplifying network rules. Previously you had to manage NACLs and target security groups separately to control access."
 }}
 
+{{mustKnow
+  "NLB for static IP + non-HTTP. ALB for HTTP routing + WAF + auth. Chain NLB -> ALB when you need both"
+  "NLB has no path routing, no WAF, no auth, no gRPC health checks — it only understands TCP/UDP"
+  "NLB scales instantly (no pre-warming); ALB needs 1-5 minutes to ramp for sudden spikes"
+}}
+
 {{phase 7 "Monitoring & Troubleshooting" "4 min"}}
 
 {{say `NLB monitoring differs from ALB — there are no HTTP-level metrics. You monitor at the TCP/UDP layer:
@@ -284,6 +338,14 @@ resource "aws_vpc_endpoint_service" "main" {
   "How do I detect if NLB is dropping connections?" "Monitor TCP_ELB_Reset_Count and UnHealthyHostCount. If both spike together, NLB is resetting connections because all targets in an AZ are unhealthy. Enable cross-zone LB as a mitigation."
 }}
 
+{{caveat "NLB idle timeout is fixed at 350 seconds and cannot be configured. If your application has long-lived connections (database proxies, streaming), you must send TCP keepalives at intervals shorter than 350s or NLB will silently reset the connection."}}
+
+{{mustKnow
+  "NLB has no access logs — use VPC Flow Logs on NLB ENIs for per-connection detail"
+  "Three TCP reset metrics: Client RST (client issue), Target RST (backend crash), ELB RST (idle timeout/config)"
+  "NLB idle timeout is fixed at 350s — send keepalives from your app to prevent silent connection drops"
+}}
+
 {{phase 8 "Interview Summary" "2 min"}}
 
 {{say `<span class="hl-blue">NLB</span> is a deliberate choice for specific constraints:
@@ -304,6 +366,12 @@ Default to ALB for HTTP and only reach for NLB when a concrete requirement force
 }}
 
 {{hint "NLB in system design interviews" "Only mention NLB when the problem has a specific constraint: static IP for partner integration, non-HTTP protocol, mTLS requirement, or PrivateLink for SaaS. If the interviewer just says 'load balancer for a web app,' start with ALB."}}
+
+{{mustKnow
+  "NLB is for specific constraints: static IP, non-HTTP, TLS passthrough, PrivateLink — not the default"
+  "NLB -> ALB chain solves the static IP + L7 routing requirement for ~$16/mo extra"
+  "In interviews: only mention NLB if the problem has an explicit constraint that rules out ALB"
+}}
 
 {{checklist
   "NLB = Layer 4, TCP/UDP — deliberate choice, not a default"

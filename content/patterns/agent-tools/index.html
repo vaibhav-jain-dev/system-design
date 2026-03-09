@@ -29,6 +29,14 @@
   "Unbounded cost. A chain makes exactly N LLM calls. An agent can loop indefinitely, each iteration burning tokens. Without hard limits on iterations, tokens, and wall time, a single adversarial prompt can trigger hundreds of LLM calls. Always set budgets before deploying any agent to production."
 }}
 
+{{caveat "Agents are non-deterministic by nature. The same input can produce different tool call sequences on different runs. This makes testing harder than deterministic pipelines — you must test for behavioral correctness (did the right tool get called?) not exact traces."}}
+
+{{mustKnow
+  "Agent pattern = LLM decides what tools to call, in what order, and when to stop"
+  "Use agents when steps are unpredictable. Use prompt chaining when steps are fixed"
+  "Always set hard limits: max iterations, max tokens, max wall time — unbounded agents are the biggest operational risk"
+}}
+
 {{phase 2 "Agent Architecture: The ReAct Loop" "8 min"}}
 
 {{say `The dominant agent architecture is <span class="hl-blue">ReAct</span>: <strong>Re</strong>asoning + <strong>Act</strong>ing:
@@ -60,6 +68,12 @@
 }}
 
 {{hint "why append tool results as strings, not structured JSON?" "The LLM processes text tokens — structured JSON adds punctuation overhead (&lt;span class='hl'>~30% more tokens&lt;/span>) without improving comprehension. Flat key-value text is cheaper and parses just as well. Reserve JSON for tool &lt;em>inputs&lt;/em> where schema validation matters."}}
+
+{{mustKnow
+  "ReAct loop: Reason (LLM thinks) then Act (call tool) then Observe (read result) then repeat until done"
+  "Context grows ~500 tokens per tool round-trip — at 10 iterations that is 5K tokens of history alone"
+  "Most legitimate tasks complete in 3-7 iterations. Hard cap at 10-20 catches infinite loops"
+}}
 
 {{phase 3 "Tool Definition & Function Calling" "8 min"}}
 
@@ -197,6 +211,14 @@ TOOLS = [
   "Three layers: write descriptions that explicitly state when NOT to call the tool (e.g., 'Only use when user explicitly asks to send an email'). Validate inputs server-side regardless of what the LLM passes. For destructive operations, require a separate human-in-the-loop confirmation step before executing. Never trust the LLM's judgment alone on write or mutation operations."
   "How many tools should an agent have?"
   "3-7 tools is the practical limit before tool selection quality degrades. More tools means more context consumed by tool definitions and a higher probability of choosing the wrong one. If you need many tools, use a router pattern: a lightweight classifier selects the relevant subset of tools before the main agent loop begins."
+}}
+
+{{caveat "Each tool definition consumes ~200 tokens of context. With 20 tools, you lose 4K tokens just for definitions. Tool selection accuracy drops below 85% past 7 tools — use a router pattern to partition into groups of 3-5."}}
+
+{{mustKnow
+  "Tool descriptions are the single most important design decision — the LLM selects tools based on description similarity to user intent"
+  "3-7 tools per agent context. Beyond that, use a router pattern to partition tools into groups"
+  "Include negative instructions in descriptions: 'Do NOT use for...' reduces misselection by ~40%"
 }}
 
 {{phase 4 "Agent Implementation & Tool Examples" "12 min"}}
@@ -462,6 +484,12 @@ TOOL_HANDLERS = {
   "Async in production. A web_search call takes &lt;span class='hl'>200-500ms&lt;/span>, and database queries take &lt;span class='hl'>50-200ms&lt;/span>. When the agent makes parallel tool calls (supported by both OpenAI and Claude APIs), async handlers let you execute them concurrently instead of sequentially — cutting latency from sum to max of call times."
 }}
 
+{{mustKnow
+  "Every tool needs: input validation, output truncation (5000 chars), timeout, and descriptive error messages"
+  "Tool error messages are part of agent context — specific errors let the LLM self-correct, generic errors waste iterations"
+  "Truncate large results and append '[truncated]' — the agent gets a signal without context overflow"
+}}
+
 {{phase 5 "Agent with Anthropic Claude" "5 min"}}
 
 {{say "Claude uses a slightly different API structure for tool calling. Here is how to adapt the agent for the Anthropic API."}}
@@ -595,6 +623,19 @@ class ClaudeAgent:
   "Three hard limits: max iterations (typically 10-15), max total tokens (budget cap per request, e.g. 50K tokens), and wall-clock timeout (60-120 seconds). When any limit is hit, the agent stops and returns a partial answer with a clear message about why it stopped. Without these limits, a confused agent can loop calling tools repeatedly — at $0.01 per iteration, 100 loops costs $1 per request. At 10K requests/day, that is $10K/day in wasted API spend."
   "How do you handle tool failures in a production agent?"
   "Return a descriptive error string to the agent, not an exception. The LLM can reason about 'Database error: connection timeout after 5s' and decide to retry or try a different approach. Exceptions crash the loop. For transient failures (timeouts, rate limits), implement automatic retry with exponential backoff inside the tool handler — the agent should not waste an iteration on a retryable failure. For permanent failures (invalid SQL, missing permissions), return the error immediately so the agent can adapt its strategy."
+}}
+
+{{collapseSection "Claude vs OpenAI Tool API Differences" "OpenAI uses <code>tool_calls</code> on the message object with a <code>tool</code> role for results. Anthropic uses content blocks with <code>type='tool_use'</code> and expects results as <code>tool_result</code> blocks in the next user message. The agent loop structure is identical — only serialization differs. Tool call IDs are provider-specific and non-transferable, so you cannot switch providers mid-conversation. Write a thin adapter per provider rather than using a framework — the tool loop is ~30 lines."}}
+
+{{goodToKnow
+  "Claude puts tool results in the user message because Anthropic's API enforces strict assistant/user turn alternation"
+  "Abstraction layers like LiteLLM add 5-15ms overhead per call — for production agents, a thin adapter is better"
+}}
+
+{{mustKnow
+  "The ReAct loop is identical across providers — only the tool call serialization format differs"
+  "You cannot switch LLM providers mid-conversation — tool call IDs are provider-specific"
+  "Parallel tool calls are supported by both OpenAI and Claude APIs — use async handlers to execute concurrently"
 }}
 
 {{phase 6 "Error Handling & Safety Controls" "8 min"}}
@@ -755,6 +796,15 @@ class SafeAgent(Agent):
   "Start conservative: max_iterations=10, max_tokens=30000, max_tool_calls=15, wall_time=45s. Then measure your p95 iteration count on real traffic and loosen limits to p95 + 50% headroom. The goal is catching pathological cases without breaking legitimate complex requests. Alert when requests approach 80% of any budget limit."
 }}
 
+{{caveat "Prompt injection through tool results is the hardest attack vector. Tool output is attacker-controlled data that the agent treats as trusted context. String-matching sanitization catches only ~60% of attempts — layer it with delimiters, a secondary classifier, and human-in-the-loop for write operations."}}
+
+{{mustKnow
+  "Four agent failure categories: infinite loops, cost explosion, tool misuse, and prompt injection via tool results"
+  "Budget defaults: max_iterations=10, max_tokens=50K, max_tool_calls=20, wall_time=60s, cost_cap=$0.50"
+  "Wrap tool results in delimiter tags and instruct the model to never follow instructions within those tags"
+  "Never allow write/mutation tools without human confirmation"
+}}
+
 {{phase 7 "Agent Observability" "5 min"}}
 
 {{say `Agents are hard to debug — the execution path is <span class="hl-blue">non-deterministic</span>:
@@ -849,6 +899,12 @@ class TracedAgent(SafeAgent):
   "Max-iteration exit rate. If more than &lt;span class='hl'>5%&lt;/span> of requests hit the iteration cap, the agent is failing to converge — either the tools are unreliable, the system prompt is ambiguous, or the task is too broad. This single metric catches infinite loops, bad tool descriptions, and task decomposition failures simultaneously."
 }}
 
+{{mustKnow
+  "Log every tool call with trace ID, tool name, arguments, result, latency, and success/failure"
+  "The single most important metric is max-iteration exit rate — if over 5%, the agent is failing to converge"
+  "Store full message arrays per trace for deterministic replay and debugging"
+}}
+
 {{phase 8 "Architecture Patterns & Interview Q&A" "13 min"}}
 
 {{say `Three agent architectures — start with the simplest that works:
@@ -881,6 +937,18 @@ class TracedAgent(SafeAgent):
 }}
 
 {{followup "How would you handle long-running agent tasks?" "Async architecture. The agent request goes to a task queue (SQS or Celery). A worker picks it up and runs the agent loop. The user gets a task ID and polls for completion or receives a webhook callback. Store intermediate results so the agent can resume if the worker crashes. This also enables longer timeouts since the user is not waiting synchronously — the agent can run for minutes without a timeout error."}}
+
+{{goodToKnow
+  "Use GPT-4o-mini ($0.001/call) for tool routing, GPT-4o for final answer synthesis — 10x cost reduction"
+  "For long-running tasks, use async architecture with task queues so the agent can run for minutes without timeout"
+}}
+
+{{mustKnow
+  "Start with a simple single agent + 3-5 tools — covers 90% of use cases"
+  "Router agent when tool selection degrades (>7 tools). Multi-agent only for genuinely parallel subtasks"
+  "Agent cost: 3-5 LLM calls per request at ~$0.05-0.10 each. At 100K requests/month, expect $5K-10K in LLM costs"
+  "Test agents at three levels: tool unit tests, integration tests for tool call sequences, evaluation harness on 200+ queries"
+}}
 
 {{checklist
   "Define tools with clear descriptions telling the LLM when to use each"

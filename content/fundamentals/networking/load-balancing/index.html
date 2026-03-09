@@ -29,6 +29,14 @@
   (nofit "Classic LB" "Legacy AWS offering. AWS recommends migrating to ALB/NLB. No new features since 2016.")
 )}}
 
+{{caveat "Classic LB is deprecated for new deployments. If an interviewer mentions it, acknowledge it exists but pivot to ALB/NLB — Classic has no path routing, no WebSocket support, and no new features since 2016."}}
+
+{{mustKnow
+  "L4 forwards TCP/UDP packets without content inspection; L7 understands HTTP headers, paths, and cookies"
+  "ALB is the default for web services — L7 routing, WAF, gRPC. NLB only when you need static IPs, TLS passthrough, or sub-100µs latency"
+  "Chain NLB → ALB when you need both static IPs and L7 features"
+}}
+
 {{phase 2 "Routing Algorithms" "5 min"}}
 
 {{say "The routing algorithm determines HOW traffic is distributed. Three workload dimensions drive the choice: request duration variance, session stickiness needs, and cache locality requirements."}}
@@ -104,6 +112,17 @@ class ConsistentHashRing:
 
 {{key "Consistent hashing minimizes redistribution when nodes are added or removed. Without it, adding a server reshuffles all keys. With it, only 1/N keys move."}}
 
+{{goodToKnow
+  "Weighted round-robin is useful during canary deploys — give the canary instance weight=1 while production instances get weight=10"
+  "Power-of-two-choices: pick two random servers, route to the one with fewer connections — near-optimal distribution with minimal state"
+}}
+
+{{mustKnow
+  "Round-robin is the default; switch to least-connections when request durations vary significantly"
+  "Consistent hashing moves only 1/N keys when a node is added/removed — use 150 virtual nodes per server for <5% load deviation"
+  "IP hash gives sticky routing without cookies but breaks when clients share IPs (corporate NATs)"
+}}
+
 {{phase 3 "Health Checks" "3 min"}}
 
 {{say "Health checks are how the load balancer knows which backends are alive. Without them, you are blindly sending traffic to potentially dead servers."}}
@@ -162,6 +181,14 @@ async def health_deep():
 
 {{key "Health check interval x threshold = detection time. Default: 30s interval x 3 failures = 90s. For critical services, use 10s x 2 = 20s detection."}}
 
+{{caveat "A deep health check on the LB path creates a cascading failure risk: one slow DB query → LB marks instance unhealthy → remaining instances get more traffic → their DB queries slow → LB removes them too. Fleet collapses."}}
+
+{{mustKnow
+  "Shallow health check for LB (process alive?), deep health check for monitoring only (DB, cache, dependencies)"
+  "Detection time = interval x failure threshold — tune to match your SLA"
+  "502 = bad response from target, 503 = no healthy targets, 504 = target timeout"
+}}
+
 {{phase 4 "AWS ALB vs NLB Comparison" "5 min"}}
 
 {{say `ALB vs NLB — the answer depends on the workload:
@@ -210,6 +237,17 @@ async def health_deep():
 
 {{qa "Can ALB handle WebSocket and gRPC natively?" "Yes. ALB upgrades HTTP/1.1 connections to WebSocket via the &lt;span class='hl-blue'>Upgrade&lt;/span> header automatically — no extra config. For gRPC, ALB routes HTTP/2 frames and supports gRPC health checks natively. &lt;span class='hl-red'>NLB cannot inspect HTTP/2 frames&lt;/span> — it treats gRPC as raw TCP." "What happens if I need TLS passthrough?" "Use &lt;strong>NLB with TCP listener&lt;/strong>. The TLS handshake terminates at your backend, not the LB. ALB always terminates TLS — it must decrypt to inspect HTTP headers. TLS passthrough is required for mutual TLS (mTLS) or when compliance mandates end-to-end encryption."}}
 
+{{mustKnow
+  "ALB = L7 default (path routing, WAF, auth, WebSocket, gRPC). NLB = L4 for static IPs, TLS passthrough, non-HTTP protocols"
+  "ALB adds ~1ms latency; NLB adds <100µs — only matters for HFT or gaming tick loops"
+  "WAF only attaches to ALB, API Gateway, or CloudFront — never directly to NLB"
+}}
+
+{{goodToKnow
+  "NLB supports ALB as a target type — the NLB → ALB chain is a first-class AWS pattern"
+  "ALB idle timeout default is 60s; increase for WebSocket or long-polling connections"
+}}
+
 {{phase 5 "Multi-AZ and High Availability" "5 min"}}
 
 {{say "The load balancer itself must be highly available. Here is how AWS handles this and what you need to configure."}}
@@ -240,6 +278,14 @@ async def health_deep():
 
 {{diagram "fund-lb-multi-az"}}
 
+{{caveat "Cross-zone load balancing is ON by default for ALB but OFF for NLB. If your NLB targets are unevenly distributed across AZs, some AZs will be overloaded. Enable it explicitly on NLB or ensure equal target counts per AZ."}}
+
+{{mustKnow
+  "ALB is inherently multi-AZ — AWS manages redundant LB nodes across AZs automatically"
+  "Cross-AZ data transfer costs $0.01/GB each way — at 1 TB/day that is $600/mo"
+  "Connection draining lets in-flight requests finish before removing a target (default 300s timeout)"
+}}
+
 {{phase 6 "Failure Scenarios" "3 min"}}
 
 {{say "Load balancer failures range from a single backend crash (minor) to a full AZ outage (major). Understanding these failure modes and their detection times is what separates a good answer from a great one."}}
@@ -263,6 +309,12 @@ async def health_deep():
   "Target group misconfiguration during deployment — a bad health check path or wrong port causes ALB to mark all new targets unhealthy, returning 502 to all requests. Prevention: canary deploys that route 5% of traffic to the new version first, with automatic rollback if 5XX rate exceeds 1%."
   "How do you handle a surge that exceeds current ALB capacity?"
   "ALB auto-scales but needs 1-5 minutes to ramp up. For predictable events (product launch, marketing campaign), contact AWS support 48 hours ahead to pre-warm. For unpredictable spikes, the targets behind the ALB will saturate first — auto-scaling on the target group with aggressive scale-up (1-minute cooldown) is more impactful than ALB pre-warming."
+}}
+
+{{mustKnow
+  "Most common LB failure: target group misconfiguration during deploy — wrong health check path or port causes 502 for all traffic"
+  "Rolling or blue-green deploys limit blast radius to 1/N targets; never deploy to all targets simultaneously"
+  "ALB auto-scales but needs 1-5 minutes to ramp — pre-warm via AWS support for predictable traffic spikes"
 }}
 
 {{phase 7 "Cost Estimates" "3 min"}}
@@ -302,6 +354,21 @@ async def health_deep():
   "When does NLB become cheaper than ALB?" "At very high throughput with simple routing. NLB NLCU is &lt;span class='hl'>$0.006/hr&lt;/span> vs ALB LCU at &lt;span class='hl'>$0.008/hr&lt;/span>, and NLB has no rule-evaluation dimension. At &lt;span class='hl'>100K RPS&lt;/span> with 20+ routing rules, ALB LCU costs can be 3-4x higher than NLB NLCU."
 }}
 
+{{collapseSection "Detailed LCU/NLCU Cost Calculations" "
+<ul>
+  <li><strong>LCU dimensions</strong> — new connections, active connections, processed bytes, rule evaluations. You pay for the highest dimension only.</li>
+  <li><strong>Rule evaluation trap</strong> — 10K RPS x 20 rules = 200K rule evals/s = 200 LCUs. At $0.008/LCU-hr that is $1.15/hr = <span class='hl'>$840/mo</span> just for rule evaluations.</li>
+  <li><strong>NLCU is simpler</strong> — only connections and bandwidth dimensions. No rule evaluation cost. At high RPS with complex routing, NLB can be 3-4x cheaper.</li>
+  <li><strong>Break-even point</strong> — ALB and NLB cost roughly the same at <span class='hl'>10K RPS</span> with <span class='hl'>5 routing rules</span>. Above that, ALB costs grow faster due to rule evaluations.</li>
+</ul>
+"}}
+
+{{mustKnow
+  "ALB base cost is ~$27/mo at 10K RPS — negligible compared to compute costs behind it"
+  "Cross-AZ data transfer ($0.01/GB each way) is the real hidden LB cost, not the LB fee itself"
+  "One ALB with path-based rules serves multiple microservices — avoid one ALB per service"
+}}
+
 {{phase 8 "Interview Q&A" "5 min"}}
 
 {{say "Common interview questions about load balancing — sticky sessions, connection draining, and traffic spikes:"}}
@@ -321,6 +388,17 @@ async def health_deep():
 }}
 
 {{followup "Can you put a load balancer behind another load balancer?" "Yes. NLB (static IP for firewall) -> ALB (L7 routing) -> ECS targets. Also used for AWS PrivateLink which requires NLB. The NLB passes TCP to ALB, ALB does content-based routing. Adds ~$25/mo but solves the static IP requirement."}}
+
+{{mustKnow
+  "Sticky sessions use cookies (ALB) or source IP hash (NLB) — avoid for stateless apps as they cause uneven load"
+  "Connection draining default is 300s — set it to match your longest expected request duration"
+  "Pre-warm ALB 48 hours before known traffic events by contacting AWS support"
+}}
+
+{{goodToKnow
+  "Slow-start mode on ALB gradually increases traffic to new targets over 30-900s — prevents overwhelming cold instances"
+  "ALB access logs go to S3 and include request processing time, target processing time, and response code — essential for debugging latency"
+}}
 
 {{checklist
   "ALB for HTTP/HTTPS workloads (Layer 7, path routing, WebSocket)"

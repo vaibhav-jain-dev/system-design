@@ -24,6 +24,14 @@ S3 stores objects in <strong>buckets</strong>. A bucket is a flat namespace — 
   "Single PUT is capped at &lt;span class='hl'>5 GB&lt;/span>. Multipart upload handles up to &lt;span class='hl'>5 TB&lt;/span> per object, uploading in parts from 5 MB to 5 GB each. For video files or large exports, always use multipart upload."
 }}
 
+{{mustKnow
+  "Object storage: PUT/GET/DELETE on opaque blobs by key — no schema, no query optimizer, no index"
+  "11 nines durability — automatically replicated across 3+ Availability Zones"
+  "Never store large blobs in a relational database — S3 costs $0.023/GB vs $0.10+/GB for DB"
+}}
+
+{{caveat "S3 bucket names are globally unique across all AWS accounts. Use a prefix like acme-prod-media-us-east-1 — include region for clarity on cross-region replication."}}
+
 {{phase 2 "Pre-Signed URLs & Access Control" "5 min"}}
 
 {{say `Never proxy media through your app servers. Instead, give clients a <strong>pre-signed URL</strong> — a time-limited signed URL that grants the client direct access to one specific S3 object:
@@ -60,6 +68,17 @@ S3 stores objects in <strong>buckets</strong>. A bucket is a flat namespace — 
 }}
 
 {{qa "Why use pre-signed URLs instead of proxying uploads through your server?" "Direct upload to S3 via pre-signed URL eliminates your server as a bandwidth bottleneck. A 100MB file upload through your API server consumes 100MB of server memory/bandwidth. With a pre-signed URL, the client uploads directly to S3 — your server only generates the URL (microseconds of work). This scales to thousands of concurrent uploads without adding servers." "What about security — can someone abuse a pre-signed URL?" "Pre-signed URLs expire (typically 5-15 minutes). They are scoped to a specific key (file path), HTTP method, and content-type. The signer's IAM permissions are checked at upload time. You can also set a max content-length condition to prevent oversized uploads."}}
+
+{{mustKnow
+  "Pre-signed URLs: server generates URL in < 1ms (pure crypto), client uploads/downloads directly to S3"
+  "Never proxy media through app servers — pre-signed URLs remove your server from the data path"
+  "CloudFront + OAC for public media — S3 bucket stays private, CDN serves at edge"
+}}
+
+{{goodToKnow
+  "Pre-signed URL TTL: 15 min for uploads, 1-24h for downloads — balance security vs UX"
+  "OAC (Origin Access Control) replaces OAI — supports SSE-KMS; always use OAC for new distributions"
+}}
 
 {{phase 3 "Multipart Upload" "4 min"}}
 
@@ -115,6 +134,14 @@ def upload_large_file(bucket, key, filepath):
 
 {{qa "How do you resume a failed multipart upload?" "Each part has an ETag returned on successful upload. Store part numbers and ETags as you go. On failure, call &lt;span class='hl-blue'>ListParts&lt;/span> to get already-uploaded parts, then continue uploading only the missing parts. The upload_id remains valid for 7 days unless you set an AbortIncompleteMultipartUploads lifecycle rule." "What about client-side upload to S3 from a browser?" "Generate a pre-signed POST policy with conditions: max file size, allowed content types, target key prefix. The browser uploads directly to S3 using a multipart form POST. Your server never touches the file bytes. Use &lt;span class='hl-blue'>S3 Transfer Acceleration&lt;/span> for uploads from distant regions — routes through <a class="dqa-link" href="/fund/networking/cdn">CloudFront</a> edge locations for &lt;span class='hl'>50-500%&lt;/span> faster uploads."}}
 
+{{mustKnow
+  "Multipart upload for files > 100 MB: parallel parts, resume on failure, up to 5 TB per object"
+  "Always set AbortIncompleteMultipartUploads lifecycle rule — incomplete parts accumulate storage charges silently"
+  "Content-Type must be set at CreateMultipartUpload — not per-part; forgotten = application/octet-stream default"
+}}
+
+{{caveat "Incomplete multipart uploads are billed indefinitely. At $0.023/GB, millions of abandoned uploads add up fast. Set a lifecycle rule to auto-abort after 7 days."}}
+
 {{phase 4 "Storage Classes & Lifecycle" "4 min"}}
 
 {{say `S3 offers 7 storage classes. The key trade-off is <strong>access cost vs storage cost</strong>:
@@ -159,6 +186,17 @@ def upload_large_file(bucket, key, filepath):
   (alt "Manual lifecycle rules" "Predictable patterns: images > 30 days → IA, > 365 days → Glacier. No monitoring fee. But wrong for content that gets accessed unpredictably.")
   (nofit "Everything in Standard" "Paying $0.023/GB for data you access once a year. At 100 TB, lifecycle to Glacier saves $22,000/month.")
 )}}
+
+{{mustKnow
+  "Lifecycle policies automate tiering: Standard ($0.023/GB) → IA ($0.0125) → Glacier ($0.004) → Deep Archive ($0.00099)"
+  "Intelligent-Tiering monitors access and auto-tiers — best for unpredictable access patterns"
+  "Minimum storage duration charges: IA 30 days, Glacier 90 days, Deep Archive 180 days"
+}}
+
+{{goodToKnow
+  "1 PB in Standard = $23K/mo; with lifecycle to Glacier Deep Archive = ~$7.5K/mo — saves $180K/year"
+  "S3 is strongly consistent since December 2020 — all operations are read-after-write consistent"
+}}
 
 {{phase 5 "Versioning & Replication" "4 min"}}
 
@@ -210,6 +248,14 @@ def upload_large_file(bucket, key, filepath):
     }
   ]
 }`}}
+
+{{mustKnow
+  "Versioning: every PUT creates new version, DELETE adds delete marker — recover from accidental overwrites"
+  "Cross-Region Replication (CRR): async copy with ~1-5s lag — use for disaster recovery, not strong consistency"
+  "Set lifecycle rule to expire non-current versions after 30 days — prevents unbounded storage cost growth"
+}}
+
+{{caveat "Versioning doubles or triples storage cost. A 5 MB photo updated 10 times = 50 MB stored. Always pair versioning with NoncurrentVersionExpiration lifecycle rules."}}
 
 {{phase 6 "S3 Event Notifications & Triggers" "3 min"}}
 
@@ -272,6 +318,17 @@ def handler(event, context):
 
 {{qa "How do you build an image processing pipeline with S3?" "Upload lands in &lt;code>uploads/&lt;/code> prefix → S3 event triggers SQS → Lambda reads original from S3 → generates thumbnail, medium, and large versions → writes to &lt;code>processed/thumb/&lt;/code>, &lt;code>processed/medium/&lt;/code>, &lt;code>processed/large/&lt;/code> prefixes → updates <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a> metadata record with URLs. All steps are idempotent — re-processing the same upload produces identical output." "What if Lambda times out on a large video file?" "Lambda has a &lt;span class='hl'>15-minute&lt;/span> maximum timeout. For video transcoding (which can take hours), use S3 event → SQS → ECS Fargate task. Fargate has no timeout limit. Or use &lt;span class='hl-blue'>AWS Elemental MediaConvert&lt;/span> for managed video transcoding — it handles queueing, scaling, and output format selection."}}
 
+{{mustKnow
+  "S3 events are at-least-once delivery — design downstream processors to be idempotent"
+  "Targets: Lambda (direct), SQS (queue/batch), SNS (fan-out), EventBridge (content-based routing)"
+  "For video transcoding exceeding Lambda's 15-min limit, use S3 → SQS → ECS Fargate (no timeout)"
+}}
+
+{{goodToKnow
+  "EventBridge enables content-based filtering: route .mp4 to video transcoder, .jpg to image resizer from one bucket"
+  "Set SQS visibility timeout > Lambda max processing time to prevent duplicate processing mid-flight"
+}}
+
 {{phase 7 "Interview: S3 in System Design" "4 min"}}
 
 {{say `When asked about object storage in any system design, address these four points:
@@ -299,6 +356,11 @@ def handler(event, context):
 
 {{qa "When should I use S3 vs EBS vs EFS?" "S3 for object storage (images, videos, backups, logs) — accessed via HTTP API, infinite scale, cheapest per GB. EBS for block storage attached to EC2 (database files, OS volumes) — accessed like a local disk, must be in the same AZ. EFS for shared file storage across multiple EC2 instances — NFS protocol, useful for CMS or shared config." "Can S3 handle high-throughput writes?" "S3 supports 3,500 PUT/POST/DELETE and 5,500 GET requests per second per prefix. For higher throughput, distribute objects across multiple prefixes (e.g., hash-based prefix: /a1b2/ instead of /uploads/). S3 auto-partitions based on prefix patterns, but distributing upfront avoids throttling during ramp-up."}}
 
+{{mustKnow
+  "Four interview points: why S3 over DB (cost/blobs), access pattern (pre-signed/CloudFront/VPC), durability (11 nines), cost (lifecycle)"
+  "CloudFront in front of S3: lower latency (600+ edge PoPs), cheaper egress, S3 never publicly exposed"
+}}
+
 {{phase 8 "Trade-offs & Edge Cases" "3 min"}}
 
 {{say "S3 has limitations that trip up engineers in interviews: no atomic multi-object updates, per-prefix rate limits, and data egress costs that dominate the bill at scale. Know these and their mitigations."}}
@@ -325,6 +387,14 @@ def handler(event, context):
 }}
 
 {{hint "S3 Select reduces data transfer by 80%" "S3 Select lets you run SQL queries directly on S3 objects (CSV, JSON, Parquet) and return only matching rows. Instead of downloading a 1 GB CSV and filtering client-side, S3 Select streams only the matching rows — reducing data transfer by &lt;span class='hl'>80%+&lt;/span> and cutting egress costs proportionally. Use it for analytics queries on archived data without spinning up Athena."}}
+
+{{mustKnow
+  "3,500 PUT/s and 5,500 GET/s per prefix — randomize key prefixes to distribute across partitions"
+  "No atomic multi-object update — use DynamoDB for metadata atomicity, S3 for blobs"
+  "Data egress ($0.09/GB) dominates the bill at scale — CloudFront + VPC endpoints reduce this"
+}}
+
+{{collapseSection "S3 Key Prefix Strategy for High Throughput" "S3 rate limits are per-prefix. If all keys start with 'images/', you hit the 5,500 GET/s limit. Randomize with a hash prefix: hash(photo_id)[:2]/2024-01-15/photo.jpg gives 256 prefix buckets x 5,500 = ~1.4M GET/s. S3 also auto-partitions based on access patterns, but distributing upfront avoids a ramp-up period where throttling occurs."}}
 
 {{checklist
   "Use pre-signed URLs for all private object access — never proxy through app servers"

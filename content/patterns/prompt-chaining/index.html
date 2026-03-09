@@ -31,6 +31,12 @@
   "The chain should abort and return an error indicating which step failed. Never silently pass bad output to the next step — errors compound. Each step should have a validator that checks the output before passing it downstream. If validation fails, retry that step up to 2-3 times with format reminders before aborting the chain."
 }}
 
+{{mustKnow
+  "Prompt chaining = predefined sequence of focused LLM calls, each with a single responsibility"
+  "Use chaining when you can draw the flowchart before the user's input arrives. If not, use an agent"
+  "3-5 steps handles 90% of production use cases — beyond 6, latency and error probability compound"
+}}
+
 {{phase 2 "Core Chaining Patterns" "8 min"}}
 
 {{say `Four foundational chaining patterns — most production LLM pipelines are combinations of these:
@@ -61,6 +67,12 @@
   "Each step returns a structured result with a status field (success/failure) and the output. The orchestrator checks status before invoking the next step. On failure: retry the step up to 3 times, then abort the chain and return an error indicating which step failed. Never silently pass bad output downstream — errors compound through the chain."
   "When do you add a gate (quality check) between steps?"
   "Add a gate when the next step is expensive or irreversible. For example: before sending a generated email (cannot unsend), before writing to a database (hard to undo), or before calling a paid API. The gate can be a simple format check (JSON valid?), an LLM judge (is this response appropriate?), or a deterministic rule (does output contain required fields?)."
+}}
+
+{{mustKnow
+  "Four core patterns: Sequential (A then B then C), Parallel + Merge, Conditional (classify then route), Gate (validate between steps)"
+  "Gate pattern prevents error propagation — the most expensive failure mode is a confident, well-formatted, wrong response"
+  "Conditional chaining (classify then route) lets you optimize each branch independently for its domain"
 }}
 
 {{phase 3 "Chaining Framework Implementation" "10 min"}}
@@ -249,6 +261,14 @@ class LLMChain:
                 )
 `}}
 
+{{caveat "String-in/string-out with an immutable context dict is the safest interface between steps. Shared mutable context objects create hidden coupling where step 3 silently depends on a field that step 1 sometimes sets — debugging requires tracing full mutation history."}}
+
+{{mustKnow
+  "Each step receives a string and returns a string — no shared mutable state between steps"
+  "Context dict holds all previous step outputs keyed by step name — step 4 can reference any earlier output"
+  "Temperature 0.1 for chain steps — higher temperatures cause 30-40% more JSON parse failures on extraction steps"
+}}
+
 {{phase 4 "Example: Customer Email Processing" "8 min"}}
 
 {{say `Complete practical example: processing incoming customer emails through a <span class="hl">4-step chain</span>:
@@ -372,6 +392,19 @@ print("Total latency: {:.0f}ms".format(result.total_latency_ms))
   "Add a conditional step after classify that checks the requires_human flag. If true, route to a human queue instead of generating an automated response. This is the classify-then-route pattern — the classification step acts as a router that determines which downstream processing happens. The chain framework handles this with a conditional step or by checking the context dict before adding subsequent steps."
 }}
 
+{{collapseSection "Email Chain Cost Breakdown" "Extract (gpt-4o-mini): ~300 tokens, $0.00005. Classify (gpt-4o-mini): ~400 tokens, $0.00006. Generate (gpt-4o): ~1500 tokens, $0.0075. Validate (rule-based): 0 tokens, $0. Total: ~$0.008 per email. At 10K emails/day = $80/day. Compare to human agent at $15/hr processing 20 emails/hr = $7,500/day for the same volume."}}
+
+{{goodToKnow
+  "Use rule-based validation (length, placeholder detection) for objective checks — runs in <1ms with zero token cost"
+  "Reserve LLM-as-judge for subjective criteria (tone, empathy) that rules cannot evaluate"
+}}
+
+{{mustKnow
+  "Use cheap models (GPT-4o-mini) for extraction and classification, expensive models (GPT-4o) for generation"
+  "Single-responsibility steps are easier to debug — when a combined step fails, you cannot tell which sub-task broke"
+  "Validate intermediate outputs before passing downstream — errors compound through the chain"
+}}
+
 {{phase 5 "The Gate Pattern: Quality Control" "5 min"}}
 
 {{say `The <span class="hl-blue">gate pattern</span> adds a validation step between chain stages:
@@ -451,6 +484,12 @@ chain.add_step(
 {{key "The gate pattern is the most important reliability technique for prompt chains. Without gates, errors compound: a bad extraction leads to a bad classification which leads to a bad response. Gates catch errors early and either retry or abort, preventing garbage from propagating through the chain."}}
 
 {{hint "LLM-as-judge uses gpt-4o-mini" "The judge only needs to classify pass/fail and give a brief reason. GPT-4o-mini handles this at 1/15th the cost of GPT-4o. Using the same expensive model for both generation and judging doubles cost with no quality benefit for the judging task."}}
+
+{{mustKnow
+  "Gate pattern = validate between steps, retry with specific feedback on failure"
+  "Gate the steps whose failures are hardest to detect downstream: extraction and classification"
+  "A chain without gates produces confident, well-formatted, wrong answers — the worst failure mode"
+}}
 
 {{phase 6 "Parallel Chains" "5 min"}}
 
@@ -538,6 +577,14 @@ async def parallel_chain(
   "Rate limits and cost spikes. Firing 10 parallel LLM calls simultaneously can hit API rate limits and produce a burst of cost that looks alarming on dashboards. Add concurrency limits (asyncio.Semaphore) to cap simultaneous calls. Also: asyncio.gather fails fast by default — if one parallel task fails, the whole gather raises. Use return_exceptions=True to collect partial results."
 }}
 
+{{caveat "Parallel chains multiply instantaneous API load. Cap concurrency with asyncio.Semaphore to prevent 429 cascades. Also, asyncio.gather fails fast by default — use return_exceptions=True to collect partial results."}}
+
+{{mustKnow
+  "Parallel latency = max(steps) instead of sum(steps) — only works for truly independent subtasks"
+  "Token cost is identical in parallel vs sequential — you only save wall-clock time"
+  "Merge step receives all parallel outputs concatenated — at 5+ branches, hierarchical merging avoids context overflow"
+}}
+
 {{phase 7 "Decision Guide & Cost-Quality Tradeoff" "10 min"}}
 
 {{say `Pattern selection depends on three factors: <strong>task predictability</strong>, <strong>latency budget</strong>, and <strong>quality requirements</strong>:
@@ -591,6 +638,12 @@ async def parallel_chain(
   "Build a 50-example test set with human ratings. Run each step with both cheap and expensive models. If quality delta is under 5%, use the cheap model. Extraction and classification almost always pass this test — they are structured tasks with clear right/wrong answers. Generation steps that require nuance, empathy, or creativity typically show a 10-20% quality gap favoring the expensive model."
   "What is the total cost difference between all-expensive and mixed-model chains?"
   "A 4-step all-GPT-4o chain costs roughly &lt;span class='hl'>$0.04&lt;/span> per request. Mixed-model (3 steps mini + 1 step 4o) costs &lt;span class='hl'>$0.013&lt;/span> — a &lt;span class='hl'>67% reduction&lt;/span>. At 100K requests/day, that is $2,700/day saved. The quality difference is measurable only on the generation step, which still uses the expensive model."
+}}
+
+{{mustKnow
+  "Mixed-model chains cut cost 50-70%: cheap models for extraction/classification, expensive for generation"
+  "Build a 50-example test set to measure per-step quality delta between models — switch to cheap when delta < 5%"
+  "At 97% per-step success rate, a 6-step chain has only 83% overall success — keep chains short"
 }}
 
 {{code "python" `# Cost-optimized chain: cheap models for simple steps,
@@ -698,6 +751,15 @@ chain.add_step(
 }}
 
 {{followup "How would you implement prompt chaining with streaming?" "Stream only the final step. Steps 1 through N-1 run normally since you need their complete output before the next step can begin. For the last step, use the streaming API so the user sees tokens appear as they are generated. In a web app, show a progress indicator (step 1 of 4, step 2 of 4...) during earlier steps, then switch to streaming text for the final generation. Total pipeline time is unchanged but perceived latency drops significantly."}}
+
+{{caveat "Pin model versions (e.g. gpt-4o-2024-08-06, not gpt-4o) in production chains. Model updates change output formatting — a step that returned clean JSON may add markdown fences on the new version, breaking downstream parsers."}}
+
+{{mustKnow
+  "Log every step's input, output, tokens, and latency — isolate failures to the exact step"
+  "Set per-step timeouts (10s) to prevent one slow API response from blocking the entire chain"
+  "Never pass raw LLM output to the next step without parsing — always strip conversational fluff"
+  "Pin model versions in production — model updates break output formatting"
+}}
 
 {{checklist
   "Decompose complex tasks into 2-6 focused steps"
