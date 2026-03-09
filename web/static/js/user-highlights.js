@@ -1178,10 +1178,11 @@
             var hasText   = sel && !sel.isCollapsed && sel.toString().trim().length > 0;
             var existMark = e.target.closest('mark.user-hl');
             var existPin  = e.target.closest('.hl-pin');
-            // For <img> elements inside a diagram, walk up from the img itself
             var diagEl    = e.target.closest('.diagram-container');
+            // Also suppress native menu on hero tech images (.detail-tech-image)
+            var techImg   = e.target.closest('.detail-tech-image');
 
-            if (!hasText && !existMark && !existPin && !diagEl) return;
+            if (!hasText && !existMark && !existPin && !diagEl && !techImg) return;
             e.preventDefault();
             e.stopPropagation();
 
