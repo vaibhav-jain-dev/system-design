@@ -748,6 +748,17 @@ def get_events_delta(calendar_id, sync_token=None, page_token=None):
   "Phone syncs first — creates event at version v6. Desktop syncs second — its PUT with If-Match: v5 gets 412. Desktop client re-fetches event (now v6), merges changes (typically last-write-wins on field level), and re-submits PUT with If-Match: v6. Three-way merge is complex — for calendar events, showing a conflict dialog to the user is acceptable."
 }}
 
+{{collapseSection "Sync Token Wire Format" `<ul>
+  <li><strong>Encoding:</strong> Base64(JSON{cal: calendar_id, t: last_sync_timestamp, v: 1})</li>
+  <li><strong>Version field (v):</strong> allows future schema changes without breaking existing clients</li>
+  <li><strong>Expiry check:</strong> server-side: if time.now() - t > 7 * 86400, return 410 Gone</li>
+  <li><strong>Page vs sync token:</strong> next_page_token continues within the same delta; next_sync_token marks the end of all pages</li>
+</ul>`}}
+
+{{mustKnow "sync_token = Base64(calendar_id + last_modified_at) — delta sync returns only events changed since that timestamp" "7-day expiry on sync_token — stale clients get 410 Gone and must do a full sync" "Soft-deleted events (status=CANCELLED) MUST appear in delta sync — otherwise clients never know to remove them locally" "ETag optimistic locking resolves concurrent edits: 412 Precondition Failed forces re-fetch before retry"}}
+
+{{goodToKnow "Last-write-wins by updated_at is the correct semantic for calendar events — vector clocks are overkill here" "95% of delta syncs return fewer than 10 events — the bandwidth savings over full sync are enormous"}}
+
 {{phase 10 "Scaling" "4 min"}}
 
 {{say `At <span class="hl">500M MAU</span> and <span class="hl">2B events/day</span>:

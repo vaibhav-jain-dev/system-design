@@ -579,6 +579,19 @@ def handle_payment_webhook(request):
   "Never partially book. If any seat in a multi-seat booking is unavailable at confirmation time, refund the entire payment. The user re-books with available seats. This avoids the complexity of partial orders and ensures the user gets the seats they want together. The auto-refund happens in under 5 seconds — most users don't notice."
 }}
 
+{{collapseSection "Payment Gateway Integration Details" `
+<ul>
+  <li><strong>Stripe:</strong> Create PaymentIntent with metadata (lock_token, show_id) → embed Stripe Elements → webhook on payment_intent.succeeded</li>
+  <li><strong>Razorpay:</strong> Create Order → embed Razorpay checkout.js → webhook with X-Razorpay-Signature HMAC verification</li>
+  <li><strong>Retry policy:</strong> Gateways retry failed webhook deliveries with exponential backoff (1min, 5min, 30min, 2hr). Always return 200 on duplicate — 4xx/5xx triggers retries</li>
+  <li><strong>Reconciliation:</strong> Cron job every 10 minutes: find bookings in 'locked' state with age > 12 minutes → poll gateway API for payment status → auto-confirm or auto-expire</li>
+</ul>
+`}}
+
+{{caveat "Always return HTTP 200 to the payment gateway webhook, even on duplicate or already-processed events. Returning 4xx causes the gateway to retry indefinitely, potentially creating cascading failures."}}
+
+{{mustKnow "Webhook handler re-checks seat lock validity before confirming — guards against lock-expired-then-re-locked edge case" "Three webhook sub-cases: seat still unbooked (proceed), seat re-locked by another user (refund), seat confirmed by another (refund)" "Idempotency on payment confirmation: UNIQUE constraint on gateway_txn_id prevents double-processing" "Reconciliation job catches lost webhooks: scans 'locked' bookings older than 12 minutes, polls gateway API"}}
+
 {{phase 8 "Real-Time Seats" "4 min"}}
 
 {{say `Real-time seat map uses <strong>Redis Pub/Sub</strong> to fan out seat state changes:

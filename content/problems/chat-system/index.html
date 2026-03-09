@@ -697,6 +697,20 @@ response = dynamodb.query(
 
 {{diagram "cs-multi-device"}}
 
+{{collapseSection "Multi-Region Deployment Details" `<ul>
+  <li><strong>Per-region stack:</strong> WebSocket fleet + Chat Service + Kafka cluster + DynamoDB replica. Each region is fully self-contained for local users</li>
+  <li><strong>Cross-region message routing:</strong> Kafka MirrorMaker 2 replicates topics between regions with ~80-120ms lag (US-East to EU-West)</li>
+  <li><strong>DynamoDB Global Tables:</strong> Multi-region replication with ~1 second lag, last-writer-wins conflict resolution. Messages never conflict (unique Snowflake IDs). Read receipts use LWW correctly (latest read position wins)</li>
+  <li><strong>DNS failover:</strong> Route 53 health checks, latency-based routing. Regional failure recovers in ~30s DNS propagation + ~2s WebSocket reconnect</li>
+  <li><strong>Graduated traffic ramp:</strong> Recovered region starts at 10% weight in DNS, ramps to 100% over 5 minutes to prevent thundering herd</li>
+</ul>`}}
+
+{{caveat "Consistent hashing for WebSocket servers is critical during rolling deploys. Without it, a deploy of 5,000 servers reconnects all 200M clients. With consistent hashing, only 1/N connections move per server change."}}
+
+{{goodToKnow "Connection draining during deploys: mark server as draining in Redis, wait 60s for natural heartbeat-driven reconnection, then force-close remaining connections — limits reconnect storm to ~333/sec" "Alert on Kafka consumer lag (not throughput) — consumer lag > 60 seconds means delivery SLA is breached"}}
+
+{{mustKnow "5,000 WebSocket servers at 100K connections each for 200M concurrent connections — consistent hashing minimizes reconnections during deploys" "Multi-region deployment is mandatory for sub-200ms global delivery — you cannot CDN-cache real-time chat messages" "Graceful connection draining prevents thundering herd during rolling deploys — mark as draining, wait for heartbeat timeout, force-close remainder" "DynamoDB Global Tables for multi-region message replication with ~1s lag — last-writer-wins works because messages have unique Snowflake IDs"}}
+
 {{phase 11 "Read Receipts & Presence" "5 min"}}
 
 {{say `Read receipts and presence are <strong>high-frequency, low-value signals</strong> — they need different treatment than messages:
