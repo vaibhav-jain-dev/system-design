@@ -74,6 +74,14 @@
 
 {{qa "How does <a class="dqa-link" href="/problem/ride-hailing">Uber</a> find nearby drivers?" "Uber uses Google S2 cells. Each driver's location is mapped to an S2 cell at a specific level. Finding nearby drivers means querying adjacent cells at that level. Drivers update their cell every few seconds via WebSocket. The matching service queries Redis with the rider's cell and neighboring cells to find candidates within 5km." "Why not just use a SQL query with latitude/longitude range?" "A bounding box query (lat BETWEEN x-0.05 AND x+0.05) works for small datasets but doesn't use spatial indexes efficiently. At 1M active drivers, you need a purpose-built spatial index (GeoHash, S2, or R-tree) to avoid full table scans."}}
 
+{{mustKnow
+  "GeoHash precision 6 = ~1.2km x 0.6km (street-level); precision 9 = ~4.8m x 4.8m (driver location)"
+  "Critical edge case: two points 1m apart on opposite cell boundaries share no common prefix — always query 8 neighbors"
+  "GeoHash strings work as Redis/Memcached cache keys for tiling POI queries by cell"
+}}
+
+{{caveat "Never rely on GeoHash prefix matching alone for proximity queries. Points on opposite sides of a cell boundary share no common prefix despite being meters apart. Always expand your search to include the 8 neighboring cells."}}
+
 {{phase 3 "S2 Cells" "4 min"}}
 
 {{say `<span class="hl-blue">S2</span> is Google's geometry library — the right tool when you need polygon operations, not just point lookup:
