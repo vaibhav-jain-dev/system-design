@@ -1,0 +1,329 @@
+{{phase 1 "What Is HTTPS & TLS?" "3 min"}}
+
+{{say `<span class="hl-blue">HTTPS</span> is HTTP over TLS — every system design interview that mentions "secure communication" implicitly requires you to know this:
+<ul>
+  <li><strong>TLS</strong> (Transport Layer Security) provides <strong>three guarantees</strong>:
+    <ul>
+      <li><strong>Confidentiality</strong> — data is encrypted; eavesdroppers see ciphertext</li>
+      <li><strong>Integrity</strong> — MAC (Message Authentication Code) detects tampering in transit</li>
+      <li><strong>Authenticity</strong> — certificate chain proves the server is who it claims to be</li>
+    </ul>
+  </li>
+  <li>TLS 1.3 (current) requires <span class="hl">1 round trip</span> to establish a session; TLS 1.2 (legacy) requires <span class="hl">2 round trips</span></li>
+  <li>All HTTPS traffic adds <span class="hl">~0.5-5ms</span> overhead after the initial handshake — subsequent requests reuse the session</li>
+</ul>`}}
+
+{{diagram "fund-https-tls-handshake"}}
+
+{{think "TLS 1.3 is not just faster — it enforces forward secrecy by design."
+  (whyNot "TLS 1.2" "TLS 1.2 still allows RSA key exchange, which does not provide forward secrecy. If the server's private key is stolen years later, all recorded TLS 1.2 sessions can be decrypted retroactively. TLS 1.3 forces ephemeral Diffie-Hellman key exchange — each session has a unique key that is discarded after use.")
+  (how "session resumption" "TLS 1.3 supports 0-RTT (Zero Round Trip Time Resumption) for previously connected clients. The client sends a session ticket from the last connection; the server accepts it without a new handshake. Warning: 0-RTT is vulnerable to replay attacks — don't use it for non-idempotent requests (POST mutations).")
+  (whatIf "the server's private key is compromised" "With TLS 1.3 (forward secrecy), past sessions cannot be decrypted even with the private key. The attacker can only impersonate the server for future connections until the certificate is revoked.")
+}}
+
+{{hint "why TLS 1.3 is faster?" "TLS 1.2 requires 2 full round trips before application data can flow. TLS 1.3 reduced this to 1 RTT by having the client send its key_share (Diffie-Hellman public value) in the initial ClientHello. At 50ms RTT, TLS 1.2 adds 100ms of setup cost; TLS 1.3 adds only 50ms."}}
+
+{{triggerQs "Phase 1 Interview Questions"
+  "What does TLS provide that plain HTTP doesn't?"
+  "Three guarantees: confidentiality (symmetric encryption so eavesdroppers see ciphertext), integrity (HMAC detects tampering — altered packets are rejected), and authenticity (certificate chain proves server identity — prevents impersonation). Plain HTTP provides none of these."
+  "What is the difference between TLS 1.2 and TLS 1.3?"
+  "TLS 1.3 is faster (1 RTT vs 2 RTT), forces forward secrecy (ephemeral DH only — RSA key exchange removed), eliminates weak cipher suites (RC4, DES, SHA-1 all removed), and supports 0-RTT resumption for returning clients. Migrate everything to TLS 1.3 — TLS 1.2 is deprecated but still widely deployed."
+}}
+
+{{phase 2 "TLS Handshake Deep Dive" "5 min"}}
+
+{{say `Walk the interviewer through a <span class="hl-blue">TLS 1.3 handshake</span> step by step:
+<ul>
+  <li><strong>Step 1 — ClientHello:</strong> client sends supported cipher suites, TLS version, and a <code>key_share</code> (its Diffie-Hellman public value) + random nonce</li>
+  <li><strong>Step 2 — ServerHello:</strong> server picks cipher suite, sends its own <code>key_share</code> — <em>both sides now derive the same session key independently</em> via DH</li>
+  <li><strong>Step 3 — Certificate + Finished:</strong> server sends its certificate (signed by CA) and a <code>Finished</code> MAC — the server proves it has the private key</li>
+  <li><strong>Step 4 — Client Finished:</strong> client verifies the certificate chain, sends <code>Finished</code> — application data flows</li>
+  <li>Total: <span class="hl">1 RTT</span>. Compare to TLS 1.2's 2 RTT which adds <span class="hl">50-100ms</span> on a typical connection</li>
+</ul>`}}
+
+{{code "http" `# TLS 1.3 Handshake (simplified)
+
+# → Client → Server
+ClientHello:
+  supported_versions: [TLS 1.3]
+  cipher_suites: [TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256]
+  key_share: {group: x25519, key_exchange: <client DH public key>}
+  random: <32 bytes>
+
+# ← Server → Client
+ServerHello:
+  version: TLS 1.3
+  cipher_suite: TLS_AES_256_GCM_SHA384
+  key_share: {group: x25519, key_exchange: <server DH public key>}
+  # Both sides now compute: session_key = ECDH(client_private, server_public)
+
+{Encrypted with session key}
+Certificate: <server's leaf cert + intermediate chain>
+CertificateVerify: <signature proving server has private key>
+Finished: <HMAC of handshake transcript>
+
+# → Client → Server {Encrypted}
+Finished: <HMAC of handshake transcript>
+
+# Application data flows immediately after`}}
+
+{{think "The session key is derived independently by both sides from public values — the private key never leaves either host."
+  (how "Diffie-Hellman key exchange" "Client generates random a; sends g^a mod p. Server generates random b; sends g^b mod p. Both compute: client: (g^b)^a = g^ab, server: (g^a)^b = g^ab. Same shared secret without either side transmitting it. Ephemeral DH means a fresh pair (a, b) per session — forward secrecy.")
+  (whyNot "RSA key exchange" "RSA key exchange (TLS 1.2 and earlier) encrypts the pre-master secret with the server's public key. If the private key is stolen later, all past sessions can be decrypted. Ephemeral DH eliminates this — TLS 1.3 removed RSA key exchange entirely.")
+}}
+
+{{table "TLS Cipher Suites (TLS 1.3)" (rows
+  (row "Cipher Suite" "Key Exchange" "Bulk Encryption" "MAC" "Performance")
+  (row "TLS_AES_256_GCM_SHA384" "ECDHE" "AES-256-GCM" "SHA-384" "Balanced — best for most")
+  (row "TLS_CHACHA20_POLY1305_SHA256" "ECDHE" "ChaCha20-Poly1305" "SHA-256" "Faster on mobile (no AES-NI)")
+  (row "TLS_AES_128_GCM_SHA256" "ECDHE" "AES-128-GCM" "SHA-256" "Fastest — 128-bit still secure")
+)}}
+
+{{hint "ChaCha20 on mobile" "AES-GCM requires hardware acceleration (AES-NI instruction set) to be fast. Most ARM mobile chips lack AES-NI. ChaCha20-Poly1305 is a software cipher designed to be fast without hardware acceleration — ~3x faster than AES on non-AES-NI hardware. Android and iOS TLS stacks prefer it on mobile. Interviewers rarely ask this but it's a great detail."}}
+
+{{triggerQs "Phase 2 Interview Questions"
+  "What is forward secrecy and why does it matter?"
+  "Forward secrecy (also called Perfect Forward Secrecy, PFS) means each TLS session uses a unique ephemeral key pair for key exchange. Even if the server's long-term private key is stolen, the attacker cannot decrypt past sessions — they would need the ephemeral key, which was discarded after the session ended. TLS 1.3 enforces PFS by removing RSA key exchange."
+  "What is 0-RTT and when should you NOT use it?"
+  "0-RTT (Zero Round Trip Time) resumption lets returning clients send application data immediately in the first packet using a session ticket from the previous connection. This saves the entire handshake RTT. Do NOT use 0-RTT for non-idempotent requests (POST/PUT/DELETE with side effects) because 0-RTT data can be replayed by a network attacker — valid session ticket + replayed first packet = replayed mutation. Use 0-RTT only for idempotent reads."
+}}
+
+{{phase 3 "Certificate Chain of Trust" "4 min"}}
+
+{{say `<span class="hl-blue">Certificates</span> are how TLS proves the server is who it claims to be — not just encrypted, but authenticated:
+<ul>
+  <li><strong>Root CA</strong> — ~200 pre-installed in OS/browsers; self-signed; private key stored in air-gapped HSM; never directly issues leaf certs</li>
+  <li><strong>Intermediate CA</strong> — signed by Root CA; used online to issue leaf certs; if compromised, only this can be revoked</li>
+  <li><strong>Leaf certificate</strong> — your server's cert; contains: public key, domain name (CN + SAN), validity period (typically 90 days), signature by Intermediate</li>
+  <li>Browser verifies: signature valid → issuer is trusted → hostname matches → not expired → not revoked (OCSP)</li>
+</ul>`}}
+
+{{diagram "fund-https-certificate-chain"}}
+
+{{think "Why intermediates? Because Root CAs must be kept offline — their compromise would invalidate all certificates globally."
+  (how "certificate validation" "Browser walks the chain from leaf → intermediate → root. For each cert: verify the signature using the parent's public key. If any signature fails, or the chain doesn't end at a trusted root, the handshake fails with SSL_ERROR_UNKNOWN_CA.")
+  (whyNot "Root CAs issuing leaf certs directly" "Root CA private keys must be stored in air-gapped HSMs and never exposed online. If a Root CA private key leaks, every certificate signed by that CA globally must be distrusted — catastrophic. Intermediates act as a safety layer: compromise an Intermediate CA = revoke just that Intermediate.")
+  (whatIf "your leaf certificate expires" "Browser shows 'NET::ERR_CERT_DATE_INVALID'. All HTTPS requests fail until the cert is renewed. Use cert-manager (Kubernetes) or ACM (AWS) for auto-renewal. Let's Encrypt certs expire in 90 days — automate renewal at day 60.")
+}}
+
+{{table "Certificate Fields That Matter" (rows
+  (row "Field" "Example" "Why It Matters")
+  (row "Subject (CN)" "api.example.com" "Primary hostname — must match request")
+  (row "SAN (Subject Alt Names)" "*.example.com, api.example.com" "Wildcard: covers all subdomains. Must include all hostnames served.")
+  (row "Validity" "2025-03-01 to 2025-06-01" "90 days (Let's Encrypt). Auto-renew at day 60.")
+  (row "Key Algorithm" "RSA 2048-bit or ECDSA P-256" "P-256 is smaller + faster than RSA 2048, equivalent security")
+  (row "OCSP Staple" "signed status from CA" "Server pre-fetches revocation status; avoids client roundtrip to CA")
+)}}
+
+{{hint "ECDSA vs RSA certificates" "ECDSA P-256 certificates are ~4x smaller than RSA 2048 (256-bit key vs 2048-bit key for equivalent security). Smaller cert = less data in the TLS handshake = faster connection setup. AWS ACM and Let's Encrypt both support ECDSA. For new deployments, prefer ECDSA P-256."}}
+
+{{triggerQs "Phase 3 Interview Questions"
+  "What happens when a certificate is revoked?"
+  "The CA adds the certificate's serial number to a Certificate Revocation List (CRL) or flags it via OCSP (Online Certificate Status Protocol). Browsers check OCSP in real-time during the handshake — this adds a round trip to a CA server. OCSP Stapling solves this: the server fetches its own OCSP response and includes it in the TLS handshake, so the browser doesn't need to query the CA separately. Reduces handshake latency and CA server load."
+  "What is certificate pinning and when should you use it?"
+  "Certificate pinning binds a client to a specific certificate or public key — rejects any other cert even if valid and CA-signed. Prevents MITM by corporate proxies or compromised CAs. Use for: mobile apps communicating with known backend APIs, high-security applications (banking, healthcare). Drawback: certificate rotation breaks pinned apps — you must pin multiple certs and ship an app update before the old cert expires. Dynamic pin management (fetch updated pins from a trusted server) reduces this risk."
+}}
+
+{{phase 4 "mTLS: Mutual Authentication" "5 min"}}
+
+{{say `Standard TLS authenticates only the server. <span class="hl-blue">mTLS</span> (mutual TLS) makes both sides prove their identity:
+<ul>
+  <li><strong>Zero-trust model:</strong> in microservices, every service call is a potential attack vector — mTLS ensures only authorized services can communicate</li>
+  <li><strong>How it differs:</strong> server sends <code>CertificateRequest</code> after its own cert; client presents its own certificate; server validates client cert against its trusted CA</li>
+  <li><strong>Istio / Linkerd:</strong> service mesh auto-provisions and rotates mTLS certs for every pod — zero application code changes needed</li>
+  <li><strong>Certificate lifetime:</strong> use short-lived certs (<span class="hl">24 hours</span>) for mTLS; Istio rotates every 24h by default — compromised cert expires quickly</li>
+</ul>`}}
+
+{{diagram "fund-https-mtls"}}
+
+{{think "mTLS eliminates the need for API keys or JWT between internal services — the certificate IS the credential."
+  (how "Istio mTLS" "Istio's control plane (Citadel/istiod) acts as the internal CA. At pod startup, it issues a SPIFFE-compliant X.509 cert with the service's identity (e.g., spiffe://cluster.local/ns/default/sa/payment-svc). The Envoy sidecar handles mTLS automatically — your app code never touches TLS. Certs rotate every 24 hours.")
+  (whyNot "JWT tokens between microservices" "JWTs require the receiving service to validate the signature (CPU cost), check expiry, and maintain a key rotation mechanism. mTLS validation is done by the TLS layer (Envoy sidecar) with zero application code. mTLS also encrypts the channel, JWT does not. For internal services, mTLS is strictly better.")
+  (whatIf "an mTLS client certificate is compromised" "Short-lived certs (24h) limit blast radius — attacker can impersonate the service for at most 24 hours. With long-lived API keys, a leak is permanent until manually rotated. Add to CRL or use OCSP for immediate revocation if detected.")
+}}
+
+{{table "mTLS Use Cases" (rows
+  (row "Scenario" "Why mTLS" "Alternative")
+  (row "Microservice-to-microservice" "Both sides authenticate — no service can impersonate another" "JWT + API key (weaker)")
+  (row "IoT devices → backend" "Device has embedded cert; no username/password to steal" "API key (rotatable but static)")
+  (row "B2B API integrations" "Partner's cert = their identity; revoke to cut access immediately" "OAuth client credentials")
+  (row "Zero-trust internal APIs" "Replaces VPN-based perimeter trust" "VPN + firewall rules")
+)}}
+
+{{code "go" `// Go service: load mTLS client certificate for outbound calls
+func newMTLSClient(certFile, keyFile, caFile string) (*http.Client, error) {
+    cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+    if err != nil {
+        return nil, err
+    }
+
+    caCert, _ := os.ReadFile(caFile)
+    caCertPool := x509.NewCertPool()
+    caCertPool.AppendCertsFromPEM(caCert)
+
+    tlsCfg := &tls.Config{
+        Certificates: []tls.Certificate{cert},
+        RootCAs:      caCertPool,
+        MinVersion:   tls.VersionTLS13,
+    }
+    return &http.Client{
+        Transport: &http.Transport{TLSClientConfig: tlsCfg},
+    }, nil
+}`}}
+
+{{triggerQs "Phase 4 Interview Questions"
+  "How does Istio implement mTLS without changing application code?"
+  "Istio injects an Envoy sidecar proxy into every pod. All outbound traffic is intercepted by the local Envoy, which establishes an mTLS connection to the destination pod's Envoy sidecar. Application code connects to its local Envoy on localhost — no TLS handling needed. Istio's control plane (istiod) provisions X.509 certificates with SPIFFE identity (spiffe://cluster.local/ns/{namespace}/sa/{service-account}) and rotates them every 24 hours."
+  "When would you NOT use mTLS?"
+  "Don't use mTLS for browser clients — browsers can't present client certificates in a user-friendly way (requires user to install cert in their OS/browser). Don't use it for public APIs with third-party developers — the client cert management burden is too high. Use mTLS only for machine-to-machine: microservices, IoT, internal B2B where you control both sides."
+}}
+
+{{phase 5 "HSTS & Certificate Pinning" "3 min"}}
+
+{{say `Two additional security controls every system design should mention:
+<ul>
+  <li><strong>HSTS</strong> (HTTP Strict Transport Security) — tells browsers to <em>only ever</em> use HTTPS for this domain, even if the user types http://; prevents downgrade attacks
+    <ul><li>Header: <code>Strict-Transport-Security: max-age=31536000; includeSubDomains; preload</code></li>
+    <li><span class="hl-red">Gotcha:</span> once you set HSTS with a long max-age, you can't easily go back to HTTP — ensure your entire domain is HTTPS-ready first</li>
+    </ul>
+  </li>
+  <li><strong>HSTS Preload</strong> — submit your domain to Chrome's preload list; browsers ship with your domain hardcoded as HTTPS-only — protection before the first visit</li>
+  <li><strong>Certificate Pinning</strong> — mobile apps pin the expected certificate or public key; reject connections to servers with different certs even if CA-signed
+    <ul><li>Prevents MITM by corporate proxies, Zscaler, rogue CAs</li>
+    <li><span class="hl-red">Risk:</span> pinned cert expires → app breaks until new version ships; always pin multiple certs (current + backup)</li>
+    </ul>
+  </li>
+</ul>`}}
+
+{{think "HSTS preload is the strongest form — even a brand new browser won't allow HTTP for preloaded domains."
+  (how "HSTS max-age" "max-age=31536000 = 1 year. Browser caches this policy and refuses HTTP for 1 year after the last HTTPS response. Combine with includeSubDomains to protect subdomains. Start with a short max-age (300 seconds) to test, then increase to 1 year once confirmed working.")
+  (whyNot "relying on server-side HTTP→HTTPS redirect" "An attacker can intercept the initial HTTP request before the redirect. HSTS prevents this: the browser never sends HTTP in the first place after seeing the HSTS header. HSTS preload goes further — no initial HTTP request even on first visit.")
+}}
+
+{{table "HTTPS Security Controls Summary" (rows
+  (row "Control" "What It Prevents" "How to Enable")
+  (row "TLS 1.3 only" "Downgrade to weak TLS versions" "Disable TLS 1.0, 1.1, 1.2 in ALB/nginx config")
+  (row "HSTS" "Downgrade to HTTP, cookie theft" "Add Strict-Transport-Security header; set long max-age")
+  (row "HSTS Preload" "First-visit MITM" "Submit to hstspreload.org")
+  (row "OCSP Stapling" "Revocation check latency" "ssl_stapling on in nginx; enable in ALB")
+  (row "Certificate Pinning" "Rogue CA / corporate MITM" "Pin public key hash in mobile app; pin 2+ certs")
+  (row "mTLS" "Unauthorized service-to-service" "Istio (k8s) or manual cert provisioning")
+)}}
+
+{{triggerQs "Phase 5 Interview Questions"
+  "What is an SSL downgrade attack and how does HSTS prevent it?"
+  "A downgrade attack intercepts the initial HTTP request and prevents the HTTP→HTTPS redirect, keeping the connection in plaintext. The attacker acts as MITM — user sees HTTPS in the browser (connected to attacker), attacker sees HTTP to the real server. HSTS prevents this by making the browser refuse to connect via HTTP — if the browser has a cached HSTS policy for the domain, it immediately redirects to HTTPS internally before any network request."
+  "How would you design certificate rotation for a large fleet without downtime?"
+  "Multi-cert support: serve both old and new certificates simultaneously during rotation. ALB supports multiple certificates on the same listener — use SNI to select. For internal mTLS: use short-lived certs (24h) with automated renewal (Istio, cert-manager). Rotation: (1) provision new cert, (2) add to all servers, (3) update DNS/validation, (4) shift traffic, (5) remove old cert after TTL expires. Never remove old cert before all clients have seen the new one."
+}}
+
+{{phase 6 "TLS Termination Architecture" "4 min"}}
+
+{{say `In production, <span class="hl-blue">TLS termination</span> happens at the load balancer — not on every app server:
+<ul>
+  <li><strong>TLS termination at ALB:</strong> ALB decrypts TLS, forwards plain HTTP to backend pods over the private VPC network — no cert management per service</li>
+  <li><strong>End-to-end TLS (re-encryption):</strong> ALB terminates TLS from client, re-establishes TLS to backend — two TLS sessions; used for PCI-DSS, HIPAA compliance</li>
+  <li><strong>TLS passthrough (NLB):</strong> load balancer passes encrypted bytes through without decrypting — backend server terminates TLS; used when ALB can't inspect packets (mTLS, client certs)</li>
+  <li><strong>Performance:</strong> TLS termination at ALB offloads crypto from app servers — ALB uses hardware crypto acceleration; handles <span class="hl">~10,000 TLS handshakes/sec</span> per listener</li>
+</ul>`}}
+
+{{think "TLS termination at the load balancer is the standard choice — but compliance requirements may force re-encryption."
+  (how "re-encryption" "ALB terminates TLS from client using its public certificate. Then ALB establishes a new TLS connection to the backend using the backend's private certificate. Two separate TLS sessions — no plaintext on the wire at any point. Required for PCI-DSS Level 1 and HIPAA if data must be encrypted in transit everywhere including internal network.")
+  (whyNot "TLS on every app server without a load balancer" "Each app server needs cert management (provisioning, rotation, renewal). N servers = N cert management problems. ALB centralizes this: one certificate, auto-renewed by ACM, one place to configure cipher suites. ACM certificates are free and auto-renewed — eliminate manual cert work entirely.")
+  (whatIf "the load balancer's private key is compromised" "Attacker can decrypt all current TLS traffic routed through that load balancer. Mitigate: HSM-backed keys (ALB stores private keys in CloudHSM by default), automatic rotation via ACM, short cert TTL. Re-encryption (end-to-end TLS) doesn't help — the load balancer still has to decrypt at some point.")
+}}
+
+{{table "TLS Termination Modes" (rows
+  (row "Mode" "Where TLS Ends" "Backend Connection" "Use When")
+  (row "Terminate at ALB" "Load balancer" "Plain HTTP (VPC)" "Standard — offloads crypto, centralized cert mgmt")
+  (row "Re-encryption" "ALB + backend" "TLS (new session)" "PCI-DSS, HIPAA, defense-in-depth")
+  (row "TLS Passthrough (NLB)" "Backend server" "TLS (same session)" "Client cert auth, mTLS, non-HTTP protocols")
+)}}
+
+{{hint "ACM certificates are free" "AWS Certificate Manager (ACM) provisions and auto-renews TLS certificates at no cost when used with ALB, CloudFront, or API Gateway. No manual cert management, no cert expiry surprises. For on-premise or non-AWS, use Let's Encrypt with cert-manager (Kubernetes) or Certbot."}}
+
+{{phase 7 "HTTPS Performance Optimization" "3 min"}}
+
+{{say `TLS adds overhead — here's how to keep it minimal:
+<ul>
+  <li><strong>Session tickets / resumption:</strong> returning clients skip the full handshake; server stores session state in an encrypted ticket sent to the client; TLS 1.3 0-RTT resumes in zero round trips</li>
+  <li><strong>OCSP Stapling:</strong> server pre-fetches and caches its revocation status from the CA; avoids browser making a separate OCSP request during handshake (saves 50-200ms)</li>
+  <li><strong>Connection reuse (HTTP/2):</strong> HTTP/2 multiplexes many requests over a single TLS connection — one handshake, many requests. Never open a new TLS connection per HTTP request.</li>
+  <li><strong>ECDSA certs:</strong> ECDSA P-256 certificates are <span class="hl">~3x smaller</span> than RSA 2048 — less data in handshake</li>
+</ul>`}}
+
+{{table "TLS Performance Numbers" (rows
+  (row "Operation" "Latency" "Notes")
+  (row "Full TLS 1.3 handshake" "1 RTT + ~5ms crypto" "Includes cert validation, DH, key derivation")
+  (row "Full TLS 1.2 handshake" "2 RTT + ~10ms crypto" "Includes extra RSA decrypt step")
+  (row "TLS 1.3 session resumption" "1 RTT" "Session ticket — no cert re-validation needed")
+  (row "TLS 1.3 0-RTT resumption" "0 RTT" "First packet contains application data; replay risk")
+  (row "Per-request overhead (reused conn)" "< 0.1ms" "Only symmetric crypto — negligible")
+  (row "OCSP check (no stapling)" "+50-200ms" "Round trip to CA OCSP server")
+  (row "OCSP Stapling" "0ms extra" "Bundled in TLS handshake")
+)}}
+
+{{triggerQs "Phase 7 Interview Questions"
+  "How does HTTP/2 improve TLS performance?"
+  "HTTP/2 multiplexes multiple requests over a single TLS connection. With HTTP/1.1, each connection requires its own TLS handshake — browsers open 6 parallel connections per host, meaning 6 TLS handshakes. HTTP/2 uses one TLS connection for all requests to a host. One handshake amortized across all requests. Also reduces TCP connection count from 6 to 1, freeing server resources."
+  "What is OCSP Stapling and why does it matter for performance?"
+  "OCSP (Online Certificate Status Protocol) is used to check if a certificate has been revoked. Without stapling, the browser must make a separate HTTP request to the CA's OCSP server during the TLS handshake — adds 50-200ms latency, and reveals to the CA which sites the user visits. OCSP Stapling: the server fetches its own OCSP response, caches it (valid for ~1 hour), and includes it in the TLS handshake. Zero extra latency for the client, no privacy leak."
+}}
+
+{{phase 8 "Interview Summary" "2 min"}}
+
+{{say `The HTTPS/TLS story for system design interviews:
+<ul>
+  <li><strong>Protocol:</strong> TLS 1.3 = 1 RTT handshake, forward secrecy enforced (ephemeral DH), 0-RTT for returning clients <small>(replay risk)</small></li>
+  <li><strong>Certificate chain:</strong> Root CA → Intermediate CA → Leaf cert; browser validates signature chain + hostname + expiry + OCSP revocation</li>
+  <li><strong>mTLS:</strong> both sides authenticate; use for microservices (Istio auto-provisions), IoT, zero-trust; short-lived certs (<span class="hl">24h</span>)</li>
+  <li><strong>HSTS:</strong> browser refuses HTTP after first HTTPS visit; preload list = protection on first visit</li>
+  <li><strong>TLS termination:</strong> standard = terminate at ALB (centralized, free ACM certs); compliance = re-encrypt to backend; mTLS = passthrough NLB</li>
+</ul>`}}
+
+{{avoid "Don't say 'just use HTTPS' without explaining what TLS provides. The interviewer wants to hear confidentiality + integrity + authenticity, and ideally that you understand the handshake at a high level."}}
+
+{{avoid "Don't confuse SSL and TLS. SSL is deprecated (SSLv2, SSLv3 are broken). The correct term is TLS. Some tools still say 'SSL' colloquially (OpenSSL, ssl_certificate in nginx) but the protocol is TLS."}}
+
+{{table "Real Company Usage" (rows
+  (row "Company / System" "TLS Usage" "Notable Detail")
+  (row "Google / HTTPS Everywhere" "TLS 1.3, HSTS preload" "Forced HTTPS industry-wide; HSTS preload submitter")
+  (row "AWS ALB" "TLS termination, ACM auto-renewal" "Free certs, hardware HSM key storage")
+  (row "Kubernetes / Istio" "mTLS between all pods" "SPIFFE identity, 24h cert rotation, zero app changes")
+  (row "Let's Encrypt" "Free CA, 90-day certs" "ACME protocol for automated renewal; 300M+ certs issued")
+  (row "Banking / PCI-DSS" "End-to-end TLS (re-encryption)" "Encrypted in transit everywhere — including internal VPC")
+)}}
+
+{{checklist
+  "TLS 1.3: 1 RTT, forward secrecy via ephemeral DH, removes weak ciphers. TLS 1.2 = 2 RTT, legacy."
+  "Certificate chain: Root CA → Intermediate → Leaf. Browser validates chain + hostname + expiry + OCSP."
+  "mTLS: both sides authenticate. Use Istio for microservices (auto-provision, 24h rotation)."
+  "HSTS: browser refuses HTTP. Preload list = zero first-visit exposure."
+  "TLS termination at ALB: offloads crypto, centralized cert mgmt, free ACM certs."
+  "OCSP Stapling: bundle revocation status in handshake — saves 50-200ms, avoids CA round trip."
+  "HTTP/2 + TLS: one handshake per host, not per request — amortizes setup cost."
+}}
+
+{{key "TLS 1.3 establishes a secure channel in 1 round trip using ephemeral Diffie-Hellman — forward secrecy means past sessions stay private even if the server key is stolen later. mTLS extends this to microservices where both services present certificates, eliminating the need for API keys or JWTs between internal services."}}
+
+<div class="fund-resources" style="margin-top: 2rem; padding: 1.5rem; border: 1px solid var(--border); border-radius: 8px; background: var(--surface);">
+  <div style="font-weight: 600; margin-bottom: 1rem; color: var(--text-primary);">Further Learning — Indian YouTube Channels</div>
+  <ul style="list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.75rem;">
+    <li>
+      <a href="https://www.youtube.com/@ArpitBhayani" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">Arpit Bhayani — Asli Engineering</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">Deep engineering dives into TLS internals, certificate management, and distributed system security. Former Google Staff Engineer.</span>
+    </li>
+    <li>
+      <a href="https://www.youtube.com/@gkcs" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">Gaurav Sen</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">System design fundamentals including networking security. InterviewReady.io founder, ex-Google.</span>
+    </li>
+    <li>
+      <a href="https://www.youtube.com/@ConceptandCoding" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">Concept && Coding — Shrayansh Jain</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">HLD/LLD playlists covering API security, HTTPS, and authentication patterns. 9+ years industry experience.</span>
+    </li>
+    <li>
+      <a href="https://www.youtube.com/@sudocode" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">sudoCODE — Yogita Sharma</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">System design basics explained with emphasis on the WHY behind security choices.</span>
+    </li>
+  </ul>
+</div>

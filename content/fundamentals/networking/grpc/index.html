@@ -1,0 +1,398 @@
+{{phase 1 "What Is gRPC?" "3 min"}}
+
+{{say `<span class="hl-blue">gRPC</span> is Google's open-source RPC framework built on HTTP/2 and Protocol Buffers:
+<ul>
+  <li><strong>RPC model:</strong> call remote methods as if they're local — the stub handles serialization, network, retries, and deadlines transparently</li>
+  <li><strong>Protocol Buffers:</strong> binary serialization — <span class="hl">~3x smaller</span> than JSON, <span class="hl">~3x faster</span> to deserialize for large messages</li>
+  <li><strong>HTTP/2 transport:</strong> multiplexes multiple concurrent RPCs over one TCP connection — no connection-per-request overhead</li>
+  <li><strong>4 streaming modes:</strong> unary, server streaming, client streaming, bidirectional — REST has none natively</li>
+  <li>Used internally by: Google, Netflix, Square, CoreOS, Docker, Cisco, Juniper</li>
+</ul>`}}
+
+{{diagram "fund-grpc-overview"}}
+
+{{think "gRPC's performance comes from two things working together: binary serialization (Protobuf) and connection multiplexing (HTTP/2)."
+  (whyNot "REST for internal microservices" "REST uses JSON (text, verbose), HTTP/1.1 (one request per connection, head-of-line blocking), and has no built-in streaming or contract enforcement. gRPC is strictly better for internal service-to-service: binary format reduces payload size by 3x, HTTP/2 multiplexing handles 100+ concurrent calls on one connection, and .proto files enforce type safety across all services.")
+  (how "code generation" "Define your service in a .proto file. Run protoc (the Protocol Buffer compiler) with the gRPC plugin. It generates a type-safe client stub and server interface in your target language. Client code calls the stub as if it's a local function. The stub handles: serialization, stream management, deadline propagation, metadata, retries.")
+  (whatIf "the .proto schema changes" "Breaking changes (removing fields, changing field types) break existing clients. Use field numbers carefully — adding new fields with new numbers is safe (backward compatible). Never reuse field numbers. Design for evolution: mark deprecated fields with the deprecated option rather than removing them.")
+}}
+
+{{hint "gRPC browser support" "Browsers can't call gRPC directly — HTTP/2 streaming required by gRPC is not exposed via the Fetch API. grpc-web is a proxy protocol (usually Envoy handles the translation) that lets browsers communicate with gRPC backends. However, grpc-web only supports unary and server-streaming — no client or bidirectional streaming. For browsers, REST or WebSocket is usually simpler."}}
+
+{{triggerQs "Phase 1 Interview Questions"
+  "What is the difference between REST and gRPC?"
+  "REST uses HTTP/1.1 + JSON: text-based, human-readable, widely supported, cacheable. gRPC uses HTTP/2 + Protobuf: binary, compact (3x smaller), multiplexed (many calls on one TCP connection), type-safe with code generation, and supports 4 streaming modes. Use REST for public APIs and browser clients. Use gRPC for internal microservice-to-microservice communication where performance and type safety matter."
+  "What is Protocol Buffers and why use it over JSON?"
+  "Protocol Buffers (Protobuf) is a binary serialization format with a schema (.proto file). Compared to JSON: 3x smaller payload (binary vs text encoding), 3x faster deserialization for large messages, compile-time type checking via generated code, backward/forward compatible via field number versioning. JSON advantages: human-readable, universally supported, no schema required, easier to debug."
+}}
+
+{{phase 2 "Protocol Buffers" "5 min"}}
+
+{{say `<span class="hl-blue">Protocol Buffers</span> are the interface definition language and serialization format:
+<ul>
+  <li>Define your data schema in a <code>.proto</code> file — this is the <strong>contract</strong> between services</li>
+  <li>Field numbers (not names) identify fields in the binary encoding — renaming a field is safe, changing its number is a breaking change</li>
+  <li>Fields are optional by default — missing fields use default values, not errors — this enables forward compatibility</li>
+  <li>Run <code>protoc</code> to generate type-safe code in Go, Java, Python, TypeScript, C++, and <span class="hl">20+ other languages</span></li>
+</ul>`}}
+
+{{code "protobuf" `// user_service.proto — the contract between UserService and its clients
+
+syntax = "proto3";
+package user.v1;
+
+// Service definition — generates client stub + server interface
+service UserService {
+  // Unary: one request → one response
+  rpc GetUser(GetUserRequest) returns (User);
+  // Server streaming: one request → stream of responses
+  rpc ListUserActivity(ListActivityRequest) returns (stream ActivityEvent);
+  // Bidirectional: stream of requests ↔ stream of responses
+  rpc SyncPresence(stream PresenceUpdate) returns (stream PresenceUpdate);
+}
+
+message GetUserRequest {
+  string user_id = 1;  // field number 1 — never change this
+}
+
+message User {
+  string user_id = 1;
+  string name    = 2;
+  string email   = 3;
+  int64  created_at = 4;   // Unix timestamp
+  bool   is_premium = 5;   // default = false if not set
+  // Field 6 reserved for future addition — never reuse numbers
+}
+
+message ActivityEvent {
+  string event_type = 1;   // "post_liked", "comment_added"
+  int64  timestamp  = 2;
+  bytes  payload    = 3;   // arbitrary event data as binary
+}`}}
+
+{{think "Field numbers are the binary identity of each field — the field name is just documentation."
+  (how "binary encoding" "Protobuf encodes each field as: [field_number << 3 | wire_type] [value]. No field names on the wire — just numbers. This is why field numbers are permanent but names are not. A Protobuf message with 10 fields is typically 30-60% smaller than equivalent JSON because: no quotes around field names, no separators like commas/braces, integers are varint-encoded (small numbers = fewer bytes).")
+  (whyNot "changing field types after deployment" "If you change field 2 from int32 to string, existing clients will fail to deserialize responses. Safe schema evolution: add new fields with new numbers, mark old fields deprecated (never delete), never reuse field numbers even after deletion. Use oneof for mutually exclusive fields.")
+}}
+
+{{table "Protobuf vs JSON" (rows
+  (row "Property" "Protobuf" "JSON")
+  (row "Payload size" "~3x smaller" "Baseline")
+  (row "Deserialization speed" "~3x faster (large messages)" "Baseline")
+  (row "Schema enforcement" "Compile-time (.proto)" "Runtime (if validated)")
+  (row "Human-readable" "No (binary)" "Yes")
+  (row "Debuggable with curl" "No (needs grpcurl)" "Yes")
+  (row "Backward compatibility" "Field numbers preserve it" "No built-in mechanism")
+  (row "Supported languages" "20+" "Universal")
+)}}
+
+{{code "go" `// Generated Go server code from .proto (simplified)
+type UserServiceServer interface {
+    GetUser(ctx context.Context, req *GetUserRequest) (*User, error)
+    ListUserActivity(*ListActivityRequest, UserService_ListUserActivityServer) error
+    SyncPresence(UserService_SyncPresenceServer) error
+}
+
+// Your implementation — just fill in the business logic
+type userServer struct{}
+
+func (s *userServer) GetUser(ctx context.Context, req *GetUserRequest) (*User, error) {
+    user, err := db.GetUserByID(ctx, req.UserId)
+    if err != nil {
+        return nil, status.Errorf(codes.NotFound, "user %s not found", req.UserId)
+    }
+    return toProto(user), nil
+}`}}
+
+{{hint "Protobuf field numbers are forever" "Once you deploy a .proto message to production, field numbers are immutable. Adding field 6 to User = fine. Renaming field 2 from 'email' to 'email_address' = fine (field number stays 2). Changing field 2 from string to int = breaking change — don't. Removing field 2 = mark it reserved; never reuse number 2. This is how Protobuf maintains backward compatibility."}}
+
+{{triggerQs "Phase 2 Interview Questions"
+  "How does Protobuf maintain backward and forward compatibility?"
+  "Backward compatible (new server, old client): add new fields with new numbers; old clients ignore unknown fields. Forward compatible (old server, new client): new clients send new fields that old server doesn't know — old server ignores unknown field numbers. Breaking changes: changing a field's type or reusing a deleted field's number. Safe evolution: add fields, never remove (mark reserved), never reuse numbers, use oneof for variants."
+  "How does Protobuf encoding work at a byte level?"
+  "Each field is encoded as: (field_number << 3 | wire_type) as a varint, followed by the field value. Wire type 0 = varint, 1 = 64-bit, 2 = length-delimited (strings, bytes, nested messages), 5 = 32-bit. A User with user_id='abc' and created_at=1700000000 encodes in ~15 bytes vs JSON's ~50 bytes. Integers use varint encoding — small numbers like 1, 2, 3 take 1 byte; large numbers take more."
+}}
+
+{{phase 3 "HTTP/2 Transport & Multiplexing" "5 min"}}
+
+{{say `gRPC's performance advantage over REST comes significantly from <span class="hl-blue">HTTP/2</span>:
+<ul>
+  <li><strong>Multiplexing:</strong> multiple concurrent gRPC calls on a single TCP connection — no connection-per-request overhead, no head-of-line blocking between different calls</li>
+  <li><strong>Header compression (HPACK):</strong> HTTP headers are compressed; repeated headers (like <code>Content-Type</code>, <code>Authorization</code>) are indexed and sent as 1-byte references</li>
+  <li><strong>Binary framing:</strong> HTTP/2 splits all data into frames; gRPC messages are framed inside HTTP/2 DATA frames</li>
+  <li><strong>Flow control:</strong> per-stream and per-connection flow control prevents fast senders from overwhelming slow receivers</li>
+  <li>Result: at <span class="hl">1,000 concurrent RPC calls</span>, REST opens 1,000 connections; gRPC uses <span class="hl">~10 connections</span> (one per server instance in the pool)</li>
+</ul>`}}
+
+{{think "HTTP/2 multiplexing means gRPC connection pools can be much smaller than HTTP/1.1 connection pools."
+  (how "HTTP/2 streams" "HTTP/2 assigns each request a stream ID (odd numbers for client-initiated: 1, 3, 5...). All streams share one TCP connection. The TCP layer delivers bytes; HTTP/2 layer reassembles frames into streams. Stream 1's data and stream 3's data are interleaved at the byte level but completely independent at the application level.")
+  (whyNot "HTTP/1.1 for high-throughput microservices" "HTTP/1.1 suffers from head-of-line blocking: one slow response blocks the connection. Workaround: open 6 parallel connections per host (browser default). At 100 microservices × 6 connections = 600 TCP connections for one service. HTTP/2 collapses this to ~5-10 connections total — reduces memory, TLS overhead, and port exhaustion.")
+  (whatIf "HTTP/2 TCP connection is lost" "gRPC client detects the connection failure and re-establishes it. gRPC has built-in keepalive (send HTTP/2 PING frames to detect dead connections faster than TCP keepalive). Failed calls receive UNAVAILABLE or CANCELLED status codes and can be retried with exponential backoff.")
+}}
+
+{{code "go" `// gRPC client with connection pool and keepalive
+conn, err := grpc.Dial("payment-service:50051",
+    grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})),
+    grpc.WithKeepaliveParams(keepalive.ClientParameters{
+        Time:                10 * time.Second, // Send PING if idle for 10s
+        Timeout:             5 * time.Second,  // Wait 5s for PONG
+        PermitWithoutStream: true,             // PING even with no active calls
+    }),
+    // gRPC picks targets round-robin across multiple endpoints
+    grpc.WithDefaultServiceConfig(`{"loadBalancingPolicy":"round_robin"}`),
+)
+client := paymentpb.NewPaymentServiceClient(conn)
+
+// This single connection handles hundreds of concurrent RPCs
+resp, err := client.ProcessPayment(ctx, req)`}}
+
+{{table "HTTP/1.1 vs HTTP/2 Connection Overhead" (rows
+  (row "Scenario" "HTTP/1.1 (REST)" "HTTP/2 (gRPC)")
+  (row "1,000 concurrent calls to 1 service" "1,000+ TCP connections" "~10 TCP connections")
+  (row "Header overhead per call" "Full headers (~500 bytes)" "HPACK compressed (~50 bytes)")
+  (row "Head-of-line blocking" "Per-connection" "None (multiplexed streams)")
+  (row "TLS handshake cost" "1 per connection" "1 per connection (amortized across all calls)")
+  (row "Streaming support" "Requires SSE/WebSocket" "Native (4 modes)")
+)}}
+
+{{hint "gRPC keepalive settings" "By default, gRPC connections can become 'zombie' if a server crashes without sending a TCP RST. Set keepalive.ClientParameters.Time=10s and Timeout=5s to detect dead connections within 15 seconds. On the server side, set keepalive.ServerParameters.MaxConnectionIdle=60s to close connections idle for over 60 seconds. Without these, gRPC connections can pile up on long-running services."}}
+
+{{triggerQs "Phase 3 Interview Questions"
+  "How does gRPC achieve lower latency than REST for the same operation?"
+  "Three factors: (1) Smaller payload — Protobuf binary is ~3x smaller than JSON, reducing serialization time and network transmission time. (2) Connection reuse — HTTP/2 multiplexing means no new TCP + TLS handshake per call (saves 1-2 RTT). (3) HTTP/2 header compression (HPACK) reduces per-call overhead. Benchmark: at high load with large payloads, gRPC can achieve 10x the throughput of REST. At low load with small payloads, difference is ~25-30%."
+  "What is head-of-line blocking and how does HTTP/2 solve it?"
+  "HTTP/1.1 head-of-line blocking: if request A is slow, requests B and C behind it on the same connection must wait. Workaround was to open 6 parallel connections per host. HTTP/2 multiplexing: requests A, B, C run as separate streams on the same connection. A slow stream doesn't block others — frames from different streams are interleaved at the byte level. Note: TCP-level HOL blocking still exists in HTTP/2 (packet loss pauses all streams) — HTTP/3 (QUIC) eliminates this."
+}}
+
+{{phase 4 "4 Streaming Modes" "5 min"}}
+
+{{say `gRPC's streaming modes are one of its biggest differentiators from REST:
+<ul>
+  <li><strong>Unary</strong> (request → response): same as REST. Most common. Client waits for response.</li>
+  <li><strong>Server streaming</strong> (request → stream): one request triggers N responses. Client reads until stream is done.</li>
+  <li><strong>Client streaming</strong> (stream → response): client sends N requests, server aggregates and responds once.</li>
+  <li><strong>Bidirectional streaming</strong> (stream ↔ stream): both sides send independently, full-duplex on one HTTP/2 stream.</li>
+</ul>`}}
+
+{{diagram "fund-grpc-streaming-modes"}}
+
+{{code "go" `// Server streaming: send stock price ticks to subscribed clients
+func (s *marketServer) SubscribePrices(
+    req *SubscribeRequest,
+    stream MarketService_SubscribePricesServer,
+) error {
+    ticker := time.NewTicker(100 * time.Millisecond)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-ticker.C:
+            price := s.getPriceFor(req.Symbol)
+            if err := stream.Send(price); err != nil {
+                return err // client disconnected
+            }
+        case <-stream.Context().Done():
+            return nil // client cancelled subscription
+        }
+    }
+}
+
+// Client-side usage:
+stream, err := client.SubscribePrices(ctx, &SubscribeRequest{Symbol: "AAPL"})
+for {
+    price, err := stream.Recv()
+    if err == io.EOF {
+        break
+    }
+    fmt.Printf("AAPL: $%.2f\n", price.Value)
+}`}}
+
+{{think "Bidirectional streaming is the most powerful mode — two independent streams over one HTTP/2 connection."
+  (how "bidirectional stream" "Both sides call Send() and Recv() independently. The gRPC framework handles flow control — a fast sender is throttled if the receiver's buffer fills. Each side ends the stream by calling CloseSend() (client) or returning from the handler (server). Useful for: real-time collaborative sync, chat between services, game state updates.")
+  (whyNot "WebSocket instead of gRPC bidirectional streaming" "For browser clients: WebSocket is the only option (gRPC-web doesn't support bidirectional streaming). For service-to-service: gRPC bidirectional streaming is better — type-safe Protobuf messages, built-in deadlines, backpressure from HTTP/2 flow control, and load balancing. WebSocket is an unstructured byte stream at the service layer.")
+  (whatIf "the server crashes mid-stream" "The client receives an error on the next Recv() call — status code UNAVAILABLE. gRPC retries are defined in service config: { methodConfig: [{retryPolicy: {maxAttempts: 4, ...}}] }. For streaming: idempotent server-streaming (e.g., log tailing) can retry by reconnecting. For stateful streams (game state), application-level sequence numbers and reconnect logic are needed.")
+}}
+
+{{table "Streaming Mode Use Cases" (rows
+  (row "Mode" "When to Use" "Real Example")
+  (row "Unary" "Standard request-response" "GetUser, ProcessPayment, Login")
+  (row "Server streaming" "Server pushes data continuously" "Stock price ticks, log streaming, ML inference results")
+  (row "Client streaming" "Upload/bulk ingestion" "File upload in chunks, IoT sensor batch upload, bulk import")
+  (row "Bidirectional" "Real-time interactive" "Trading order matching, collaborative editing sync, game state")
+)}}
+
+{{hint "Client streaming for file upload" "Traditional REST multipart upload: client buffers the entire file, sends one large request. gRPC client streaming: client sends chunks as they're read from disk. Server processes chunks as they arrive — lower memory on both sides. Google Drive's internal file upload APIs use gRPC client streaming for large file transfers."}}
+
+{{triggerQs "Phase 4 Interview Questions"
+  "When would you use gRPC streaming vs WebSocket for real-time communication?"
+  "gRPC streaming for service-to-service: type safety, Protobuf efficiency, deadline propagation, backpressure from HTTP/2 flow control, load balancing through gRPC LB policies. WebSocket for browser-to-server: browsers can't natively call gRPC streaming (grpc-web only supports unary and server-streaming). For a chat system: browser → WebSocket → gateway service → gRPC bidirectional streaming → chat microservice. The gateway translates between protocols."
+  "How do you handle backpressure in gRPC streaming?"
+  "HTTP/2 flow control handles backpressure automatically. Each stream has a receive window (default 65KB). If the receiver doesn't process data fast enough, the window fills and the sender is blocked until the receiver reads more data. Application-level: gRPC server streaming's Send() blocks if the client isn't reading — your server goroutine is naturally throttled. No separate backpressure logic needed — HTTP/2 layer handles it."
+}}
+
+{{phase 5 "Error Handling & Deadlines" "4 min"}}
+
+{{say `gRPC has a richer error model than HTTP status codes and built-in deadline propagation:
+<ul>
+  <li><strong>Status codes:</strong> 16 gRPC codes mapped to intent — <code>NOT_FOUND</code>, <code>INVALID_ARGUMENT</code>, <code>UNAVAILABLE</code>, <code>DEADLINE_EXCEEDED</code>, etc.</li>
+  <li><strong>Rich error details:</strong> attach structured error metadata (error reason, field violations, retry info) in Google's error model — far richer than HTTP status</li>
+  <li><strong>Deadlines:</strong> client sets a deadline (<code>ctx, cancel = context.WithTimeout(ctx, 500*time.Millisecond)</code>); the deadline propagates through the entire call chain — when the deadline expires, all downstream calls are cancelled automatically</li>
+  <li><strong>Context cancellation:</strong> if client cancels (user navigated away), all in-flight gRPC calls are cancelled — no wasted work downstream</li>
+</ul>`}}
+
+{{think "Deadline propagation is gRPC's most underrated feature — it prevents cascading timeouts."
+  (how "deadline propagation" "Client calls ServiceA with 500ms deadline. ServiceA calls ServiceB — the remaining deadline (e.g., 420ms) is propagated via gRPC metadata. ServiceB calls ServiceC with 380ms remaining. If any call exceeds its deadline, all downstream calls receive DEADLINE_EXCEEDED immediately — no dangling threads. REST with HTTP doesn't propagate timeouts natively.")
+  (whyNot "ignoring deadlines" "Without deadlines, a slow database query in ServiceC causes ServiceB to wait, causes ServiceA to wait, causes the client to wait. Threads pile up. The system appears 'stuck'. With deadline propagation, the client's 500ms timeout is enforced across the entire call chain — fan-out requests are cancelled when the deadline passes.")
+  (whatIf "gRPC service returns UNAVAILABLE" "UNAVAILABLE means the server is temporarily down — safe to retry with exponential backoff. DEADLINE_EXCEEDED means the call took too long — retry with care (was the operation idempotent?). ALREADY_EXISTS and NOT_FOUND are not retryable. gRPC retry policy in service config: specify retryableStatusCodes and maxAttempts.")
+}}
+
+{{table "gRPC Status Codes" (rows
+  (row "Code" "HTTP Equivalent" "When to Use" "Retryable?")
+  (row "OK (0)" "200" "Success" "N/A")
+  (row "INVALID_ARGUMENT (3)" "400" "Client sent bad data (validation error)" "No — fix the request")
+  (row "NOT_FOUND (5)" "404" "Resource doesn't exist" "No")
+  (row "ALREADY_EXISTS (6)" "409" "Duplicate creation attempt" "No")
+  (row "PERMISSION_DENIED (7)" "403" "Auth check failed" "No")
+  (row "UNAUTHENTICATED (16)" "401" "No/invalid credentials" "No")
+  (row "DEADLINE_EXCEEDED (4)" "408/504" "Timeout exceeded" "Conditional (idempotent only)")
+  (row "UNAVAILABLE (14)" "503" "Server temporarily down" "Yes (backoff)")
+  (row "INTERNAL (13)" "500" "Bug in server" "No (fix the bug)")
+)}}
+
+{{code "go" `// gRPC client with deadline and retry
+ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+defer cancel()
+
+resp, err := client.GetUser(ctx, req)
+if err != nil {
+    st, ok := status.FromError(err)
+    if !ok {
+        return fmt.Errorf("non-gRPC error: %v", err)
+    }
+    switch st.Code() {
+    case codes.NotFound:
+        return ErrUserNotFound
+    case codes.Unavailable, codes.DeadlineExceeded:
+        // Retry with exponential backoff
+        return retryWithBackoff(ctx, client, req)
+    default:
+        return fmt.Errorf("rpc error %s: %s", st.Code(), st.Message())
+    }
+}`}}
+
+{{triggerQs "Phase 5 Interview Questions"
+  "How do gRPC deadlines differ from HTTP timeouts?"
+  "HTTP timeouts are per-connection (TCP socket timeout) or per-request (client-side). They don't propagate — ServiceA's 5s timeout doesn't limit ServiceB or ServiceC. gRPC deadlines propagate via context: ServiceA sets a 500ms deadline, which is carried as metadata to ServiceB, which forwards remaining time to ServiceC. When the deadline expires, all in-flight downstream calls receive DEADLINE_EXCEEDED immediately — no orphaned threads."
+  "What is the difference between gRPC DEADLINE_EXCEEDED and UNAVAILABLE?"
+  "DEADLINE_EXCEEDED: the call took longer than the specified deadline. The operation may or may not have completed on the server. Retry only if the operation is idempotent (reads, get operations). UNAVAILABLE: the server is temporarily unable to handle the request (overloaded, restarting). The operation definitely didn't complete. Safe to retry with exponential backoff. Both can be configured in gRPC retry policy with retryableStatusCodes."
+}}
+
+{{phase 6 "Load Balancing & Service Mesh" "4 min"}}
+
+{{say `gRPC load balancing is more nuanced than HTTP load balancing because of long-lived connections:
+<ul>
+  <li><strong>Problem:</strong> a gRPC connection is long-lived (seconds to minutes); round-robin at connection level doesn't distribute load evenly per RPC</li>
+  <li><strong>Client-side LB:</strong> client resolves service name to a list of IPs, maintains connections to each, round-robins RPCs across them — fine-grained, O(1) per RPC</li>
+  <li><strong>Lookaside LB (xDS):</strong> gRPC connects to a load balancer control plane (Envoy xDS) for dynamic backend discovery — used by Istio, GCP Traffic Director</li>
+  <li><strong>Service mesh (Istio/Linkerd):</strong> Envoy sidecar intercepts all gRPC calls, handles retries, circuit breaking, mTLS, observability — zero application code changes</li>
+</ul>`}}
+
+{{think "Long-lived connections require per-RPC (not per-connection) load balancing."
+  (how "gRPC client-side LB" "gRPC resolver watches DNS or a name server for the list of backend IPs. Load balancer policy (round_robin, least_request) picks a subchannel (connection to one backend) for each RPC. 10 backends = 10 subchannels; each RPC is assigned to one subchannel independently. This gives even distribution even with long-lived connections.")
+  (whyNot "proxy-based LB without gRPC awareness" "An L4 load balancer (NLB) balances at TCP connection level. One gRPC client opens one TCP connection, all RPCs go to one backend — no distribution. L7 load balancer (ALB) balances HTTP/2 streams. This works but ALB adds latency vs client-side LB.")
+  (whatIf "a backend is slow but not dead" "Circuit breaker pattern: if >50% of RPCs to a backend fail or exceed deadline within a 10-second window, mark it as unhealthy and stop routing to it for 30 seconds. gRPC + Envoy/Istio implement circuit breaking automatically via outlier detection configuration.")
+}}
+
+{{table "gRPC Load Balancing Approaches" (rows
+  (row "Approach" "How It Works" "Pros" "Cons")
+  (row "Client-side (round_robin)" "Client picks subchannel per RPC" "Zero extra hop, fine-grained" "Client manages backend list")
+  (row "L7 proxy (Envoy/ALB)" "Proxy balances HTTP/2 streams" "Centralized, no client changes" "Extra hop latency")
+  (row "xDS / Istio" "Control plane pushes routing rules to Envoy sidecar" "Dynamic, circuit breaking, mTLS, observability" "Istio complexity, sidecar overhead")
+  (row "gRPC-LB (legacy)" "Separate LB server assigns backends" "Good for external clients" "Deprecated; use xDS")
+)}}
+
+{{hint "Istio for gRPC in Kubernetes" "Istio's Envoy sidecar understands HTTP/2 framing and intercepts gRPC calls transparently. It provides: per-RPC load balancing across pods, automatic mTLS between services, circuit breaking, retry policies, distributed tracing (Jaeger/Zipkin), and traffic splitting for canary deployments — all with zero changes to gRPC application code. Configure in VirtualService and DestinationRule CRDs."}}
+
+{{phase 7 "gRPC vs REST: Decision Framework" "3 min"}}
+
+{{say `Use this framework to choose between gRPC and REST in a system design interview:
+<ul>
+  <li><strong>Internal service-to-service:</strong> gRPC — type safety, performance, deadline propagation, streaming support</li>
+  <li><strong>Public API / browser clients:</strong> REST — universally supported, human-readable, CDN-cacheable, no toolchain required</li>
+  <li><strong>Mobile clients:</strong> REST or gRPC-web — gRPC benefits apply on mobile but grpc-web proxy required</li>
+  <li><strong>Hybrid:</strong> gRPC internally + REST/GraphQL at the API gateway — best of both worlds; Netflix, Google, Uber use this pattern</li>
+</ul>`}}
+
+{{diagram "fund-grpc-vs-rest"}}
+
+{{table "API Protocol Comparison" (rows
+  (row "Protocol" "Transport" "Format" "Streaming" "Browser" "Best For")
+  (row "REST" "HTTP/1.1" "JSON" "Via SSE/WebSocket" "Native" "Public APIs, CRUD, browser clients")
+  (row "gRPC" "HTTP/2" "Protobuf" "4 native modes" "grpc-web only" "Internal microservices, high-throughput")
+  (row "GraphQL" "HTTP/1.1 or 2" "JSON" "Subscriptions (WebSocket)" "Native" "Flexible client-driven APIs, BFF layer")
+  (row "WebSocket" "TCP" "Any" "Full-duplex" "Native" "Real-time browser-server communication")
+)}}
+
+{{triggerQs "Phase 7 Interview Questions"
+  "Would you use gRPC for the API between a mobile app and your backend?"
+  "Not directly — mobile apps are browser-like environments where gRPC-web proxy is needed. Better pattern: REST or GraphQL for client-facing API (mobile-optimized, cacheable, easy to debug), gRPC for all internal microservice communication behind the API gateway. This gives: mobile-friendly external API + high-performance internal communication. Netflix and Uber use exactly this architecture."
+  "How would you design a migration from REST to gRPC for an existing service?"
+  "Don't migrate the public API — keep REST for clients. Add gRPC as a secondary interface: service exposes both REST (for backward compatibility) and gRPC (for internal callers). New services call via gRPC; legacy callers keep REST. Use a transcoding proxy (gRPC-Gateway for Go) to auto-generate REST endpoints from .proto definitions — maintain one source of truth. Migrate callers one by one, sunset REST when all callers are migrated."
+}}
+
+{{phase 8 "Interview Summary" "2 min"}}
+
+{{say `The gRPC story for system design interviews:
+<ul>
+  <li><strong>What it is:</strong> RPC framework using HTTP/2 (multiplexing) + Protobuf (binary, 3x smaller than JSON) + code generation (type-safe stubs in 20+ languages)</li>
+  <li><strong>Performance:</strong> <span class="hl">10x throughput</span> vs REST at large payloads, <span class="hl">~3x smaller</span> payload, one TCP connection for many concurrent calls</li>
+  <li><strong>4 streaming modes:</strong> unary, server-streaming, client-streaming, bidirectional — REST has none natively</li>
+  <li><strong>Deadlines:</strong> propagate through entire call chain — prevents cascading timeouts</li>
+  <li><strong>Use when:</strong> internal microservice-to-microservice, streaming data, high throughput, polyglot teams</li>
+  <li><strong>Don't use when:</strong> public APIs, browser clients (no native support), cacheable GET responses</li>
+</ul>`}}
+
+{{avoid "Don't say gRPC is always better than REST. REST is better for: public APIs where developers need to test with curl, browser clients, CDN-cacheable responses. gRPC wins for internal microservice communication where you control both sides."}}
+
+{{table "Real Company gRPC Usage" (rows
+  (row "Company" "gRPC Usage" "Scale")
+  (row "Google" "Internal services, GCP APIs" "Petabyte-scale, 100s of services")
+  (row "Netflix" "Microservice-to-microservice" "Internal APIs, user personalization")
+  (row "Square" "Payment processing" "Low-latency financial transactions")
+  (row "CoreOS / etcd" "Distributed KV consensus" "etcd uses gRPC for Raft consensus messages")
+  (row "Uber" "Internal service mesh" "1000s of microservices, gRPC + Envoy")
+)}}
+
+{{checklist
+  "gRPC = HTTP/2 (multiplexing) + Protobuf (binary, 3x smaller) + code generation (20+ languages)"
+  "4 streaming modes: unary, server-streaming, client-streaming, bidirectional. REST has none natively."
+  "Protobuf field numbers are immutable — changing a number is a breaking change; renaming is safe."
+  "Deadlines propagate: client's 500ms deadline cancels ALL downstream calls when exceeded."
+  "Use gRPC for internal services; REST for public APIs and browser clients."
+  "HTTP/2 multiplexing: 1,000 concurrent RPCs → ~10 TCP connections (not 1,000)."
+  "Istio sidecar: zero-code mTLS + LB + circuit breaking + tracing for all gRPC calls."
+}}
+
+{{key "gRPC's HTTP/2 multiplexing + Protobuf binary serialization gives 10x throughput vs REST at scale. Use it for internal microservice communication where you control both sides. Keep REST for public APIs and browser clients where human-readability and cacheability matter more than raw performance."}}
+
+<div class="fund-resources" style="margin-top: 2rem; padding: 1.5rem; border: 1px solid var(--border); border-radius: 8px; background: var(--surface);">
+  <div style="font-weight: 600; margin-bottom: 1rem; color: var(--text-primary);">Further Learning — Indian YouTube Channels</div>
+  <ul style="list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.75rem;">
+    <li>
+      <a href="https://www.youtube.com/@ArpitBhayani" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">Arpit Bhayani — Asli Engineering</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">Deep-dive gRPC series in Golang covering Protobuf, streaming modes, and production patterns. GitHub: <a href="https://github.com/arpitbbhayani/grpc-in-depth" class="dqa-link" target="_blank">arpitbbhayani/grpc-in-depth</a>.</span>
+    </li>
+    <li>
+      <a href="https://www.youtube.com/@gkcs" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">Gaurav Sen</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">System design fundamentals and microservice patterns. InterviewReady.io courses cover gRPC in distributed systems context.</span>
+    </li>
+    <li>
+      <a href="https://www.youtube.com/@ConceptandCoding" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">Concept && Coding — Shrayansh Jain</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">HLD playlist covering gRPC vs REST, API protocols, and microservice communication patterns.</span>
+    </li>
+    <li>
+      <a href="https://www.youtube.com/@sudocode" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">sudoCODE — Yogita Sharma</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">Beginner-friendly explanations of API design and communication protocols including gRPC fundamentals.</span>
+    </li>
+  </ul>
+</div>
