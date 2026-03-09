@@ -454,6 +454,7 @@ func renderDiagram(d *diagrams.Diagram) template.HTML {
 				</div>
 				%s
 				<div class="diagram-body">
+					<div class="diagram-body-overlay"></div>
 					<img src="/static/img/diagrams/%s" alt="%s" class="diagram-img" loading="lazy">
 				</div>
 				%s
@@ -468,6 +469,7 @@ func renderDiagram(d *diagrams.Diagram) template.HTML {
 				</div>
 				%s
 				<div class="diagram-body">
+					<div class="diagram-body-overlay"></div>
 					%s
 				</div>
 				%s
