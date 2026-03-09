@@ -747,6 +747,20 @@ def validate_ticket(token_prefix: str, booking_id_suffix: str) -> dict:
 
 {{hint "why HMAC not UUID for QR token" "A UUID is random but doesn't bind to specific booking data — a stolen UUID is a valid ticket for any booking. HMAC binds the token to (booking_id + show_date + secret). Without the secret, an attacker can't forge a valid token even if they know the booking_id."}}
 
+{{collapseSection "QR Code Technical Specifications" `
+<ul>
+  <li><strong>QR Version 6:</strong> 41x41 modules, handles up to 195 alphanumeric characters — sufficient for the compact JSON payload (~200 bytes)</li>
+  <li><strong>Error correction M:</strong> 15% of codewords can be restored — balances scan reliability vs data capacity</li>
+  <li><strong>Payload format:</strong> <code>{"t":"&lt;token_prefix&gt;","b":"&lt;booking_suffix&gt;","s":["A1","A2"]}</code> — minimal data for lookup + display</li>
+  <li><strong>S3 storage:</strong> ~5KB per QR PNG × 500K bookings/day = ~2.5GB/day, ~75GB/month ($1.73/mo S3 Standard)</li>
+  <li><strong>CloudFront delivery:</strong> QR images are immutable — Cache-Control: max-age=31536000 (1 year), no invalidation needed</li>
+</ul>
+`}}
+
+{{goodToKnow "Venue validation endpoint must handle offline-ish scenarios — pre-cache validated tokens on the scanner device for the current show's bookings" "Token prefix (16 chars) + booking suffix (8 chars) is enough for unique lookup — avoids encoding the full 64-char HMAC in the QR"}}
+
+{{mustKnow "HMAC-SHA256 binds the QR token to booking_id + show_date + secret — unforgeable without the secret key, unlike random UUIDs" "QR generation is async via SQS + workers — never blocks the booking confirmation path" "Venue validation is a simple GET endpoint: look up token prefix, verify not already scanned, mark as used" "S3 + CloudFront for QR image delivery — static, immutable, cached indefinitely"}}
+
 {{phase 11 "Anti-Scalping" "4 min"}}
 
 {{say `Bot scalpers try to buy all premium seats for resale — defense is layered:

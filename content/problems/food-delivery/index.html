@@ -938,6 +938,20 @@ CREATE TABLE order_events (
 
 {{hint "Kafka partition count" "Start with 6 partitions per topic, one per shard key (city). At 350 orders/sec with 6 partitions, each partition handles ~58 events/sec — well within Kafka's 1MB/sec per partition limit. Scale to 12 partitions if you split into top-12 metros."}}
 
+{{caveat "Managed Cassandra (AWS Keyspaces) costs 3-5x self-managed for write-heavy workloads. At 125K writes/sec, Keyspaces would be ~$42K/month vs $8,400 self-managed. This cost difference is worth mentioning if the interviewer asks about managed vs self-hosted."}}
+
+{{collapseSection "Detailed Cost Breakdown" `Infrastructure cost analysis at 10M orders/day:
+<ul>
+  <li><strong>Redis Cluster (location):</strong> 6 × r6g.xlarge (32GB) = ~$4,320/mo</li>
+  <li><strong>PostgreSQL (orders):</strong> r6g.2xlarge primary + 3 read replicas = ~$6,800/mo</li>
+  <li><strong>Cassandra (location history):</strong> 6 × i3.2xlarge (1.9TB NVMe) = ~$8,400/mo</li>
+  <li><strong>Kafka (MSK):</strong> 3-broker, 6-partition topics = ~$2,100/mo</li>
+  <li><strong>Compute (all services):</strong> 50 pods avg, c6g.large = ~$5,500/mo</li>
+  <li><strong>Elasticsearch (search):</strong> 3-node 32GB cluster = ~$1,800/mo</li>
+  <li><strong>Total:</strong> ~$29K/mo = $0.097/order. At $2-3 delivery fee, infra is 3-5% of revenue.</li>
+</ul>
+Biggest optimization lever: Cassandra location history with ZSTD compression (4:1) cuts storage cost to ~$2,100/mo.`}}
+
 {{checklist "Key design decisions made"
   "Redis GEORADIUS with 60s TTL for live partner tracking — auto-expires offline partners"
   "Greedy constraint-filter matching (2ms) over Dijkstra (500ms) for sub-2s SLA"
@@ -948,6 +962,8 @@ CREATE TABLE order_events (
   "Batch delivery capped at 10-minute ETA inflation per order"
   "TTL-based partner offline detection — no heartbeat service needed"
 }}
+
+{{mustKnow "Three independent scaling bottlenecks: location writes (125K/s → Redis Cluster), matching (350/s → stateless pods), order writes (350/s → PostgreSQL + replicas)" "Total infra cost: ~$29K/month for 10M orders/day = $0.097/order (3-5% of delivery fee revenue)" "Aurora PostgreSQL beats DynamoDB above ~500K orders/day on cost; DynamoDB wins below that threshold" "Kafka partitions by city zone — each zone scales independently, peak in one city does not affect others"}}
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 
