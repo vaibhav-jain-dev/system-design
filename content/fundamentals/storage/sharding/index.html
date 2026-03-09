@@ -16,7 +16,7 @@
 )}}
 
 {{think "When is sharding the right answer?"
-  (whyNot "sharding first" "Sharding adds significant operational complexity: no cross-shard joins, cross-shard transactions require 2PC, re-sharding requires zero-downtime migrations. A db.r6g.16xlarge handles 500GB RAM and 128 vCPUs. That covers most startups to mid-scale.")
+  (whyNot "sharding first" "Sharding adds significant operational complexity: no cross-shard joins, cross-shard transactions require <strong>2PC</strong> (Two-Phase Commit — a distributed protocol that locks all participants while ensuring all-or-nothing writes), re-sharding requires zero-downtime migrations. A db.r6g.16xlarge handles 500GB RAM and 128 vCPUs. That covers most startups to mid-scale.")
   (how "the signal to shard" "Write throughput exceeds what a single primary can handle, OR your dataset exceeds the largest available instance. For Postgres on RDS: write-heavy workloads hit limits around 10K-50K writes/s. At that point, sharding is appropriate.")
   (whatIf "I shard too early" "You lock yourself into a shard key that cannot change without a full re-shard. You lose SQL joins across shards. Your team must understand distributed transaction semantics. All of this cost with no benefit if one big machine would have worked.")
 }}
@@ -171,7 +171,7 @@ def get_tweet_key(user_id: int, shard_suffix: int) -> str:
 <ul>
   <li>Most flexible approach — any key can be assigned to any shard at any time</li>
   <li>Re-sharding = update the lookup table and migrate data; no key-space math required</li>
-  <li><span class="hl-red">Cost:</span> every request must hit the lookup service before reaching the shard — potential bottleneck and <strong>SPOF</strong></li>
+  <li><span class="hl-red">Cost:</span> every request must hit the lookup service before reaching the shard — potential bottleneck and <strong>SPOF</strong> (Single Point of Failure — if this service goes down, all routing fails)</li>
   <li>Mitigated by caching the mapping in each app server — shard assignments rarely change</li>
 </ul>`}}
 
@@ -183,7 +183,7 @@ def get_tweet_key(user_id: int, shard_suffix: int) -> str:
   (row "Flexibility"     "Any key can be mapped to any shard, any time")
   (row "Rebalancing"     "Update the lookup table, then migrate data — no key-space math")
   (row "Bottleneck"      "Every request hits the lookup service before the shard")
-  (row "&lt;span class=\"hl-blue\">SPOF&lt;/span> &lt;small>(Single Point of Failure)&lt;/small>" "Lookup service down = no requests can route")
+  (row "&lt;span class=\"hl-blue\">SPOF&lt;/span>" "Lookup service down = no requests can route — mitigate with replicated lookup service + client-side cache")
   (row "Used by"         "Vitess (MySQL sharding proxy), some legacy sharding frameworks")
 )}}
 
@@ -302,10 +302,10 @@ def get_dynamo_partition_key(user_id: str, is_celebrity: bool = False) -> str:
 
 {{phase 6 "Re-Sharding (Zero Downtime)" "6 min"}}
 
-{{say `<span class="hl-blue">Re-sharding</span> is moving from N shards to M shards without downtime — the most operationally complex database operation:
+{{say `<span class="hl-blue">Re-sharding</span> is moving from N shards to M shards without downtime — the most operationally complex database operation. The core challenge: you cannot simply redirect all traffic to the new shard layout because data that was written to old shards hasn't moved yet. So you must double-write while backfilling:
 <ul>
   <li>A <span class="hl">1TB</span> shard takes <span class="hl">28–48 hours</span> to backfill and verify before cutover</li>
-  <li>Requires <strong>double-write</strong> for the entire duration — <span class="hl">2× write cost</span> during migration</li>
+  <li>Requires <strong>double-write</strong> (all new writes go to both old and new shards simultaneously) for the entire duration — <span class="hl">2× write cost</span> during migration</li>
   <li>Any bug in the backfill job causes silent data loss — checksums are mandatory before cutover</li>
   <li><span class="hl-red">This is the primary argument</span> for using managed databases (<a class='dqa-link' href='/fund/storage/dynamodb'>DynamoDB</a>, Cassandra) that re-shard automatically</li>
 </ul>`}}

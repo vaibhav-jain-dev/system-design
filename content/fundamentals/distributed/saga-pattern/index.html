@@ -1,11 +1,11 @@
 {{phase 1 "What Is the Saga Pattern?" "3 min"}}
 
-{{say "A Saga is a sequence of local transactions. Each step publishes an event — or sends a command — that triggers the next step. If any step fails, compensating transactions run in reverse to undo prior steps. No global lock, no 2PC coordinator."}}
+{{say "A Saga is a sequence of local transactions. Each step publishes an event — or sends a command — that triggers the next step. If any step fails, compensating transactions run in reverse to undo prior steps. No global lock, no <strong>2PC</strong> (Two-Phase Commit — a protocol where a coordinator asks all participants to vote, then tells them all to commit or rollback together) coordinator."}}
 
 {{diagram "fund-saga-overview"}}
 
 {{think "Why not just use a distributed transaction?"
-  (whyNot "2PC (two-phase commit)" "2PC locks rows across services for the duration of the transaction. One slow or crashed service stalls every participant. In microservices across teams, you rarely control all participants.")
+  (whyNot "2PC (Two-Phase Commit)" "2PC locks rows across all participating services for the full duration of the transaction — first a prepare phase (everyone votes ready), then a commit phase (everyone writes). One slow or crashed service stalls every participant. In microservices across teams, you rarely control all participants.")
   (how "Saga replaces atomic commit" "Each service commits its own local transaction immediately. Consistency is achieved eventually via compensations, not via a global lock.")
 }}
 
@@ -203,11 +203,11 @@ def charge_customer_idempotent(saga_id: str, customer_id: str, amount: float):
 `}}
 
 {{think "Idempotency and 'at least once delivery' are inseparable in sagas."
-  (whyNot "relying on message deduplication at the broker layer" "<a class='dqa-link' href='/fund/messaging/message-queues'>Kafka</a> and SQS guarantee at-least-once delivery. Message deduplication at the broker is optional and has a finite deduplication window (5 minutes in SQS). Application-level idempotency keys are the reliable guarantee.")
+  (whyNot "relying on message deduplication at the broker layer" "<a class='dqa-link' href='/fund/messaging/message-queues'>Kafka</a> and <strong>SQS</strong> (Simple Queue Service — AWS's managed message queue) guarantee at-least-once delivery. Message deduplication at the broker is optional and has a finite deduplication window (5 minutes in SQS). Application-level idempotency keys are the reliable guarantee.")
   (how "idempotency key scoping" "Use (saga_id, step_name) as the composite key. Don't use just saga_id — a saga has multiple steps, each needing its own idempotency record.")
 }}
 
-{{hint "saga_step_log TTL" "Purge saga_step_log entries after saga completion + 7 days. Sagas rarely replay after completion. Keeping them forever inflates the table. A TTL index in Postgres or <a class='dqa-link' href='/fund/storage/dynamodb'>DynamoDB</a> handles this automatically."}}
+{{hint "saga_step_log TTL" "Purge saga_step_log entries after saga completion + 7 days. Sagas rarely replay after completion. Keeping them forever inflates the table. A <strong>TTL</strong> (Time-To-Live — a timestamp attribute that tells the database to automatically delete the record after a set duration) index in Postgres or <a class='dqa-link' href='/fund/storage/dynamodb'>DynamoDB</a> handles this automatically."}}
 
 {{mustKnow "Every saga step must be idempotent — use (saga_id, step_name) as composite idempotency key" "At-least-once delivery from message brokers means steps can be called multiple times — idempotency prevents double-charges" "Check saga_step_log before executing: if key exists, return prior result without re-executing"}}
 
@@ -247,7 +247,7 @@ def charge_customer_idempotent(saga_id: str, customer_id: str, amount: float):
 
 {{phase 7 "Saga vs 2PC" "4 min"}}
 
-{{say "Two-phase commit (2PC) achieves distributed atomicity through a prepare/commit protocol with a coordinator. Every participant locks resources during the prepare phase. Saga achieves eventual consistency through local commits and compensations — no distributed locks, no coordinator."}}
+{{say "<strong>2PC</strong> (Two-Phase Commit) achieves distributed atomicity through a prepare/commit protocol with a coordinator: in phase 1 the coordinator asks all participants to vote ready, in phase 2 it tells them all to commit. Every participant locks resources during the prepare phase. A Saga achieves eventual consistency through local commits and compensations — no distributed locks, no coordinator."}}
 
 {{diagram "fund-saga-vs-2pc"}}
 
@@ -262,7 +262,7 @@ def charge_customer_idempotent(saga_id: str, customer_id: str, amount: float):
 )}}
 
 {{think "2PC is not dead — it's misapplied when used across services."
-  (whyNot "2PC across microservices" "Each service may use a different DB. XA protocol (distributed 2PC) requires all DBs to support it, the coordinator to be perpetually available, and holds locks for seconds. In practice, XA is fragile and rarely used in modern microservices.")
+  (whyNot "2PC across microservices" "Each service may use a different DB. The <strong>XA protocol</strong> (the standard distributed 2PC implementation that coordinates across heterogeneous databases) requires all DBs to support it, the coordinator to be perpetually available, and holds locks for seconds while waiting for all participants. In practice, XA is fragile and rarely used in modern microservices.")
   (how "2PC still relevant" "Within a single service with multiple DB tables — or with databases that support distributed transactions natively (CockroachDB, Spanner) — 2PC is perfectly valid. Don't rewrite a monolith's transaction to a saga unnecessarily.")
 }}
 

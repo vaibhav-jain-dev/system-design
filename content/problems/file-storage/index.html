@@ -78,7 +78,7 @@
         <div class="api-quick-row">
           <span class="api-method GET">GET</span>
           <span class="api-quick-path">/api/v1/files/<span class="pp">{file_id}</span></span>
-          <span class="api-quick-comment"># Download file (redirect to CDN presigned URL)</span>
+          <span class="api-quick-comment"># Download file (redirect to CDN — Content Delivery Network — presigned URL)</span>
         </div>
         <div class="api-quick-row">
           <span class="api-method GET">GET</span>
@@ -307,7 +307,7 @@ class FileUploader:
 
 {{triggerQs "Upload design questions"
   "What if the client crashes mid-upload?"
-  "The upload_id is durable in the server DB. On restart, client calls GET /upload/{upload_id}/status and the server returns which chunks were successfully received. Client resumes by uploading only missing chunks. Presigned URLs are regenerated if expired (1-hour TTL). This is the key advantage of chunked upload over streaming."
+  "The upload_id is durable in the server DB. On restart, client calls GET /upload/{upload_id}/status and the server returns which chunks were successfully received. Client resumes by uploading only missing chunks. Presigned URLs are regenerated if expired (1-hour TTL — Time-To-Live). This is the key advantage of chunked upload over streaming."
   "How do you prevent duplicate uploads racing concurrently?"
   "The start_upload endpoint checks content_hash against existing files atomically. If two users upload the same file simultaneously, one wins the INSERT and gets upload_id, the other gets 200 with existing file_id. For the same user uploading the same file twice concurrently, the upload_id is idempotent — both clients share the same upload session."
 }}
@@ -321,8 +321,8 @@ class FileUploader:
   <li><strong>API Service:</strong> handles metadata operations, auth, issues presigned URLs</li>
   <li><strong>Upload Service:</strong> tracks chunked upload sessions, triggers assembly</li>
   <li><strong>Storage Service:</strong> wraps S3/object storage, handles dedup, manages chunk refs</li>
-  <li><strong>Sync Service:</strong> maintains change feed, broadcasts updates via SSE/WebSocket</li>
-  <li><strong>CDN (CloudFront):</strong> serves downloads at edge — most downloads are reads of popular files</li>
+  <li><strong>Sync Service:</strong> maintains change feed, broadcasts updates via <strong>SSE</strong> (Server-Sent Events — a one-way HTTP push from server to client, simpler than WebSocket for read-only streams)/WebSocket</li>
+  <li><strong>CDN</strong> (Content Delivery Network — servers distributed globally to serve content closer to users, e.g. CloudFront): serves downloads at edge — most downloads are reads of popular files</li>
 </ul>`}}
 
 {{diagram "fs-architecture"}}
@@ -426,7 +426,7 @@ CREATE INDEX idx_sync_events_user_seq ON sync_events (user_id, seq);
   <li>Permissions are checked on every API call — no caching (permissions can be revoked in real-time)</li>
 </ul>`}}
 
-{{hint "permission inheritance for folders" "Sharing a folder with 'edit' permission grants edit on all current and future files inside it. Implementation: when checking file permission, walk up the folder tree until you find an explicit permission. This is a recursive parent lookup — optimize by caching the permission chain in Redis with a short TTL (5 min) to handle revocations quickly."}}
+{{hint "permission inheritance for folders" "Sharing a folder with 'edit' permission grants edit on all current and future files inside it. Implementation: when checking file permission, walk up the folder tree until you find an explicit permission. This is a recursive parent lookup — optimize by caching the permission chain in Redis with a short <strong>TTL</strong> (Time-To-Live — the duration before the cached entry expires and is re-fetched from the DB) of 5 min to handle revocations quickly."}}
 
 {{mustKnow "Three permission levels: view, comment, edit — checked on every API call (no permission caching)" "Folder permissions inherit to all children; walk up folder tree to find explicit permission" "Share links use opaque tokens in the URL for unauthenticated access"}}
 
@@ -447,12 +447,12 @@ CREATE INDEX idx_sync_events_user_seq ON sync_events (user_id, seq);
   (row "Redis"      "File metadata"          "1 min"   "Invalidate on update")
   (row "Redis"      "Permission checks"      "5 min"   "Invalidate on permission change")
   (row "Redis"      "Folder listings"        "30 sec"  "Invalidate on folder change")
-  (row "Client disk" "Recently opened files" "7 days"  "LRU by access time")
+  (row "Client disk" "Recently opened files" "7 days"  "LRU (Least Recently Used — evicts the least recently accessed item when cache is full) by access time")
 )}}
 
 {{hint "why 24h CDN TTL is safe" "File content is immutable — we use content hash in the URL. /files/abc?v=sha256hash never changes content for that URL. If the file is updated, the new version gets a new hash → new URL → CDN fetches fresh. The old URL might still be in cache but nobody requests it anymore. This eliminates all CDN invalidation calls."}}
 
-{{mustKnow "Three cache layers: CDN (file bytes, 24h), Redis (metadata/permissions, 30s-5min), client disk (7 days LRU)" "Content hash in CDN URL means cached content is never stale — file update = new hash = new URL" "Redis caches permission lookups with 5-min TTL; invalidate on permission change for near-real-time revocation"}}
+{{mustKnow "Three cache layers: CDN (file bytes, 24h TTL — Time-To-Live), Redis (metadata/permissions, 30s-5min TTL), client disk (7 days LRU — Least Recently Used)" "Content hash in CDN URL means cached content is never stale — file update = new hash = new URL" "Redis caches permission lookups with 5-min TTL; invalidate on permission change for near-real-time revocation"}}
 
 {{goodToKnow "CDN egress costs dominate at scale. At 100 TB/month, S3 egress via CloudFront costs ~$8,500/month. Cloudflare R2 with zero egress fees is increasingly adopted as an alternative for read-heavy file storage workloads."}}
 

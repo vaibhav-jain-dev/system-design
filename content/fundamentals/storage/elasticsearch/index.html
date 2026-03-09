@@ -11,7 +11,7 @@ The result: full-text search across millions of documents in <span class='hl'>< 
 
 {{think "Elasticsearch is optimized for one thing databases are terrible at: searching arbitrary text across large document sets. The inverted index trades write amplification (each word must be indexed) for dramatically faster reads. This is the right trade-off when reads dominate writes."
   (whyNot "using LIKE '%redis%' in Postgres" "LIKE with a leading wildcard cannot use any index — it forces a full table scan. At 100M rows with 500-byte text each, that's 50 GB scanned per query. Even with a GIN trigram index, Postgres cannot match Elasticsearch for relevance ranking, fuzzy matching, and aggregation performance.")
-  (how "inverted index works" "At index time: tokenize text → normalize (lowercase, remove stopwords, stem) → record {term → [doc_id, position]}. At query time: look up each search term → intersect/union document lists → score by TF-IDF or BM25. The index is stored as a sorted term dictionary + posting lists on disk.")
+  (how "inverted index works" "At index time: tokenize text → normalize (lowercase, remove stopwords, stem) → record {term → [doc_id, position]}. At query time: look up each search term → intersect/union document lists → score by <strong>BM25</strong> (Best Match 25 — a probabilistic ranking algorithm that scores documents by term frequency and rarity; it replaced the older <strong>TF-IDF</strong> (Term Frequency-Inverse Document Frequency) as the default in ES 5.0 because it handles long documents better). The index is stored as a sorted term dictionary + posting lists on disk.")
 }}
 
 {{hint "Elasticsearch vs OpenSearch" "AWS forked Elasticsearch 7.10 in 2021 as &lt;strong>OpenSearch&lt;/strong> after Elastic changed licensing. APIs are near-identical. Use OpenSearch Service on AWS for managed deployment — same mental model as Elasticsearch."}}
@@ -142,7 +142,7 @@ The result: full-text search across millions of documents in <span class='hl'>< 
 
 {{triggerQs "Relevance & Scoring Questions"
   "How does BM25 scoring work in Elasticsearch?"
-  "BM25 scores each document by: (1) &lt;strong>term frequency&lt;/strong> — how often the search term appears in the document, with diminishing returns for repetition; (2) &lt;strong>inverse document frequency&lt;/strong> — rare terms score higher than common terms; (3) &lt;strong>field length normalization&lt;/strong> — a match in a short title scores higher than the same match in a 10,000-word body. BM25 replaced TF-IDF as the default in ES 5.0 because it handles long documents better."
+  "<strong>BM25</strong> (Best Match 25) scores each document by: (1) <strong>term frequency</strong> — how often the search term appears in the document, with diminishing returns for repetition (unlike <strong>TF-IDF</strong> where score grows linearly with frequency); (2) <strong>inverse document frequency</strong> — rare terms score higher than common terms; (3) <strong>field length normalization</strong> — a match in a short title scores higher than the same match in a 10,000-word body. BM25 replaced TF-IDF as the default in ES 5.0 because it handles long documents better."
   "When should you use function_score to override default scoring?"
   "When business signals matter more than text relevance. Example: product search should boost by &lt;span class='hl'>sales_rank&lt;/span> and &lt;span class='hl'>recency&lt;/span>, not just keyword match. Use &lt;code>function_score&lt;/code> with &lt;code>field_value_factor&lt;/code> on popularity or &lt;code>decay&lt;/code> functions on date. Without this, a 5-year-old product with perfect keyword match outranks today's bestseller."
   "What is the difference between match and match_phrase?"
@@ -167,7 +167,7 @@ The result: full-text search across millions of documents in <span class='hl'>< 
 {{say `Elasticsearch is a <strong>derived index</strong> — never the primary store. The standard pattern:
 <ul>
   <li>Primary database (Postgres/<a class='dqa-link' href='/fund/storage/dynamodb'>DynamoDB</a>) → single source of truth</li>
-  <li>Change Data Capture (CDC) stream → Kafka/Kinesis</li>
+  <li><strong>CDC</strong> (Change Data Capture — reads the database's write-ahead log to stream every insert/update/delete as an event, without requiring application code changes) stream → Kafka/Kinesis</li>
   <li>Sync worker → consumes events → indexes into ES</li>
   <li>Result: <span class='hl'>~1 second</span> indexing lag (near-real-time, not real-time)</li>
 </ul>`}}
@@ -180,7 +180,7 @@ The result: full-text search across millions of documents in <span class='hl'>< 
   (whyNot "writing directly to Elasticsearch without a primary DB" "ES does not guarantee durability by default. A node crash can lose up to translog flush_interval (default: 5 seconds) of writes. And ES has no transactions — you cannot roll back a partial batch index. Primary DB + async sync is the correct architecture.")
 }}
 
-{{hint "why CDC over dual writes" "Dual writes (write to DB + write to ES in application code) fail when one write succeeds and the other doesn't — no distributed transaction between Postgres and ES. CDC captures the DB's write-ahead log, so every committed change eventually reaches ES. At &lt;span class='hl'>10K writes/sec&lt;/span>, even a 0.1% dual-write failure rate means &lt;span class='hl'>~860 inconsistencies/day&lt;/span>."}}
+{{hint "why CDC over dual writes" "Dual writes (write to DB + write to ES in application code) fail when one write succeeds and the other doesn't — no distributed transaction between Postgres and ES. <strong>CDC</strong> captures the DB's <strong>WAL</strong> (Write-Ahead Log — the internal log that the database writes to before applying changes, used for crash recovery and replication), so every committed DB change eventually reaches ES. At &lt;span class='hl'>10K writes/sec&lt;/span>, even a 0.1% dual-write failure rate means &lt;span class='hl'>~860 inconsistencies/day&lt;/span>."}}
 
 {{hint "refresh_interval tuning for bulk indexing" "During bulk reindex operations, set &lt;code>refresh_interval: -1&lt;/code> to disable automatic refresh. This avoids creating a new Lucene segment every second — reducing I/O by &lt;span class='hl'>~40%&lt;/span> and speeding up bulk indexing by &lt;span class='hl'>2-3x&lt;/span>. Re-enable to &lt;code>1s&lt;/code> after the bulk operation completes."}}
 

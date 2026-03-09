@@ -7,7 +7,7 @@
   <li>Designing a <strong>payment processing system</strong> — think Stripe or Square: accept payments, issue refunds, track balances</li>
   <li><strong>Core flows:</strong> card charge, refund, balance inquiry — out of scope: subscription billing, invoicing, ACH/wire</li>
   <li>The hardest invariant: <span class="hl-red">never charge a customer twice</span> — idempotency is non-negotiable</li>
-  <li>Scale target: <span class="hl">~13 TPS average</span>, <span class="hl">peak 1,000 TPS</span> (Black Friday spikes)</li>
+  <li>Scale target: <span class="hl">~13 <abbr title="Transactions Per Second">TPS</abbr> average</span>, <span class="hl">peak 1,000 TPS</span> (Black Friday spikes)</li>
   <li>Availability: <span class="hl">99.999%</span> — that's <span class="hl">5.26 minutes of downtime per year</span></li>
 </ul>`}}
 
@@ -18,7 +18,7 @@
   (whatIf "we skip idempotency keys and rely on client retries being rare" "Network timeouts are common — mobile clients retry on every TCP timeout. At 1000 TPS with 1% timeout rate, you get 10 duplicate attempts per second. Without idempotency keys, some become double charges.")
 }}
 
-{{hint "why 99.999% and not 99.9%?" "Stripe's actual SLA is 99.9999%. Even at 99.999% (5 minutes/year), a 5-minute outage during Black Friday can cost millions. Multi-region active-active is the only way to achieve this — no planned maintenance windows."}}
+{{hint "why 99.999% and not 99.9%?" "Stripe's actual <strong>SLA</strong> (Service Level Agreement — a contract defining uptime and performance guarantees) is 99.9999%. Even at 99.999% (5 minutes/year), a 5-minute outage during Black Friday can cost millions. Multi-region active-active is the only way to achieve this — no planned maintenance windows."}}
 
 {{hint "Stripe's actual scale" "Stripe processes <strong>400M+ transactions/year</strong>, which sounds large but averages only ~<span class='hl'>13 TPS</span>. The challenge is the peak: Black Friday spikes to <span class='hl'>1,000 TPS</span> — 77× the average. Design for the peak, not the mean."}}
 
@@ -305,7 +305,7 @@
 {{think "Authorization and capture are separate for a reason — this is not a premature optimization."
   (whyNot "single authorize+capture call" "Hotels, car rentals, and subscription services need to authorize for an estimated amount, then capture the exact amount later. Separating them is a fundamental requirement of card networks, not a design choice.")
   (whatIf "authorization expires before capture" "Visa auth holds expire in 7 days, Mastercard in 30. Build a job that scans for authorized-but-not-captured payments older than 6 days and sends an alert. The merchant must recapture or the auth is void.")
-  (how "settlement via Kafka" "After capture, publish to Kafka settlement topic. A consumer batches these into a single ACH/wire transfer to the acquiring bank at end-of-day. One wire transfer covers thousands of individual captures — far cheaper than per-transaction wire fees.")
+  (how "settlement via Kafka" "After capture, publish to Kafka settlement topic. A consumer batches these into a single <strong>ACH</strong> (Automated Clearing House — the US banking network used for electronic fund transfers)/wire transfer to the acquiring bank at end-of-day. One wire transfer covers thousands of individual captures — far cheaper than per-transaction wire fees.")
 }}
 
 {{hint "why batch settlement?" "Card networks charge per-wire fees. Batching 10,000 captures into one settlement message costs ~$0.25 total vs $2,500 at $0.25/wire. Settlement is always async — merchants accept T+1 as standard in the industry."}}
@@ -354,8 +354,8 @@
 
 {{say `Idempotency is the most important property of a payment system. Here's how it works end-to-end:
 <ul>
-  <li>Client sends <code>Idempotency-Key: {client_id}:{uuid}</code> on every write request</li>
-  <li>API Gateway checks <span class="hl-blue">Redis SET NX</span> with <span class="hl">24h TTL</span> — if key exists, return cached response immediately</li>
+  <li>Client sends <code>Idempotency-Key: {client_id}:{uuid}</code> on every write request (<strong>UUID</strong> = Universally Unique Identifier — a randomly generated 128-bit ID with negligible collision probability)</li>
+  <li>API Gateway checks <span class="hl-blue">Redis SET NX</span> with <span class="hl">24h <abbr title="Time-To-Live — duration before the key expires and is automatically removed">TTL</abbr></span> — if key exists, return cached response immediately</li>
   <li>If key is new, process normally and store the response in Redis before returning to client</li>
   <li>Second attempt with same key: Redis hit → return cached 201, <span class="hl-red">zero ledger writes</span></li>
   <li>The 24h window covers all realistic retry scenarios — mobile clients don't retry after 24h</li>
@@ -386,7 +386,7 @@
 
 {{say `I'll use the <strong>Saga pattern</strong> instead of two-phase commit. Here's why and how:
 <ul>
-  <li><span class="hl-red">Why not 2PC:</span> bank APIs (Visa, Mastercard) don't support a prepare/commit protocol — they're external services you don't control</li>
+  <li><span class="hl-red">Why not <strong>2PC</strong> (Two-Phase Commit — a protocol where all participants must agree to either commit or rollback a transaction together):</span> bank APIs (Visa, Mastercard) don't support a prepare/commit protocol — they're external services you don't control</li>
   <li><span class="hl-blue">Saga</span>: a sequence of local transactions, each publishing an event. On failure, compensating transactions undo prior steps in reverse order</li>
   <li>Steps: <strong>Authorize → Reserve Funds → Capture → Settle</strong></li>
   <li>Failure at Capture? Compensate: <strong>Release Reserve → Void Authorization</strong></li>
@@ -444,7 +444,7 @@
 
 {{phase 9 "Security & PCI DSS" "5 min"}}
 
-{{say `PCI DSS (Payment Card Industry Data Security Standard) defines what we can and cannot store:
+{{say `<strong>PCI-DSS</strong> (Payment Card Industry Data Security Standard — the security standard that governs how payment card data must be handled, stored, and transmitted) defines what we can and cannot store:
 <ul>
   <li><span class="hl-red">NEVER store CVV/CVV2</span> — illegal under PCI DSS, even encrypted. Delete from memory after authorization</li>
   <li><span class="hl-red">Never store raw card numbers</span> after initial tokenization</li>
@@ -504,10 +504,10 @@
 
 {{phase 11 "Monitoring & SLAs" "5 min"}}
 
-{{say `Three SLOs that define success for a payment system:
+{{say `Three <strong>SLOs</strong> (Service Level Objectives — specific, measurable targets that define acceptable system performance) that define success for a payment system:
 <ul>
   <li><strong>Payment success rate</strong>: &gt;<span class="hl">99.5%</span> of initiated payments reach <code>succeeded</code> or <code>failed</code> (not stuck in pending)</li>
-  <li><strong>P99 latency</strong>: &lt;<span class="hl">2 seconds</span> from POST /payments to final status available</li>
+  <li><strong>P99 latency</strong> (99th percentile — the slowest 1% of requests; this is the latency your worst-performing users experience): &lt;<span class="hl">2 seconds</span> from POST /payments to final status available</li>
   <li><strong>Availability</strong>: <span class="hl">99.999%</span> — API responds to requests (even if returning cached failure)</li>
   <li>Alert on: fraud decline rate spike &gt;2% (card testing attack), P99 &gt;1.5s, pending payments older than 60s</li>
 </ul>`}}
@@ -526,7 +526,7 @@
 
 {{triggerQs "Phase 11 interview triggers"
   "How do you set SLOs for a payment system with external dependencies?"
-  "External bank APIs have their own SLAs (~99.9%). Our end-to-end SLO must account for this dependency. Use error budget allocation: we own 99.99% for our internal services, the remaining 0.01% budget is consumed by bank API failures. We fail fast on bank timeouts so our SLO window isn't consumed by slow failures."
+  "External bank APIs have their own SLAs (~99.9%). Our end-to-end SLO (Service Level Objective — a specific measurable target within an SLA, e.g. 'P99 latency under 2 seconds') must account for this dependency. Use error budget allocation: we own 99.99% for our internal services, the remaining 0.01% budget is consumed by bank API failures. We fail fast on bank timeouts so our SLO window isn't consumed by slow failures."
   "What is your runbook for a P99 latency spike?"
   "Check in order: (1) Fraud service latency — ML model inference occasionally spikes; (2) PostgreSQL query time — check for lock contention on hot accounts; (3) Bank API P99 — if external, fail fast and return 503; (4) Redis idempotency store — if slow, bypass and fall through to DB check."
 }}

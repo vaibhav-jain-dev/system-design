@@ -16,7 +16,7 @@
 
 {{think "The trie's superpower is that all words sharing a prefix share nodes. 'google', 'gmail', 'go' share the 'g'→'o' path. Navigating to the 'go' node instantly locates all ~500K English words starting with 'go' — no scanning needed."
   (whyNot "a sorted array of strings with binary search" "Binary search finds the insertion point for a prefix in O(log N). Then you scan forward to collect all matches — O(K) where K is the number of results. For 100M prefixes, log N = 27 comparisons, each comparing a full string O(L). Trie walk to prefix node is O(L) regardless of N.")
-  (how "tries enable <a class=\"dqa-link\" href=\"/problem/search-autocomplete\">autocomplete</a> in O(L + K)" "L = length of the query prefix, K = number of matching completions to return. The O(L) walk reaches the prefix node. Then a bounded DFS collects the top-K ranked completions. With 100M words, a hash map scan is O(100M), a trie walk is still O(7) for 'search-' prefix.")
+  (how "tries enable <a class=\"dqa-link\" href=\"/problem/search-autocomplete\">autocomplete</a> in O(L + K)" "L = length of the query prefix, K = number of matching completions to return. The O(L) walk reaches the prefix node. Then a bounded DFS (Depth-First Search — a graph traversal that explores one branch fully before backtracking) collects the top-K ranked completions. With 100M words, a hash map scan is O(100M), a trie walk is still O(7) for 'search-' prefix.")
 }}
 
 {{hint "why dict not array[26] for children?" "An array of 26 pointers costs &lt;span class='hl'>208 bytes per node&lt;/span> regardless of fill rate. Typical English trie nodes have only 2-4 children on average — meaning 85% of those slots are null. A dict (hash map) uses ~64 bytes for 3 entries. At &lt;span class='hl'>10M nodes&lt;/span>, that's 2 GB vs 640 MB."}}
@@ -134,8 +134,8 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
   (row "HAT-Trie" "Near-radix" "Complex" "Cache-efficient hash + trie hybrid")
 )}}
 
-{{think "In practice, at search-autocomplete scale, the trie is kept in Redis sorted sets (for hot prefixes) or in memory as a serialized radix tree. The on-disk representation uses a Finite State Transducer (FST) — a compiled, minimal DFA that encodes all completions in a compressed binary format. Lucene and <a class='dqa-link' href='/fund/storage/elasticsearch'>Elasticsearch</a>'s completion suggester use FSTs."
-  (how "FST differs from a trie" "A trie is a DAG (directed acyclic graph) without sharing of suffixes. A FST shares both prefixes AND suffixes. For the words 'mop', 'mom', 'top', 'tom', a trie has 7 nodes. The FST merges the common 'op' and 'om' suffixes — only 5 states. The minimal FST is the most compact possible representation.")
+{{think "In practice, at search-autocomplete scale, the trie is kept in Redis sorted sets (for hot prefixes) or in memory as a serialized radix tree. The on-disk representation uses a <strong>FST (Finite State Transducer)</strong> — a compiled, minimal <strong>DFA (Deterministic Finite Automaton — a state machine where each input character transitions to exactly one next state)</strong> that encodes all completions in a compressed binary format. Lucene and <a class='dqa-link' href='/fund/storage/elasticsearch'>Elasticsearch</a>'s completion suggester use FSTs."
+  (how "FST differs from a trie" "A trie is a <strong>DAG (Directed Acyclic Graph — a graph with directed edges and no cycles)</strong> without sharing of suffixes. A FST shares both prefixes AND suffixes. For the words 'mop', 'mom', 'top', 'tom', a trie has 7 nodes. The FST merges the common 'op' and 'om' suffixes — only 5 states. The minimal FST is the most compact possible representation.")
   (whyNot "a standard trie at Elasticsearch scale" "<a class=\"dqa-link\" href=\"/fund/storage/elasticsearch\">Elasticsearch</a> indexes billions of documents. A standard trie for all unique terms would use ~200 bytes/node × billions of nodes — terabytes of RAM. An FST compresses the same vocabulary into a few GB because suffix sharing reduces node count by 10-50x. That's why Lucene's term dictionary is an FST, not a trie.")
 }}
 
@@ -149,7 +149,7 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
 }}
 
 {{goodToKnow
-  "Finite State Transducer (FST) shares both prefixes AND suffixes — most compact representation; used by Lucene/Elasticsearch"
+  "FST (Finite State Transducer) shares both prefixes AND suffixes — most compact representation; used by Lucene/Elasticsearch"
   "HAT-trie uses hash buckets at leaf level for cache-friendly memory layout — 30-50% less memory than radix trees"
 }}
 
@@ -187,7 +187,7 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
 
 {{think "Sharding by first character creates uneven load — 't' and 's' handle 15-20% of English queries each, while 'x' and 'z' handle &lt;1%."
   (whyNot "equal-size range sharding (aa-az on shard 0, ba-bz on shard 1...)" "This distributes data evenly but breaks prefix locality. A query for 'th' might span two shards if the boundary splits 'tg' and 'th'. Every prefix query could become a multi-shard fan-out, adding latency and complexity.")
-  (how "to handle hot shards like 't'" "Add read replicas for hot-letter shards. Since tries are rebuilt offline and shards are stateless between rebuilds, replication is trivial — copy the serialized trie to N replicas. Load balancer round-robins across replicas. For 't' at 50K QPS, 5 replicas each handle 10K QPS.")
+  (how "to handle hot shards like 't'" "Add read replicas for hot-letter shards. Since tries are rebuilt offline and shards are stateless between rebuilds, replication is trivial — copy the serialized trie to N replicas. Load balancer round-robins across replicas. For 't' at 50K QPS (Queries Per Second), 5 replicas each handle 10K QPS.")
 }}
 
 {{triggerQs "Distributed Trie Questions"
@@ -208,9 +208,9 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
 
 {{say `Standard tries only match exact prefixes. Fuzzy matching (typo tolerance) requires a modified traversal:
 <ul>
-  <li><strong>Levenshtein automaton</strong> — DFA that accepts all strings within edit distance K</li>
-  <li><strong>DFS with error budget</strong> — traverse trie, tracking remaining edit distance</li>
-  <li><strong>Practical limit</strong> — edit distance 1 is fast; distance 2 visits exponentially more nodes</li>
+  <li><strong>Levenshtein automaton</strong> — a DFA (Deterministic Finite Automaton) that accepts all strings within edit distance K; built once per query and intersected with the trie</li>
+  <li><strong>DFS with error budget</strong> — DFS (Depth-First Search) traversal of the trie, tracking how many edits have been used so far; prunes branches that exceed the budget</li>
+  <li><strong>Practical limit</strong> — edit distance 1 is fast (~0.5ms); distance 2 is 10-100x slower due to exponential branch expansion</li>
 </ul>`}}
 
 {{code "python" `def fuzzy_search(trie: Trie, query: str,
@@ -317,7 +317,7 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
   <li>Trie sharded by prefix first character: 26 shards (a-z)</li>
   <li>Hot prefix cache: top 5000 prefix→suggestions in <a class='dqa-link' href='/fund/storage/redis'>Redis</a> sorted set</li>
   <li>API path: Redis miss → trie shard → return top-5</li>
-  <li>CDN: cache top-1000 prefix results at edge (60s TTL)</li>
+  <li>CDN: cache top-1000 prefix results at edge (60s TTL — Time-To-Live, the duration before the cached response expires)</li>
 </ol>`}}
 
 {{think "The production autocomplete path has three latency tiers — CDN, Redis, trie shard. The design goal is to serve 99% of queries from the first two tiers and never hit the trie shard for popular prefixes."

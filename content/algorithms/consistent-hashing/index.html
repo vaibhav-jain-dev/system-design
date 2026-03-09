@@ -15,7 +15,7 @@
   (whatIf "you use modulo hashing and never change cluster size" "It works fine for static clusters. Some sharded databases use modulo internally for exactly this reason — shards are defined at design time and never change. The problem is that you lose the ability to scale horizontally.")
 }}
 
-{{hint "thundering herd" "When a cache misses for many keys simultaneously, all the corresponding requests hit the database at the same time. A 100-server cache cluster losing one node can redirect 1% of traffic to the DB — sounds small, but if the DB was handling 10K QPS before, it suddenly gets 10K extra QPS in milliseconds."}}
+{{hint "thundering herd" "When a cache misses for many keys simultaneously, all the corresponding requests hit the database at the same time. A 100-server cache cluster losing one node can redirect 1% of traffic to the DB — sounds small, but if the DB was handling 10K QPS (Queries Per Second) before, it suddenly gets 10K extra QPS in milliseconds."}}
 
 {{key "Consistent hashing is the go-to algorithm whenever you distribute data across a cluster that can grow or shrink. Used by <a class=\"dqa-link\" href=\"/fund/storage/dynamodb\">DynamoDB</a>, Cassandra, Memcached, <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis Cluster</a>, Akamai CDN, and Discord."}}
 
@@ -41,7 +41,7 @@
 {{say "Every node and every key is hashed to a position on the ring. A key belongs to the first node found clockwise from its position. When a node joins, it only takes keys from its clockwise neighbor. When a node leaves, its keys move to the next clockwise node."}}
 
 {{think "The ring abstraction is what enables minimal key movement. A key's 'owner' is defined as the nearest clockwise node. When a node is removed, its keys move to the next clockwise node — no other keys move. The ring is not a physical data structure; it is a conceptual circle from 0 to 2^32-1 with modular arithmetic at the seam."
-  (how "do you find the owning node efficiently?" "Sort all node hash positions in an array. Use binary search (bisect_right in Python) to find the first position >= key hash. If no position is found (key is past the last node), wrap around to index 0. O(log N) per lookup.")
+  (how "do you find the owning node efficiently?" "Sort all node hash positions in an array. Use binary search (bisect_right in Python — finds the first position strictly greater than the key hash) to find the first node position >= key hash. In other words: the sorted array acts like a phonebook; binary search locates 'the next position clockwise' in O(log N) comparisons — for 1,000 nodes, that's ~10 comparisons. If no position is found (key is past the last node), wrap around to index 0.")
   (whatIf "two nodes hash to the same ring position" "Collision probability on a 32-bit ring with 1000 nodes is negligible (birthday paradox: 1000^2 / 2^32 ≈ 0.023%). In practice, use the full 128 bits of MD5 or SHA1. In production code, detect collisions and add a tiebreaker (e.g., append counter to node name).")
 }}
 
@@ -172,7 +172,7 @@ ring.remove_node("cache-2")  # only its keys move clockwise
 }}
 
 {{goodToKnow
-  "sorted_keys.remove(h) in remove_node is O(N*vnodes) — production systems use a balanced BST or skip list for O(log N) removal"
+  "sorted_keys.remove(h) in remove_node is O(N*vnodes) — production systems use a balanced BST (Binary Search Tree) or skip list for O(log N) removal; a BST keeps nodes sorted and finds/removes any element in O(log N) comparisons"
   "get_replicas must skip vnodes belonging to the same physical node to collect R distinct replicas"
 }}
 

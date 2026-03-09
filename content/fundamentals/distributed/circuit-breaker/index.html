@@ -201,13 +201,13 @@ class CircuitBreaker:
         return 1.0 - (sum(self._window) / len(self._window))
 `}}
 
-{{hint "use a library in production" "This implementation omits metrics emission, configurable window types, and slow-call rate tracking. &lt;strong>Resilience4j&lt;/strong> (Java), &lt;strong>Polly&lt;/strong> (.NET), and &lt;strong>pybreaker&lt;/strong> (Python) handle all of this. Know the concepts; do not hand-roll it in production."}}
+{{hint "use a library in production" "This implementation omits metrics emission, configurable window types, and slow-call rate tracking. Production libraries handle all of this: &lt;strong>Resilience4j&lt;/strong> (Java), &lt;strong>Polly&lt;/strong> (.NET), and &lt;strong>pybreaker&lt;/strong> (Python). Know the concepts; do not hand-roll it in production."}}
 
 {{triggerQs "Implementation Questions"
   "How does the sliding window work internally?"
   "Two types: &lt;strong>count-based&lt;/strong> uses a fixed-size ring buffer (e.g., last 100 calls). &lt;strong>Time-based&lt;/strong> uses N partial aggregation buckets (e.g., 10 one-second buckets = 10-second window). Count-based responds faster to sudden spikes. Time-based is more representative when request rate varies. Resilience4j supports both."
   "What about thread safety — how does the circuit breaker handle concurrent calls?"
-  "State transitions use &lt;span class='hl-blue'>compare-and-swap (CAS)&lt;/span> operations — no locks on the hot path. The sliding window uses atomic counters for success/failure aggregation. Lock-free design is critical: at &lt;span class='hl'>10K req/s&lt;/span>, a lock on every call adds measurable contention. Resilience4j's count-based window uses a lock-free ring buffer."
+  "State transitions use &lt;span class='hl-blue'>CAS (compare-and-swap — an atomic CPU instruction that updates a value only if it still matches the expected value, preventing race conditions without locks)&lt;/span> operations — no locks on the hot path. The sliding window uses atomic counters for success/failure aggregation. Lock-free design is critical: at &lt;span class='hl'>10K RPS&lt;/span> (Requests Per Second), a lock on every call adds measurable contention. Resilience4j's count-based window uses a lock-free ring buffer."
 }}
 
 {{qa "How do you test a circuit breaker?" "Three approaches: (1) &lt;strong>Unit test the state machine&lt;/strong> — inject failures to verify CLOSED→OPEN→HALF_OPEN→CLOSED transitions. (2) &lt;strong>Chaos testing&lt;/strong> — use Chaos Monkey or Litmus to kill downstream pods in staging and verify the circuit opens within expected time. (3) &lt;strong>Load test with fault injection&lt;/strong> — Toxiproxy or Istio fault injection to simulate 50% failure rate and verify fallback activation." "Should I use the same circuit breaker library across all services?" "Yes. Standardize on one library per language — &lt;span class='hl-blue'>Resilience4j&lt;/span> for Java, &lt;span class='hl-blue'>Polly&lt;/span> for .NET. This ensures consistent metric naming, dashboarding, and configuration patterns. A centralized config service can push circuit breaker parameters to all services via feature flags."}}
@@ -221,7 +221,7 @@ class CircuitBreaker:
 </ul>
 `}}
 
-{{mustKnow "Use a library in production (Resilience4j, Polly, pybreaker) — hand-rolled implementations miss metrics, slow-call tracking, and thread safety" "Lock-free sliding window is critical at high QPS — a lock on every call adds measurable contention at 10K+ req/s" "HALF_OPEN must enforce single-request probing with atomic compare-and-swap"}}
+{{mustKnow "Use a library in production (Resilience4j, Polly, pybreaker) — hand-rolled implementations miss metrics, slow-call tracking, and thread safety" "Lock-free sliding window is critical at high RPS — a lock on every call adds measurable contention at 10K+ req/s" "HALF_OPEN must enforce single-request probing with atomic CAS (compare-and-swap)"}}
 
 {{phase 5 "Fallback Strategies" "4 min"}}
 
@@ -481,7 +481,7 @@ def on_state_change(dependency: str, old_state, new_state):
 
 {{triggerQs "Interview Deep Questions"
   "How does Netflix use circuit breakers in production?"
-  "Netflix pioneered the pattern with &lt;span class='hl-blue'>Hystrix&lt;/span> (now replaced by &lt;span class='hl-blue'>Resilience4j&lt;/span>). Every service-to-service call is wrapped in a circuit breaker. At &lt;span class='hl'>100+ microservices&lt;/span>, a single dependency failure can cascade through the entire call graph. Netflix uses &lt;strong>bulkhead isolation&lt;/strong> alongside circuit breakers — each dependency gets its own thread pool so a slow service cannot exhaust the caller's entire thread pool."
+  "Netflix pioneered the pattern with &lt;span class='hl-blue'>Hystrix&lt;/span> (now replaced by &lt;span class='hl-blue'>Resilience4j&lt;/span>). Every service-to-service call is wrapped in a circuit breaker. At &lt;span class='hl'>100+ microservices&lt;/span>, a single dependency failure can cascade through the entire call graph. Netflix uses &lt;strong>bulkhead isolation&lt;/strong> alongside circuit breakers — each dependency gets its own thread pool (like watertight bulkheads on a ship that contain flooding to one compartment) so a slow service cannot exhaust the caller's entire thread pool."
   "What is the difference between a circuit breaker and a bulkhead?"
   "A circuit breaker detects failures and stops calling. A bulkhead limits resource allocation per dependency — typically a dedicated thread pool or semaphore. Without a bulkhead, 10 dependencies sharing one thread pool means one slow dependency can exhaust all threads. The bulkhead ensures at most N threads are used for any single dependency. &lt;strong>Use both together&lt;/strong>: bulkhead limits blast radius, circuit breaker stops the bleeding."
   "How do service meshes implement circuit breaking?"

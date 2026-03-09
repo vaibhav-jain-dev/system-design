@@ -22,17 +22,17 @@
   (row "Datacenter-aware"    "IDs encode which DC generated them"                 "P1"        "Datacenter bits in layout")
 )}}
 
-{{hint "why 64-bit specifically?" "64-bit fits in a SQL BIGINT, JSON number (safe integer up to 2^53), and most programming language native integers. UUID is 128-bit — twice the storage, not sortable by time, breaks JSON number safety. Snowflake gives you time-ordering + uniqueness in the same space as a regular integer."}}
+{{hint "why 64-bit specifically?" "64-bit fits in a SQL BIGINT, JSON number (safe integer up to 2^53), and most programming language native integers. <strong>UUID</strong> (Universally Unique Identifier — a 128-bit randomly generated ID) is 128-bit — twice the storage, not sortable by time, breaks JSON number safety. Snowflake gives you time-ordering + uniqueness in the same space as a regular integer."}}
 
 {{think "The core insight: uniqueness across servers can be achieved without coordination by partitioning the ID space. Each server 'owns' a slice of the ID space defined by its worker ID — it can never generate an ID in another server's slice."
-  (whyNot "database auto-increment" "Single DB is a bottleneck — at 1M IDs/sec you'd need a DB that can handle 1M writes/sec just for ID generation. Also a SPOF: DB goes down, nothing can create records.")
+  (whyNot "database auto-increment" "Single DB is a bottleneck — at 1M IDs/sec you'd need a DB that can handle 1M writes/sec just for ID generation. Also a <strong>SPOF</strong> (Single Point of Failure — if this one component fails, the entire system stops working): DB goes down, nothing can create records.")
   (whatIf "two servers get the same worker ID" "IDs collide — same timestamp + same worker ID + same sequence = identical ID. This is the critical failure mode. Worker ID assignment must be exclusive. ZooKeeper ephemeral nodes solve this cleanly.")
   (how "time ordering works" "The 41 timestamp bits are the most significant bits in the 64-bit layout. So sorting 64-bit IDs numerically gives roughly time-ordered results. Two IDs created in the same millisecond are ordered by sequence number — still deterministic.")
 }}
 
 {{triggerQs "Requirements clarifications"
   "Why not use UUIDs?"
-  "UUID v4 is 128-bit (double storage), random (not time-ordered), and breaks JSON number safety (JavaScript MAX_SAFE_INTEGER is 2^53). Snowflake IDs fit in BIGINT, sort by time, and work natively in all systems. The only UUID advantage is no worker ID coordination — but that's solvable."
+  "UUID v4 (Universally Unique Identifier — a 128-bit randomly generated ID) is 128-bit (double storage), random (not time-ordered), and breaks JSON number safety (JavaScript MAX_SAFE_INTEGER is 2^53). Snowflake IDs fit in BIGINT, sort by time, and work natively in all systems. The only UUID advantage is no worker ID coordination — but that's solvable."
   "Does time-ordering need to be guaranteed or approximate?"
   "Approximate is fine. Snowflake guarantees IDs generated later have higher values within the same worker. Across workers and datacenters, IDs generated within the same millisecond may have any relative order. For strict ordering, you'd need a centralized sequencer — much higher latency."
 }}
@@ -205,7 +205,7 @@ class SnowflakeGenerator:
 {{hint "why a threading lock per generator instance?" "The sequence counter is shared state — two threads incrementing it concurrently could produce the same sequence value (race condition). The lock ensures only one thread increments the sequence at a time. But: one lock per generator instance, not one global lock. Each worker node runs its own generator, so locks don't contend across nodes."}}
 
 {{think "The sequence mask <code>&amp; 0xFFF</code> is critical — without it, the sequence could exceed 12 bits and corrupt the timestamp bits. 0xFFF = 0b111111111111 = 4095. When sequence overflows 4095, masking gives 0 and the next millisecond wait kicks in."
-  (whatIf "the service receives 5000 requests in a single millisecond" "Sequence overflows at 4096. The generator waits for the next millisecond via busy-wait (_wait_next_ms). This adds at most 1ms latency — acceptable. The caller sees slightly increased P99 latency during extreme bursts but no errors. You can also pre-allocate blocks to avoid this.")
+  (whatIf "the service receives 5000 requests in a single millisecond" "Sequence overflows at 4096. The generator waits for the next millisecond via busy-wait (_wait_next_ms). This adds at most 1ms latency — acceptable. The caller sees slightly increased <strong>P99</strong> (99th percentile) latency during extreme bursts but no errors. You can also pre-allocate blocks to avoid this.")
 }}
 
 {{triggerQs "Algorithm deep-dives"
@@ -290,7 +290,7 @@ class SnowflakeGenerator:
 
 {{say `Three failure modes to handle explicitly:
 <ul>
-  <li><strong>Clock goes backward:</strong> NTP correction or VM live migration can cause this — must detect and wait</li>
+  <li><strong>Clock goes backward:</strong> <strong>NTP</strong> (Network Time Protocol — the standard used to synchronize server clocks to an accurate time source) correction or VM live migration can cause this — must detect and wait</li>
   <li><strong>Sequence exhaustion:</strong> more than 4096 requests in 1ms — wait for next millisecond</li>
   <li><strong>Worker crash and restart:</strong> new worker claims fresh worker ID — safe, gap in sequence is normal</li>
 </ul>`}}

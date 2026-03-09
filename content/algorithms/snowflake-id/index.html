@@ -18,7 +18,7 @@
   (how "does the custom epoch work?" "CUSTOM_EPOCH is a Unix timestamp in milliseconds set to a fixed past date (e.g., 2024-01-01). Subtract it from the current timestamp before storing. This gives 41 bits of range starting from epoch, so IDs run out 69.7 years after epoch — not 69.7 years after 1970.")
 }}
 
-{{hint "timestamp is the most significant field" "The timestamp occupies bits 22-62 (the most significant non-sign bits). This means IDs from an earlier millisecond are always numerically smaller than IDs from a later millisecond. Time-ordering is automatic — no sorting needed."}}
+{{hint "timestamp is the most significant field" "The timestamp occupies bits 22-62 — the <strong>MSB (Most Significant Bits)</strong>, meaning the leftmost, highest-value portion of the integer. IDs from an earlier millisecond are always numerically smaller than IDs from a later millisecond. Time-ordering is automatic — no sorting needed. The 12 sequence bits are the <strong>LSB (Least Significant Bits)</strong>, the rightmost, lowest-value portion — which is why they only affect ordering within the same millisecond."}}
 
 {{key "Snowflake IDs are time-sorted by construction. The timestamp occupies the most significant bits, so IDs are monotonically increasing. This gives excellent B-tree insert performance: inserts always append to the rightmost leaf, avoiding random page splits."}}
 
@@ -130,13 +130,15 @@ assert ids == sorted(ids), "Snowflake IDs must be time-sorted"
 
 {{say "The biggest risk with Snowflake IDs is clock skew. If the system clock jumps backward due to NTP correction or VM migration, you could generate duplicate IDs. This is the most common interview follow-up."}}
 
+<p><strong>NTP (Network Time Protocol)</strong> synchronizes clocks across machines, but corrections can move the clock backward — typically by up to <span class="hl">100ms</span>, occasionally more. VM live migration can freeze a VM for 0.5–2 seconds; when it resumes, the clock may be stale.</p>
+
 {{table "Clock Skew Strategies" (rows
   (row "Strategy"                   "How It Works"                                          "Trade-off")
   (row "Refuse to generate"         "Throw error if clock &lt; last_timestamp"                 "Safe but causes brief downtime")
   (row "Wait for clock catch-up"    "Spin-wait until clock >= last_timestamp"                "Brief pause (&lt; 5ms), no duplicates")
   (row "Logical clock fallback"     "Use incrementing counter instead of wall clock"         "Breaks time-ordering guarantee")
   (row "Lease-based timestamps"     "Fetch time from central authority (like Google TrueTime)" "Adds latency, requires coordination")
-  (row "Hybrid Logical Clock"       "Combine wall clock + logical counter"                   "Best of both, more complex")
+  (row "Hybrid Logical Clock (HLC)" "Combine wall clock + logical counter — max(wall_clock, last_ts) + increment"   "Best of both worlds, more complex to implement")
 )}}
 
 {{think "The standard production approach is: wait if the clock moved backward by less than 5ms (happens during NTP adjustments), reject if it moved backward by more (indicates serious clock issue like VM migration). Twitter's original implementation logs a warning and waits. Discord rejects immediately to avoid blocking message delivery."
@@ -145,7 +147,7 @@ assert ids == sorted(ids), "Snowflake IDs must be time-sorted"
   (whatIf "you are running on AWS and a VM live-migrates" "EC2 live migration can pause the VM for 0.5-2 seconds during migration. The clock is frozen during this pause. When the VM resumes, time jumps forward (not backward). Snowflake handles forward jumps naturally — the timestamp increases, sequence resets. Backward jumps are the dangerous case.")
 }}
 
-{{avoid "Never trust that system clocks are monotonic. NTP can adjust clocks backward by seconds. VM pause and resume causes time jumps. AWS EC2 instances can skew by 10-20ms after live migration. Always guard against backward clock movement in the generate function."}}
+{{avoid "Never trust that system clocks are monotonic. NTP (Network Time Protocol) can adjust clocks backward by seconds. VM pause and resume causes time jumps. AWS EC2 instances can skew by 10-20ms after live migration. Always guard against backward clock movement in the generate function."}}
 
 {{triggerQs "Questions this phase triggers"
   "What happens if two machines have the same machine_id?"
@@ -154,7 +156,7 @@ assert ids == sorted(ids), "Snowflake IDs must be time-sorted"
   "Three patterns: 1) ZooKeeper/etcd: instance registers on startup, gets a unique ID from 0-1023, releases it on shutdown. 2) Last 10 bits of the private IP address — works if the VPC CIDR ensures uniqueness in the last 10 bits. 3) Kubernetes StatefulSet pod ordinal index. Pattern 1 is most reliable; pattern 2 is simplest but risks collision in large VPCs."
 }}
 
-{{caveat "NTP can adjust clocks backward by seconds. VM live migration can freeze time. Never trust that system clocks are monotonic. The clock-backward guard in generate() is not optional — it prevents duplicate IDs."}}
+{{caveat "NTP (Network Time Protocol) can adjust clocks backward by seconds. VM live migration can freeze time. Never trust that system clocks are monotonic. The clock-backward guard in generate() is not optional — it prevents duplicate IDs."}}
 
 {{mustKnow
   "Clock backward <5ms: spin-wait until clock catches up (safe, sub-ms pause)"
@@ -288,7 +290,7 @@ assert ids == sorted(ids), "Snowflake IDs must be time-sorted"
   (row "Event sourcing"    "Event IDs"             "Ordered event log across microservices"            "Auto-increment across services")
 )}}
 
-{{hint "ID generation as a single point of failure" "Snowflake generators run locally on each machine — there is no central ID service to fail. The only coordination is machine ID assignment at startup, which can use a lease from ZooKeeper/etcd with a TTL of 5-10 minutes. If the lease service is down, the machine keeps its existing lease until expiry. This makes ID generation available even during partial infrastructure outages."}}
+{{hint "ID generation as a single point of failure" "Snowflake generators run locally on each machine — there is no central ID service to fail. The only coordination is machine ID assignment at startup, which can use a lease from ZooKeeper/etcd with a TTL (Time-To-Live — the duration before the lease expires and must be renewed) of 5-10 minutes. If the lease service is down, the machine keeps its existing lease until expiry. This makes ID generation available even during partial infrastructure outages."}}
 
 {{triggerQs "Questions about ID generation in distributed systems"
   "How do you guarantee no duplicate IDs across multiple datacenters?"
