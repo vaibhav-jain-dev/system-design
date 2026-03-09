@@ -1,0 +1,510 @@
+{{stageNav "Requirements & Problem Scope" 1 "API Design" 2 "Data Model" 3 "File Upload & Chunking" 4 "High-Level Architecture" 5 "Deduplication & Storage Efficiency" 6 "Sync Protocol" 7 "Versioning & Conflict Resolution" 8 "Permissions & Sharing" 9 "Caching Strategy" 10 "Failure Modes" 11 "Interview Deep-Dive Q&A" 12}}
+
+{{phase 1 "Requirements & Problem Scope" "5 min"}}
+
+{{say `Let me clarify what we're building before designing:
+<ul>
+  <li>Google Drive / Dropbox: <strong>cloud file storage</strong> with upload, download, sync across devices</li>
+  <li>Scale: <span class="hl">50M users</span>, each storing avg <span class="hl">10 GB</span> = <span class="hl">500 PB total storage</span></li>
+  <li>Files up to <span class="hl">5 GB</span>, must handle large files without timeout</li>
+  <li>Sync: changes on one device appear on all others within <span class="hl">30 seconds</span></li>
+  <li>Key non-functional: durability first (no file loss), then availability, then performance</li>
+</ul>`}}
+
+{{diagram "fs-requirements"}}
+
+{{table "Functional vs Non-Functional Requirements" (rows
+  (row "Requirement"         "Target"                                      "Why It Matters")
+  (row "Upload files"        "Up to 5 GB per file, chunked"               "Large files need resumable upload")
+  (row "Download files"      "<500ms first byte for cached files"         "User experience")
+  (row "Sync across devices" "<30 seconds end-to-end"                     "Core value proposition")
+  (row "Share files/folders" "View, comment, edit permission levels"      "Collaboration")
+  (row "Versioning"          "Last 30 versions retained"                  "Accidental deletion recovery")
+  (row "Durability"          "99.9999999% (11 nines)"                     "Files must never be lost")
+  (row "Availability"        "99.99% uptime"                              "4.4 min downtime/month max")
+)}}
+
+{{think "The defining constraint is storage at petabyte scale. 500 PB of unique data is the ceiling — but with deduplication across users, actual stored bytes could be 50-100 PB (many users store the same files). The system is read-heavy: files are uploaded once, downloaded many times."
+  (whyNot "single database for file storage" "Files are binary blobs — DBs are for structured data. Storing 500 PB in a DB would be catastrophically expensive and unperformant. Object storage (S3) costs $0.023/GB/month vs $0.10/GB/month for SSD-backed DB storage — 4x cheaper, plus it's built for blob storage.")
+  (whatIf "a file is uploaded by 1000 different users" "Without dedup, you store 1000 copies. With content-addressable storage (SHA256 hash of content as key), you store 1 copy and maintain 1000 references. Dropbox saved 80% storage by deduplicating at the chunk level.")
+}}
+
+{{hint "why chunk files instead of uploading whole?" "A 5 GB file upload that fails at 99% must restart entirely without chunking. With 4 MB chunks: only the last chunk is retried. Also enables parallel upload of chunks across multiple connections — 10 parallel 4 MB chunks is faster than 1 sequential 5 GB stream. Dropbox uses 4 MB chunks. Google Drive uses 256 KB to 5 MB adaptive chunks."}}
+
+{{triggerQs "Requirements clarifications"
+  "What happens to a file if the user deletes their account?"
+  "Files the user owns go to a 30-day trash before permanent deletion. Files shared with others: the owner's deletion removes their copy but doesn't immediately delete files shared with others — other users retain their copies until those users delete them. GDPR compliance requires complete deletion within 30 days of account deletion request."
+  "Do we need real-time collaboration (like Google Docs)?"
+  "No — that's a separate problem (see collaborative editing). File storage is about uploading a complete file and syncing it. Concurrent edits to the same file create conflict copies, not merged versions."
+}}
+
+{{phase 2 "API Design" "5 min"}}
+
+{{say `Three categories of APIs: file operations, sync protocol, and sharing:
+<ul>
+  <li><strong>P0 — Core:</strong> upload (chunked), download, list directory, delete</li>
+  <li><strong>P1 — Sync:</strong> get changes since timestamp, subscribe to events</li>
+  <li><strong>P2 — Sharing:</strong> create share link, update permissions</li>
+</ul>`}}
+
+{{diagram "fs-upload-flow"}}
+
+<div class="api-doc">
+  <div class="api-view-tabs">
+    <button class="api-view-tab active" data-view="quick">Quick</button>
+    <button class="api-view-tab" data-view="detailed">Detailed</button>
+  </div>
+  <div class="api-view-pane active" data-view="quick">
+    <div class="api-quick">
+      <div class="api-quick-block">
+        <div class="api-quick-section"># P0 — Core File Operations</div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/api/v1/files/upload/start</span>
+          <span class="api-quick-comment"># Initiate upload session, get upload_id</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method PUT">PUT</span>
+          <span class="api-quick-path">/api/v1/files/upload/<span class="pp">{upload_id}</span>/chunk/<span class="pp">{chunk_num}</span></span>
+          <span class="api-quick-comment"># Upload individual chunk</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/api/v1/files/upload/<span class="pp">{upload_id}</span>/complete</span>
+          <span class="api-quick-comment"># Finalize upload, trigger processing</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/api/v1/files/<span class="pp">{file_id}</span></span>
+          <span class="api-quick-comment"># Download file (redirect to CDN presigned URL)</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/api/v1/folders/<span class="pp">{folder_id}</span>/contents</span>
+          <span class="api-quick-comment"># List folder contents</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method DELETE">DELETE</span>
+          <span class="api-quick-path">/api/v1/files/<span class="pp">{file_id}</span></span>
+          <span class="api-quick-comment"># Soft delete (moves to trash)</span>
+        </div>
+      </div>
+      <div class="api-quick-block">
+        <div class="api-quick-section"># P1 — Sync</div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/api/v1/sync/changes<span class="pq">?since={cursor}&limit=500</span></span>
+          <span class="api-quick-comment"># Paginated change feed for sync</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path">/api/v1/sync/subscribe</span>
+          <span class="api-quick-comment"># SSE stream for real-time change notifications</span>
+        </div>
+      </div>
+      <div class="api-quick-block">
+        <div class="api-quick-section"># P2 — Sharing</div>
+        <div class="api-quick-row">
+          <span class="api-method POST">POST</span>
+          <span class="api-quick-path">/api/v1/files/<span class="pp">{file_id}</span>/share</span>
+          <span class="api-quick-comment"># Create share link or invite user</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="api-view-pane" data-view="detailed">
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method POST">POST</span>
+          <span class="api-path">/api/v1/files/upload/start</span>
+          <span class="api-desc">Initiate a chunked upload session</span>
+        </div>
+        <span class="api-auth">🔑 Bearer token</span>
+      </div>
+      <div class="api-card-body">
+        <div>
+          <div class="api-req-label">Request Body</div>
+          <table class="api-req-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><span class="rf">filename</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">Original filename including extension</td></tr>
+              <tr><td><span class="rf">file_size</span><span class="rbadge req">required</span></td><td><span class="rt">integer</span></td><td class="rd">Total file size in bytes</td></tr>
+              <tr><td><span class="rf">content_hash</span><span class="rbadge req">required</span></td><td><span class="rt">string</span></td><td class="rd">SHA256 of entire file — enables server-side dedup check</td></tr>
+              <tr><td><span class="rf">parent_folder_id</span><span class="rbadge opt">optional</span></td><td><span class="rt">string</span></td><td class="rd">Destination folder; defaults to root</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 OK (dedup hit)</span>
+            <span class="api-tab s2" data-code="201">201 Created (new upload)</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><span class="jp">{</span>
+  <span class="jk">"file_id"</span><span class="jp">:</span> <span class="jv">"fil_abc123"</span><span class="jp">,</span>
+  <span class="jk">"dedup"</span><span class="jp">:</span> <span class="jb">true</span><span class="jp">,</span>
+  <span class="jc">// File already exists — no upload needed</span>
+  <span class="jk">"message"</span><span class="jp">:</span> <span class="jv">"File already stored, linked to your account"</span>
+<span class="jp">}</span></div>
+          <div class="api-response-body" data-code="201"><span class="jp">{</span>
+  <span class="jk">"upload_id"</span><span class="jp">:</span> <span class="jv">"upl_xyz789"</span><span class="jp">,</span>
+  <span class="jk">"chunk_size"</span><span class="jp">:</span> <span class="jn">4194304</span><span class="jp">,</span>
+  <span class="jc">// 4 MB chunks</span>
+  <span class="jk">"total_chunks"</span><span class="jp">:</span> <span class="jn">12</span><span class="jp">,</span>
+  <span class="jk">"upload_urls"</span><span class="jp">:</span> <span class="jp">[</span><span class="jv">"https://s3.../chunk-0?sig=..."</span><span class="jp">,</span> <span class="jv">"..."</span><span class="jp">]</span>
+<span class="jp">}</span></div>
+        </div>
+        <div class="api-card-note">Content hash enables instant dedup: if hash matches an existing file, return 200 with file_id — zero bytes uploaded.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{{hint "why presigned S3 URLs for chunk upload?" "The client uploads chunks directly to S3, not through your API servers. This bypasses your application tier entirely for the actual bytes — no proxy overhead, no double bandwidth cost, S3 handles parallel chunk acceptance. Your API only issues the presigned URLs (valid for 1 hour) and tracks which chunks have been received."}}
+
+{{phase 3 "Data Model" "8 min"}}
+
+{{say `Three separate concerns: metadata (in a relational DB), content (in object storage), and the mapping between them:
+<ul>
+  <li><strong>Metadata DB (Postgres):</strong> files, folders, versions, permissions — structured data, transactional</li>
+  <li><strong>Object storage (S3):</strong> actual file bytes, addressed by content hash — immutable blobs</li>
+  <li><strong>Chunk table:</strong> mapping from file → chunks (each chunk stored once by hash)</li>
+</ul>`}}
+
+{{diagram "fs-data-model"}}
+
+{{code "sql" `-- File metadata (one row per file, not per version)
+CREATE TABLE files (
+    id          BIGSERIAL PRIMARY KEY,
+    owner_id    BIGINT NOT NULL REFERENCES users(id),
+    folder_id   BIGINT REFERENCES folders(id),
+    name        VARCHAR(255) NOT NULL,
+    size_bytes  BIGINT NOT NULL,
+    content_hash CHAR(64) NOT NULL,  -- SHA256 hex
+    version     INT NOT NULL DEFAULT 1,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at  TIMESTAMPTZ              -- soft delete
+);
+
+-- Chunks: content-addressable storage
+-- Same chunk content → same hash → stored once
+CREATE TABLE chunks (
+    hash        CHAR(64) PRIMARY KEY,   -- SHA256 of chunk content
+    size_bytes  INT NOT NULL,
+    s3_key      VARCHAR(512) NOT NULL,  -- s3://bucket/hash
+    ref_count   INT NOT NULL DEFAULT 0  -- for garbage collection
+);
+
+-- File → chunks mapping (ordered)
+CREATE TABLE file_chunks (
+    file_id     BIGINT REFERENCES files(id),
+    chunk_index INT NOT NULL,
+    chunk_hash  CHAR(64) REFERENCES chunks(hash),
+    PRIMARY KEY (file_id, chunk_index)
+);
+
+-- Version history
+CREATE TABLE file_versions (
+    id          BIGSERIAL PRIMARY KEY,
+    file_id     BIGINT REFERENCES files(id),
+    version     INT NOT NULL,
+    content_hash CHAR(64) NOT NULL,
+    size_bytes  BIGINT NOT NULL,
+    modified_by BIGINT REFERENCES users(id),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Sharing permissions
+CREATE TABLE file_permissions (
+    file_id     BIGINT REFERENCES files(id),
+    grantee_id  BIGINT REFERENCES users(id),
+    permission  VARCHAR(10) NOT NULL,  -- 'view', 'comment', 'edit'
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (file_id, grantee_id)
+);`}}
+
+{{think "Content-addressable storage (CAS) is the key design pattern: the S3 key IS the hash. Two users uploading the same 100 MB file → same hash → same S3 object → stored once. The file metadata row just points to the hash. Ref_count enables safe GC: only delete the S3 object when ref_count drops to 0."
+  (whyNot "store file content directly in the files table" "Binary blobs in relational DB tables make backups huge, slow index scans, and can't leverage S3's durability/CDN/parallel download features. Postgres BYTEA column for a 5 GB file would cause table bloat and make the entire metadata table slow.")
+  (how "garbage collection works" "When a file is deleted: decrement ref_count on its chunks. Chunks with ref_count=0 are eligible for deletion. A daily GC job finds chunks with ref_count=0 AND last_modified >7 days ago (safety window) and deletes from S3. The 7-day window prevents deleting chunks that are being uploaded right now.")
+}}
+
+{{hint "why soft delete instead of hard delete?" "Soft delete (setting deleted_at) enables trash functionality — users can recover accidentally deleted files within 30 days. Hard delete from S3 also needs GC to decrement chunk ref_counts first. With soft delete, the GC job handles both: it finds files where deleted_at > 30 days, decrements chunk refs, then actually removes the file row."}}
+
+{{phase 4 "File Upload & Chunking" "10 min"}}
+
+{{say `The upload flow is a four-step process designed for reliability with large files:
+<ol>
+  <li><strong>Hash check:</strong> client computes SHA256 of entire file → server checks if file already exists (instant dedup)</li>
+  <li><strong>Start session:</strong> server allocates upload_id, returns presigned S3 URLs for each chunk</li>
+  <li><strong>Parallel chunk upload:</strong> client uploads all chunks in parallel directly to S3</li>
+  <li><strong>Complete:</strong> client tells server all chunks are done → server assembles metadata, triggers post-processing</li>
+</ol>`}}
+
+{{diagram "fs-chunking"}}
+
+{{code "python" `import hashlib
+import concurrent.futures
+import requests
+
+class FileUploader:
+    CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB
+
+    def upload_file(self, file_path: str, api_client) -> str:
+        # Step 1: Compute hashes
+        file_hash, chunks = self._compute_hashes(file_path)
+        file_size = sum(c['size'] for c in chunks)
+
+        # Step 2: Check dedup + get upload session
+        response = api_client.start_upload(
+            filename=file_path.name,
+            file_size=file_size,
+            content_hash=file_hash
+        )
+        if response.get('dedup'):
+            return response['file_id']  # Already exists!
+
+        upload_id = response['upload_id']
+        upload_urls = response['upload_urls']
+
+        # Step 3: Upload chunks in parallel (max 5 concurrent)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = []
+            for i, (chunk, url) in enumerate(zip(chunks, upload_urls)):
+                if not chunk['already_uploaded']:
+                    futures.append(executor.submit(
+                        self._upload_chunk, chunk['data'], url, i
+                    ))
+            concurrent.futures.wait(futures)
+
+        # Step 4: Complete upload
+        return api_client.complete_upload(upload_id)
+
+    def _compute_hashes(self, file_path):
+        chunks = []
+        file_hash = hashlib.sha256()
+        with open(file_path, 'rb') as f:
+            while data := f.read(self.CHUNK_SIZE):
+                chunk_hash = hashlib.sha256(data).hexdigest()
+                chunks.append({'data': data, 'hash': chunk_hash, 'size': len(data)})
+                file_hash.update(data)
+        return file_hash.hexdigest(), chunks
+
+    def _upload_chunk(self, data: bytes, url: str, idx: int):
+        # Direct to S3 presigned URL — no auth header needed
+        response = requests.put(url, data=data)
+        response.raise_for_status()`}}
+
+{{hint "delta sync for modified files" "When a 1 GB file changes by 1 KB, only upload the changed chunks. Client computes chunk hashes locally and sends them to the server. Server responds with which chunk hashes are missing from storage. Client uploads only missing chunks. Dropbox reported 80% bandwidth savings on file modifications with chunk-level delta sync."}}
+
+{{triggerQs "Upload design questions"
+  "What if the client crashes mid-upload?"
+  "The upload_id is durable in the server DB. On restart, client calls GET /upload/{upload_id}/status and the server returns which chunks were successfully received. Client resumes by uploading only missing chunks. Presigned URLs are regenerated if expired (1-hour TTL). This is the key advantage of chunked upload over streaming."
+  "How do you prevent duplicate uploads racing concurrently?"
+  "The start_upload endpoint checks content_hash against existing files atomically. If two users upload the same file simultaneously, one wins the INSERT and gets upload_id, the other gets 200 with existing file_id. For the same user uploading the same file twice concurrently, the upload_id is idempotent — both clients share the same upload session."
+}}
+
+{{phase 5 "High-Level Architecture" "10 min"}}
+
+{{say `Five main services, each with a clear responsibility:
+<ul>
+  <li><strong>API Service:</strong> handles metadata operations, auth, issues presigned URLs</li>
+  <li><strong>Upload Service:</strong> tracks chunked upload sessions, triggers assembly</li>
+  <li><strong>Storage Service:</strong> wraps S3/object storage, handles dedup, manages chunk refs</li>
+  <li><strong>Sync Service:</strong> maintains change feed, broadcasts updates via SSE/WebSocket</li>
+  <li><strong>CDN (CloudFront):</strong> serves downloads at edge — most downloads are reads of popular files</li>
+</ul>`}}
+
+{{diagram "fs-architecture"}}
+
+{{think "The architecture has two separate data flows: upload (client → API → S3) and download (client → CDN → S3). Downloads benefit from CDN caching — frequently accessed files are served from edge nodes at <50ms instead of 200ms from origin. Uploads bypass CDN entirely — presigned URLs go directly to S3."
+  (whyNot "one monolithic upload service handling all file bytes" "A single upload service becomes a bandwidth bottleneck at 50M users. At 1 GB/user upload/day = 50 TB/day bandwidth. Routing that through your service doubles the cost (you pay to receive AND forward to S3). Presigned URLs let clients upload directly to S3 — your service only handles metadata.")
+  (whatIf "S3 is unavailable" "Uploads fail immediately — you can't accept file bytes without somewhere to store them. Downloads can still serve from CDN cache for cached files. Uncached downloads fail. This is acceptable — S3 has 99.99% availability, and you can notify users of degraded upload status proactively.")
+}}
+
+{{hint "how CDN invalidation works on file update" "When a file is updated (new version uploaded), the old CDN-cached bytes are stale. Solution: use versioned CDN URLs — embed the content_hash in the download URL: /files/abc?v=sha256hash. When content changes, the hash changes, so the URL changes, and CDN never serves stale content. No explicit cache invalidation needed."}}
+
+{{triggerQs "Architecture decisions"
+  "How do multiple devices stay in sync?"
+  "The Sync Service maintains a change log (cursor-based, like Kafka offset). Each device subscribes via SSE and receives change events (file_id, version, change_type). On receiving a change event, the device downloads the delta (only changed chunks). Devices that were offline poll GET /sync/changes?since={last_cursor} on reconnect to catch up."
+  "How do you handle 50 million simultaneous connections to the Sync Service?"
+  "SSE connections are long-lived but low-bandwidth. Use a connection gateway that maps user_id → SSE connection. The gateway nodes handle millions of idle connections cheaply (they're just file descriptors). When a sync event fires, look up the user's connection in Redis and forward. This is the same pattern as WhatsApp's connection management."
+}}
+
+{{phase 6 "Deduplication & Storage Efficiency" "8 min"}}
+
+{{say `Two levels of deduplication — file-level and chunk-level:
+<ul>
+  <li><strong>File-level dedup:</strong> SHA256 of entire file — if hash exists, link to existing storage immediately (zero upload)</li>
+  <li><strong>Chunk-level dedup:</strong> SHA256 of each 4 MB chunk — if chunk exists, only upload missing chunks</li>
+  <li>Dropbox reports <span class="hl">60-70% storage savings</span> from chunk-level deduplication across their user base</li>
+</ul>`}}
+
+{{diagram "fs-deduplication"}}
+
+{{think "File-level dedup is great for exact duplicates (same file, different users). Chunk-level dedup handles partial duplicates — a 10 GB video with a 5-second intro change shares 99.9% of chunks with the original. The chunk boundary problem: if file changes at byte 1, fixed-size chunking invalidates every chunk. Content-defined chunking (Rabin fingerprinting) creates natural boundaries that survive insertions."
+  (whyNot "content-defined chunking for simplicity" "Rabin fingerprinting (content-defined chunking) gives 20-30% better dedup ratios but adds CPU cost during upload and complexity in the client. For a Google Drive clone, fixed-size chunks are simpler to implement and still give excellent dedup for common cases: duplicate files, unchanged file tails. Content-defined is worth implementing once the system is proven.")
+  (how "dedup with ref counting prevents data loss" "Chunk ref_count = number of file_chunks rows pointing to this chunk hash. When ref_count drops to 0, the chunk is eligible for deletion. The key invariant: never delete a chunk that any file is referencing. The GC job runs daily and deletes only chunks where ref_count=0 AND last_modified >7 days. The 7-day window handles the race where a chunk is being uploaded right now but ref_count hasn't been incremented yet.")
+}}
+
+{{hint "SHA256 collision risk" "SHA256 has 2^256 possible values. The birthday paradox collision probability for 10^18 chunks (1 exabyte at 4 MB chunks = 250 billion chunks) is negligible — effectively zero. No known SHA256 collision exists. Dropbox, Git, and most content-addressable systems rely on SHA256 as a unique identifier."}}
+
+{{phase 7 "Sync Protocol" "8 min"}}
+
+{{say `Sync is the hard part — multiple devices modifying the filesystem, offline edits, slow connections:
+<ul>
+  <li>Use a <strong>cursor-based change feed</strong> — every file operation appends to a change log</li>
+  <li>Each device tracks its own cursor; reconnecting resumes from where it left off</li>
+  <li>Changes: create, update, delete, rename, move — each gets a monotonically increasing sequence number</li>
+</ul>`}}
+
+{{diagram "fs-sync-protocol"}}
+
+{{code "sql" `-- Change log for sync (append-only)
+CREATE TABLE sync_events (
+    seq         BIGSERIAL PRIMARY KEY,   -- cursor position
+    user_id     BIGINT NOT NULL,
+    event_type  VARCHAR(20) NOT NULL,    -- 'created', 'updated', 'deleted', 'moved'
+    file_id     BIGINT NOT NULL,
+    folder_id   BIGINT,
+    metadata    JSONB,                   -- new name, new parent, etc.
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Index for efficient cursor-based queries
+CREATE INDEX idx_sync_events_user_seq ON sync_events (user_id, seq);
+-- Query: SELECT * FROM sync_events WHERE user_id=? AND seq > {cursor} ORDER BY seq LIMIT 500`}}
+
+{{hint "why sequence numbers instead of timestamps for cursors?" "Timestamps have gaps and can be ambiguous — two events can have the same timestamp. Sequence numbers are monotonically increasing, unique, and deterministic. A device that last synced at sequence 5000 asks for events since 5000 — guaranteed to get all events, in order, with no duplicates. This is exactly how Kafka offsets work."}}
+
+{{phase 8 "Versioning & Conflict Resolution" "5 min"}}
+
+{{say `File versioning is straightforward — conflict resolution is the hard case:
+<ul>
+  <li>Every file modification creates a new row in <code>file_versions</code> with the old content_hash</li>
+  <li>Last 30 versions retained; older versions GC'd after 30 days</li>
+  <li><strong>Conflict rule:</strong> if two devices modify the same file before syncing → conflict copy, not merge</li>
+</ul>`}}
+
+{{diagram "fs-versioning"}}
+
+{{think "Automatic merge of file conflicts is only possible for structured data (like Google Docs with OT). For arbitrary binary files (Word docs, Photoshop files), the only safe resolution is creating a conflict copy. Dropbox calls these 'conflicted copies' — you see 'document (Device A's conflicted copy 2024-01-15).docx'. The user resolves the conflict manually."
+  (whyNot "last-write-wins conflict resolution" "Last-write-wins silently discards one user's changes. If two people edit a critical document offline for an hour and sync, LWW loses one hour of work with no warning. Conflict copies are verbose but safe — no work is ever lost. Let the user merge manually.")
+  (how "detecting a conflict" "Each file has a vector clock or simply a version number. When device A syncs, it uploads with base_version=5. If the server's current version is also 5, apply the update (version becomes 6). If the server's version is already 6 (device B synced first), create a conflict copy instead of overwriting.")
+}}
+
+{{phase 9 "Permissions & Sharing" "5 min"}}
+
+{{diagram "fs-permissions"}}
+
+{{say `Three permission levels: view (download only), comment (annotate), edit (modify/delete):
+<ul>
+  <li><strong>Share link:</strong> a token in the URL grants access without requiring sign-in — for public sharing</li>
+  <li><strong>Direct invite:</strong> grants access to a specific user_id — appears in their Drive</li>
+  <li>Permissions are checked on every API call — no caching (permissions can be revoked in real-time)</li>
+</ul>`}}
+
+{{hint "permission inheritance for folders" "Sharing a folder with 'edit' permission grants edit on all current and future files inside it. Implementation: when checking file permission, walk up the folder tree until you find an explicit permission. This is a recursive parent lookup — optimize by caching the permission chain in Redis with a short TTL (5 min) to handle revocations quickly."}}
+
+{{phase 10 "Caching Strategy" "5 min"}}
+
+{{diagram "fs-caching"}}
+
+{{say `Three layers of caching, each serving a different purpose:
+<ul>
+  <li><strong>CDN (CloudFront):</strong> caches file bytes at edge — serves downloads at <50ms for popular files</li>
+  <li><strong>Redis:</strong> caches file metadata, permission lookups, folder listings — avoids DB round-trips</li>
+  <li><strong>Client-side:</strong> local disk cache of recently opened files — works offline</li>
+</ul>`}}
+
+{{table "Caching Layer Summary" (rows
+  (row "Layer"      "What's Cached"         "TTL"     "Eviction Strategy")
+  (row "CDN"        "File bytes"             "24h"     "Content hash in URL (never stale)")
+  (row "Redis"      "File metadata"          "1 min"   "Invalidate on update")
+  (row "Redis"      "Permission checks"      "5 min"   "Invalidate on permission change")
+  (row "Redis"      "Folder listings"        "30 sec"  "Invalidate on folder change")
+  (row "Client disk" "Recently opened files" "7 days"  "LRU by access time")
+)}}
+
+{{hint "why 24h CDN TTL is safe" "File content is immutable — we use content hash in the URL. /files/abc?v=sha256hash never changes content for that URL. If the file is updated, the new version gets a new hash → new URL → CDN fetches fresh. The old URL might still be in cache but nobody requests it anymore. This eliminates all CDN invalidation calls."}}
+
+{{phase 11 "Failure Modes" "5 min"}}
+
+{{diagram "fs-failure-handling"}}
+
+{{table "Failure Scenarios" (rows
+  (row "Failure"                   "Impact"                    "Mitigation")
+  (row "API service down"          "No metadata ops"           "Auto-scaling, health checks, multi-AZ")
+  (row "S3 unavailable"           "Uploads/downloads fail"    "Retry with backoff; CDN serves cached downloads")
+  (row "Sync Service down"        "No real-time notifications" "Devices poll fallback endpoint every 30s")
+  (row "Metadata DB down"         "Full service outage"       "RDS Multi-AZ with automatic failover <1 min")
+  (row "Chunk upload partial fail" "Upload session incomplete"  "Resumable upload — retry missing chunks only")
+  (row "Corrupted chunk"          "File integrity failure"     "SHA256 verify on download; re-fetch from S3 if mismatch")
+)}}
+
+{{key "Distributed file storage separates concerns: metadata in Postgres, bytes in S3 (content-addressed by SHA256), sync via cursor-based change feed. Chunked upload enables 5 GB files with resumability; deduplication at both file and chunk level reduces storage by 60-70%."}}
+
+{{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
+
+{{deepQA "Critical Interview Questions" `
+<div class="dqa-item">
+  <div class="dqa-q">How does deduplication actually save money at scale?</div>
+  <div class="dqa-a">At 50M users × 10 GB average = 500 PB logical storage. With 60% dedup efficiency, actual stored bytes = <span class="dqa-key">200 PB</span>. S3 Standard costs $0.023/GB/month → 200 PB = $4.6M/month vs $11.5M without dedup. Chunk-level dedup saves more than file-level: large video files with minor edits share ~95% of chunks.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">How do you handle dedup for encrypted files?</div>
+    <div class="dqa-sub-a">Server-side dedup requires the server to see plaintext content hashes. End-to-end encrypted files (where only the client holds the key) can't be deduped at the chunk level — different clients use different encryption keys, so identical plaintext chunks have different ciphertext and different hashes. Convergent encryption solves this: derive the encryption key from the content hash. Same plaintext → same key → same ciphertext → same chunk hash → dedup works. Dropbox uses this for their "block" storage.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">What's the security risk of convergent encryption?</div>
+      <div class="dqa-deep-a">Confirmation-of-a-file attack: an attacker who knows the hash of a file (e.g., a copyrighted movie) can check if any user stores it, by sending an upload request with that hash — the server returns a dedup hit without the attacker ever possessing the file. Mitigation: require the client to prove they actually have the file content (provide a random challenge, client responds with HMAC(challenge, content)), not just the hash. This prevents hash-only confirmation attacks.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How does sync work when a device has been offline for 2 weeks?</div>
+  <div class="dqa-a">The device has a stored cursor (last sync sequence number). On reconnect: GET /sync/changes?since={cursor} → server returns all changes since that cursor, paginated at 500 events per page. If the change log retains <span class="dqa-key">30 days of history</span>, any device offline &lt; 30 days can catch up from its cursor. Beyond 30 days, the device must do a full re-sync (re-download folder metadata to rebuild its local state).</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What if the change log has 100,000 events to replay?</div>
+    <div class="dqa-sub-a">Paginated replay at 500 events/page = 200 pages. Each page includes only metadata (file_id, event_type, version) — not file bytes. The device only downloads file bytes for files it actually needs (not all changes). Background sync downloads changed files lazily. The metadata catch-up is fast; the content download is selective and prioritized by recency.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you handle conflict detection for offline edits?</div>
+      <div class="dqa-deep-a">Each device tracks the server version of each file at last sync time. When uploading an offline edit, include base_version in the request. Server checks: if current version == base_version, apply update (no concurrent edit). If current version > base_version (another device edited while offline), create conflict copy. Version vector clocks provide more nuanced conflict detection for collaborative environments.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How do you store 500 PB durably without losing files?</div>
+  <div class="dqa-a">S3 Standard provides <span class="dqa-key">11 nines (99.999999999%) durability</span> by replicating every object across ≥3 AZs within a region. Additionally: enable S3 Versioning (bucket-level), use S3 Replication to copy to a second region for disaster recovery, enable MFA Delete to prevent accidental bucket deletion. For extra safety: verify chunk SHA256 on download and re-upload from backup if mismatch.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">How do you test that durability guarantees are met?</div>
+    <div class="dqa-sub-a">Chaos testing: randomly delete S3 objects and verify automatic recovery. Restore drills: quarterly full-restore test from backup to a clean account. Integrity checks: daily sampling of 0.1% of chunks to verify SHA256 matches metadata. S3's own durability is measured through their redundancy and annual reports — 11 nines means &lt;1 object lost per billion stored per million years.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">What's the RTO and RPO for a complete region failure?</div>
+      <div class="dqa-deep-a">With cross-region replication enabled: RPO = replication lag (typically &lt; 15 seconds). RTO = time to failover DNS to secondary region + warm up caches (15-30 minutes). Without active-active setup, the secondary is passive (read-only) until promoted. For Dropbox-scale: active-active across two regions with Route 53 latency-based routing provides sub-minute RTO with zero data loss.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How do you handle very large files (50 GB video files)?</div>
+  <div class="dqa-a">Same chunked upload, but increase chunk size to 32 MB for large files to reduce the number of API calls (50 GB / 32 MB = 1,563 chunks instead of 12,800 at 4 MB). Use S3 Multipart Upload: accepts parts of 5 MB to 5 GB each, max 10,000 parts → supports up to 50 TB per file. Parallel upload with 10 concurrent chunk uploads at 100 Mbps = <span class="dqa-key">~40 seconds for 5 GB</span>.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What about mobile clients with unreliable connections?</div>
+    <div class="dqa-sub-a">Small chunk size (1 MB instead of 4 MB) reduces retry cost on connection drop. Exponential backoff on failed chunks. Upload only on WiFi by default. Progress persistence: save uploaded chunk list to local DB so a phone reboot doesn't restart from zero. Upload session TTL on the server: 7 days instead of 1 hour for mobile clients (since mobile uploads are slower).</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you stream very large files for preview without downloading entirely?</div>
+      <div class="dqa-deep-a">S3 supports HTTP Range requests: GET /file with Range: bytes=0-1048576 returns just the first 1 MB. For video streaming, the client requests only the chunks needed for the current playback position. Store a chunk manifest (chunk_index → byte_range mapping) in metadata. The player fetches the manifest, then requests only needed byte ranges via CloudFront. This enables seeking without full download — same technique used by video streaming services.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How do you prevent the sync service from becoming a bottleneck at 50M users?</div>
+  <div class="dqa-a">SSE connections are stateless from the server perspective — each connection is just a long-lived HTTP response. Scale horizontally: each sync server node handles <span class="dqa-key">50,000–100,000 concurrent connections</span> (Go coroutines or Node.js event loop). With 1 billion active connections (50M users × ~20 devices), you need 10,000–20,000 sync nodes. User → sync node mapping stored in Redis; when an event fires for user_id, look up their node and forward.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What happens when a sync node crashes?</div>
+    <div class="dqa-sub-a">All SSE connections on that node are dropped. Clients reconnect to any healthy node (load balancer picks one). On reconnect, clients poll /sync/changes?since={cursor} to catch up on missed events. The new node updates Redis: user_id → new_node_id. No data loss — all events are in the change log DB. This is why the polling fallback is important: even if SSE fails, clients catch up.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you efficiently fan out a shared folder change to 1000 users?</div>
+      <div class="dqa-deep-a">When a shared folder is modified, look up all users with access (from file_permissions table). Publish one event per user_id to a Redis pub/sub channel (or Kafka partition keyed by user_id). Each sync node subscribes to the channels for users connected to it. The fan-out is O(users_with_access) which is bounded by your maximum share size. For public folders shared with millions, pre-compute the change and store it — subscribers pull rather than push at massive scale.</div>
+    </div>
+  </div>
+</div>
+`}}
