@@ -195,6 +195,15 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
   "Two options: (1) Hourly batch rebuild picks up trending terms in the next cycle — up to 1h lag. (2) Hot prefix override — maintain a separate real-time Redis sorted set for the top 100 trending queries; merge with trie results at query time. Most systems accept 15-60 min lag for trending updates."
 }}
 
+{{caveat "Sharding by first character creates uneven load — 't' and 's' handle 15-20% of English queries each while 'x' and 'z' handle <1%. Add read replicas for hot-letter shards; monitor per-shard QPS and auto-scale."}}
+
+{{mustKnow
+  "Shard by prefix first character — keeps all completions for a prefix co-located on 1 shard"
+  "Hot prefix cache in Redis sorted sets — serves 99% of queries without hitting trie shards"
+  "Rebuild trie offline from query logs (hourly) — never update in real-time"
+  "Atomic trie swap: build standby trie, swap pointer, garbage-collect old trie — zero downtime"
+}}
+
 {{phase 5 "Fuzzy Matching in Tries" "4 min"}}
 
 {{say `Standard tries only match exact prefixes. Fuzzy matching (typo tolerance) requires a modified traversal:
@@ -252,6 +261,14 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
   "Google doesn't run fuzzy trie search per query. They pre-compute a spelling correction map offline: for each known query in the log, generate all edit-distance-1 variants and map them to the canonical spelling. At query time, it's a simple hash lookup — O(1). The trie-based fuzzy search is used during the offline map construction, not at serving time."
   "Can you do fuzzy prefix matching, not just fuzzy exact matching?"
   "Yes — modify the termination condition. Instead of checking &lt;code>curr_row[n] &lt;= max_edits&lt;/code> (which requires consuming the entire query), check &lt;code>min(curr_row) &lt;= max_edits&lt;/code> at any node with is_end=True. This finds words that are within edit distance K of any prefix of the query. Useful for 'did you mean?' where the user is still typing."
+}}
+
+{{caveat "Edit distance 2 is 10-100x slower than edit distance 1 due to exponential branch expansion. At production scale, pre-compute a spelling correction map offline rather than running fuzzy trie search per query."}}
+
+{{mustKnow
+  "DFS with edit distance budget + pruning: prune branches where min(current_row) > max_edits"
+  "Edit distance 1 covers ~80% of real typos — the standard production setting"
+  "Production: pre-compute spelling correction map offline (hash lookup = O(1) at query time)"
 }}
 
 {{phase 6 "Complexity Summary" "3 min"}}
