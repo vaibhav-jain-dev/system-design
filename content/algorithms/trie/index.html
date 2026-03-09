@@ -134,7 +134,7 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
   (row "HAT-Trie" "Near-radix" "Complex" "Cache-efficient hash + trie hybrid")
 )}}
 
-{{think "In practice, at search-autocomplete scale, the trie is kept in Redis sorted sets (for hot prefixes) or in memory as a serialized radix tree. The on-disk representation uses a Finite State Transducer (FST) — a compiled, minimal DFA that encodes all completions in a compressed binary format. Lucene and <a class="dqa-link" href="/fund/storage/elasticsearch">Elasticsearch</a>'s completion suggester use FSTs."
+{{think "In practice, at search-autocomplete scale, the trie is kept in Redis sorted sets (for hot prefixes) or in memory as a serialized radix tree. The on-disk representation uses a Finite State Transducer (FST) — a compiled, minimal DFA that encodes all completions in a compressed binary format. Lucene and <a class='dqa-link' href='/fund/storage/elasticsearch'>Elasticsearch</a>'s completion suggester use FSTs."
   (how "FST differs from a trie" "A trie is a DAG (directed acyclic graph) without sharing of suffixes. A FST shares both prefixes AND suffixes. For the words 'mop', 'mom', 'top', 'tom', a trie has 7 nodes. The FST merges the common 'op' and 'om' suffixes — only 5 states. The minimal FST is the most compact possible representation.")
   (whyNot "a standard trie at Elasticsearch scale" "<a class=\"dqa-link\" href=\"/fund/storage/elasticsearch\">Elasticsearch</a> indexes billions of documents. A standard trie for all unique terms would use ~200 bytes/node × billions of nodes — terabytes of RAM. An FST compresses the same vocabulary into a few GB because suffix sharing reduces node count by 10-50x. That's why Lucene's term dictionary is an FST, not a trie.")
 }}
@@ -161,10 +161,10 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
 
 {{phase 4 "Distributed Trie for Search Autocomplete" "5 min"}}
 
-{{say `A single-machine trie for 100M+ query strings (as in <a class="dqa-link" href="/problem/search-autocomplete">Search Autocomplete</a>) doesn't fit in RAM. The production approach:
+{{say `A single-machine trie for 100M+ query strings (as in <a class='dqa-link' href='/problem/search-autocomplete'>Search Autocomplete</a>) doesn't fit in RAM. The production approach:
 <ul>
   <li><strong>Shard by prefix</strong> — all queries starting with 'a' go to shard 0, 'b' to shard 1, etc.</li>
-  <li><strong>Hot prefix cache in <a class="dqa-link" href="/fund/storage/redis">Redis</a></strong> — top 1000 prefixes cached as sorted sets</li>
+  <li><strong>Hot prefix cache in <a class='dqa-link' href='/fund/storage/redis'>Redis</a></strong> — top 1000 prefixes cached as sorted sets</li>
   <li><strong>Offline rebuild</strong> — trie rebuilt from query logs every hour, not updated in real-time</li>
 </ul>`}}
 
@@ -179,7 +179,7 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
 )}}
 
 {{think "The trie is rebuilt offline from query logs rather than updated on every keystroke."
-  (whyNot "updating the trie in real-time on every search" "At 10K queries/second, 10K trie updates/second with top-K propagation to all ancestor nodes creates massive write contention. The trie becomes a hot lock. Instead, aggregate query counts in <a class="dqa-link" href="/fund/storage/redis">Redis</a> for 1 hour, batch into a job that rebuilds the trie offline, swap the new trie atomically.")
+  (whyNot "updating the trie in real-time on every search" "At 10K queries/second, 10K trie updates/second with top-K propagation to all ancestor nodes creates massive write contention. The trie becomes a hot lock. Instead, aggregate query counts in <a class='dqa-link' href='/fund/storage/redis'>Redis</a> for 1 hour, batch into a job that rebuilds the trie offline, swap the new trie atomically.")
   (how "atomic trie swap works" "Keep two tries: active and standby. Rebuild standby from fresh query log batch. When ready, swap an atomic pointer. Requests read from new trie immediately. Old trie garbage-collected. Zero downtime, zero inconsistency.")
 }}
 
@@ -310,12 +310,12 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
 
 {{phase 7 "Production Autocomplete Architecture" "3 min"}}
 
-{{say `Putting it together — the production <a class="dqa-link" href="/problem/search-autocomplete">Search Autocomplete</a> system:
+{{say `Putting it together — the production <a class='dqa-link' href='/problem/search-autocomplete'>Search Autocomplete</a> system:
 <ol>
-  <li>Query log aggregator: batch query counts from <a class="dqa-link" href="/fund/messaging/message-queues">Kafka</a> every hour</li>
+  <li>Query log aggregator: batch query counts from <a class='dqa-link' href='/fund/messaging/message-queues'>Kafka</a> every hour</li>
   <li>Trie builder: rebuild compressed trie with pre-computed top-K from fresh counts</li>
   <li>Trie sharded by prefix first character: 26 shards (a-z)</li>
-  <li>Hot prefix cache: top 5000 prefix→suggestions in <a class="dqa-link" href="/fund/storage/redis">Redis</a> sorted set</li>
+  <li>Hot prefix cache: top 5000 prefix→suggestions in <a class='dqa-link' href='/fund/storage/redis'>Redis</a> sorted set</li>
   <li>API path: Redis miss → trie shard → return top-5</li>
   <li>CDN: cache top-1000 prefix results at edge (60s TTL)</li>
 </ol>`}}
@@ -328,7 +328,7 @@ Memory reduction: 4-8x vs standard trie for natural language.`}}
 {{hint "why 60s TTL on CDN not longer?" "Autocomplete results change as query popularity shifts. A &lt;span class='hl'>60s TTL&lt;/span> balances freshness against cache hit rate. At 100K QPS with 40% hitting top-1000 prefixes, that's &lt;span class='hl'>40K cache hits/sec&lt;/span>. Increasing TTL to 5 minutes only adds ~2% more hits but delays trending updates by 5x."}}
 
 {{qa "How do you keep autocomplete suggestions fresh for breaking news or trending topics?"
-  "Two mechanisms: (1) &lt;strong>Real-time trending overlay&lt;/strong> — maintain a separate <a class="dqa-link" href="/fund/storage/redis">Redis</a> sorted set for queries in the last 15 minutes, weighted heavily; merge with trie results on the fly. (2) &lt;strong>Faster rebuild cycle&lt;/strong> — reduce batch rebuild from hourly to 15-minute cycles for trending detection. The trie itself does not need to update in real-time — the trending overlay covers the gap."
+  "Two mechanisms: (1) &lt;strong>Real-time trending overlay&lt;/strong> — maintain a separate <a class='dqa-link' href='/fund/storage/redis'>Redis</a> sorted set for queries in the last 15 minutes, weighted heavily; merge with trie results on the fly. (2) &lt;strong>Faster rebuild cycle&lt;/strong> — reduce batch rebuild from hourly to 15-minute cycles for trending detection. The trie itself does not need to update in real-time — the trending overlay covers the gap."
   "What happens when the trie shard for 't' receives 10× traffic vs 'z'?"
   "Trie shards are stateless and read-only between rebuilds — add more replicas for the 't' shard. Alternatively, sub-shard by second character: 'ta', 'te', 'th', 'ti', 'to', 'tr' each get their own replica. Monitor query distribution per prefix shard and auto-scale replicas based on CPU."}}
 
