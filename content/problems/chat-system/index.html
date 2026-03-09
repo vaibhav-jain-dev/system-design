@@ -565,6 +565,12 @@ response = dynamodb.query(
   "Messages are backed up in their encrypted form with an additional backup encryption key. WhatsApp lets users create a backup password or use a 64-digit encryption key. Without this backup key, the cloud backup is unreadable — even by Apple or Google. If the user forgets the backup password, all backed-up messages are permanently lost."
 }}
 
+{{caveat "Never suggest 'rolling your own crypto' in an interview. Signal Protocol is battle-tested by 2B+ users. The interviewer expects you to name it specifically and explain forward secrecy and future secrecy."}}
+
+{{goodToKnow "Group E2E means N encrypt operations per message (one per member) — this is why group size is capped at 256, not a server limitation but a client battery/CPU constraint" "Key reinstallation after app reinstall triggers a 'security code changed' warning to all contacts — this is a feature, not a bug"}}
+
+{{mustKnow "Signal Protocol provides forward secrecy (compromised key cannot decrypt past messages) and future secrecy (key is healed on next ratchet step)" "Server is zero-knowledge — routes encrypted bytes without ever seeing plaintext. This eliminates server-side search, spam filtering, and compliance indexing" "Group E2E: sender encrypts message N times with each member's pairwise session key — the 256-member cap bounds this cost" "No server-side content moderation is possible — spam detection must happen client-side"}}
+
 {{phase 9 "Media Sharing" "5 min"}}
 
 {{say `Media messages follow a separate upload pipeline:
@@ -617,6 +623,17 @@ response = dynamodb.query(
   <li>Cost: <small>AWS Elemental MediaConvert, ~$0.015/min of video processed</small></li>
 </ul>`
 }}
+
+{{collapseSection "Media Cost Breakdown" `<ul>
+  <li><strong>S3 storage:</strong> 1 PB/day × $0.023/GB = ~$23K/day = ~$700K/month. With S3 Intelligent-Tiering, media older than 30 days moves to infrequent access ($0.0125/GB) — ~40% savings</li>
+  <li><strong>CloudFront transfer:</strong> At $0.085/GB for first 10TB, media-heavy usage could reach $500K-1M/month. Reserved capacity pricing brings this down 30-40%</li>
+  <li><strong>Deduplication savings:</strong> ~65% dedup rate on forwarded images reduces effective storage by 2.8× — critical at PB scale</li>
+  <li><strong>Lambda thumbnails:</strong> ~$0.20 per 1M invocations × 2B media messages/day = ~$400/day — negligible compared to storage and transfer</li>
+</ul>`}}
+
+{{caveat "Media deduplication must happen BEFORE encryption — encrypted blobs differ even for identical files because of random IVs. If you suggest dedup after encryption, the interviewer will catch the mistake."}}
+
+{{mustKnow "Client encrypts media locally with AES-256, uploads ciphertext to S3, sends URL + key inside E2E-encrypted message — server never sees plaintext media" "Presigned S3 URLs with short TTL (15 min) prevent unauthorized access — even if URL leaks, ciphertext is useless without the AES key" "Content-addressed dedup via SHA-256 hash saves ~65% storage on forwarded media — hash computed on plaintext before encryption" "Media never flows through the chat server — direct client-to-S3 upload via presigned URL keeps the chat path lean"}}
 
 {{phase 10 "Scaling & Reliability" "8 min"}}
 

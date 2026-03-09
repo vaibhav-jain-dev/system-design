@@ -849,6 +849,12 @@ class ShardedCounter:
   "Intra-region reads: &lt;span class='hl'>1-5ms&lt;/span>. Cross-region replication lag: &lt;span class='hl'>200-500ms&lt;/span> for DynamoDB Global Tables, &lt;span class='hl'>up to 15 minutes&lt;/span> for S3 CRR. Users reading their own data use &lt;strong>read-your-writes consistency&lt;/strong> by routing to their home region. Cross-region follows (Indian user following US user) see eventual consistency — the feed may lag by 1-5 seconds, which is acceptable."
 }}
 
+{{caveat "Multi-region is the most expensive decision — 3x infrastructure cost. Only deploy when user latency exceeds 200ms from the nearest region or when compliance (GDPR) requires data residency."}}
+
+{{mustKnow "CRDTs (G-Counters) for multi-region like counters — each region increments independently, merge by taking max per region, no coordination" "DynamoDB Global Tables for posts: <1s replication lag, last-writer-wins conflict resolution" "Route users to their home region via IP geolocation at signup — read-your-writes consistency within home region" "Route 53 health checks detect region failure in 30 seconds and reroute traffic to failover region"}}
+
+{{goodToKnow "S3 Cross-Region Replication lag is up to 15 minutes — images uploaded in the last 15 minutes may be missing during failover" "Feed cache (Redis) is per-region and independently computed — cold start after failover takes 5-10 minutes to warm"}}
+
 {{phase 9 "Security & Content Moderation" "8 min"}}
 
 {{say "Security at Instagram scale covers four areas: content moderation (ML classifiers + human review), spam prevention (behavioral signals + rate limiting), bot detection (device fingerprinting + CAPTCHA), and account safety (2FA + session management)."}}
@@ -960,6 +966,14 @@ async def mark_viewed(story_id: str, user_id: int):
 {{hint "why Redis bitmaps for story views?" "A bitmap uses 1 bit per user_id to track who has viewed a story. For 500M users, that is only 62.5MB per story. Compare to a Set of user_ids: at 8 bytes per ID, 1M viewers would consume 8MB per story vs 62.5MB fixed for the bitmap. Bitmaps win when viewer count is high relative to total users, and the auto-expire TTL (25h) means zero cleanup code."}}
 
 {{diagram "ig-sub-problems"}}
+
+{{collapseSection "Stories Implementation Detail" "Stories use DynamoDB with a TTL attribute set to created_at + 86400 seconds (24 hours). DynamoDB automatically deletes expired items with no application code needed. View tracking uses Redis bitmaps — 1 bit per user_id, so 500M users costs only 62.5MB per story. The bitmap key auto-expires 25 hours after creation (1 hour buffer). This is cheaper than a Set of user_ids when viewer count is high relative to total users."}}
+
+{{caveat "At 100M posts/day, even a 0.1% false positive rate in content moderation means 100K wrongly blocked posts. Layer ML (95% accuracy, fast) with human review (99%+ accuracy, slow) to balance speed and accuracy."}}
+
+{{mustKnow "Content moderation is layered: PhotoDNA hash matching (sync, <100ms), ML classification (async, ~200ms), human review (4-24h) — each layer catches what the previous missed" "Shadowban over hard ban for bots — invisible to the operator, more effective at deterring bot farms" "Stories use DynamoDB TTL for 24h auto-delete and Redis bitmaps for view tracking (62.5MB per story for 500M users)" "JWT with 15-minute access token + 7-day refresh token — compromised tokens expire quickly"}}
+
+{{goodToKnow "PhotoDNA uses perceptual hashing — catches modified versions of known bad content that raw SHA-256 would miss" "GDPR deletion requires an async pipeline across all services: Postgres CASCADE, DynamoDB batch delete, S3 media, Redis cache, Elasticsearch index — 48-72 hours total"}}
 
 {{phase 10 "Analytics & Monitoring" "5 min"}}
 

@@ -515,6 +515,10 @@ class TrieManager:
 
 {{hint "memory pressure during rebuild" "During the 60s rebuild window, memory briefly holds both old and new trie — 3GB peak for a 1.5GB trie. Ensure nodes have at least 4GB RAM. The old trie is freed within 5s of the swap."}}
 
+{{caveat "Never mutate a trie that is actively serving traffic. Concurrent readers seeing a partially-updated trie will return corrupted or incomplete results. Always use blue/green swap with an atomic pointer assignment."}}
+
+{{mustKnow "Blue/green pattern: build new trie in background, sanity check, then atomic pointer swap — never partial state" "Full rebuild every hour is simpler and safer than incremental updates (which need fine-grained locking)" "Memory peaks at 2x trie size during rebuild (old + new) — size instances accordingly" "Sanity checks before swap: verify top queries for common prefixes, node count within 20% of previous"}}
+
 {{phase 8 "Data Model" "4 min"}}
 
 {{say `Three data stores:
@@ -556,6 +560,18 @@ CREATE TABLE query_counts (
 }}
 
 {{hint "Redis Hash for user history" "We store uid → {query: click_count} as a Redis Hash. HGETALL takes &lt;1ms for 100-entry hashes. We cap at 100 queries with a background LRU eviction job running every 15 minutes."}}
+
+{{collapseSection "Trie Serialization and Cold Start" `
+<ul>
+  <li>Trie serialized to <strong>Protocol Buffers</strong>, gzip compressed (~500MB for English)</li>
+  <li>Uploaded to S3 after each hourly rebuild</li>
+  <li>Cold start: download from S3 (~30s) + deserialize (~60s) = <strong>~90 seconds</strong></li>
+  <li>During cold start, the instance serves no traffic — load balancer health check gates it</li>
+  <li>Rolling restarts: only 1 replica restarts at a time to maintain fleet capacity</li>
+</ul>
+`}}
+
+{{mustKnow "Three stores: Kafka (raw logs, 7-day), Redshift/BigQuery (aggregated counts, 5-year), Redis (personalization + trending)" "Trie lives entirely in service memory — rebuilt from aggregated counts, persisted as S3 snapshots" "Cold start is ~90 seconds (S3 download + deserialize) — rolling restarts ensure fleet capacity" "Never query a database on the hot path — any DB hop adds 5-15ms, defeating the latency budget"}}
 
 {{phase 9 "Personalization" "4 min"}}
 
@@ -620,6 +636,10 @@ def blend_personal(
   "How do you handle a user who wants to clear their search history?"
   "DELETE /user/history triggers a Redis DEL on the user's history key and adds all their queries to the blocklist for 30 days (so suggestions they cleared don't immediately reappear). Takes effect within 60 seconds (next CDN TTL expiry)."
 }}
+
+{{caveat "Personalization must never be included in the CDN cache key. Adding uid to cache keys creates 100M users x 1K prefixes = 100B cache entries — CDN becomes useless. Blend personalization at the service layer after the CDN cache hit."}}
+
+{{mustKnow "Personalization blends user history into global top-10 — it never replaces global results" "0.3 boost multiplier for user-relevant queries; personalization capped at 10% of total score" "Blending is ephemeral (computed at query time, never stored) — prevents filter-bubble feedback loops" "History stored in Redis Hash per uid with 90-day TTL; HGETALL under 1ms for 100 entries"}}
 
 {{phase 10 "Scaling" "5 min"}}
 

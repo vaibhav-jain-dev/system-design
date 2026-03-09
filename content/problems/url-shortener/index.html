@@ -686,6 +686,20 @@ async def resolve_short_url(short_code: str) -> str:
 
 {{key "DynamoDB eliminates the sharding decision entirely. If you choose SQL (Postgres), consistent hashing with virtual nodes is the right approach, but you inherit the operational burden of rebalancing, split-brain prevention, and cross-shard queries."}}
 
+{{collapseSection "Database Migration: DynamoDB ↔ Postgres Without Downtime" `<p>Dual-write pattern: write to both stores simultaneously for 48 hours. Validate consistency by comparing a sample of reads. Once consistent, cut reads to the new store via feature flag. Remove writes to the old store after a 24-hour bake period. Feature flag enables instant rollback if issues arise.</p>`}}
+
+{{mustKnow
+  "DynamoDB auto-shards by partition key — you never write sharding logic"
+  "If using SQL: consistent hashing with virtual nodes is the correct sharding strategy for URL lookups"
+  "Compute (ECS) scales horizontally because it is stateless — no coordination needed between tasks"
+  "ElastiCache cluster mode partitions data across shards automatically"
+}}
+
+{{goodToKnow
+  "DynamoDB on-demand becomes more expensive than Postgres above ~10K sustained writes/sec"
+  "Write sharding (appending random suffix to partition key) is unnecessary for URL shorteners since each short_code is already unique"
+}}
+
 {{phase 8 "Availability & Reliability" "5 min"}}
 
 {{say `Three pillars of reliability — replication, failover, and geo-distribution:
@@ -758,6 +772,20 @@ async def resolve_short_url(short_code: str) -> str:
   "Route 53 latency-based routing measures RTT from the user's DNS resolver to each region and returns the IP of the lowest-latency region. CloudFront handles this at the edge layer automatically — users hit the nearest of 750+ PoPs regardless of which region the origin is in. For writes, Route 53 routes to the nearest region's ALB."
   "What is the cost of running multi-region vs single-region?"
   "DynamoDB Global Tables charges standard write pricing in each region plus $0.725 per million replicated write units. For 1,157 writes/sec across 3 regions, replication adds ~$2,500/month. ElastiCache needs a separate cluster per region (~$735/month each). Total multi-region premium: roughly 2.5x the single-region cost. Only justified when you need sub-50ms global latency or regulatory data residency."
+}}
+
+{{caveat "Multi-region adds a 2.5x cost multiplier. Always start with multi-AZ (99.99% availability) and only add multi-region when you need global latency or data residency requirements — do not over-engineer for a hypothetical global user base."}}
+
+{{mustKnow
+  "AP system: availability over consistency — a failed redirect is worse than a stale redirect"
+  "Multi-AZ gives 99.99% availability with minimal complexity; multi-region is a separate, later decision"
+  "DynamoDB Global Tables: eventual consistency with last-writer-wins, sub-second cross-region replication"
+  "Circuit breaker pattern prevents retry storms from cascading failures — use it on all downstream calls"
+}}
+
+{{goodToKnow
+  "KGS-generated keys never conflict across regions because each region gets non-overlapping key ranges"
+  "Chaos engineering (AWS Fault Injection Simulator) validates failover works before production incidents"
 }}
 
 {{phase 9 "Enhanced Security & Abuse Prevention" "8 min"}}

@@ -576,6 +576,10 @@ class TrackingService:
   "OSRM uses pre-computed road graphs without live traffic. We layer real-time traffic data from HERE or TomTom APIs (batch updated every 5 minutes). ETA accuracy is ±2 minutes for short rides, ±5 minutes for 30+ minute rides."
 }}
 
+{{caveat "Redis Pub/Sub is fire-and-forget with no persistence. If the broker crashes, all subscriptions are lost. This is acceptable for location tracking (next update in 4s) but never use Pub/Sub for ride state changes — those go through Kafka."}}
+
+{{mustKnow "Driver GPS -> WebSocket gateway -> Redis GEO + Redis Pub/Sub -> rider's WebSocket" "OSRM for ETA: sub-50ms, no per-query cost, 100K queries/sec — Google Maps API costs $1.8M/year at scale" "Redis Pub/Sub for real-time fan-out (< 1ms), Kafka for durable event log (10-50ms)"}}
+
 {{phase 9 "Data Model" "5 min"}}
 
 {{say `Three storage tiers:
@@ -637,6 +641,10 @@ CREATE TABLE drivers (
   (row "Ride event log" "Kafka → S3" "Downstream consumers, audit")
 )}}
 
+{{goodToKnow "Partial index on rides (WHERE status NOT IN COMPLETED, CANCELLED) keeps the active rides index small — critical for matching query performance" "Cassandra partition key is (ride_id, date) — each ride's GPS path is a single partition, enabling efficient range queries for trip replay"}}
+
+{{mustKnow "Three storage tiers: Postgres (ride state, ACID), Redis (hot location data, locks), Cassandra (GPS history, 1.25M writes/sec)" "Rides table uses a partial index on active statuses — only ~0.1% of rides are active at any time" "Driver location in Redis GEO with 30s TTL; trip GPS path appended to Cassandra for audit and ML training"}}
+
 {{phase 10 "Scaling" "4 min"}}
 
 {{say `Three independent scaling axes:
@@ -663,6 +671,10 @@ CREATE TABLE drivers (
 )}}
 
 {{hint "WebSocket sticky sessions" "A rider's location stream is subscribed to a Redis Pub/Sub channel on a specific WebSocket server. If they hop to a different server on reconnect, the server re-subscribes — stateless recovery. But we still use sticky sessions (ALB cookie-based) to avoid the reconnect overhead for stable connections."}}
+
+{{caveat "The dominant scaling bottleneck is Postgres writes to the rides table, not Redis. At 10x spike that's ~23K writes/sec — pre-provision with 50K IOPS and connection pooling via PgBouncer."}}
+
+{{mustKnow "1.25M driver location writes/sec across 20 Redis city shards = 62.5K writes/sec each (under 200K limit)" "WebSocket gateway: 10K connections/server x 200 servers = 2M concurrent connections" "Postgres is the bottleneck at spikes — shard by city_id, pre-provision IOPS, use PgBouncer"}}
 
 {{phase 11 "Failure Modes" "5 min"}}
 

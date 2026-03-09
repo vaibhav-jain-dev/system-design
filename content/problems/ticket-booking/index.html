@@ -382,6 +382,16 @@ Payment flows through <strong>async webhooks</strong> — not synchronous calls 
   "Reads: Show browsing → CloudFront CDN → Postgres read replicas (3 replicas). Seat map → Redis cache with 5s TTL + WebSocket invalidation. Writes: Seat locks → Redis Cluster. Booking confirm → Postgres primary (only path needing primary). This routing concentrates primary writes to &lt; 600/sec under normal load."
 }}
 
+{{collapseSection "CDN Cost Analysis" `
+<ul>
+  <li><strong>Without CDN:</strong> 500M browse requests/month × $0.004/10K requests = ~$200K/mo in origin compute + $50K data transfer</li>
+  <li><strong>With CloudFront:</strong> 90% cache hit rate → origin receives 50M requests. CloudFront cost: ~$2K/mo. Origin compute: ~$20K/mo. Net savings: ~$228K/mo</li>
+  <li><strong>Cache invalidation:</strong> New showtimes added hours before — invalidate via CloudFront API or short TTL (60s). Not latency-sensitive.</li>
+</ul>
+`}}
+
+{{mustKnow "Three-tier architecture: Edge (CDN for browse), API (Booking Service is critical path), Data (Redis for locks, Postgres for bookings)" "Payment is async via webhooks — never synchronous in the critical path; avoids holding connections for 2-5 seconds" "Read/write split: CDN + Redis cache + read replicas for reads; Redis Cluster + Postgres primary for writes" "Postgres SERIALIZABLE is the final safety net for booking confirmation — even if Redis state is stale"}}
+
 {{phase 5 "Data Model" "5 min"}}
 
 {{say `Entity hierarchy:
@@ -426,6 +436,12 @@ CREATE INDEX idx_bookings_show_active
 )}}
 
 {{hint "seat_ids as UUID array" "Storing seat_ids as a Postgres array (UUID[]) avoids a join table for the common query 'which seats does this booking hold'. The downside: you can't index individual seat IDs within an array. For the availability query, we use the reverse lookup: show all bookings that contain this seat, which requires a GIN index on seat_ids."}}
+
+{{caveat "The partial index WHERE status IN ('locked', 'confirmed') is critical — without it, the seat availability query scans all historical bookings including millions of expired/cancelled rows, degrading from 10ms to 500ms+."}}
+
+{{goodToKnow "GIN index on seat_ids array enables 'which bookings contain seat X?' queries — needed for the availability JOIN but adds ~20% write overhead on booking inserts" "Booking state machine is monotonic: available → locked → confirmed | expired — no backward transitions, which simplifies conflict detection"}}
+
+{{mustKnow "Seat locks live in Redis (source of truth during checkout); confirmed bookings live in Postgres (durable source of truth)" "Partial index on bookings(show_id, status) WHERE status IN ('locked', 'confirmed') keeps the availability query fast" "Entity hierarchy: theatres → screens → seats (static) and shows → bookings → payments → tickets (transactional)" "Redis cache with 5s TTL for seat map views — 90% hit rate; acceptable staleness for display purposes"}}
 
 {{phase 6 "Rush Handling" "5 min"}}
 

@@ -165,6 +165,18 @@ def watch_leader(data, stat):
   "Spanner uses &lt;strong>TrueTime&lt;/strong> — GPS and atomic clocks in every datacenter to bound clock skew to &lt;span class='hl'>±4ms&lt;/span>. This lets it commit transactions with external consistency without blocking. It is &lt;span class='hl'>99.999%&lt;/span> available with strong consistency. CAP still applies, but Spanner minimizes partition duration through redundant fiber paths and fast failure detection."
 }}
 
+{{collapseSection "ZooKeeper vs etcd Operational Details" "
+<ul>
+  <li><strong>ZooKeeper</strong> — JVM-based, requires tuning GC pauses; ephemeral nodes for leader election; watches for change notification; 3.5+ supports dynamic reconfiguration</li>
+  <li><strong>etcd</strong> — single Go binary, gRPC API; used by Kubernetes for all cluster state; built-in RBAC; watch API with revision-based streaming</li>
+  <li>Both need <span class='hl'>odd-numbered clusters</span> (3 or 5 nodes) and low-latency network between nodes (<span class='hl'>&lt; 10ms RTT</span>)</li>
+</ul>
+"}}
+
+{{mustKnow "CP systems reject requests on the minority partition — the client gets a clear error (503/timeout)" "Raft consensus: leader replicates to quorum before committing; leader steps down if quorum lost" "ZooKeeper and etcd are canonical CP systems for distributed coordination"}}
+
+{{goodToKnow "Spanner achieves 99.999% availability with strong consistency using TrueTime (GPS + atomic clocks) to bound clock skew to ±4ms" "CP unavailability is explicit (error) while AP unavailability is invisible (stale data returned as if correct)"}}
+
 {{phase 5 "AP Systems" "4 min"}}
 
 {{say `AP systems prioritize availability. Every request gets a response, even during a partition — but that response might contain stale data.
@@ -212,6 +224,10 @@ session.execute(
 }}
 
 {{qa "What is the danger of last-write-wins conflict resolution?" "LWW relies on wall-clock timestamps, and distributed clocks drift by &lt;span class='hl'>50-100ms&lt;/span> via NTP. Write A at T=100ms on node 1 may have a lower timestamp than write B at T=50ms on node 2 if node 2's clock is fast — the genuinely newer write is silently discarded. LWW is safe only for idempotent, non-critical data like analytics counters — never for inventory or account balances." "How do you detect conflicts if LWW silently drops writes?" "Use &lt;strong>vector clocks&lt;/strong> or &lt;strong>version vectors&lt;/strong>. Each node increments its own counter on writes. On read, if two versions have divergent vectors (neither dominates the other), the system surfaces both versions for application-level resolution. DynamoDB Streams and Cassandra lightweight transactions provide similar conflict detection."}}
+
+{{caveat "Last-write-wins silently discards writes when clocks drift. Never use LWW for inventory, balances, or any non-idempotent data."}}
+
+{{mustKnow "AP systems use conflict resolution after partition heals — LWW, CRDTs, or application-level merge" "LWW relies on wall clocks which drift ±50-100ms via NTP — genuinely newer writes can be silently dropped" "CRDTs auto-merge without conflicts but only work for specific data types (counters, add-only sets)" "Cassandra consistency is tunable per query: ONE (AP) → QUORUM → ALL (CP)"}}
 
 {{phase 6 "PACELC Model" "4 min"}}
 

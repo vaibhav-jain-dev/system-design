@@ -915,6 +915,10 @@ activedefrag: yes                 # Defragment memory proactively
   <li>Add <strong>jitter</strong> to Retry-After: <code>window_reset + rand(0, 10s)</code> to prevent all clients retrying at the exact same second</li>
 </ul>`}}
 
+{{caveat "Silent drops (dropping requests without a 429 response) look like network errors to clients — they retry immediately and harder, making overload worse. Always return an explicit 429 with Retry-After."}}
+
+{{caveat "IP-based rate limits alone are insufficient against distributed botnets. Layer IP limits with fingerprinting and behavioral analysis for unauthenticated endpoints."}}
+
 {{triggerQs "Questions this section might trigger"
   "How do you prevent rate limit circumvention through account farming — creating many accounts to multiply effective limits?"
   `<ul>
@@ -938,6 +942,18 @@ activedefrag: yes                 # Defragment memory proactively
 </ul>`
 }}
 
+{{mustKnow
+  "Fail-open is correct for most services; fail-closed only for payment/login endpoints"
+  "429 + Retry-After is mandatory — silent drops cause immediate aggressive retries"
+  "Add jitter to Retry-After to prevent thundering herd at window reset"
+  "Idempotency keys prevent duplicate requests from consuming rate limit quota unfairly"
+}}
+
+{{goodToKnow
+  "Cost-based rate limiting (not request counting) is needed for batch and GraphQL APIs — GitHub uses query complexity scoring"
+  "Account farming defense requires correlated signals (payment method, device fingerprint, IP subnet) beyond simple per-key counting"
+}}
+
 {{phase 10 "Cost Estimates" "2 min"}}
 
 {{say "Rate limiting infrastructure: &lt;span class='hl'>~$580/month&lt;/span> for a 3-node ElastiCache cluster handling &lt;span class='hl'>300K ops/s&lt;/span>. Middleware overhead is &lt;span class='hl'>&lt;0.1ms per rate check&lt;/span> — the Redis cluster is the only dedicated line item."}}
@@ -958,6 +974,21 @@ activedefrag: yes                 # Defragment memory proactively
   "A &lt;span class='hl'>6-node ElastiCache r6g.large cluster&lt;/span> handles &lt;span class='hl'>500K ops/sec&lt;/span> at &lt;span class='hl'>~$582/month&lt;/span>. For 1M req/sec, double to 12 nodes = &lt;span class='hl'>~$1,164/month&lt;/span>. Add &lt;span class='hl'>~$30/month&lt;/span> cross-AZ transfer. Total: under &lt;span class='hl'>$1,200/month&lt;/span> — less than the cost of one engineer-hour of DDoS incident response."
   "Should you build or buy rate limiting?"
   "Build if: you need custom algorithms (per-tenant, per-endpoint, combined limits), your team can operate Redis clusters, and you want zero vendor lock-in. Buy (Kong, Apigee, AWS WAF) if: you need rate limiting in &lt;1 week, your team is &lt;5 engineers, or you need managed DDoS protection bundled. At &lt;span class='hl'>$50K+/year&lt;/span> for enterprise API gateways, the build option is cheaper if you already run Redis."
+}}
+
+{{collapseSection "Detailed Cost Breakdown by Component" `
+<ul>
+  <li><strong>ElastiCache r6g.large (6 nodes)</strong>: $97/node/month x 6 = $582/month — handles 300K+ ops/sec with Lua scripts</li>
+  <li><strong>Cross-AZ data transfer</strong>: 500K req/sec x 200 bytes x 86400 sec = ~8.6 TB/day, but replication traffic stays within the cluster; app-to-Redis cross-AZ is ~$30/month</li>
+  <li><strong>CloudWatch monitoring</strong>: ~$5/month for ElastiCache metrics (EngineCPUUtilization, CurrConnections, Evictions)</li>
+  <li><strong>App server overhead</strong>: Rate limit middleware adds ~0.1ms CPU per request — at $0.04/vCPU-hour, this is negligible vs the Redis cluster cost</li>
+  <li><strong>Scaling curve</strong>: 1M req/sec → 12 nodes (~$1,164/month); 5M req/sec → ~50 nodes (~$4,850/month); beyond 5M, evaluate Envoy's native rate limiting</li>
+</ul>
+`}}
+
+{{mustKnow
+  "Rate limiting infrastructure costs ~$580/month for 300K ops/sec — Redis cluster is the only significant line item"
+  "Build vs buy: build if you need custom algorithms and can operate Redis; buy if you need it in <1 week or team is <5 engineers"
 }}
 
 {{phase 11 "Sub-Problems & Building Blocks" "3 min"}}

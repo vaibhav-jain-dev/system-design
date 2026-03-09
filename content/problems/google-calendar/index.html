@@ -529,6 +529,18 @@ CREATE INDEX idx_acl_user             ON calendar_acl (user_id);              --
 
 {{hint "recur_until denormalization" "recur_until is derived from the RRULE (UNTIL or COUNT * interval). Stored as a column so the index idx_events_calendar_time can skip master events with recur_until &lt; window_start. Without this, every query scans all recurring masters regardless of whether they're still active."}}
 
+{{collapseSection "Full Index Strategy Reference" `<ul>
+  <li><strong>idx_events_calendar_time</strong> — (calendar_id, start_utc, end_utc) WHERE status != 'CANCELLED' — primary query path for calendar views and conflict detection</li>
+  <li><strong>idx_events_updated_at</strong> — (calendar_id, updated_at) — delta sync cursor scans</li>
+  <li><strong>idx_acl_user</strong> — (user_id) on calendar_acl — 'what calendars can I see?'</li>
+  <li><strong>GIN on attendees</strong> — JSONB index for 'all events attendee X is on'</li>
+  <li><strong>recurring_exceptions PK</strong> — (master_event_id, occurrence_date) — O(1) exception lookup per occurrence</li>
+</ul>`}}
+
+{{mustKnow "Single events table for both recurring and non-recurring — NULL rrule for single events, no separate table" "Four core tables: events, recurring_exceptions, calendars, calendar_acl — know the schema cold" "ETag = MD5(updated_at + event_id) for optimistic locking — no separate version counter needed" "JSONB for attendees (small, always read in full) avoids JOIN overhead; GIN index enables reverse lookup"}}
+
+{{goodToKnow "recur_until denormalized from RRULE lets the index skip expired master events without parsing the RRULE string" "Partial index WHERE status != 'CANCELLED' excludes soft-deleted rows from all query paths automatically"}}
+
 {{phase 7 "Notifications & Reminders" "4 min"}}
 
 {{say `Reminders use a <strong>Redis sorted set as a delay queue</strong>:
@@ -584,6 +596,12 @@ def reminder_worker():
 {{hint "daily digest notifications" "Daily digest (7am local time) is a different pattern — use a cron job that runs at midnight UTC, computes 7am UTC for each user's timezone, and enqueues in the Redis sorted set with the correct epoch. &lt;span class='hl-red'>Don't use a fixed UTC time for all users&lt;/span> — that sends digests at random local times."}}
 
 {{hint "FCM vs APNs token management" "Push tokens expire and rotate. Store device tokens in a push_tokens table (user_id, platform, token, updated_at). On FCM/APNs registration failure, remove the stale token. Periodic cleanup of tokens not updated in 90 days."}}
+
+{{caveat "Never compute fire_at by subtracting minutes from local time — DST transitions produce incorrect fire times. Always subtract from UTC: fire_at_utc = start_utc - timedelta(minutes=N)."}}
+
+{{mustKnow "Redis sorted set as delay queue: score = fire_at Unix epoch, ZPOPMIN every 1 second claims due reminders" "At-least-once delivery is acceptable for notifications — a missed reminder is annoying, not catastrophic" "Kafka decouples notification scheduling from event writes — creating 100 recurring events doesn't block the hot path" "FCM for Android, APNs for iOS — push token management requires stale token cleanup"}}
+
+{{goodToKnow "Daily digest notifications use a cron job converting 7am local time per user's timezone to UTC epoch, then enqueue in the same Redis sorted set" "Redis ZPOPMIN is O(log N) and in-memory — scanning PostgreSQL every second at 2B events scale would be catastrophic"}}
 
 {{phase 8 "Timezone Handling" "4 min"}}
 

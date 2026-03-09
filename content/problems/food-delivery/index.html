@@ -537,6 +537,17 @@ def score(partner: Partner, distance_km: float) -> float:
   (nofit "Full graph Dijkstra per candidate" "100–500ms per path, infeasible at 350 orders/sec with 20 candidates each")
 )}}
 
+{{caveat "Dijkstra on a city road graph takes 100-500ms per query. At 350 orders/sec with 20 candidates each, that is 7000 Dijkstra calls/sec — completely infeasible within a 2s SLA. Greedy GEORADIUS with Haversine is accurate to within 25% and takes 2ms."}}
+
+{{collapseSection "Partner Matching Scoring Implementation" `Scoring formula breakdown:
+<ul>
+  <li><strong>score = 0.6 × normalized_distance + 0.2 × (1 − normalized_rating) + 0.2 × (1 − acceptance_rate)</strong></li>
+  <li>Distance dominance (0.6 weight) ensures fast delivery — the primary customer satisfaction driver</li>
+  <li>Rating (0.2 weight) prevents quality floor violations without causing starvation of the top-rated partner</li>
+  <li>Acceptance rate (0.2 weight) penalizes cherry-picking partners who game the system</li>
+  <li>Fallback cascade: 5km/rating 4.0 → 8km/rating 3.8 → 12km/no rating filter → auto-cancel at 10 min</li>
+</ul>`}}
+
 {{triggerQs "Matching algorithm questions"
   "What if two orders are placed simultaneously and both want the same partner?"
   "Optimistic locking on the partner row. Matching service issues UPDATE partners SET status='ASSIGNED', order_id=X WHERE id=P AND status='AVAILABLE'. Exactly one transaction wins. The loser retries matching immediately — by the time the retry runs, a different partner is top of the GEORADIUS list."
@@ -545,6 +556,8 @@ def score(partner: Partner, distance_km: float) -> float:
   "What is the fallback if Redis is down?"
   "We fall back to PostgreSQL with a bounding-box query: SELECT * FROM partners WHERE lat BETWEEN X-0.05 AND X+0.05 AND lng BETWEEN Y-0.05 AND Y+0.05 AND status='AVAILABLE'. Covers ~5.5km radius. Performance degrades to ~50ms but correctness is maintained."
 }}
+
+{{mustKnow "Three-step matching: GEORADIUS (20 nearest) → hard constraint filter (status, rating, acceptance rate) → weighted score → optimistic-lock assignment" "Greedy with Haversine (2ms) beats Dijkstra (100-500ms) for real-time matching at 350/sec" "Optimistic locking resolves concurrent assignment: UPDATE WHERE status=AVAILABLE — exactly one transaction wins" "Fallback if Redis is down: PostgreSQL bounding-box query, 50ms latency but correct"}}
 
 {{phase 7 "Real-Time Location Tracking" "8 min"}}
 
@@ -597,12 +610,18 @@ def stream_order_tracking(order_id: str) -> Generator:
 
 {{hint "GEORADIUS complexity" "GEORADIUS is O(N + log M) where M is total partners in the set and N is results returned. With 500K partners per city and radius=5km returning ~20 results, this is ~500K + log(500K) ≈ 500,019 operations, running in ~2ms on Redis. This is why we cap returned results at 20."}}
 
+{{caveat "TTL-based partner offline detection (60s expiry) is the clever primitive — it handles phone crashes, force-quits, and battery deaths without any explicit heartbeat service. But it also means a partner who enters a tunnel for 61 seconds is marked offline and removed from matching."}}
+
 {{triggerQs "Location tracking questions"
   "How do you reduce battery drain on the partner app from continuous GPS?"
   "Adaptive update frequency: AVAILABLE (partner is idle) → 15s intervals. Accepted + moving → 4s intervals. Stationary for 30s → 30s intervals. This reduces GPS pings by ~60% on average while maintaining tracking accuracy when it matters."
   "How does the customer-facing tracking map stay smooth despite 4-second GPS updates?"
   "Client-side dead reckoning. The app stores last two GPS points, calculates bearing and speed, and interpolates the marker position every 500ms. The map appears smooth; actual GPS anchors the position every 4 seconds."
 }}
+
+{{mustKnow "Write path: GPS ping → Redis GEOADD (matching index) + Cassandra (history) + Kafka (fan-out to SSE streams)" "60-second TTL on Redis keys auto-expires offline partners — no heartbeat service needed" "Kafka partition key = partner_id guarantees ordered pings per partner on a single partition" "Client-side dead reckoning smooths the 4-second GPS update gap to 500ms visual updates"}}
+
+{{goodToKnow "Adaptive GPS frequency saves ~60% battery: 15s when idle, 4s when active, 30s when stationary" "GEORADIUS is O(N + log M) — with 500K partners and 20 results, runs in ~2ms on Redis"}}
 
 {{phase 8 "ETA & Surge Pricing" "8 min"}}
 

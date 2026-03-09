@@ -323,6 +323,10 @@ def fanout_tweet(tweet_id: str, author_id: str, timestamp: float):
   "A retweet creates a new tweet object with a reference_tweet_id. The fanout logic is identical — the retweet's tweet_id gets pushed to the retweeter's followers' timelines. At read time, the Timeline Service fetches the reference tweet to render the full retweet card. Storage cost: one additional row in Cassandra per retweet. No media duplication."
 }}
 
+{{mustKnow "Write path: Tweet Service → Cassandra → Kafka → Fanout Service → Redis timelines. Read path: Timeline Service → Redis sorted set → celebrity merge → hydrate from Cassandra → optional ranking." "Tweet Service (write) and Timeline Service (read) are separate services because of the 40:1 read/write asymmetry — they scale independently." "Kafka decouples tweet storage from fanout — tweet creation returns in <5ms, fanout happens asynchronously. Multiple consumers (fanout, search, notifications, analytics) read the same topic."}}
+
+{{goodToKnow "Cassandra is chosen for tweet storage because tweets are append-only writes keyed by (user_id, tweet_id) — exactly the partition key + clustering key pattern Cassandra optimizes for."}}
+
 {{phase 6 "Timeline Generation & Caching" "8 min"}}
 
 {{say "The timeline read path has two sub-cases: warm cache (user has a pre-computed Redis sorted set) and cold start (cache miss or first load). For warm cache, we fetch tweet IDs from Redis, hydrate from Cassandra, merge celebrity tweets, and optionally re-rank. For cold start, we reconstruct from Cassandra and seed the cache."}}
@@ -406,6 +410,12 @@ ZREMRANGEBYRANK user:12345:timeline 0 -801
 # Check timeline size
 ZCARD user:12345:timeline`}}
 
+{{caveat "Cold-start timeline seeding is expensive: fetching tweets from 1000 followed accounts hits Cassandra hard. Always batch in groups of 100 and return the first page to the user before the full cache is populated — do not block the response on full seeding."}}
+
+{{collapseSection "Cold-Start Optimization Details" "Three strategies to reduce cold-start latency: (1) <strong>Lazy seeding</strong> — seed only the first 20 tweets immediately, background-fill the rest. (2) <strong>Preemptive seeding</strong> — a daily batch job re-seeds timelines for users who logged in within the last 7 days. (3) <strong>Tiered TTL</strong> — active users get 7-day TTL, weekly-active users get 3-day, others get 1-day. This reduces Redis memory by ~30% while keeping most timelines warm."}}
+
+{{mustKnow "Two read sub-cases: warm cache (Redis sorted set hit) and cold start (cache miss — reconstruct from Cassandra and seed)." "Celebrity merge at read time: fetch recent tweets from each celebrity followed via parallel Cassandra reads, sorted-merge with pre-computed timeline in O(N log K)." "ZREVRANGE for latest tweets, ZRANGEBYSCORE with cursor for pagination — both O(log N + M) where M is result size." "Always return first page immediately on cold start — do not block the user while seeding the full 800-tweet cache."}}
+
 {{phase 7 "Data Model" "8 min"}}
 
 {{say "Four main data stores: Cassandra for tweets and user profiles, Redis for timelines and counters, follow graph in a dedicated graph store or Cassandra, and Elasticsearch for full-text search. each schema."}}
@@ -447,6 +457,10 @@ ZCARD user:12345:timeline`}}
 }}
 
 {{hint "Snowflake IDs as clustering keys" "Snowflake IDs encode timestamp in the high bits, making them sortable by time. Using tweet_id DESC as Cassandra's clustering key means the most recent tweets are physically adjacent on disk — range reads for timeline reconstruction are sequential IO, not random."}}
+
+{{mustKnow "Four data stores: Cassandra (tweets, follows), Redis (timelines, counters, tweet cache), graph store (follow graph), Elasticsearch (search)." "Like counts live in Redis (INCR, O(1), atomic) with periodic sync to Cassandra — eventual consistency is acceptable because users don't notice a 60-second count drift." "Snowflake IDs as Cassandra clustering keys (DESC) ensure most recent tweets are physically adjacent on disk — range reads are sequential IO."}}
+
+{{goodToKnow "Cassandra counter columns use LWW conflict resolution — at high like rates (10K/s for viral tweets), they cause write hotspots. Redis INCR handles 100K ops/s per key trivially." "Timeline Redis keys use 7-day TTL. Tweet object caches use 1-hour TTL with sync to Cassandra."}}
 
 {{phase 8 "Celebrity Problem Deep Dive" "8 min"}}
 
