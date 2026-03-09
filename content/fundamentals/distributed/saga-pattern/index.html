@@ -170,6 +170,10 @@ SAGA_STEPS = [
   "This is where business logic must decide: maybe the compensation sends an apology + credit instead of a simple cancel. Compensations encode business rules, not just technical rollbacks. Design them with your product team."
 }}
 
+{{caveat "Compensations are NOT database rollbacks. A compensation is a new forward-moving business action (issue refund, send cancellation). It runs after the original step already committed."}}
+
+{{mustKnow "Every saga step needs a compensating transaction — the business-level undo that runs after the step committed" "Compensations run in reverse order of the forward steps — step 3 undoes before step 2" "Pivot transactions cannot be compensated (e.g., physical delivery) — place them as late as possible in the saga" "If compensation fails, retry with exponential backoff; persistent failure requires manual intervention"}}
+
 {{phase 5 "Idempotency in Sagas" "4 min"}}
 
 {{say "Every saga step must be idempotent. The orchestrator will retry failed steps. If the step executed but the response was lost, the retry must not double-charge or double-notify. Store (saga_id, step_name) before executing — if it already exists, return the prior result."}}
@@ -205,6 +209,8 @@ def charge_customer_idempotent(saga_id: str, customer_id: str, amount: float):
 
 {{hint "saga_step_log TTL" "Purge saga_step_log entries after saga completion + 7 days. Sagas rarely replay after completion. Keeping them forever inflates the table. A TTL index in Postgres or <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a> handles this automatically."}}
 
+{{mustKnow "Every saga step must be idempotent — use (saga_id, step_name) as composite idempotency key" "At-least-once delivery from message brokers means steps can be called multiple times — idempotency prevents double-charges" "Check saga_step_log before executing: if key exists, return prior result without re-executing"}}
+
 {{phase 6 "Saga Failure Recovery" "4 min"}}
 
 {{say "On any failure — service crash, timeout, network partition — the saga orchestrator recovers by reading the saga_log from the database, finding the last successful step, and replaying forward. Because every step is idempotent, replaying a completed step is safe."}}
@@ -234,6 +240,10 @@ def charge_customer_idempotent(saga_id: str, customer_id: str, amount: float):
 }}
 
 {{qa "How do you handle concurrent sagas modifying the same resource?" "Use semantic locks: when a saga step begins, mark the resource as 'PENDING' in its own table. Other sagas check this flag and either wait, skip, or fail. Release the flag when the saga completes or compensates. This provides application-level isolation without distributed locks." "What if a saga reads stale data from a step that hasn't completed yet?" "This is the dirty read problem. You can accept it (eventual consistency), use semantic locks (block reads of PENDING resources), or design business logic to tolerate it (e.g., show 'processing' status to users instead of confirmed)."}}
+
+{{mustKnow "Orchestrator replays from last successful step on crash — idempotent steps make this safe" "Saga watchdog: background job queries PENDING sagas older than N minutes and triggers retry or alerts" "Step is successful only when both the action AND the saga_log write are committed"}}
+
+{{goodToKnow "Semantic locks (mark resource as PENDING) provide application-level isolation without distributed locks" "A saga timeout means the step may have succeeded or failed — retry with idempotency key to resolve safely"}}
 
 {{phase 7 "Saga vs 2PC" "4 min"}}
 

@@ -154,6 +154,14 @@ assert ids == sorted(ids), "Snowflake IDs must be time-sorted"
   "Three patterns: 1) ZooKeeper/etcd: instance registers on startup, gets a unique ID from 0-1023, releases it on shutdown. 2) Last 10 bits of the private IP address — works if the VPC CIDR ensures uniqueness in the last 10 bits. 3) Kubernetes StatefulSet pod ordinal index. Pattern 1 is most reliable; pattern 2 is simplest but risks collision in large VPCs."
 }}
 
+{{caveat "NTP can adjust clocks backward by seconds. VM live migration can freeze time. Never trust that system clocks are monotonic. The clock-backward guard in generate() is not optional — it prevents duplicate IDs."}}
+
+{{mustKnow
+  "Clock backward <5ms: spin-wait until clock catches up (safe, sub-ms pause)"
+  "Clock backward >5ms: reject and raise exception (indicates serious clock issue)"
+  "Machine IDs must be globally unique — use ZooKeeper/etcd leases, not random assignment"
+}}
+
 {{phase 4 "Why Time-Sorted IDs Matter" "3 min"}}
 
 {{say "Time-sorted IDs are not just a nice-to-have. They have a direct, measurable impact on database performance."}}
@@ -177,6 +185,12 @@ assert ids == sorted(ids), "Snowflake IDs must be time-sorted"
 {{hint "rightmost leaf" "In a B-tree, sequential inserts always hit the same rightmost leaf page. The database keeps this page in the buffer pool (RAM). Random inserts scatter across all leaf pages, requiring disk I/O for pages that have been evicted. This is the core reason sequential IDs give 6x higher throughput than UUIDs."}}
 
 {{key "At scale, the difference between sequential and random primary keys is 5-10x in write throughput. This is why Twitter, Discord, and <a class=\"dqa-link\" href=\"/problem/instagram\">Instagram</a> all use Snowflake-style IDs instead of UUIDs."}}
+
+{{mustKnow
+  "Sequential IDs: inserts always go to rightmost B-tree leaf — only 1 page needs to be in buffer pool"
+  "Random IDs (UUID v4): scatter across all leaf pages — require entire index in RAM to avoid disk I/O"
+  "Snowflake achieves ~50K inserts/sec vs ~8K for UUID v4 — a 6x throughput advantage"
+}}
 
 {{phase 5 "Comparison: ID Generation Strategies" "5 min"}}
 
@@ -212,6 +226,17 @@ assert ids == sorted(ids), "Snowflake IDs must be time-sorted"
 }}
 
 {{hint "when UUID v4 is actually acceptable" "UUID v4 works fine when IDs are not used as primary keys or sort keys — for example, idempotency keys, correlation IDs in logs, or distributed trace IDs. In these cases the 16-byte overhead and random ordering do not matter because you only do point lookups by exact ID, never range scans or sorted inserts."}}
+
+{{goodToKnow
+  "UUID v7 (RFC 9562) combines time-sorting with 128-bit space — a modern compromise between Snowflake and UUID v4"
+  "ULID uses 48-bit ms timestamp + 80-bit random — no machine ID coordination but 128 bits"
+}}
+
+{{mustKnow
+  "Snowflake: 64-bit, time-sorted, 4M/sec, needs machine ID coordination — industry standard"
+  "UUID v4: 128-bit random, no coordination — only for non-PK use cases (idempotency keys, trace IDs)"
+  "ULID: 128-bit, time-sorted, no coordination — good when you cannot manage machine IDs"
+}}
 
 {{phase 6 "Production Variants" "3 min"}}
 

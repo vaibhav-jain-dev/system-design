@@ -235,6 +235,19 @@ def euclidean_distance(a: List[float], b: List[float]) -> float:
   (whatIf "you outgrow pgvector at 10M+ vectors" "Three options: partition pgvector by metadata field so each partition has its own smaller index. Migrate to Qdrant (open-source, self-host, similar SQL-like filtering). Migrate to Pinecone (zero-ops, higher cost). The migration is expensive — plan for it by versioning your embedding model in metadata from day one.")
 }}
 
+{{caveat "pgvector applies metadata filters AFTER the vector search, not before. If you request top-10 but your filter removes 8, you get only 2 results. Workaround: over-fetch (top-50, filter, take top-10) or use Qdrant which supports integrated pre-filtering."}}
+
+{{goodToKnow
+  "At 5M+ vectors, self-hosted Qdrant on EC2 becomes cheaper than Pinecone serverless"
+  "ChromaDB is an embedded library, not a database — no persistence, no replication, prototyping only"
+}}
+
+{{mustKnow
+  "pgvector for simplicity if already on Postgres (good to 10M vectors), Pinecone for zero-ops, Qdrant for performance + filtering"
+  "Factor in engineer time for self-hosting: 40 hrs/month at $100/hr = $4K/month hidden ops cost"
+  "Version your embedding model in metadata from day one — migration between vector stores under production load is painful"
+}}
+
 {{phase 5 "Complete Implementation with pgvector" "10 min"}}
 
 {{say `Complete, production-ready implementation with <span class="hl-blue">pgvector</span> — covers setup, ingestion, search, and metadata filtering:
@@ -454,6 +467,14 @@ class VectorStore:
   "Two approaches: row-level isolation (add a tenant_id column to the chunks table, index it, and always filter by tenant_id in queries — this is simple but puts all tenants in one table) or schema-level isolation (each tenant gets their own schema and table — more isolation but harder to manage at scale). Row-level with a composite index on (tenant_id, embedding) is sufficient for up to 10M vectors per tenant."
 }}
 
+{{collapseSection "pgvector HNSW Tuning Parameters" "HNSW has two build-time params (m and ef_construction) and one query-time param (ef_search). m=16: connections per node — higher means better recall but more memory and slower build. ef_construction=64: how many candidates to evaluate during index build — higher builds a better graph. ef_search (SET ivfflat.probes or SET hnsw.ef_search): how many candidates to evaluate during query — higher means better recall at higher latency. For 1M vectors: m=16, ef_construction=64, ef_search=40 gives 99% recall at 5ms query time."}}
+
+{{mustKnow
+  "Specify vector_cosine_ops when creating HNSW index — wrong operator class causes pgvector to fall back to sequential scan"
+  "JSONB @> containment operator enables metadata filtering in pgvector — index-supported with a GIN index"
+  "For multi-tenancy: row-level isolation with composite index on (tenant_id, embedding) handles up to 10M vectors per tenant"
+}}
+
 {{phase 6 "Embedding Pipeline for Production" "5 min"}}
 
 {{say `Production ingestion needs three capabilities beyond basic embedding:
@@ -561,6 +582,12 @@ class IncrementalIndexer:
   "OpenAI rate limits text-embedding-3-small at 5,000 RPM and 5M TPM. For 1M documents at 500 tokens each, you need 500M tokens — 100 minutes at max throughput. Use batch sizes of 2048 texts per request to minimize RPM usage. Add exponential backoff with jitter on 429 responses. For faster ingestion, request a rate limit increase or split across multiple API keys."
   "What happens if embedding fails mid-ingestion?"
   "The content hash tracking table acts as a checkpoint. Each document is individually tracked — if ingestion fails at document 500K of 1M, restart the job and the first 500K will be skipped (their hashes already match). This makes the pipeline idempotent. Wrap individual document ingestion in try/except and log failures to a dead-letter queue for retry."
+}}
+
+{{mustKnow
+  "Content hashing (SHA-256) detects changes and skips unchanged documents — saves 95% of re-indexing cost"
+  "Tag every vector with the embedding model version in metadata — enables incremental re-indexing on model upgrade"
+  "Idempotent ingestion: hash-based tracking makes pipeline restartable after failures without re-embedding already-indexed documents"
 }}
 
 {{phase 7 "Cost Analysis Deep Dive" "5 min"}}
