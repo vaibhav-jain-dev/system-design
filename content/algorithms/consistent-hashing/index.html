@@ -26,6 +26,12 @@
   "A cache stampede happens when many cache keys expire or are invalidated simultaneously, causing all their requests to hit the backend at once. Consistent hashing prevents it by limiting key movement to only the 1/N fraction owned by the changed node — the other N-1/N of keys remain on their servers undisturbed."
 }}
 
+{{mustKnow
+  "Modulo hashing remaps ~(N-1)/N keys on any topology change — catastrophic at scale"
+  "Consistent hashing moves only K/N keys when a node is added or removed"
+  "Thundering herd: mass cache miss causes all requests to hit DB simultaneously"
+}}
+
 {{phase 2 "The Hash Ring Concept" "5 min"}}
 
 {{say "Consistent hashing maps both servers and keys onto a circular hash space called a ring, ranging from 0 to 2^32. To find which server owns a key, walk clockwise from the key's hash position until you hit a server."}}
@@ -40,6 +46,12 @@
 }}
 
 {{hint "wrap-around" "The ring wraps: after the highest-position node, the next clockwise position is the lowest-position node. In code, after binary search returns an index equal to len(sorted_keys), wrap to index 0. This is the circular part of the ring."}}
+
+{{mustKnow
+  "Ring maps both keys and nodes to a circular 0–2^32 hash space"
+  "Key ownership: walk clockwise from key hash to find the first node"
+  "Lookup is O(log N) using binary search on sorted node positions"
+}}
 
 {{phase 3 "Virtual Nodes" "5 min"}}
 
@@ -67,6 +79,14 @@
   "With 1 physical node per ring position, random hash placement can leave one node owning 60% of the ring by chance. With 150 virtual nodes per physical server, each server has 150 random positions spread around the ring. By the law of large numbers, each server owns close to 1/N of the ring with standard deviation ~1/sqrt(150N)."
   "How much memory does a consistent hash ring use with 1000 servers and 200 vnodes each?"
   "200K ring entries at ~40 bytes each = 8 MB. The sorted_keys array (200K uint32 values) takes another 800 KB. Total is under 10 MB on every node that maintains the ring — a rounding error compared to cache data."
+}}
+
+{{caveat "Too many virtual nodes waste memory and slow down add/remove operations. 150-200 vnodes per server achieves ~8% load std dev. Going beyond 500 offers diminishing returns — the improvement from 500 to 1000 is only ~1.3% std dev."}}
+
+{{mustKnow
+  "150-200 virtual nodes per server is the production standard"
+  "Weighted nodes: assign more vnodes to more powerful servers (2x capacity = 2x vnodes)"
+  "Load std dev drops as 1/sqrt(vnodes) — diminishing returns beyond ~200"
 }}
 
 {{phase 4 "Full Python Implementation" "8 min"}}
@@ -151,6 +171,17 @@ ring.remove_node("cache-2")  # only its keys move clockwise
   (how "do you handle rebalancing when a node joins?" "The new node's vnodes are inserted into the ring. For each new vnode position, the key range it now owns was previously owned by the next clockwise node. You must migrate those keys from the old owner to the new node before traffic is routed to it.")
 }}
 
+{{goodToKnow
+  "sorted_keys.remove(h) in remove_node is O(N*vnodes) — production systems use a balanced BST or skip list for O(log N) removal"
+  "get_replicas must skip vnodes belonging to the same physical node to collect R distinct replicas"
+}}
+
+{{mustKnow
+  "Lookup: binary search on sorted ring positions — O(log(N * vnodes))"
+  "Replication: walk clockwise collecting R distinct physical nodes"
+  "Wrap-around: if binary search returns index == len(sorted_keys), wrap to index 0"
+}}
+
 {{phase 5 "Rebalancing Analysis" "5 min"}}
 
 {{say "The key property of consistent hashing is minimal disruption. When adding or removing a node with N total nodes, only K/N keys need to move on average."}}
@@ -181,6 +212,12 @@ ring.remove_node("cache-2")  # only its keys move clockwise
   "Exactly K/101 keys move, where K is the total key count. The new node claims roughly 1/101 of the ring from its clockwise neighbors. All other keys stay on their current nodes. Compare to modulo hashing where ~99% of keys would move."
   "How do you migrate keys to a new node without downtime?"
   "Use a two-phase migration: 1) Add the new node to the ring with 0 vnodes so it receives no traffic. 2) Incrementally add vnodes one at a time, migrating the key ranges before each vnode goes live. 3) Once all vnodes are live and keys are migrated, enable writes to the new node. The old owner serves reads during migration."
+}}
+
+{{mustKnow
+  "Adding 1 node to N-node cluster moves only K/(N+1) keys — all others stay"
+  "Virtual nodes distribute rebalancing load evenly across all existing nodes"
+  "Two-phase migration: add node with 0 vnodes, incrementally add vnodes while migrating keys"
 }}
 
 {{phase 6 "Comparison: Hashing Strategies" "5 min"}}
@@ -223,6 +260,15 @@ ring.remove_node("cache-2")  # only its keys move clockwise
   "Yes — walk clockwise from the key's ring position and store copies on the next R distinct physical nodes. With R=3 on a 10-node cluster, losing any single node still leaves 2 replicas available. <a class=\"dqa-link\" href=\"/fund/storage/dynamodb\">DynamoDB</a> and Cassandra both use this exact approach. The ring naturally determines replica placement without a separate coordination service."
 }}
 
+{{caveat "Rendezvous hashing has the same minimal-movement guarantee as consistent hashing but evaluates all N nodes per lookup. At N=1000, that is 1000 hash computations vs ~17 binary search comparisons. Only use rendezvous hashing below ~50 nodes."}}
+
+{{mustKnow
+  "Consistent hashing + vnodes: O(log N) lookup, K/N movement, weighted nodes — industry standard"
+  "Rendezvous hashing: same K/N movement but O(N) lookup — simpler for small clusters (<50 nodes)"
+  "Jump consistent hash: O(1) memory, O(ln N) time — but no arbitrary node removal or weights"
+  "Modulo hashing: never use in production — remaps ~99% of keys on topology change"
+}}
+
 {{phase 7 "Real-World Applications" "5 min"}}
 
 {{say "Consistent hashing appears in three main system design contexts: cache distribution, database sharding, and load balancing."}}
@@ -248,6 +294,12 @@ ring.remove_node("cache-2")  # only its keys move clockwise
 
 {{followup "How would you implement weighted consistent hashing?" "Assign more virtual nodes to more powerful servers. If server A has 2x the capacity of server B, give A 300 virtual nodes and B 150. Server A owns roughly twice the ring space and handles twice the keys. This is how heterogeneous clusters balance load across different hardware generations without any special logic in the lookup path."}}
 
+{{mustKnow
+  "DynamoDB, Cassandra, Redis Cluster, Memcached, Akamai CDN all use consistent hashing"
+  "Cassandra: Murmur3 hash of partition key determines token ring position; R=3 replication"
+  "Weighted nodes: more vnodes = more ring arcs = more keys — no special lookup logic needed"
+}}
+
 {{phase 8 "Interview Checklist" "2 min"}}
 
 {{say "Here is a summary of everything you should be prepared to discuss about consistent hashing in an interview."}}
@@ -261,6 +313,13 @@ ring.remove_node("cache-2")  # only its keys move clockwise
   "Replication: store each key on R consecutive clockwise physical nodes"
   "Rendezvous hashing is an alternative with O(N) lookup but simpler structure"
   "Used by: <a class=\"dqa-link\" href=\"/fund/storage/dynamodb\">DynamoDB</a>, Cassandra, Memcached, <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis Cluster</a>, CDNs"
+}}
+
+{{mustKnow
+  "Ring + virtual nodes + binary search = O(log N) lookup with K/N rebalancing"
+  "150-200 vnodes per server gives ~8% load std dev — the production sweet spot"
+  "Replication: walk clockwise for R distinct physical nodes; quorum reads for availability"
+  "Always quantify: adding 1 node to 10-node cluster moves 10% of keys, not 90%"
 }}
 
 {{key "Consistent hashing interviews test whether you understand why naive modulo fails at scale, how virtual nodes fix load imbalance, and how the ring minimizes data movement during cluster changes. Always quantify: adding a node to a 10-node cluster moves only 10% of keys, not 90%."}}

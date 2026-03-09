@@ -28,6 +28,14 @@ The result: full-text search across millions of documents in <span class='hl'>< 
   "What specific features does ES have that Postgres full-text search lacks?"
   "&lt;ul>&lt;li>&lt;strong>Fuzzy matching&lt;/strong> — Levenshtein-based typo tolerance built in; Postgres requires pg_trgm with manual threshold tuning&lt;/li>&lt;li>&lt;strong>Completion suggester&lt;/strong> — sub-ms prefix autocomplete via in-memory FST; no Postgres equivalent&lt;/li>&lt;li>&lt;strong>Distributed fan-out&lt;/strong> — queries shard across nodes; Postgres is single-node&lt;/li>&lt;li>&lt;strong>Aggregations&lt;/strong> — histogram, terms, nested bucket aggregations in one query; Postgres needs multiple GROUP BY queries&lt;/li>&lt;/ul>"}}
 
+{{mustKnow
+  "Inverted index: maps every word to its document list — O(1) lookup vs O(N) full scan with SQL LIKE"
+  "Full-text search across millions of documents in < 50ms with BM25 relevance scoring"
+  "ES is always a derived index — never the primary store; sync via CDC from primary DB"
+}}
+
+{{caveat "Elasticsearch has no transactions, no rollback, and a ~1 second indexing lag. Newly created content is not immediately searchable. Never use ES as the sole data store."}}
+
 {{phase 2 "Core Concepts" "5 min"}}
 
 {{say `Four key concepts:
@@ -67,6 +75,17 @@ The result: full-text search across millions of documents in <span class='hl'>< 
 {{triggerQs "Core Concepts Questions"
   "How many shards should you create for an index?"
   "Target &lt;span class='hl'>20-50 GB per shard&lt;/span>. For a 100 GB index: 3-5 shards. Rule: never over-shard. More shards means more merge overhead, more file handles, more coordination overhead per query. You can increase replicas for read scaling without recreating the index. Shard count is forever, replica count is adjustable."
+}}
+
+{{mustKnow
+  "Index = table, Document = row (JSON), Shard = partition (Lucene index), Replica = read replica"
+  "Shard count is fixed at index creation — target 30-50 GB per shard; over-sharding wastes resources"
+  "Analyzers are applied at index time and are immutable — choose before first write"
+}}
+
+{{goodToKnow
+  "Replicas can be added/removed online for read scaling without reindexing"
+  "Each shard consumes ~1-2 MB heap for metadata — stay under 1,000 shards per node"
 }}
 
 {{phase 3 "Query Types & Relevance" "6 min"}}
@@ -135,6 +154,14 @@ The result: full-text search across millions of documents in <span class='hl'>< 
   "Does fuzziness affect relevance scoring?"
   "Yes. Fuzzy matches are penalized in the BM25 score. An exact match on 'redis' scores higher than a fuzzy match on 'rediis' → 'redis'. The penalty is proportional to edit distance — 2 edits scores lower than 1 edit."}}
 
+{{mustKnow
+  "bool query: filter clauses (cacheable bitsets, no scoring) vs must clauses (BM25 scoring, not cached)"
+  "BM25 scores by term frequency, inverse document frequency, and field length normalization"
+  "Fuzzy matching uses Levenshtein edit distance — AUTO allows 0/1/2 edits by term length; 2-5x slower than exact"
+}}
+
+{{caveat "Using match instead of filter for exact/range conditions wastes CPU on scoring and bypasses the filter cache. A status=published filter adds ~0ms cached; in a must clause it recomputes BM25 every query (+5-15ms)."}}
+
 {{phase 4 "Indexing Pipeline" "4 min"}}
 
 {{say `Elasticsearch is a <strong>derived index</strong> — never the primary store. The standard pattern:
@@ -169,6 +196,17 @@ The result: full-text search across millions of documents in <span class='hl'>< 
   "Use CDC (Debezium/DynamoDB Streams) to sync changes reliably"
   "Design for ~1s indexing lag — do not use ES for real-time consistency"
   "Index only the fields you will search or aggregate — do not index everything"
+}}
+
+{{mustKnow
+  "CDC (Debezium/DynamoDB Streams) over dual writes — dual writes have no distributed transaction, causing inconsistencies"
+  "1-second refresh interval: documents indexed in the last <1s are not yet searchable (near-real-time, not real-time)"
+  "During bulk reindex: set refresh_interval=-1 to disable auto-refresh — reduces I/O by ~40%, speeds up 2-3x"
+}}
+
+{{goodToKnow
+  "At 10K writes/sec, even 0.1% dual-write failure rate = ~860 inconsistencies/day"
+  "Force refresh with ?refresh=true costs ~50ms — use only for critical paths, never as default"
 }}
 
 {{phase 5 "Autocomplete with ES" "4 min"}}
@@ -245,6 +283,14 @@ The result: full-text search across millions of documents in <span class='hl'>< 
   "What about typo-tolerant autocomplete?"
   "The completion suggester supports &lt;code>fuzzy&lt;/code> with configurable edit distance. Set &lt;code>fuzziness: 1&lt;/code> to match 'rdis' → 'redis'. Cost: fuzzy completion is &lt;span class='hl'>~3-5x slower&lt;/span> than exact prefix because it expands the FST traversal. For &lt;span class='hl'>&lt; 10M&lt;/span> completion terms, this is still under &lt;span class='hl'>5ms&lt;/span>."}}
 
+{{mustKnow
+  "Completion suggester: FST in memory, sub-ms prefix autocomplete — the fastest option for prefix matching"
+  "search_as_you_type: n-gram fields for infix matching ~10ms — use when users type middle-of-word queries"
+  "match_phrase_prefix: slowest (20-50ms) — avoid in production autocomplete"
+}}
+
+{{caveat "N-gram fields grow index size 5-8x. For 10M documents with 3 text fields, n-grams generate ~500M tokens. Use completion suggester (FST: ~200-500 MB heap for 10M terms) for prefix-only matching."}}
+
 {{phase 6 "Scaling Elasticsearch" "4 min"}}
 
 {{say `Three levers for scaling ES:
@@ -279,6 +325,17 @@ The result: full-text search across millions of documents in <span class='hl'>< 
   "Master node detects the failed node via missed heartbeats (30-60s default). Promotes replica shards on surviving nodes to primary. Re-allocates the failed node's primary shards across the cluster. The cluster goes from &lt;strong>green&lt;/strong> (all shards healthy) to &lt;strong>yellow&lt;/strong> (primaries OK, some replicas missing) to &lt;strong>green&lt;/strong> once re-replication completes. No data loss if at least one replica survived."
 }}
 
+{{mustKnow
+  "Three scaling levers: more replicas (read scale), more data nodes (capacity), index rollover (time-series)"
+  "3 master-eligible nodes minimum (odd number for quorum) — prevents split-brain"
+  "Index Lifecycle Management (ILM): hot → warm → cold → delete phases for time-series data"
+}}
+
+{{goodToKnow
+  "Dedicated coordinating nodes prevent data nodes from being overwhelmed by query merge overhead"
+  "Zero-downtime reindex: create new index, reindex docs, atomically swap alias — no query interruption"
+}}
+
 {{phase 7 "ES in System Design: Common Patterns" "3 min"}}
 
 {{say "Elasticsearch appears in almost every system design problem that involves search. The pattern is always the same: primary data lives in a database, ES is a derived index synced via change data capture or event streams."}}
@@ -306,6 +363,12 @@ The result: full-text search across millions of documents in <span class='hl'>< 
   "Index products with &lt;strong>keyword&lt;/strong> sub-fields for every filterable attribute (brand, category, color). Use &lt;code>bool.filter&lt;/code> for facets (cacheable bitsets) and &lt;code>bool.must&lt;/code> for the text query. Run a &lt;code>terms&lt;/code> aggregation on each facet field to compute counts. At &lt;span class='hl'>50M products&lt;/span>, this returns results + facet counts in &lt;span class='hl'>&lt; 50ms&lt;/span> — impossible with SQL GROUP BY across multiple dimensions."
   "When should you denormalize data into ES vs use nested or parent-child documents?"
   "Denormalize whenever possible — it is the fastest query path. Use &lt;strong>nested&lt;/strong> only when you need to query inner objects independently (e.g., 'find products where a review by user X has rating > 4'). Nested documents are stored as hidden Lucene documents — a product with &lt;span class='hl'>100 reviews&lt;/span> becomes &lt;span class='hl'>101 Lucene docs&lt;/span>. Parent-child (join field) is the slowest option: &lt;span class='hl'>5-10x slower&lt;/span> than denormalized queries. Use it only when child documents change independently and reindexing the parent is too expensive."
+}}
+
+{{mustKnow
+  "ES is always a secondary derived index — primary DB + CDC stream + ES is the canonical architecture"
+  "Alias switching pattern: create new index, reindex, atomically swap alias — the foundation of ES index management"
+  "Denormalize data into ES whenever possible — nested docs are 101 Lucene docs; parent-child is 5-10x slower"
 }}
 
 {{phase 8 "Trade-offs & Edge Cases" "3 min"}}
@@ -354,6 +417,14 @@ The result: full-text search across millions of documents in <span class='hl'>< 
   "What happens when ES runs out of JVM heap?"
   "The JVM triggers aggressive garbage collection — stop-the-world pauses of &lt;span class='hl'>10-30 seconds&lt;/span>. During GC pauses, the node appears dead to the cluster. If the pause exceeds the master's failure detection timeout (&lt;span class='hl'>30s default&lt;/span>), the master removes the node and starts reallocating its shards — causing a cascade. Fix: keep heap below &lt;span class='hl'>75%&lt;/span>, use circuit breakers (&lt;code>indices.breaker.total.limit: 70%&lt;/code>), and avoid fielddata on high-cardinality text fields."
 }}
+
+{{mustKnow
+  "JVM heap: 31 GB max — above 31 GB, compressed oops disabled and effective memory drops"
+  "Split-brain: 3 master-eligible nodes + automatic quorum prevents dual-master election"
+  "Skip ES when dataset < 5M docs and search is not core — Postgres GIN trigram index suffices at ~$150/mo vs ~$550/mo"
+}}
+
+{{collapseSection "ES Cluster Sizing Quick Reference" "For a 2 TB dataset: ~3 TB with replicas → 60-100 shards → 6-8 data nodes (r5.xlarge, 64 GB RAM each). Add 3 dedicated master nodes (r5.large) and 2 coordinating nodes. Heap: 31 GB max per node (compressed oops). Remaining RAM for OS file cache (Lucene segments are memory-mapped). Minimal production cluster (3 master + 3 data) costs ~$1,200/mo on AWS. Each additional data node adds ~$180/mo."}}
 
 {{checklist
   "ES is a derived index — primary DB is the source of truth, ES is the read-optimized view"

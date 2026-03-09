@@ -75,6 +75,20 @@
 </ul>`
 }}
 
+{{caveat "Fail-open vs fail-closed is NOT a global setting — it must be configurable per endpoint. Payment endpoints fail-closed; read-heavy APIs fail-open. Getting this wrong in either direction is a red flag in interviews."}}
+
+{{mustKnow
+  "Distributed rate limiting requires a shared store (Redis) — in-memory counters per server allow 2x the intended limit"
+  "Fail-open is the correct default; fail-closed only for security-critical endpoints like login and payments"
+  "Rate limit key hierarchy: API key > user ID > IP address — use the most specific identifier available"
+  "Three enforcement tiers: API gateway (coarse DDoS), service middleware (per-endpoint SLA), in-process (business logic)"
+}}
+
+{{goodToKnow
+  "IETF is standardizing RateLimit-* headers (without X- prefix) — mention this to show you follow evolving standards"
+  "Stripe, GitHub, and AWS all publish their rate limiting strategies — citing a real-world example strengthens your answer"
+}}
+
 {{phase 2 "Capacity Estimation" "3 min"}}
 
 {{say `Throughput math first — it drives the storage choice:
@@ -111,6 +125,14 @@ Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</
   <li><strong>Mitigation</strong>: fall back to in-process counters (approximate but <span class='hl'><0.1ms</span>) while you scale the cluster horizontally</li>
   <li>ElastiCache supports online resharding — add shards without downtime, but rebalancing takes <span class='hl'>10–30 minutes</span></li>
 </ul>`
+}}
+
+{{caveat "Do not conflate ops/sec with requests/sec when using Lua scripts. A single Lua script with 3 Redis commands counts as 1 op but replaces 3 round trips — your effective req/sec capacity is higher than raw ops/sec suggests."}}
+
+{{mustKnow
+  "Redis handles ~100K ops/s per node — capacity estimation drives the cluster sizing decision"
+  "Lua scripts reduce 3 round trips to 1, effectively doubling throughput for sliding window checks"
+  "Memory is rarely the bottleneck — 50M keys x 100 bytes = 5 GB fits in a single 13 GB node; sharding is for throughput"
 }}
 
 {{phase 3 "API Design with Rate Headers" "3 min"}}
@@ -334,6 +356,18 @@ Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</
 </ul>`
 }}
 
+{{caveat "X-RateLimit-Reset must be a Unix timestamp (absolute), not relative seconds. Using relative seconds causes clock-skew bugs across time zones. Retry-After is the one that uses relative seconds."}}
+
+{{mustKnow
+  "Rate headers go on EVERY response (200 and 429) — not just rejections"
+  "Three mandatory headers: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset"
+  "Retry-After (relative seconds) only appears on 429 responses — it tells clients exactly when to retry"
+}}
+
+{{goodToKnow
+  "The IETF RateLimit Fields draft (RFC 9110) standardizes these headers without the X- prefix — adoption is growing"
+}}
+
 {{phase 4 "Algorithm Deep Dive" "10 min"}}
 
 {{say "Four algorithms to compare — each trades off accuracy, memory usage, and burst tolerance differently:"}}
@@ -501,6 +535,29 @@ class SlidingWindowCounter:
 </ul>`
 }}
 
+{{caveat "Fixed Window's boundary burst problem is a classic interview trap. If you propose Fixed Window, the interviewer will ask about the 2x burst at window boundaries — have the Sliding Window Counter upgrade ready."}}
+
+{{collapseSection "Token Bucket vs Sliding Window Counter — Detailed Implementation Trade-offs" `
+<ul>
+  <li><strong>Token Bucket state</strong>: 2 fields (tokens float64 + last_refill timestamp) — requires floating-point math in Lua, which can accumulate precision errors over millions of refills</li>
+  <li><strong>Sliding Window Counter state</strong>: 2 integer counters (current + previous window) — INCR is atomic and exact; no floating-point drift</li>
+  <li><strong>Edge case</strong>: Token Bucket with very low refill rates (0.001 tokens/sec) can accumulate rounding errors over days — reset the bucket periodically or use integer math with a scaling factor</li>
+  <li><strong>Testing</strong>: Sliding Window Counter is easier to unit test — fixed timestamps produce deterministic results; Token Bucket requires mocking time.time() precisely</li>
+</ul>
+`}}
+
+{{mustKnow
+  "Four algorithms: Token Bucket, Sliding Window Counter, Fixed Window, Sliding Window Log — know trade-offs of each"
+  "Sliding Window Counter is the best default: O(1) memory, <1% error, no boundary burst"
+  "Token Bucket when burst tolerance is a product requirement (e.g., AWS API Gateway)"
+  "Fixed Window has a 2x boundary burst problem — never propose it without acknowledging this"
+}}
+
+{{goodToKnow
+  "GitHub uses dual-rate limiting: 5,000 req/hour (sliding window) + per-minute burst cap (token bucket)"
+  "Sliding Window Log is O(N) memory — only viable for very low limits like 5 login attempts per 15 minutes"
+}}
+
 {{phase 5 "Architecture (Hop-by-Hop)" "8 min"}}
 
 {{say `Three placement tiers — each trades latency for flexibility:
@@ -593,6 +650,23 @@ async def rate_limit_middleware(request: Request, call_next):
 </ul>`
 }}
 
+{{caveat "Load balancers should NOT do rate limiting — they lack shared state for distributed counting and coupling infrastructure config to business rules is an operational nightmare."}}
+
+{{collapseSection "Rate Limit Middleware Implementation Details" `
+<ul>
+  <li><strong>Connection pooling</strong>: Use a Redis connection pool (min 10, max 50 connections per app server) — creating a new TCP connection per rate check adds ~1ms overhead</li>
+  <li><strong>Timeout handling</strong>: Set Redis command timeout to 5ms — if the check takes longer, fall back to the configured fail-open/fail-closed policy</li>
+  <li><strong>Key construction</strong>: Build the rate limit key in the middleware: <code>rl:{tier}:{api_key}:{endpoint}:{window_start}</code> — include the endpoint so different endpoints can have different limits</li>
+  <li><strong>Header injection</strong>: Add rate limit headers in both the success and error paths — a common bug is only adding them on 429 responses</li>
+</ul>
+`}}
+
+{{mustKnow
+  "Three placement tiers: API gateway (DDoS), service middleware (SLA enforcement), in-process (business logic)"
+  "Rate limiter must add <1ms latency — Redis Lua scripts achieve this with a single round trip"
+  "On key extraction failure, fall back to the lowest-tier limit by IP — never skip rate limiting entirely"
+}}
+
 {{phase 6 "Distributed Rate Limiting" "8 min"}}
 
 {{say `The hard problem is distributed counting — accurate limits across multiple app servers, Redis nodes, and regions:
@@ -677,6 +751,20 @@ return {1, limit - count - 1, 0}
 </ul>`
 }}
 
+{{caveat "Redis hash tags force all keys for a user onto one shard. This is required for Lua atomicity but creates hot-key risk if one user generates disproportionate traffic — have the local in-memory fallback strategy ready."}}
+
+{{mustKnow
+  "Multi-region rate limiting requires async gossip sync — synchronous cross-region reads add 50-150ms per request"
+  "Lua scripts guarantee atomicity — without them, concurrent read-modify-write creates race conditions allowing 2x the limit"
+  "Redis hash tags ({user:123}) co-locate keys on the same shard — required for cross-key Lua scripts in Cluster mode"
+  "Accept slight over-counting (1.1-1.5x) during sync windows — exact global accuracy is not worth the latency cost"
+}}
+
+{{goodToKnow
+  "Cloudflare uses hierarchical sync: PoP-local → regional (~1s) → global (~5s), accepting up to 3x limit for a few seconds"
+  "EVALSHA sends only the 40-byte SHA1 hash instead of the full Lua script — reduces network bandwidth by ~92% per check"
+}}
+
 {{phase 7 "Data Model & Redis Schema" "3 min"}}
 
 {{say `The Redis data model depends on the algorithm. Three schemas:
@@ -720,6 +808,14 @@ return {1, limit - count - 1, 0}
   <li>Critical for incident response: if a customer is sending malicious traffic, you want to reduce their limit immediately</li>
   <li>Store rules as JSON keyed by <code>api_key</code> or tier; use a short <span class='hl'>60s in-process cache TTL</span> to avoid a Redis lookup on every request</li>
 </ul>`
+}}
+
+{{caveat "When switching algorithms for a live endpoint, old Redis keys have the wrong data structure. Let them expire naturally (within one window duration) rather than running a migration — rate limit keys have short TTLs by design."}}
+
+{{mustKnow
+  "Each algorithm maps to a natural Redis data structure: sliding window counter → string (INCR), token bucket → hash, sliding window log → sorted set"
+  "Memory comparison at 50M users: sliding window counter ~50 GB vs sorted set log ~250 GB — a 5x difference"
+  "TTL = window duration + buffer (e.g., 120s for a 60s window) to keep previous window available for weighted calculation"
 }}
 
 {{phase 8 "Redis Configuration" "3 min"}}
@@ -780,6 +876,22 @@ activedefrag: yes                 # Defragment memory proactively
 </ul>`
 }}
 
+{{collapseSection "ElastiCache Cluster Sizing & Configuration Details" `
+<ul>
+  <li><strong>Instance selection</strong>: r6g.large (2 vCPU, 13 GB) is the sweet spot — r6g.xlarge doubles cost but rate limiting is CPU-bound (Lua scripts), not memory-bound</li>
+  <li><strong>Replication</strong>: 1 replica per shard for HA; 2 replicas only if you need read replicas for analytics queries against rate limit data</li>
+  <li><strong>Parameter group tuning</strong>: <code>hz=100</code> increases event loop frequency from default 10 → faster expired key cleanup; <code>activedefrag=yes</code> prevents memory fragmentation from short-lived keys</li>
+  <li><strong>Maintenance window</strong>: Schedule during lowest-traffic hours; ElastiCache patches one node at a time with automatic failover</li>
+  <li><strong>Encryption</strong>: Enable in-transit encryption (TLS) for compliance but expect ~10% throughput reduction; in-memory encryption (at-rest) is free on r6g instances</li>
+</ul>
+`}}
+
+{{mustKnow
+  "Disable Redis persistence (RDB/AOF) for rate limiting — counters are ephemeral and rebuild from traffic within one window"
+  "volatile-lru eviction policy (not allkeys-lru) — only evicts keys with TTL, protecting non-ephemeral config data"
+  "Cluster mode for production: single shard maxes at ~100K ops/s; cluster gives horizontal scaling + automatic failover"
+}}
+
 {{phase 9 "Trade-offs & Edge Cases" "5 min"}}
 
 {{say "The algorithm is the easy part — the edge cases are where rate limiters fail in production. Here are the critical failure scenarios and how to handle them."}}
@@ -802,6 +914,10 @@ activedefrag: yes                 # Defragment memory proactively
   <li>This turns a thundering herd of retries into a <span class='hl'>smooth retry distribution</span> spread across the window</li>
   <li>Add <strong>jitter</strong> to Retry-After: <code>window_reset + rand(0, 10s)</code> to prevent all clients retrying at the exact same second</li>
 </ul>`}}
+
+{{caveat "Silent drops (dropping requests without a 429 response) look like network errors to clients — they retry immediately and harder, making overload worse. Always return an explicit 429 with Retry-After."}}
+
+{{caveat "IP-based rate limits alone are insufficient against distributed botnets. Layer IP limits with fingerprinting and behavioral analysis for unauthenticated endpoints."}}
 
 {{triggerQs "Questions this section might trigger"
   "How do you prevent rate limit circumvention through account farming — creating many accounts to multiply effective limits?"
@@ -826,6 +942,18 @@ activedefrag: yes                 # Defragment memory proactively
 </ul>`
 }}
 
+{{mustKnow
+  "Fail-open is correct for most services; fail-closed only for payment/login endpoints"
+  "429 + Retry-After is mandatory — silent drops cause immediate aggressive retries"
+  "Add jitter to Retry-After to prevent thundering herd at window reset"
+  "Idempotency keys prevent duplicate requests from consuming rate limit quota unfairly"
+}}
+
+{{goodToKnow
+  "Cost-based rate limiting (not request counting) is needed for batch and GraphQL APIs — GitHub uses query complexity scoring"
+  "Account farming defense requires correlated signals (payment method, device fingerprint, IP subnet) beyond simple per-key counting"
+}}
+
 {{phase 10 "Cost Estimates" "2 min"}}
 
 {{say "Rate limiting infrastructure: &lt;span class='hl'>~$580/month&lt;/span> for a 3-node ElastiCache cluster handling &lt;span class='hl'>300K ops/s&lt;/span>. Middleware overhead is &lt;span class='hl'>&lt;0.1ms per rate check&lt;/span> — the Redis cluster is the only dedicated line item."}}
@@ -848,6 +976,21 @@ activedefrag: yes                 # Defragment memory proactively
   "Build if: you need custom algorithms (per-tenant, per-endpoint, combined limits), your team can operate Redis clusters, and you want zero vendor lock-in. Buy (Kong, Apigee, AWS WAF) if: you need rate limiting in &lt;1 week, your team is &lt;5 engineers, or you need managed DDoS protection bundled. At &lt;span class='hl'>$50K+/year&lt;/span> for enterprise API gateways, the build option is cheaper if you already run Redis."
 }}
 
+{{collapseSection "Detailed Cost Breakdown by Component" `
+<ul>
+  <li><strong>ElastiCache r6g.large (6 nodes)</strong>: $97/node/month x 6 = $582/month — handles 300K+ ops/sec with Lua scripts</li>
+  <li><strong>Cross-AZ data transfer</strong>: 500K req/sec x 200 bytes x 86400 sec = ~8.6 TB/day, but replication traffic stays within the cluster; app-to-Redis cross-AZ is ~$30/month</li>
+  <li><strong>CloudWatch monitoring</strong>: ~$5/month for ElastiCache metrics (EngineCPUUtilization, CurrConnections, Evictions)</li>
+  <li><strong>App server overhead</strong>: Rate limit middleware adds ~0.1ms CPU per request — at $0.04/vCPU-hour, this is negligible vs the Redis cluster cost</li>
+  <li><strong>Scaling curve</strong>: 1M req/sec → 12 nodes (~$1,164/month); 5M req/sec → ~50 nodes (~$4,850/month); beyond 5M, evaluate Envoy's native rate limiting</li>
+</ul>
+`}}
+
+{{mustKnow
+  "Rate limiting infrastructure costs ~$580/month for 300K ops/sec — Redis cluster is the only significant line item"
+  "Build vs buy: build if you need custom algorithms and can operate Redis; buy if you need it in <1 week or team is <5 engineers"
+}}
+
 {{phase 11 "Sub-Problems & Building Blocks" "3 min"}}
 
 {{say "Six building blocks — algorithm selection, Redis atomicity, distributed sync, rule storage, header propagation, and monitoring — each is a sub-problem worth diving into if the interviewer asks."}}
@@ -868,6 +1011,12 @@ activedefrag: yes                 # Defragment memory proactively
 }}
 
 {{key "The rate limiter interview is about demonstrating you understand the algorithm trade-offs (Token Bucket vs Sliding Window), the distributed counting challenge (Lua atomicity, multi-region sync), and the operational details (fail-open, rate headers, monitoring). The algorithm implementation is just the starting point."}}
+
+{{mustKnow
+  "Six building blocks to be ready to dive into: algorithm selection, Redis atomicity, distributed sync, rule storage, header propagation, monitoring"
+  "Sliding Window Counter is the best default algorithm; Token Bucket when burst tolerance is required"
+  "Fail-open for most services, fail-closed for payment/security endpoints — this is a per-endpoint config, not global"
+}}
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 

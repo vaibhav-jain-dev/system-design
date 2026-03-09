@@ -39,6 +39,10 @@ Does that align?`}}
   "Group bookings go through a separate async flow with higher lock timeout (30 minutes) and manual confirmation. They're queued through a separate path, not the real-time lock flow, to avoid starving individual users."
 }}
 
+{{caveat "Do not conflate availability of the seat map (eventually consistent, 5s stale is fine) with availability of the lock (must be strongly consistent). Interviewers test whether you understand this distinction."}}
+
+{{mustKnow "The core problem is a distributed lock with a payment window — 100K users contending for 500 seats at a 200:1 ratio" "Redis SET NX is the serialization point — atomic, O(1), no retry storm unlike Postgres SERIALIZABLE" "Seat lock TTL of 10 minutes covers 99th percentile payment completion; auto-expiry means zero manual cleanup" "Two consistency models: strong for locks (Redis SET NX), eventual for seat map display (Redis cache + Pub/Sub)"}}
+
 {{phase 2 "APIs" "4 min"}}
 
 {{say `Three API groups:
@@ -250,6 +254,19 @@ Booking APIs are the most sensitive — they interact with seat locks and paymen
 
 {{hint "why split lock and confirm into two calls" "Payment is handled by the gateway and takes 2–5 seconds. During that time, the seat must stay locked. If we did lock+confirm atomically, we'd hold a database transaction for 5 seconds — blocking all other operations on those seat rows. Two-phase: lock (Redis, instant), pay (gateway, 2–5s), confirm (DB write, &lt; 100ms)."}}
 
+{{caveat "Idempotency-Key is not optional — without it, a network timeout + retry creates duplicate locks. Interviewers will probe whether you handle retry semantics correctly on mutating endpoints."}}
+
+{{collapseSection "Detailed API Response Headers" `
+<ul>
+  <li><strong>POST /bookings/lock 200:</strong> <code>X-Lock-Expires: 2026-03-05T14:10:00Z</code>, <code>X-Idempotent: true</code></li>
+  <li><strong>POST /bookings/confirm 200:</strong> <code>X-Ticket-URL: /bookings/{id}/ticket</code> (available after async QR generation)</li>
+  <li><strong>GET /shows/{id}/seats 200:</strong> <code>Cache-Control: max-age=5</code>, <code>X-WS-Channel: seats:{show_id}</code></li>
+  <li><strong>POST /payments/webhook 200:</strong> Always return 200 to gateway on duplicates — returning 4xx causes infinite retries</li>
+</ul>
+`}}
+
+{{mustKnow "Two-phase booking: lock (Redis, instant) then confirm (Postgres, after payment) — never hold a DB transaction during payment" "Idempotency-Key on POST /bookings/lock prevents duplicate locks on network retry" "Webhook is the payment confirmation path — not synchronous API calls; always return 200 to gateway even on duplicates" "409 Conflict for seat unavailability, 410 Gone for expired locks — distinct failure modes with distinct client handling"}}
+
 {{phase 3 "Seat Locking" "6 min"}}
 
 {{say `Seat locking uses <span class="hl-blue">Redis SET NX EX</span> — set if not exists with expiry:
@@ -327,6 +344,12 @@ def release_lock(show_id: str, seat_ids: list[str], lock_token: str):
   "All-or-nothing: if any seat fails to lock, we rollback all successful locks in the same request using the Lua check-and-delete script. Return 409. User sees which seat was unavailable and can choose alternatives."
 }}
 
+{{caveat "The Lua check-and-delete script for lock release is not optional — a raw DEL without value checking can delete another user's valid lock after TTL expiry, causing a phantom available seat and potential double-booking."}}
+
+{{goodToKnow "Redlock across 3 independent Redis nodes provides safety against single-node failure during async replication — single-node SET NX can silently lose a lock on failover" "For Redis Cluster with hash tags, all seat locks for one show land on one shard — enabling atomic multi-seat operations but creating a hot-shard risk for viral events"}}
+
+{{mustKnow "SET NX EX is the atomic lock primitive — set-if-not-exists with TTL, O(1), no race condition possible" "Lock release must use Lua script for atomic check-and-delete: verify the lock value matches before deleting" "Multi-seat locking is all-or-nothing: if any seat fails, rollback all previously acquired locks in the same request" "Lock value encodes lock_token:user_id — the token proves ownership; prevents one user from releasing another's lock"}}
+
 {{phase 4 "Architecture" "6 min"}}
 
 {{say `Three tiers:
@@ -358,6 +381,16 @@ Payment flows through <strong>async webhooks</strong> — not synchronous calls 
   "What's the read vs write split strategy?"
   "Reads: Show browsing → CloudFront CDN → Postgres read replicas (3 replicas). Seat map → Redis cache with 5s TTL + WebSocket invalidation. Writes: Seat locks → Redis Cluster. Booking confirm → Postgres primary (only path needing primary). This routing concentrates primary writes to &lt; 600/sec under normal load."
 }}
+
+{{collapseSection "CDN Cost Analysis" `
+<ul>
+  <li><strong>Without CDN:</strong> 500M browse requests/month × $0.004/10K requests = ~$200K/mo in origin compute + $50K data transfer</li>
+  <li><strong>With CloudFront:</strong> 90% cache hit rate → origin receives 50M requests. CloudFront cost: ~$2K/mo. Origin compute: ~$20K/mo. Net savings: ~$228K/mo</li>
+  <li><strong>Cache invalidation:</strong> New showtimes added hours before — invalidate via CloudFront API or short TTL (60s). Not latency-sensitive.</li>
+</ul>
+`}}
+
+{{mustKnow "Three-tier architecture: Edge (CDN for browse), API (Booking Service is critical path), Data (Redis for locks, Postgres for bookings)" "Payment is async via webhooks — never synchronous in the critical path; avoids holding connections for 2-5 seconds" "Read/write split: CDN + Redis cache + read replicas for reads; Redis Cluster + Postgres primary for writes" "Postgres SERIALIZABLE is the final safety net for booking confirmation — even if Redis state is stale"}}
 
 {{phase 5 "Data Model" "5 min"}}
 
@@ -403,6 +436,12 @@ CREATE INDEX idx_bookings_show_active
 )}}
 
 {{hint "seat_ids as UUID array" "Storing seat_ids as a Postgres array (UUID[]) avoids a join table for the common query 'which seats does this booking hold'. The downside: you can't index individual seat IDs within an array. For the availability query, we use the reverse lookup: show all bookings that contain this seat, which requires a GIN index on seat_ids."}}
+
+{{caveat "The partial index WHERE status IN ('locked', 'confirmed') is critical — without it, the seat availability query scans all historical bookings including millions of expired/cancelled rows, degrading from 10ms to 500ms+."}}
+
+{{goodToKnow "GIN index on seat_ids array enables 'which bookings contain seat X?' queries — needed for the availability JOIN but adds ~20% write overhead on booking inserts" "Booking state machine is monotonic: available → locked → confirmed | expired — no backward transitions, which simplifies conflict detection"}}
+
+{{mustKnow "Seat locks live in Redis (source of truth during checkout); confirmed bookings live in Postgres (durable source of truth)" "Partial index on bookings(show_id, status) WHERE status IN ('locked', 'confirmed') keeps the availability query fast" "Entity hierarchy: theatres → screens → seats (static) and shows → bookings → payments → tickets (transactional)" "Redis cache with 5s TTL for seat map views — 90% hit rate; acceptable staleness for display purposes"}}
 
 {{phase 6 "Rush Handling" "5 min"}}
 
@@ -454,6 +493,12 @@ def dequeue_batch(show_id: str, batch_size=1000):
   "How do you prevent queue position manipulation or users jumping the queue?"
   "Queue position is server-side only — the client gets a position number but cannot modify it. The dequeue process runs server-side and emits 'your turn' notifications based on position order. There is no client-side trust in the queue logic. Additionally, one user_id gets one queue position — duplicate entries are rejected via the Redis SETNX pattern."
 }}
+
+{{caveat "Without a virtual queue, 100K simultaneous lock attempts create a thundering herd on Redis and the booking service. The queue is not just a UX feature — it is a load protection mechanism that meters admission to 1K/sec."}}
+
+{{goodToKnow "~15% of seat locks expire without payment completion — these seats re-enter the pool automatically via TTL, feeding the waitlist" "Queue position is calculated as (position - available_seats) / dequeue_rate — gives users an accurate wait estimate"}}
+
+{{mustKnow "Virtual queue with metered dequeue (1K/sec) prevents thundering herd — converts 100K simultaneous requests into a controlled flow" "Queue is backed by Redis INCR (1M+ ops/sec) — the queue itself is never the bottleneck" "Queue position is server-side only; one user_id gets one position (SETNX prevents duplicates)" "Users who get 'your turn' have 5 minutes to complete seat selection — expired turns are recycled"}}
 
 {{phase 7 "Payment Flow" "5 min"}}
 
@@ -534,6 +579,19 @@ def handle_payment_webhook(request):
   "Never partially book. If any seat in a multi-seat booking is unavailable at confirmation time, refund the entire payment. The user re-books with available seats. This avoids the complexity of partial orders and ensures the user gets the seats they want together. The auto-refund happens in under 5 seconds — most users don't notice."
 }}
 
+{{collapseSection "Payment Gateway Integration Details" `
+<ul>
+  <li><strong>Stripe:</strong> Create PaymentIntent with metadata (lock_token, show_id) → embed Stripe Elements → webhook on payment_intent.succeeded</li>
+  <li><strong>Razorpay:</strong> Create Order → embed Razorpay checkout.js → webhook with X-Razorpay-Signature HMAC verification</li>
+  <li><strong>Retry policy:</strong> Gateways retry failed webhook deliveries with exponential backoff (1min, 5min, 30min, 2hr). Always return 200 on duplicate — 4xx/5xx triggers retries</li>
+  <li><strong>Reconciliation:</strong> Cron job every 10 minutes: find bookings in 'locked' state with age > 12 minutes → poll gateway API for payment status → auto-confirm or auto-expire</li>
+</ul>
+`}}
+
+{{caveat "Always return HTTP 200 to the payment gateway webhook, even on duplicate or already-processed events. Returning 4xx causes the gateway to retry indefinitely, potentially creating cascading failures."}}
+
+{{mustKnow "Webhook handler re-checks seat lock validity before confirming — guards against lock-expired-then-re-locked edge case" "Three webhook sub-cases: seat still unbooked (proceed), seat re-locked by another user (refund), seat confirmed by another (refund)" "Idempotency on payment confirmation: UNIQUE constraint on gateway_txn_id prevents double-processing" "Reconciliation job catches lost webhooks: scans 'locked' bookings older than 12 minutes, polls gateway API"}}
+
 {{phase 8 "Real-Time Seats" "4 min"}}
 
 {{say `Real-time seat map uses <strong>Redis Pub/Sub</strong> to fan out seat state changes:
@@ -576,6 +634,10 @@ async def seat_map_ws(websocket, show_id: str):
 
 {{hint "handling WebSocket reconnects" "If a client disconnects and reconnects, they might have missed seat events. On reconnect, the client fetches fresh seat map state (GET /shows/{id}/seats from Redis cache). Then subscribes to Pub/Sub for deltas. This 'initial state + deltas' pattern is standard for real-time collaborative UIs."}}
 
+{{caveat "Redis Pub/Sub is fire-and-forget — if a WebSocket server is down when an event publishes, those clients miss the update permanently. The 'initial state + deltas' reconnect pattern is mandatory, not optional."}}
+
+{{mustKnow "Redis Pub/Sub fans out seat state changes to all WebSocket-connected clients in < 10ms — no polling needed" "Initial state + deltas pattern: on connect/reconnect, fetch full seat map first, then subscribe to Pub/Sub channel for incremental updates" "Pub/Sub is fire-and-forget — missed events are recovered by the initial state fetch on reconnect" "50K concurrent seat map viewers generate zero database reads — all served from Redis cache + Pub/Sub push"}}
+
 {{phase 9 "Scaling" "4 min"}}
 
 {{say `Two distinct scaling paths:
@@ -605,6 +667,21 @@ Redis is sharded by <strong>show_id</strong> (hash tags) so one popular show doe
   "What is the maximum number of concurrent bookings the system can handle?"
   "The bottleneck is PostgreSQL write throughput for booking confirmations. A tuned Postgres primary on db.r6g.2xlarge handles approximately 2,000 confirmed writes/sec with connection pooling. At 2 seats per booking, that is 4,000 seats confirmed per second. For events larger than this, batch multiple seat confirmations into a single transaction or use DynamoDB for the confirmation layer."
 }}
+
+{{collapseSection "Infrastructure Cost Estimates" `
+<ul>
+  <li><strong>Redis Cluster (6 nodes, r6g.large):</strong> ~$550/mo — handles all seat locks + cache + Pub/Sub</li>
+  <li><strong>PostgreSQL (db.r6g.2xlarge primary + 3 read replicas):</strong> ~$2,400/mo</li>
+  <li><strong>ECS Booking Service (50 tasks at peak, 10 baseline):</strong> ~$800/mo average with auto-scaling</li>
+  <li><strong>CloudFront:</strong> ~$2K/mo for 500M browse requests</li>
+  <li><strong>WebSocket fleet (20 instances at peak):</strong> ~$600/mo</li>
+  <li><strong>Total:</strong> ~$6,350/mo for a system handling 500K bookings/day</li>
+</ul>
+`}}
+
+{{goodToKnow "Redis hash tags ({show_id}:seat:{seat_id}) isolate one show's locks to one shard — a dedicated Redis cluster can be spun up for extreme events like Taylor Swift tours" "Postgres write bottleneck at ~2,000 confirms/sec can be extended with batched transactions or DynamoDB conditional writes for the confirmation layer"}}
+
+{{mustKnow "Read path scales horizontally: CDN → Redis cache → read replicas; write path has two bottlenecks: Redis Cluster and Postgres primary" "Redis sharding by show_id via hash tags keeps all seat locks for one show on one shard — enables atomic multi-seat operations" "Postgres primary handles ~2,000 confirmed writes/sec — this is the hard ceiling for booking throughput" "WebSocket fleet scales independently; sticky sessions route clients to the same server for Pub/Sub subscription continuity"}}
 
 {{phase 10 "QR Generation" "3 min"}}
 
@@ -670,6 +747,20 @@ def validate_ticket(token_prefix: str, booking_id_suffix: str) -> dict:
 
 {{hint "why HMAC not UUID for QR token" "A UUID is random but doesn't bind to specific booking data — a stolen UUID is a valid ticket for any booking. HMAC binds the token to (booking_id + show_date + secret). Without the secret, an attacker can't forge a valid token even if they know the booking_id."}}
 
+{{collapseSection "QR Code Technical Specifications" `
+<ul>
+  <li><strong>QR Version 6:</strong> 41x41 modules, handles up to 195 alphanumeric characters — sufficient for the compact JSON payload (~200 bytes)</li>
+  <li><strong>Error correction M:</strong> 15% of codewords can be restored — balances scan reliability vs data capacity</li>
+  <li><strong>Payload format:</strong> <code>{"t":"&lt;token_prefix&gt;","b":"&lt;booking_suffix&gt;","s":["A1","A2"]}</code> — minimal data for lookup + display</li>
+  <li><strong>S3 storage:</strong> ~5KB per QR PNG × 500K bookings/day = ~2.5GB/day, ~75GB/month ($1.73/mo S3 Standard)</li>
+  <li><strong>CloudFront delivery:</strong> QR images are immutable — Cache-Control: max-age=31536000 (1 year), no invalidation needed</li>
+</ul>
+`}}
+
+{{goodToKnow "Venue validation endpoint must handle offline-ish scenarios — pre-cache validated tokens on the scanner device for the current show's bookings" "Token prefix (16 chars) + booking suffix (8 chars) is enough for unique lookup — avoids encoding the full 64-char HMAC in the QR"}}
+
+{{mustKnow "HMAC-SHA256 binds the QR token to booking_id + show_date + secret — unforgeable without the secret key, unlike random UUIDs" "QR generation is async via SQS + workers — never blocks the booking confirmation path" "Venue validation is a simple GET endpoint: look up token prefix, verify not already scanned, mark as used" "S3 + CloudFront for QR image delivery — static, immutable, cached indefinitely"}}
+
 {{phase 11 "Anti-Scalping" "4 min"}}
 
 {{say `Bot scalpers try to buy all premium seats for resale — defense is layered:
@@ -694,6 +785,12 @@ Bot traffic detected by behavior patterns: <span class="hl-red">sub-second lock 
 }}
 
 {{checklist "Anti-scalping checklist" "WAF rate limit: 100 requests/minute per IP for booking endpoints" "reCAPTCHA v3 score > 0.7 required for lock attempts on high-demand shows" "Max 6 seats per user per show enforced at API layer" "Device fingerprint: max 3 accounts per device for high-demand bookings" "Session velocity: max 3 lock attempts per session per show" "Purchase history: flag accounts with > 20 bookings/month for review"}}
+
+{{caveat "Anti-scalping measures that are too aggressive block legitimate users — a family of 4 on 4 phones is not a bot ring. Device fingerprints and IPs are signals for scoring, not hard blockers. The business limit (6 tickets per user per show) is the real enforcement."}}
+
+{{goodToKnow "reCAPTCHA v3 is score-based (0.0-1.0) and invisible — no checkbox friction; threshold of 0.7 balances false positive rate vs bot detection" "ID verification for ticket-to-person binding prevents secondary market resale but adds 30-60 seconds of friction — only appropriate for high-value events"}}
+
+{{mustKnow "Defense in depth: WAF (edge rate limit) → reCAPTCHA v3 (bot scoring) → device fingerprint (multi-account detection) → business limits (6 seats/user/show)" "IP-based rate limiting alone is insufficient — scalpers use residential proxy networks with millions of IPs" "Business logic limits are the hard enforcement; device/IP signals are soft scoring inputs" "Sub-second lock attempts across multiple accounts from the same IP cluster is the primary bot detection signal"}}
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 

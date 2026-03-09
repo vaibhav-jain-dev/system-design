@@ -23,6 +23,12 @@
   "Track false positive rate as a metric. When a guardrail blocks too many legitimate requests (over 2%), either tune the threshold or add a secondary check for borderline cases before blocking. Always log blocked requests so you can review patterns and tune regularly. Over-aggressive guardrails harm user experience as much as under-aggressive ones."
 }}
 
+{{mustKnow
+  "Guardrails = input and output validation layers around LLM calls — middleware for LLM applications"
+  "System prompts can be overridden by prompt injection — they are a first line of defense, not a complete safety solution"
+  "Run cheap checks first (regex, length) then expensive checks (LLM classifiers) — saves 90% of guardrail cost"
+}}
+
 {{phase 2 "Input Guardrails" "8 min"}}
 
 {{say `Input guardrails protect your LLM from dangerous, abusive, or costly inputs — run them <strong>cheapest first</strong>:
@@ -206,6 +212,14 @@ class InputGuardrails:
             pii_found=pii_found,
         )
 `}}
+
+{{caveat "Sequential short-circuiting is critical — if you run all checks in parallel, a cost attacker sending 1M garbage requests burns through your LLM classifier budget before any regex fires."}}
+
+{{mustKnow
+  "Order input guardrails cheapest-first: length (<1ms) then PII (5-20ms) then topic (10-50ms) then injection classifier (200-500ms)"
+  "Mask PII instead of blocking — most users who send PII are asking legitimate questions, not attacking"
+  "At 100K requests/day, expect 5-15% to contain at least one PII pattern"
+}}
 
 {{phase 3 "Output Guardrails" "8 min"}}
 
@@ -402,6 +416,17 @@ class OutputGuardrails:
   "Format validation and PII detection are free — regex runs locally in under 1ms. Content safety via the OpenAI Moderation API is free and adds 100-200ms. The hallucination check (LLM-as-judge with gpt-4o-mini) costs $0.50 per 1000 requests and adds 500-1000ms — run this only for RAG apps. Total overhead for a typical request is under $0.001 and 200-300ms."
 }}
 
+{{goodToKnow
+  "OpenAI Moderation API is free and catches most content safety issues — run on every output"
+  "Cross-validate hallucination check by verifying key claims appear verbatim in source context using string matching"
+}}
+
+{{mustKnow
+  "Output guardrails are harder than input — the LLM output space is unbounded, regex alone is insufficient"
+  "Retry failed outputs up to 2 times with specific violation feedback — blind retries fix only 50%, informed retries fix 85%"
+  "Hallucination check (LLM-as-judge) costs $0.50/1K requests at 500-1000ms — only for RAG applications"
+}}
+
 {{phase 4 "Prompt Injection Defense In Depth" "8 min"}}
 
 {{say `<span class="hl-red">Prompt injection</span> is the most dangerous attack on LLM applications:
@@ -530,6 +555,15 @@ class PromptInjectionDetector:
   "Analyze the full conversation history, not just the latest message. An attacker may spread an injection across 5-10 messages that individually look benign. Concatenate the last N messages and run the injection detector on the combined text. Set N based on your context window — typically the last &lt;span class='hl'>5 turns&lt;/span> or &lt;span class='hl'>2000 tokens&lt;/span>, whichever is smaller."
   "What accuracy do injection classifiers achieve in practice?"
   "State-of-the-art LLM-based classifiers reach &lt;span class='hl'>~95% true positive rate&lt;/span> with a &lt;span class='hl'>~3% false positive rate&lt;/span> on standard benchmarks. Regex heuristics alone catch &lt;span class='hl'>~70-80%&lt;/span> of known patterns but miss novel attacks. The multi-layer approach (regex + LLM) achieves &lt;span class='hl'>~98% detection&lt;/span> at the cost of higher latency on suspicious inputs."
+}}
+
+{{caveat "Injection detection should fail closed — block the request if the detector cannot determine safety. A false positive costs one user retry. A false negative can leak data or execute unintended actions."}}
+
+{{mustKnow
+  "Prompt injection is the most dangerous attack on LLM applications — no single defense is sufficient"
+  "Multi-layer defense: regex heuristics (80% catch rate) then LLM classifier (catches subtle attacks) then output monitoring"
+  "Direct injection comes from user input. Indirect injection is embedded in documents the LLM retrieves — much harder to defend"
+  "Add a decoding step (Base64, Unicode normalization) before heuristic checks — attackers routinely use encoding to bypass filters"
 }}
 
 {{phase 5 "Complete Guardrail Pipeline" "8 min"}}
@@ -689,6 +723,14 @@ class GuardedLLM:
   "Use a priority hierarchy: content safety overrides format validation, and injection detection overrides everything. If the injection detector says block but the content safety classifier says safe, block the request — injection is the higher-severity threat. Log disagreements for human review to improve the weaker classifier."
 }}
 
+{{collapseSection "Streaming Response Guardrails" "Streaming adds complexity: you cannot validate the full response before the user sees it. Buffer tokens until you have enough content to run safety checks (every 50-100 tokens or after each sentence). If a check fails mid-stream, stop the stream and replace with a safe fallback. For latency-sensitive apps, run a lightweight check on each chunk and a full check on the complete response. This means the user may see partial unsafe content before the stream is cut — for high-risk applications, buffer the entire response before streaming."}}
+
+{{mustKnow
+  "Complete pipeline: input guardrails (block bad requests) then LLM call (with sanitized input) then output guardrails (validate before user sees it)"
+  "Cap output retries at 2 — each retry costs a full LLM inference pass. Return a safe fallback message after exhausting retries"
+  "Log all guardrail decisions (passes and blocks) — if block rate drops suddenly, attackers may have found a bypass"
+}}
+
 {{phase 6 "Common Attacks & Defenses" "5 min"}}
 
 {{say "Six attack types target LLM applications — each has a specific defense. Interviewers expect you to name both the attack vector and the mitigation:"}}
@@ -720,6 +762,14 @@ class GuardedLLM:
   "Direct injection comes from the user's own input — the attacker types 'ignore your instructions' into the chat box. Indirect injection is embedded in external data the LLM retrieves: a malicious instruction hidden in a PDF, email, or web page that the RAG pipeline fetches. Direct injection is caught by input guardrails. Indirect injection bypasses input guardrails entirely because the payload arrives through the retrieval pipeline. You must scan retrieved chunks for injection patterns before including them in the prompt, and use XML delimiters to separate data from instructions."
 }}
 
+{{caveat "Indirect injection is the hardest attack to defend because the adversarial payload arrives via the retrieval pipeline, not the user's input. Input guardrails never see it. You must also scan retrieved chunks before including them in the prompt."}}
+
+{{mustKnow
+  "Six attack types: prompt injection, jailbreaking, data exfiltration, cost attack, denial of service, indirect injection"
+  "Use XML delimiters to separate retrieved data from instructions — reduces successful indirect injection by 60-70%"
+  "Scan retrieved chunks at indexing time AND query time — a malicious document in your RAG corpus bypasses all input guardrails"
+}}
+
 {{phase 7 "Cost and Latency Analysis" "5 min"}}
 
 {{say `Guardrails add latency and cost to every request — here is the full budget breakdown for informed trade-offs:
@@ -744,6 +794,12 @@ class GuardedLLM:
 {{think "Total guardrail overhead for a typical request: 50-300ms and under $0.001. The hallucination check is the expensive outlier at $0.50 per 1000 requests — but it only applies to RAG. The cost of NOT having guardrails is much higher: a single PII leak or harmful output can trigger incident response costing thousands and permanent reputation damage."
   (whatIf "hallucination check latency is unacceptable" "Run it asynchronously. Return the LLM response immediately, then run the hallucination check in the background. If it fails, send a follow-up message or flag the response in the UI. This works for use cases where a brief delay in flagging is acceptable, like a review-before-sending workflow.")
   (how "tune guardrail thresholds" "Set thresholds based on measured false positive rates on production traffic. Start strict (high sensitivity), then loosen based on what you learn. Track: input_block_rate (should be under 10%), output_block_rate (under 5%), false_positive_rate (under 2%). Alert when any rate deviates more than 2x from baseline.")
+}}
+
+{{mustKnow
+  "Typical guardrail overhead: 50-300ms and <$0.001 per request for most applications"
+  "Hallucination check is the expensive outlier: $0.50/1K requests at 500-1000ms — RAG only"
+  "The cost of not having guardrails is far higher: one PII leak costs thousands in incident response"
 }}
 
 {{phase 8 "Monitoring, Improvement & Interview Q&A" "10 min"}}
@@ -851,6 +907,19 @@ class GuardrailMonitor:
 }}
 
 {{followup "How would you handle PII that needs to stay in context for the LLM to give a useful answer?" "Tokenized PII with a lookup table. Replace PII with tokens (SSN_1, EMAIL_1) before sending to the LLM. The LLM reasons about the token references. Before returning the response to the user, replace the tokens back with the original values. This lets the model say 'The account for SSN_1 is overdue' which you then render as 'The account for 123-45-6789 is overdue' only for the authorized user. The LLM never sees raw PII and your logs never capture it."}}
+
+{{collapseSection "Multi-Tenant Guardrail Configuration" "Per-tenant guardrail configs stored in a database keyed by tenant ID. Each tenant gets: custom topic allowlists/blocklists, PII handling preferences (mask vs tokenize vs block), output format requirements, and custom injection patterns for their domain. Load config at request time. An enterprise customer can block financial advice while a healthcare customer blocks non-medical topics. Shared infrastructure, customized safety. Use feature flags to roll out new guardrail rules gradually per tenant."}}
+
+{{goodToKnow
+  "Tokenized PII (SSN_1, EMAIL_1) with a lookup table lets the LLM reason about PII without seeing raw values"
+  "Per-tenant guardrail configs enable shared infrastructure with customized safety rules per customer"
+}}
+
+{{mustKnow
+  "Track three key metrics: input_block_rate (<10%), false_positive_rate (<2%), injection_attempt_rate (>1% = investigate)"
+  "Start strict then loosen — alert when any rate deviates more than 2x from baseline"
+  "Defense in depth: no single guardrail layer catches everything — combine heuristics, classifiers, and output monitoring"
+}}
 
 {{checklist
   "PII detection on BOTH input and output (regex + NER model)"

@@ -28,6 +28,12 @@
   "Token bucket when clients have bursty traffic patterns — mobile apps, batch jobs, retry storms after outages. Leaky bucket when the downstream system needs a smooth, predictable input rate — video encoding pipelines, payment processors, or any queue-based consumer. Most API gateways use token bucket."
 }}
 
+{{mustKnow
+  "Two independent knobs: bucket_size (burst tolerance) and refill_rate (sustained throughput)"
+  "Token bucket allows controlled bursts — tokens accumulate during idle time"
+  "Leaky bucket smooths all bursts to a fixed output rate — use for traffic shaping"
+}}
+
 {{phase 2 "The Algorithm" "3 min"}}
 
 {{say "The algorithm uses lazy refill: instead of running a background timer to add tokens, we calculate how many tokens should have been added since the last request."}}
@@ -48,6 +54,14 @@
 }}
 
 {{hint "time.monotonic vs time.time" "Use time.monotonic() for the single-server implementation. It is guaranteed never to go backward (unlike time.time() which NTP can adjust). For the Redis implementation, time.time() is necessary because all servers must share the same clock reference."}}
+
+{{caveat "Without the min(bucket_size, ...) cap on refill, an idle client could accumulate unlimited tokens and fire millions of requests at once. The cap is essential — it enforces the burst limit regardless of how long the client has been idle."}}
+
+{{mustKnow
+  "Lazy refill: calculate tokens on demand — no background thread needed"
+  "tokens = min(capacity, tokens + elapsed * refill_rate) — always cap at bucket_size"
+  "Retry-After = (tokens_needed - current_tokens) / refill_rate — return in HTTP header"
+}}
 
 {{phase 3 "Python Implementation (Thread-Safe)" "8 min"}}
 
@@ -117,6 +131,17 @@ for i in range(15):
   (how "do you return rate limit headers to the client?" "Populate standard HTTP headers from the allow() response: X-RateLimit-Limit: {capacity}, X-RateLimit-Remaining: {remaining}, X-RateLimit-Reset: {unix_timestamp_when_full}, Retry-After: {retry_after} (only on 429 responses).")
 }}
 
+{{goodToKnow
+  "10M users at ~100 bytes/bucket = ~1 GB RAM — manageable single-server, but Redis scales horizontally"
+  "Add TTL cleanup: remove buckets for users inactive > capacity/refill_rate seconds"
+}}
+
+{{mustKnow
+  "Thread-safe: mutex lock protects tokens and last_refill per bucket"
+  "O(1) time and O(1) space per rate limit key"
+  "Return HTTP headers: X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After (on 429)"
+}}
+
 {{phase 4 "Algorithm Comparison" "5 min"}}
 
 {{say "Four rate limiting algorithms — each trades burst handling, memory, and accuracy differently:"}}
@@ -149,6 +174,13 @@ for i in range(15):
   "A user can make N requests at 11:59:59.999 (end of minute 1) and N more at 12:00:00.001 (start of minute 2). Both windows see N requests — under the limit. But in a 2-millisecond window, 2N requests were served. Token bucket prevents this because the burst draws down accumulated tokens regardless of window boundaries."
   "When would you choose sliding window counter over token bucket?"
   "When you need to enforce an exact requests-per-time-window SLA (e.g., exactly 1000 per minute with no burst above that). Token bucket allows capacity-sized bursts that a sliding window would block. Cloudflare uses sliding window for its simplicity and the near-elimination of the boundary burst problem."
+}}
+
+{{mustKnow
+  "Token bucket: controlled bursts + sustained rate — best for most APIs"
+  "Sliding window counter: strict per-window cap, no boundary burst — best for SLA enforcement"
+  "Fixed window counter: 2x burst possible at boundary — only acceptable for MVP/internal tooling"
+  "Leaky bucket: fixed output rate regardless of input — best for traffic shaping"
 }}
 
 {{phase 5 "Distributed Token Bucket with Redis" "8 min"}}
@@ -230,6 +262,15 @@ else:
   "Hash the rate limit key to always route to the same Redis shard using hash tags: key = 'rl:{user:42}' — Redis Cluster hashes only the part in braces. All keys for the same user land on the same shard. The Lua script runs atomically within that shard. No cross-shard coordination needed."
 }}
 
+{{caveat "Never use separate GET + SET for distributed rate limiting. Between reading and writing, another server reads the same stale value — both allow the request, double-spending the token. Always use a Lua script or MULTI/EXEC for atomicity."}}
+
+{{mustKnow
+  "Redis Lua script: atomic check-and-update — no race conditions between multiple app servers"
+  "EXPIRE key after 2 * (capacity / refill_rate) — auto-cleanup for inactive users"
+  "math.max(0, elapsed) prevents clock skew between app servers from subtracting tokens"
+  "Fail-open on Redis failure for most APIs; fail-closed for payments and authentication"
+}}
+
 {{phase 6 "System Design Integration" "5 min"}}
 
 {{say "Token bucket rate limiting appears in <a class=\"dqa-link\" href=\"/problem/rate-limiter\">Rate Limiter</a> interviews. Here is how it fits as middleware in the request path."}}
@@ -260,6 +301,13 @@ else:
 
 {{followup "How do you rate limit across multiple regions?" "Two approaches: 1) Per-region buckets — each region has its own Redis and its own bucket per user. A user gets N tokens per region. Total possible is N times the number of regions. Simple but over-counts. 2) Async sync — regions share token counts via gossip or a global Redis every 1-5 seconds. Most companies use per-region buckets and accept the over-count because cross-region sync adds latency to every request."}}
 
+{{mustKnow
+  "Token bucket as middleware: sits between load balancer and application servers"
+  "Per-tier configuration: different bucket_size and refill_rate for Free/Pro/Enterprise"
+  "Rate limit by both IP and API key — IP catches bots, API key ties to billable account"
+  "Multi-region: per-region buckets with async sync is the pragmatic production choice"
+}}
+
 {{phase 7 "Interview Checklist" "2 min"}}
 
 {{say "Here are the key points to cover when discussing token bucket rate limiting in an interview."}}
@@ -273,6 +321,13 @@ else:
   "Return X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After headers"
   "Fail-open on <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> failure for most APIs, fail-closed for payments"
   "Used by AWS API Gateway, Stripe, GitHub, and most production rate limiters"
+}}
+
+{{mustKnow
+  "Two knobs: bucket_size (burst) and refill_rate (sustained) — explain both clearly"
+  "Lazy refill eliminates background threads — calculate tokens on each request"
+  "Redis Lua script for distributed atomicity — never use separate GET+SET"
+  "Fail-open vs fail-closed is a deliberate design decision — discuss trade-offs"
 }}
 
 {{key "The token bucket interview tests whether you understand the two knobs (burst vs sustained rate), why lazy refill eliminates background threads, and how <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> Lua scripts prevent race conditions in distributed deployments. Always discuss fail-open vs fail-closed as a deliberate design decision. See also: <a class=\"dqa-link\" href=\"/problem/rate-limiter\">Rate Limiter</a> system design."}}
@@ -291,6 +346,12 @@ else:
   "Fail-open on Redis failure for most APIs; fail-closed for payments and authentication"
   "Token bucket beats fixed-window counters because it has no boundary burst problem"
   "Used by AWS API Gateway, Stripe, GitHub, and most production rate limiters"
+}}
+
+{{mustKnow
+  "Token bucket = default choice for API rate limiting — handles bursts, O(1) memory, scales with Redis"
+  "Lazy refill = no background threads; Lua script = no race conditions; fail-open = safe default"
+  "Used by AWS API Gateway, Stripe, GitHub — mention these production references in interviews"
 }}
 
 {{key "Token bucket is the default choice for API rate limiting because it handles bursty traffic naturally, uses O(1) memory per key, and scales to distributed deployments with a single <a class=\"dqa-link\" href=\"/fund/storage/redis\">Redis</a> Lua script. Always mention the two knobs, lazy refill, and the fail-open vs fail-closed decision."}}

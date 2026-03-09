@@ -40,6 +40,10 @@
   "We maintain separate tries per language code (en, es, zh, etc.). The client sends Accept-Language or the user's stored preference. This keeps trie sizes manageable — a single global trie would need Unicode normalization for every prefix."
 }}
 
+{{caveat "Autocomplete is non-critical infrastructure. Never let it block the search box — if the service is down, degrade to empty suggestions. Users can always type and submit manually."}}
+
+{{mustKnow "Sub-100ms p99 latency is the defining constraint — every design decision flows from this" "5B queries/day = 58K avg QPS, 290K peak — CDN caching is non-negotiable" "Autocomplete is a read-heavy, latency-sensitive, availability-first system — degrade gracefully, never block search" "Separate tries per language — a single global trie is too large and requires expensive Unicode normalization"}}
+
 {{phase 2 "API Design" "4 min"}}
 
 {{say `The autocomplete API is a read-heavy <strong>GET endpoint</strong> — cacheability is non-negotiable:
@@ -179,6 +183,12 @@
   "Rate limit by IP at the CDN layer: 200 requests per minute per IP. The uid is validated via JWT — an invalid uid gets global suggestions, not an error, so we don't leak whether a uid exists."
 }}
 
+{{caveat "Using POST for autocomplete is a common mistake. POST responses are not CDN-cacheable — at 290K QPS you would need 5x more origin capacity. Always use GET for idempotent, cacheable read paths."}}
+
+{{goodToKnow "Client debounce at 150ms cuts QPS by ~60% — mention this proactively to show you think about client-server cost holistically" "Including latency_ms in the response enables the client to show spinners vs instant results and feeds SLO dashboards without distributed tracing"}}
+
+{{mustKnow "Autocomplete MUST be GET, not POST — cacheability at CDN is the single biggest capacity lever" "Client debounce at 150ms reduces QPS from 700K to 290K — always mention client-side optimization" "Write path (query logging) is fire-and-forget via Kafka — never block the user on log writes" "Personalization via uid is blended at the service layer, not part of the CDN cache key"}}
+
 {{phase 3 "Trie Structure" "6 min"}}
 
 {{say `The trie is the core data structure:
@@ -258,6 +268,20 @@ class Trie:
   "We normalize to Unicode NFC form and build per-language tries. For Chinese (zh), we index on pinyin AND character sequences. The trie node children map uses full Unicode code points as keys, not just ASCII — the 26-child assumption is only for estimation."
 }}
 
+{{collapseSection "Storage Estimation Math" `
+<ul>
+  <li>Average query length: 6 characters → unique prefix paths up to depth 6</li>
+  <li>26^1 + 26^2 + ... + 26^6 ≈ 3M unique prefix nodes (English, ASCII-only estimate)</li>
+  <li>Each node stores top-10 suggestions × 50 bytes = 500 bytes per node</li>
+  <li>3M nodes × 500 bytes = <strong>1.5 GB</strong> for the English trie</li>
+  <li>Non-Latin tries (zh, ja) are smaller due to fewer unique prefixes but larger character sets</li>
+</ul>
+`}}
+
+{{caveat "Never traverse the subtree at query time to find top-K results. A DFS for prefix 'a' touches millions of nodes and takes 5-10ms. Pre-computing top-K at each node during build gives O(1) result return."}}
+
+{{mustKnow "Pre-compute top-K at every trie node — this is THE core insight; lookup is O(prefix_length) + O(1) result" "Trie shares prefix structure, using 2-3x less memory than an equivalent flat hash map of prefix → top-K" "~1.5 GB RAM for the English trie — fits in L3 cache on memory-optimized instances" "Trie depth capped at 20 chars — 99.9% of autocomplete prefixes are under 15 characters"}}
+
 {{phase 4 "Architecture" "6 min"}}
 
 {{say `Three-layer request path:
@@ -311,6 +335,10 @@ class AutocompleteHandler:
   "CDN hit: 5ms. Redis hit: 8ms (2ms network + 6ms serialization). Trie lookup: 12ms (in-memory, L3 cache). Elasticsearch fallback: 40-60ms. Total p99 on trie path including personalization blend: 18-22ms."
 }}
 
+{{goodToKnow "Per-language tries allow independent update schedules — English trie can rebuild hourly while smaller language tries rebuild every 4 hours" "Elasticsearch is sized for 30K QPS fallback traffic only — not primary path capacity"}}
+
+{{mustKnow "Three-layer read path: CDN (90% hit, 5ms) → Redis L1 (8ms) → in-memory trie (12ms) → ES fallback (40-60ms)" "CDN absorbs ~90% of traffic by caching top 10K prefixes — origin sees only 29K QPS" "Per-language tries (300MB-1.5GB each) fit in L3 cache; a combined multi-language trie would be 8-10GB and thrash cache" "50 stateless replicas at 6K QPS each with 2x headroom — trivial horizontal scaling"}}
+
 {{phase 5 "Data Collection" "5 min"}}
 
 {{say `Two query signal sources:
@@ -363,6 +391,20 @@ def rebuild_trie(hourly_counts, historical_counts):
   "What's your Kafka partition strategy?"
   "Partition by lang+geo (e.g., 'en-US'). This ensures all English-US queries go to the same consumer group partition, making hourly aggregation a local reduce with no shuffle. We use 50 partitions per topic — handles 300K events/second at 10KB average batch."
 }}
+
+{{caveat "Never log raw user IDs with query text — this is PII under GDPR. Use a daily-salted SHA-256 hash of the uid so records cannot be linked across days."}}
+
+{{collapseSection "Hot Path Trending Detection Details" `
+<ul>
+  <li>Separate Flink job watches <strong>5-minute tumbling windows</strong> on Kafka stream</li>
+  <li>Queries exceeding <strong>10K submissions in 5 minutes</strong> are flagged as trending</li>
+  <li>Job writes directly to Redis with <strong>60-minute TTL</strong>, bypassing hourly rebuild</li>
+  <li>Autocomplete service polls Redis for trending overrides on every request</li>
+  <li>End-to-end latency from viral event to suggestion appearance: <strong>~6 minutes</strong></li>
+</ul>
+`}}
+
+{{mustKnow "Two signal sources: submitted queries (strong signal) and suggestion clicks (calibration signal)" "Hourly aggregation via Flink/Spark feeds the main trie rebuild; hot-path updater catches viral queries in under 5 minutes" "Privacy by design: uid is daily-salted SHA-256 before logging — cross-day linkage is impossible" "Min frequency filter (10 submissions/hour) eliminates 99% of long-tail queries and filters accidental PII"}}
 
 {{phase 6 "Ranking Algorithm" "5 min"}}
 
@@ -418,6 +460,10 @@ def compute_score(
   "We store a per-query seasonal baseline: the average count for that query in the same calendar week across prior years. The recency boost formula uses days_since_seasonal_baseline instead of absolute days. This means 'valentines day gifts' naturally resurfaces each year."
 }}
 
+{{goodToKnow "Log-scale popularity prevents mega-queries from dominating — 10M and 50M count queries are both just 'very popular'" "Seasonal baseline tracking resurfaces recurring queries (e.g., 'valentines day gifts') without manual intervention"}}
+
+{{mustKnow "Score = 70% global popularity (log-scaled) + 20% recency boost (exponential decay) + 10% personalization" "Log scale compresses popularity — prevents top queries from dominating all prefixes" "Recency uses exponential decay with 7-day half-life — trending queries surface naturally then fade" "Personalization is capped at 10% to prevent filter-bubble effects"}}
+
 {{phase 7 "Trie Updates" "5 min"}}
 
 {{say `Updating a live trie is dangerous — <span class="hl-red">never mutate shared data while serving 290K QPS</span>:
@@ -469,6 +515,10 @@ class TrieManager:
 
 {{hint "memory pressure during rebuild" "During the 60s rebuild window, memory briefly holds both old and new trie — 3GB peak for a 1.5GB trie. Ensure nodes have at least 4GB RAM. The old trie is freed within 5s of the swap."}}
 
+{{caveat "Never mutate a trie that is actively serving traffic. Concurrent readers seeing a partially-updated trie will return corrupted or incomplete results. Always use blue/green swap with an atomic pointer assignment."}}
+
+{{mustKnow "Blue/green pattern: build new trie in background, sanity check, then atomic pointer swap — never partial state" "Full rebuild every hour is simpler and safer than incremental updates (which need fine-grained locking)" "Memory peaks at 2x trie size during rebuild (old + new) — size instances accordingly" "Sanity checks before swap: verify top queries for common prefixes, node count within 20% of previous"}}
+
 {{phase 8 "Data Model" "4 min"}}
 
 {{say `Three data stores:
@@ -510,6 +560,18 @@ CREATE TABLE query_counts (
 }}
 
 {{hint "Redis Hash for user history" "We store uid → {query: click_count} as a Redis Hash. HGETALL takes &lt;1ms for 100-entry hashes. We cap at 100 queries with a background LRU eviction job running every 15 minutes."}}
+
+{{collapseSection "Trie Serialization and Cold Start" `
+<ul>
+  <li>Trie serialized to <strong>Protocol Buffers</strong>, gzip compressed (~500MB for English)</li>
+  <li>Uploaded to S3 after each hourly rebuild</li>
+  <li>Cold start: download from S3 (~30s) + deserialize (~60s) = <strong>~90 seconds</strong></li>
+  <li>During cold start, the instance serves no traffic — load balancer health check gates it</li>
+  <li>Rolling restarts: only 1 replica restarts at a time to maintain fleet capacity</li>
+</ul>
+`}}
+
+{{mustKnow "Three stores: Kafka (raw logs, 7-day), Redshift/BigQuery (aggregated counts, 5-year), Redis (personalization + trending)" "Trie lives entirely in service memory — rebuilt from aggregated counts, persisted as S3 snapshots" "Cold start is ~90 seconds (S3 download + deserialize) — rolling restarts ensure fleet capacity" "Never query a database on the hot path — any DB hop adds 5-15ms, defeating the latency budget"}}
 
 {{phase 9 "Personalization" "4 min"}}
 
@@ -575,6 +637,10 @@ def blend_personal(
   "DELETE /user/history triggers a Redis DEL on the user's history key and adds all their queries to the blocklist for 30 days (so suggestions they cleared don't immediately reappear). Takes effect within 60 seconds (next CDN TTL expiry)."
 }}
 
+{{caveat "Personalization must never be included in the CDN cache key. Adding uid to cache keys creates 100M users x 1K prefixes = 100B cache entries — CDN becomes useless. Blend personalization at the service layer after the CDN cache hit."}}
+
+{{mustKnow "Personalization blends user history into global top-10 — it never replaces global results" "0.3 boost multiplier for user-relevant queries; personalization capped at 10% of total score" "Blending is ephemeral (computed at query time, never stored) — prevents filter-bubble feedback loops" "History stored in Redis Hash per uid with 90-day TTL; HGETALL under 1ms for 100 entries"}}
+
 {{phase 10 "Scaling" "5 min"}}
 
 {{say `<span class="hl">290K peak QPS</span> with <span class="hl">&lt;100ms p99</span> requires three independent scaling axes:
@@ -616,6 +682,10 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
   "Stagger rebuilds with a <span class=\"hl-blue\">random jitter</span> of 0–15 minutes. In a 10-node cluster, rebuilds are spread across 10 non-overlapping windows. A <strong>Redis distributed lock</strong> (background mutex) ensures at most 1–2 nodes rebuild simultaneously — the others serve the current trie while waiting. This caps the number of S3 download streams and prevents synchronized CPU spikes."
 }}
 
+{{goodToKnow "Multi-region trie distribution: push snapshots to regional S3 buckets; accept 1-2 hours staleness between regions" "If trie grows beyond 5GB, shard by prefix range (A-M / N-Z) to keep rebuild times under 60 seconds"}}
+
+{{mustKnow "CDN absorbs 90% of traffic — the single most important scaling lever" "Trie service is stateless with full replicas — horizontal scaling is trivial, no coordination needed" "Three independent scaling axes: CDN edge capacity, stateless trie replicas, Kafka partition count" "Stagger trie rebuilds with random jitter to avoid thundering herd on S3 downloads"}}
+
 {{phase 11 "Failure Modes" "4 min"}}
 
 {{say `Autocomplete is non-critical — degraded suggestions are better than a broken search box:
@@ -650,6 +720,20 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
   "What if personalization data (Redis) is unavailable — do you serve 503?"
   "No. We degrade gracefully: if Redis is unreachable, we skip personalization and return global top-10. The user gets slightly less tailored suggestions but doesn't see an error. This is a UX tradeoff we've explicitly chosen — availability > personalization freshness."
 }}
+
+{{caveat "A bug in the trending detector can inject garbage queries globally within 60 seconds. Always validate trending writes (query length, character set, count sanity bounds) and have a circuit breaker that skips bad writes."}}
+
+{{collapseSection "Elasticsearch Fallback Sizing" `
+<ul>
+  <li>ES handles cold-path misses and full trie outage fallback</li>
+  <li>Size for <strong>30K QPS</strong> (10% of total traffic)</li>
+  <li><strong>5 ES nodes</strong> with 16 vCPU each</li>
+  <li>Keep autocomplete index warm with background ping job</li>
+  <li>Response time: 40-60ms — acceptable for fallback, not for hot path</li>
+</ul>
+`}}
+
+{{mustKnow "Graceful degradation order: Redis cache → in-memory trie → Elasticsearch fallback → empty []" "Never let autocomplete block search — always return something in under 200ms, even if stale or empty" "Circuit breaker on trending writes prevents garbage injection propagating globally" "Three sanity checks after trie rebuild: known-query verification, top-result stability, node count within 20% of previous"}}
 
 {{qa "What if the Kafka query log pipeline falls behind?" "Trie freshness degrades. A <span class=\"hl\">4-hour Kafka lag</span> means new trending queries take 4 hours to appear in the trie. This is a <strong>freshness SLO violation</strong>, not an availability failure — users still get suggestions, just not the most recent ones. Alert on consumer group lag <span class=\"hl\">&gt; 30 minutes</span>. The mitigation: increase <span class=\"hl-blue\">consumer group parallelism</span> to match partition count — 10 consumers per 10 partitions. If lag is structural (sustained throughput > consumer capacity), add partitions to the query-log topic and scale consumers to match." "How do you prevent Kafka lag from cascading into trie staleness permanently?" "The Flink job that processes the query log is stateless — it only needs to process the <em>current window</em> to compute new trie weights. If lag spikes during a traffic event, the job catches up by processing historical events in bulk (Flink's event-time processing handles out-of-order arrival). The trie is only swapped when a full rebuild completes — if the job crashes mid-rebuild, the previous snapshot remains live. Lag &gt; 2 hours triggers an auto-scaling event on the Flink cluster."}}
 

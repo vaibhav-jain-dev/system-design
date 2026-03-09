@@ -31,6 +31,8 @@
   "Fail fast with a clear error to the merchant. We cannot queue payments and retry later — the authorization window is time-limited (typically 7 days but card data cannot be stored). Merchant must retry from their side."
 }}
 
+{{mustKnow "Idempotency is the single most critical requirement — never charge a customer twice, even on retries" "Scale target is ~13 TPS average but 1,000 TPS peak (Black Friday) — design for the peak" "99.999% availability = 5.26 minutes downtime per year — requires multi-region active-active" "Never use floats for money — store amounts as integer cents (IEEE 754 rounding causes real financial discrepancies)"}}
+
 {{phase 2 "API Design" "5 min"}}
 
 {{say `Three surfaces: payment creation, status lookup, and refunds. Every write endpoint requires an idempotency key in the header:
@@ -237,6 +239,10 @@
 
 {{hint "why integer amounts?" "Floating-point representation of 0.1 in IEEE 754 is 0.100000000000000005551... Summing 1000 payments of $0.10 gives $100.00000000000000555... — a real financial discrepancy. Store <span class='hl-red'>never floats</span>, always integer cents."}}
 
+{{caveat "Returning 201 with 'pending' status means the client must poll or listen for webhooks. If you return a synchronous 200 after capture, you hold HTTP connections for 200-800ms per request — at 1000 TPS that's 800 concurrent connections minimum, and timeouts cause duplicate charge risk."}}
+
+{{mustKnow "Every write endpoint requires an Idempotency-Key header — format is {client_id}:{uuid}" "POST /payments returns 201 with status 'pending' immediately — capture is async via Kafka" "Refunds create new ledger entries — the original transaction is never mutated (append-only ledger)" "Amount field is always integer in smallest currency unit (cents) — ISO 4217 currency codes"}}
+
 {{phase 3 "Double-Entry Ledger Design" "10 min"}}
 
 {{say `Every transaction in our system follows double-entry bookkeeping — the same principle that has governed accounting for 700 years:
@@ -281,6 +287,8 @@
   "Yes — SELECT SUM(amount) FROM ledger_entries WHERE account_id = X gives the current balance. The denormalized balance_after column is for audit speed. The authoritative balance is always the SUM query."
 }}
 
+{{mustKnow "Double-entry bookkeeping: every payment = exactly two ledger entries (debit + credit), SUM(all entries) must always = 0" "PostgreSQL with SERIALIZABLE isolation — the only level that prevents phantom reads in concurrent balance checks" "Lock accounts in ascending account_id order to prevent deadlocks deterministically" "Ledger is append-only — no UPDATE, no DELETE; corrections are new entries"}}
+
 {{phase 4 "Payment Processing Flow" "10 min"}}
 
 {{say `A successful card payment goes through four stages. I'll walk through each:
@@ -313,6 +321,10 @@
   "Merchants see 'pending' balance during the 24-48h settlement window. Stripe's Instant Payouts feature lets merchants pay a fee (1.5%) to access funds immediately — essentially a short-term loan against the settlement receivable."
 }}
 
+{{goodToKnow "Visa authorization holds expire in 7 days, Mastercard in 30 days. Build a sweeper job to alert on authorized-but-not-captured payments older than 6 days before the auth becomes void."}}
+
+{{mustKnow "Four stages: Authorization (hold) → Reserve (ledger) → Capture (money moves) → Settlement (T+1 batch)" "Authorization and capture are separate because hotels/subscriptions need to authorize an estimated amount, then capture exact amount later" "Settlement is batched — 10,000 captures in one ACH/wire transfer costs ~$0.25 vs $2,500 at $0.25/wire" "If capture fails after auth succeeds, the Saga fires a compensating void to release the hold"}}
+
 {{phase 5 "High-Level Architecture" "8 min"}}
 
 {{say `Five service layers, each horizontally scalable:
@@ -335,6 +347,8 @@
 {{hint "connection pooling is critical" "PostgreSQL has a max_connections limit (~300-500). At 1000 TPS with 50ms avg transaction time, you need at least 50 concurrent connections. PgBouncer pools connections at the transport layer — application sees 1000 connections, PostgreSQL sees 50. Without pooling, the server falls over."}}
 
 {{hint "read replicas for balance queries" "GET /v1/balance can tolerate 1-2 seconds of replication lag — the merchant dashboard doesn't need real-time precision. Route read queries to replicas, write queries to primary. This cuts primary load by ~60% in practice."}}
+
+{{mustKnow "PostgreSQL for the ledger — DynamoDB lacks arbitrary-size ACID transactions, Cassandra lacks multi-row atomicity" "PgBouncer for connection pooling — without it, 1000 TPS exceeds PostgreSQL's max_connections limit" "Five service layers: API Gateway, Payment Service, Ledger Service, Fraud Service, Settlement Service"}}
 
 {{phase 6 "Idempotency & Exactly-Once Semantics" "8 min"}}
 
@@ -366,6 +380,8 @@
   "Cap response size at 4KB — strip verbose fields before caching. If the actual response exceeds 4KB, cache a summary with a pointer to the authoritative DB record. The GET /payments/{id} endpoint always reads from the DB as the source of truth."
 }}
 
+{{mustKnow "Redis SET NX with 24h TTL for idempotency check — must happen before any side effects" "Sentinel value 'processing' stored first via SET NX; replaced with full response on completion" "If Redis is down, PostgreSQL UNIQUE(idempotency_key) constraint is the secondary guard" "Same idempotency key with different request body → 422 rejection (compare request body hashes)"}}
+
 {{phase 7 "Distributed Transactions (Saga Pattern)" "8 min"}}
 
 {{say `I'll use the <strong>Saga pattern</strong> instead of two-phase commit. Here's why and how:
@@ -396,6 +412,10 @@
   "The orchestrator persists state in PostgreSQL with the current step and status. On restart, it queries for all payments in 'processing' state older than 30 seconds and resumes from the last completed step. Restart safety is a first-class design requirement."
 }}
 
+{{caveat "2PC is fundamentally incompatible with external bank APIs — they expose authorize/void, not prepare/commit. Saying '2PC' in a payment system interview is a red flag. Always say Saga pattern."}}
+
+{{mustKnow "Saga pattern over 2PC — bank APIs are external black boxes that don't support prepare/commit protocol" "Orchestration-based Saga (not choreography) — central orchestrator owns the state machine in PostgreSQL" "Compensating transactions must be idempotent — the orchestrator retries on failure" "If compensating transaction fails after retries, dead-letter queue + human ops ticket (<1 per 100K transactions)"}}
+
 {{phase 8 "Fraud Detection" "5 min"}}
 
 {{say `Fraud detection runs synchronously before authorization — every payment scores before a card is charged:
@@ -419,6 +439,8 @@
 {{hint "3D Secure shifts liability" "3D Secure (Visa Secure/Mastercard ID Check) is more than UX — it's a <strong>liability shift</strong>. If a customer completes 3DS and later disputes the charge, the card network (not the merchant) bears the chargeback liability. This is why 3DS for medium-risk transactions is worth the friction."}}
 
 {{hint "feature store latency budget" "Total fraud decision budget: <span class='hl'>100ms</span>. Breakdown: feature fetch from Redis 2ms, model inference 30ms, decision logic 1ms, total ~33ms. Remaining 67ms is buffer for Redis latency spikes. Never call a synchronous ML inference service that takes >50ms."}}
+
+{{mustKnow "Fraud scoring runs synchronously before authorization — every payment scores in <50ms (XGBoost)" "Score <30: approve, 30-70: trigger 3D Secure (OTP), >70: decline immediately" "If fraud model is down, fail open (not closed) — declining all payments costs more than the fraud" "3D Secure shifts chargeback liability from merchant to card network"}}
 
 {{phase 9 "Security & PCI DSS" "5 min"}}
 
@@ -451,6 +473,10 @@
   "A stolen database contains only tokens — meaningless without the HSM that maps tokens to real cards. The HSM is air-gapped hardware: it will process lookup requests but will not export its internal mapping table. Even a full database dump gives the attacker nothing usable."
 }}
 
+{{caveat "Never store CVV/CVV2 — it is illegal under PCI DSS, even encrypted. This is a hard rule that interviewers will test. CVV is purged from memory immediately after authorization."}}
+
+{{mustKnow "Never store CVV — illegal under PCI DSS even encrypted; delete from memory after authorization" "Tokenization via HSM: real card number lives only inside hardware that will never export the key" "JS tokenization (e.g., Stripe.js) sends card directly to processor — merchant servers never touch raw card data" "Reducing PCI scope from SAQ D (300+ controls) to SAQ A (22 controls) by never handling raw card data"}}
+
 {{phase 10 "Failure Handling & Recovery" "5 min"}}
 
 {{say `Every external call can fail. Here's the failure budget and recovery strategy:
@@ -473,6 +499,8 @@
 {{hint "reconciliation is not optional" "Daily reconciliation: compare internal ledger totals with bank statement CSV. Every discrepancy gets a ticket. At scale, even a 0.001% error rate is thousands of dollars per day. Stripe runs reconciliation every hour, not daily."}}
 
 {{hint "circuit breaker for bank APIs" "If the bank API returns 5xx errors on >20% of requests in a 1-minute window, open the circuit — fail all new authorizations immediately without calling the API. Re-probe every 30 seconds. This prevents cascading timeouts from consuming all threads."}}
+
+{{mustKnow "Sweeper job queries payments stuck in 'pending' >30s and resumes the Saga from the last confirmed step" "Daily reconciliation: compare internal ledger totals with bank statement — every discrepancy gets a ticket" "Circuit breaker for bank APIs: open at >20% 5xx rate in 1-minute window, re-probe every 30s" "Database failover via Patroni in <30s; multi-region active-passive with 15-minute RPO"}}
 
 {{phase 11 "Monitoring & SLAs" "5 min"}}
 
@@ -502,6 +530,10 @@
   "What is your runbook for a P99 latency spike?"
   "Check in order: (1) Fraud service latency — ML model inference occasionally spikes; (2) PostgreSQL query time — check for lock contention on hot accounts; (3) Bank API P99 — if external, fail fast and return 503; (4) Redis idempotency store — if slow, bypass and fall through to DB check."
 }}
+
+{{goodToKnow "Visa/Mastercard impose fines and can terminate card processing rights if chargeback rate exceeds 1% for 3 consecutive months. Monitoring chargeback rate is as critical as monitoring uptime."}}
+
+{{mustKnow "Three SLOs: payment success rate >99.5%, P99 latency <2s, availability 99.999%" "Payment-specific golden signals: authorization rate, chargeback rate (<0.1%), settlement lag, idempotency key hit rate" "Idempotency key hit rate spike (>5%) indicates a client retry bug — potential double-charging at scale" "Distributed tracing with trace_id across all Saga steps for debugging stuck payments"}}
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 
@@ -608,6 +640,8 @@
   </div>
 </div>
 `}}
+
+{{mustKnow "Idempotency keys (Redis SET NX + DB UNIQUE constraint) are the primary defense against double charging" "Saga pattern with orchestration — not 2PC, not choreography — for distributed payment transactions" "Double-entry ledger with SERIALIZABLE isolation ensures SUM(all entries) = 0 at all times" "Tokenization via HSM for PCI compliance — merchants never store or transmit raw card numbers"}}
 
 {{key "A payment system's correctness is its only feature — idempotent writes, double-entry ledger invariants, and Saga compensations are not optimizations, they are the product."}}
 

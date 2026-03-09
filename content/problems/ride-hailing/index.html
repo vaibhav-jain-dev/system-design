@@ -38,6 +38,10 @@ Does that align?`}}
   "Hot data (last known position) lives in Redis GEO with 30s TTL. Append-only trip path is written to Cassandra for audit and ETA model training. We don't store inter-ride location pings."
 }}
 
+{{caveat "Don't scope too broadly — scheduled rides, driver onboarding, and payment processing are each full system design problems. Explicitly exclude them or the interviewer will expect you to cover them."}}
+
+{{mustKnow "The two hard subproblems are geospatial driver lookup under real-time mutation and stateless dispatch — state this upfront" "Scale numbers: 100M users, 5M drivers, 1.25M location writes/sec, matching latency < 10s" "Driver location freshness target is < 5 seconds stale — this drives the 3-5s GPS update interval"}}
+
 {{phase 2 "APIs" "5 min"}}
 
 {{say `Three API groups:
@@ -244,6 +248,12 @@ Does that align?`}}
   "{ride_id, pickup_address, destination_address, estimated_fare_range, distance_km, pickup_eta_seconds}. Driver sees fare estimate upfront. System logs whether they accepted or rejected for acceptance rate scoring."
 }}
 
+{{caveat "WebSocket is required for driver connections — not SSE, not long polling. SSE is server-to-client only, but drivers need to both push GPS and receive ride offers. This is a common interview mistake."}}
+
+{{collapseSection "Detailed API Card Reference" `The detailed API view above shows request/response schemas for all endpoints. Key design decisions: POST /v1/rides uses X-Idempotency-Key header with 60s Redis TTL to prevent double-booking on network retries. The WebSocket frame for driver location is ~250 bytes — minimal overhead at 4s intervals. Ride offer expiry of 15 seconds is chosen to balance driver attention (they're driving) against rider wait time.`}}
+
+{{mustKnow "Drivers use WebSocket (bidirectional), riders use REST — explain why each protocol fits" "Idempotency key on POST /v1/rides prevents double-booking from client retries" "Driver ride offer has a 15-second timeout — sequential offers, not parallel broadcast"}}
+
 {{phase 3 "Ride Flow" "5 min"}}
 
 {{say `Six ride states — every transition is an atomic write to PostgreSQL + a Kafka event:
@@ -290,6 +300,12 @@ class RideMatchingService:
 
 {{hint "why 15s driver timeout" "15 seconds balances driver attention (they're on the road) against rider frustration. Uber uses 12–15s. After timeout, the system moves to the next ranked driver. No penalty to driver for the first rejection."}}
 
+{{caveat "If the matching service holds state in-memory and crashes mid-offer, the ride is stuck. All state must live in Postgres + Redis so any instance can resume from the last committed transition."}}
+
+{{goodToKnow "Kafka consumer groups with at-least-once delivery enable crash recovery — any matching instance can pick up where the crashed one left off" "The ride state machine is intentionally linear (no branching except CANCELLED) to simplify recovery logic"}}
+
+{{mustKnow "Dispatch loop is stateless — all state in Postgres + Redis, any worker can handle any ride" "Six ride states: REQUESTED -> MATCHED -> ARRIVING -> IN_PROGRESS -> COMPLETED (with CANCELLED branch)" "Sequential driver offers prevent the thundering-herd problem of parallel broadcast" "Every state transition is an atomic DB write + Kafka event — never one without the other"}}
+
 {{phase 4 "Architecture" "6 min"}}
 
 {{say `Four planes:
@@ -322,6 +338,10 @@ class RideMatchingService:
   "What happens to rides in flight during a Kafka broker failure?"
   "Ride state is in Postgres — that's durable. Kafka events are best-effort notifications to downstream consumers. If a billing event is missed, a reconciliation job catches up nightly by scanning completed rides with no billing record."
 }}
+
+{{caveat "A global single Redis cluster for 5M drivers won't work — hot cities (Mumbai, NYC) overwhelm one shard. City-based sharding is mandatory."}}
+
+{{mustKnow "Four planes: API, Matching, Tracking, Data — each scales independently" "City-based sharding: each city has its own Redis GEO, Postgres partition, and matching workers" "Redis GEO for hot location data, Postgres for ride state, Cassandra for GPS history, Kafka for event fan-out"}}
 
 {{phase 5 "Geospatial Indexing" "5 min"}}
 
@@ -378,6 +398,10 @@ def find_nearby_drivers(city_id: str, pickup_lat: float, pickup_lng: float, radi
   "How do you handle 5M concurrent drivers updating location every 4 seconds?"
   "5M / 4 = 1.25M GEOADD writes/sec globally. With 10 city shards, that's 125K writes/sec per shard. A Redis instance handles 200K+ writes/sec for simple commands. Plus 6 replicas per shard absorbs read load. Redis cluster mode with 20 shards is the scaling lever."
 }}
+
+{{goodToKnow "Redis GEO uses 52-bit geohash internally — ~0.6m precision, more than sufficient for driver matching" "GEORADIUS uses Haversine formula for distance sorting, accurate to 0.3% at city scale"}}
+
+{{mustKnow "GEOADD is O(log N), GEORADIUS is O(N log N) — know the complexities" "Separate TTL key per driver (30s) acts as a heartbeat — GEOADD doesn't expire individual members" "City-sharded Redis keys: drivers:{city_id} — keeps each shard under 200K writes/sec"}}
 
 {{phase 6 "Matching" "6 min"}}
 
@@ -445,6 +469,12 @@ def dispatch(ride_id, ranked_drivers):
   "Before sending an offer, matching service does SET NX driver:{id}:locked 1 EX 20 in Redis. If another instance already holds the lock, we skip that driver. This prevents double-offering without a distributed lock on the ride itself."
 }}
 
+{{caveat "Do not suggest the globally optimal Hungarian algorithm — it's O(N^3) and requires a global view of all rides and drivers. Greedy weighted scoring is the correct interview answer for real-time matching."}}
+
+{{collapseSection "Scoring Weight Tuning Details" `The 40/20/20/20 weight split (proximity/rating/acceptance/ETA) is a starting point. In production, these weights are tuned per-city using A/B testing on rider satisfaction and matching latency. Some cities weight ETA higher (congested roads make straight-line distance misleading). The scoring function is intentionally simple — a linear combination is interpretable and debuggable. ML-based scoring (gradient boosted trees on historical match outcomes) is a Phase 2 optimization.`}}
+
+{{mustKnow "Weighted scoring: 40% proximity, 20% rating, 20% acceptance rate, 20% ETA — greedy, not globally optimal" "Sequential offers to top candidates prevent double-acceptance thundering herd" "SET NX with TTL in Redis prevents two matching instances from offering the same driver simultaneously" "Expand radius on rejection (5km -> 10km) before falling back to surge pricing"}}
+
 {{phase 7 "Surge Pricing" "4 min"}}
 
 {{say `Surge pricing per <span class="hl-blue">H3 hex cell</span> (resolution 8, ~<span class="hl">0.7 km²</span>), updated every <span class="hl">5 minutes</span>:
@@ -489,6 +519,12 @@ def calculate_fare(base_fare, distance_km, duration_min, surge) -> int:
 }}
 
 {{hint "why show surge upfront" "Riders who see the surge multiplier before confirming have a chance to wait or take transit. Hidden surge creates chargeback disputes. Transparent pricing is also a legal requirement in several markets (NYC, EU)."}}
+
+{{caveat "Uncapped surge pricing creates PR disasters and regulatory risk. Always mention the hard cap (3x) and that riders must explicitly confirm surge before being charged."}}
+
+{{goodToKnow "H3 hexagonal grid (resolution 8, ~0.7 km^2) is better than geohash for surge zones — hexagons have uniform area and equal neighbor distances" "Surge is both a demand dampener (riders wait) and supply attractor (drivers relocate) — mention this feedback loop"}}
+
+{{mustKnow "Surge is computed per H3 cell, not city-wide — micro-supply-demand imbalances matter" "Hard cap at 3x surge multiplier — show to rider before confirmation" "Surge recomputed every 5 minutes — pre-cached in Redis, not calculated per-request"}}
 
 {{phase 8 "Live Tracking" "4 min"}}
 
@@ -539,6 +575,10 @@ class TrackingService:
   "How accurate is ETA during heavy traffic?"
   "OSRM uses pre-computed road graphs without live traffic. We layer real-time traffic data from HERE or TomTom APIs (batch updated every 5 minutes). ETA accuracy is ±2 minutes for short rides, ±5 minutes for 30+ minute rides."
 }}
+
+{{caveat "Redis Pub/Sub is fire-and-forget with no persistence. If the broker crashes, all subscriptions are lost. This is acceptable for location tracking (next update in 4s) but never use Pub/Sub for ride state changes — those go through Kafka."}}
+
+{{mustKnow "Driver GPS -> WebSocket gateway -> Redis GEO + Redis Pub/Sub -> rider's WebSocket" "OSRM for ETA: sub-50ms, no per-query cost, 100K queries/sec — Google Maps API costs $1.8M/year at scale" "Redis Pub/Sub for real-time fan-out (< 1ms), Kafka for durable event log (10-50ms)"}}
 
 {{phase 9 "Data Model" "5 min"}}
 
@@ -601,6 +641,10 @@ CREATE TABLE drivers (
   (row "Ride event log" "Kafka → S3" "Downstream consumers, audit")
 )}}
 
+{{goodToKnow "Partial index on rides (WHERE status NOT IN COMPLETED, CANCELLED) keeps the active rides index small — critical for matching query performance" "Cassandra partition key is (ride_id, date) — each ride's GPS path is a single partition, enabling efficient range queries for trip replay"}}
+
+{{mustKnow "Three storage tiers: Postgres (ride state, ACID), Redis (hot location data, locks), Cassandra (GPS history, 1.25M writes/sec)" "Rides table uses a partial index on active statuses — only ~0.1% of rides are active at any time" "Driver location in Redis GEO with 30s TTL; trip GPS path appended to Cassandra for audit and ML training"}}
+
 {{phase 10 "Scaling" "4 min"}}
 
 {{say `Three independent scaling axes:
@@ -627,6 +671,10 @@ CREATE TABLE drivers (
 )}}
 
 {{hint "WebSocket sticky sessions" "A rider's location stream is subscribed to a Redis Pub/Sub channel on a specific WebSocket server. If they hop to a different server on reconnect, the server re-subscribes — stateless recovery. But we still use sticky sessions (ALB cookie-based) to avoid the reconnect overhead for stable connections."}}
+
+{{caveat "The dominant scaling bottleneck is Postgres writes to the rides table, not Redis. At 10x spike that's ~23K writes/sec — pre-provision with 50K IOPS and connection pooling via PgBouncer."}}
+
+{{mustKnow "1.25M driver location writes/sec across 20 Redis city shards = 62.5K writes/sec each (under 200K limit)" "WebSocket gateway: 10K connections/server x 200 servers = 2M concurrent connections" "Postgres is the bottleneck at spikes — shard by city_id, pre-provision IOPS, use PgBouncer"}}
 
 {{phase 11 "Failure Modes" "5 min"}}
 
@@ -666,6 +714,12 @@ CREATE TABLE drivers (
 {{hint "shared rides detour constraint" "The 40% detour threshold is an empirical value from Uber Pool data. Below 40%, most riders accept the trade-off for a 25–35% fare discount. Above 40%, cancellation rates spike above 15%."}}
 
 {{checklist "Failure mode checklist" "Idempotency key on all payment calls" "Driver location TTL removes stale entries automatically" "Matching service is stateless — any instance can handle any ride" "Kafka consumer group auto-recovers on instance crash" "Ride status transitions are atomic DB writes + Kafka events" "GPS drift detected by speed anomaly (> 200km/h) and handled by map-matching"}}
+
+{{collapseSection "Shared Rides (Pooling) Details" `Shared rides use a detour-constrained matching algorithm: match a new request with an in-progress ride if pickup detour is < 40% of the original route, ETA increase for existing riders < 10 minutes, and rider receives a 25-35% fare discount. The 40% threshold is empirical from Uber Pool data — above 40%, cancellation rates spike above 15%. This is a Phase 2 feature that adds significant complexity to the matching algorithm.`}}
+
+{{caveat "The most dangerous failure is a double-charge: payment webhook fires twice on network retry. Idempotency key on payment + database-level unique constraint on payment_id is the double layer of protection."}}
+
+{{mustKnow "Idempotency keys prevent double-charges — two-layer dedup (application + DB constraint)" "Matching service crash recovery: Kafka consumer group restarts, picks up unprocessed ride events from last committed offset" "GPS drift detection: speed > 200km/h OR gap > 30s triggers map-matching interpolation" "Driver no-show: 5-minute timer auto-cancels, zero charge to rider, acceptance rate penalty to driver"}}
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 

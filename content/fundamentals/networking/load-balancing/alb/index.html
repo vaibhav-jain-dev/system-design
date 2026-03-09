@@ -33,6 +33,12 @@
   "Yes, using IP targets (not instance targets). Register IP addresses from peered VPCs, on-premises servers via Direct Connect, or even other AWS accounts. Target type must be set to &lt;span class='hl-blue'>ip&lt;/span> instead of &lt;span class='hl-blue'>instance&lt;/span> when creating the target group."
 }}
 
+{{mustKnow
+  "ALB = Layer 7, HTTP-aware routing (path, host, header, query string)"
+  "Key features: path routing, WAF, Cognito auth, WebSocket, gRPC, Lambda targets"
+  "Limits: 100 rules/listener, 100 target groups/ALB, 1000 targets/target group (soft limits)"
+}}
+
 {{phase 2 "Routing Rules Deep Dive" "5 min"}}
 
 {{say "ALB listener rules are evaluated in &lt;strong>priority order — first match wins&lt;/strong>. A single ALB can serve dozens of microservices using path and host conditions, with no need for a separate ALB per service."}}
@@ -61,6 +67,8 @@
 }}
 
 {{hint "One ALB for all microservices saves money" "Each ALB costs $16.43/mo base. Ten microservices behind one ALB with path rules costs the same base fee as one service."}}
+
+{{caveat "Listener rules are evaluated in priority order — first match wins. A misplaced catch-all rule at priority 1 will swallow all traffic and bypass specific path rules below it. Always put specific rules at low priority numbers and catch-alls at 99."}}
 
 {{diagram "fund-alb-path-routing"}}
 
@@ -136,6 +144,21 @@ resource "aws_lb_target_group" "api" {
 }
 `}}
 
+{{collapseSection "Terraform Configuration Details" "
+<ul>
+  <li><strong>ssl_policy</strong> — use <code>ELBSecurityPolicy-TLS13-1-2-2021-06</code> for TLS 1.3 + 1.2 minimum. Never allow TLS 1.0/1.1.</li>
+  <li><strong>target_type = ip</strong> — required for ECS Fargate, cross-VPC targets, and peered VPC routing. Use <code>instance</code> only for EC2 auto-scaling groups.</li>
+  <li><strong>deregistration_delay</strong> — set to your longest request timeout. 30s for APIs, 300s for file uploads.</li>
+  <li><strong>enable_deletion_protection</strong> — always true in production to prevent accidental <code>terraform destroy</code>.</li>
+</ul>
+"}}
+
+{{mustKnow
+  "Rules evaluated in priority order — first match wins. Put specific rules first, catch-all last"
+  "Path-based routing lets one ALB serve dozens of microservices — no need for one ALB per service"
+  "Default rule fires when no rule matches — always configure it explicitly (404 for APIs, SPA frontend for web apps)"
+}}
+
 {{phase 3 "WebSocket and gRPC Support" "3 min"}}
 
 {{say "ALB natively supports &lt;strong>WebSocket&lt;/strong> and &lt;strong>gRPC&lt;/strong> without special configuration — each protocol is handled transparently."}}
@@ -187,6 +210,19 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
 {{qa "Does ALB add latency to WebSocket connections?" "ALB adds &lt;span class='hl'>~1ms&lt;/span> latency to the initial HTTP upgrade handshake. After the upgrade, ALB passes WebSocket frames with no additional processing — it is effectively a TCP proxy at that point. The ongoing latency overhead is negligible (&lt;span class='hl'>&lt;100µs&lt;/span> per frame)." "What is the maximum WebSocket connection duration on ALB?" "ALB idle timeout applies — default &lt;span class='hl'>60 seconds&lt;/span>, max &lt;span class='hl'>4,000 seconds&lt;/span>. If no data is sent for longer than the idle timeout, ALB closes the connection. Send application-level pings every &lt;span class='hl'>30 seconds&lt;/span> to keep the connection alive. Set idle timeout to &lt;span class='hl'>3600 seconds&lt;/span> for WebSocket workloads."}}
 
 {{hint "gRPC requires HTTP/2 end-to-end" "ALB supports gRPC natively but the target group protocol version must be set to &lt;span class='hl-blue'>gRPC&lt;/span>, not HTTP2. This enables proper gRPC health checks and response code mapping. ALB translates gRPC status codes to HTTP status codes in access logs — &lt;span class='hl-blue'>gRPC OK (0)&lt;/span> maps to HTTP 200, &lt;span class='hl-blue'>gRPC UNAVAILABLE (14)&lt;/span> maps to HTTP 503."}}
+
+{{caveat "ALB WebSocket idle timeout maxes out at 4000 seconds. If your WebSocket connections must stay open indefinitely, you need application-level pings every 30s to reset the timer. Without pings, ALB silently drops the connection."}}
+
+{{mustKnow
+  "WebSocket: no config needed — ALB handles HTTP upgrade transparently. Idle timeout default 60s, max 4000s"
+  "gRPC: target group protocol version must be set to gRPC (not HTTP2) for proper health checks"
+  "After WebSocket upgrade, ALB acts as TCP proxy with <100us per-frame overhead"
+}}
+
+{{goodToKnow
+  "ALB can translate HTTP/2 from clients to HTTP/1.1 to backends — backends do not need HTTP/2 support"
+  "WebSocket reconnections need sticky sessions enabled so clients reconnect to the same target"
+}}
 
 {{phase 4 "WAF and Authentication" "3 min"}}
 
@@ -255,6 +291,21 @@ WebACL:
 
 {{key "ALB + WAF + Cognito auth means your application code never handles unauthenticated requests, SQL injection, or known bad IPs. These are all blocked before reaching your ECS tasks. This is defense in depth."}}
 
+{{collapseSection "WAF Cost Estimation" "
+<ul>
+  <li><strong>Minimum WAF config</strong> — AWSManagedRulesCommonRuleSet + rate-based rule = ~$2/mo + $0.60/M requests</li>
+  <li><strong>Bot Control</strong> — $10/mo + $1/M requests. Only enable if you have a bot problem.</li>
+  <li><strong>At 10M requests/mo</strong> — Common rules ($1) + rate rule ($1) + request charges ($6) = <span class='hl'>~$8/mo</span></li>
+  <li><strong>At 100M requests/mo</strong> — Same rules ($2) + request charges ($60) = <span class='hl'>~$62/mo</span></li>
+</ul>
+"}}
+
+{{mustKnow
+  "WAF at ALB blocks SQL injection, XSS, and rate-limits per IP before requests reach your app"
+  "Cognito integration at ALB = zero auth code in your backend — ALB validates JWT and forwards claims in headers"
+  "Minimum WAF config: AWSManagedRulesCommonRuleSet + rate-based rule for ~$2/mo"
+}}
+
 {{phase 5 "Cost Breakdown" "3 min"}}
 
 {{say `ALB pricing has two components:
@@ -287,6 +338,12 @@ WebACL:
   "Rule evaluations. At &lt;span class='hl'>10K RPS&lt;/span> with &lt;span class='hl'>10 routing rules&lt;/span>, rule evaluations = 100K/s = &lt;span class='hl'>100 LCU&lt;/span>. That is &lt;span class='hl'>$58/mo&lt;/span> in LCU charges alone — dominating new connections (20 LCU) and processed bytes (0.5 LCU). Consolidate rules and remove unused ones."
   "How do I reduce ALB costs for low-traffic services?"
   "Consolidate behind one ALB using path-based routing. Each ALB base fee is &lt;span class='hl'>$16.43/mo&lt;/span> regardless of traffic. Ten low-traffic services on separate ALBs cost &lt;span class='hl'>$164/mo&lt;/span> in base fees. One ALB with 10 rules costs &lt;span class='hl'>$16.43/mo&lt;/span> base plus negligible LCU."
+}}
+
+{{mustKnow
+  "ALB cost = $16.43/mo base + LCU variable. LCU bills on the highest single dimension only"
+  "Rule evaluations dominate LCU at high RPS — 10K RPS x 10 rules = 100 LCU = $58/mo"
+  "Consolidate microservices behind one ALB to avoid multiplying the $16.43 base fee"
 }}
 
 {{phase 6 "Best Practices" "3 min"}}
@@ -344,6 +401,17 @@ aws elbv2 modify-rule --rule-arn $RULE_ARN \
 aws elbv2 modify-rule --rule-arn $RULE_ARN \
   --actions Type=forward,TargetGroupArn=$BLUE_TG_ARN`}}
 
+{{mustKnow
+  "Deregistration delay: set to your longest request duration (default 300s is too long for most APIs)"
+  "TLS policy: use ELBSecurityPolicy-TLS13-1-2-2021-06 — never allow TLS 1.0/1.1"
+  "Rolling deploy limits blast radius to 1/N targets; blue-green gives instant rollback by switching target groups"
+}}
+
+{{goodToKnow
+  "Slow start mode ramps traffic to new targets over 30-900s — prevents cold-start overload on JVM services"
+  "ALB weighted target groups enable canary deploys: 95% to stable, 5% to canary target group"
+}}
+
 {{phase 7 "Monitoring & Troubleshooting" "4 min"}}
 
 {{say `ALB exposes critical metrics through CloudWatch. Three metrics you must monitor:
@@ -379,6 +447,14 @@ Access logs give per-request detail (URL, client IP, status code, latency) when 
   "What is the difference between connection timeout and idle timeout?" "Connection timeout (default 10s) is how long ALB waits for the TCP handshake to the target. Idle timeout (default 60s) is how long ALB keeps an idle connection open. Increase idle timeout for long-polling or slow responses."
 }}
 
+{{caveat "ELB 5XX and Target 5XX are different metrics with different root causes. ELB 5XX means the ALB itself failed (capacity, misconfigured listener). Target 5XX means your app returned an error. Alerting on one without the other misses half the failure modes."}}
+
+{{mustKnow
+  "Three must-monitor metrics: HTTPCode_ELB_5XX (ALB failure), HTTPCode_Target_5XX (app failure), TargetResponseTime (latency)"
+  "Access logs to S3 provide per-request detail: URL, client IP, response time, status code — essential for debugging"
+  "ELB 5XX = ALB problem (capacity, config). Target 5XX = app problem. Always distinguish between them"
+}}
+
 {{phase 8 "Interview Summary" "2 min"}}
 
 {{say `<span class="hl-blue">ALB</span> is the default for HTTP workloads on AWS:
@@ -397,6 +473,12 @@ Access logs give per-request detail (URL, client IP, status code, latency) when 
 }}
 
 {{hint "ALB in system design interviews" "When the interviewer asks about load balancing for a web application, start with ALB. Only switch to NLB if the interviewer introduces a constraint like static IP, non-HTTP protocol, or PrivateLink."}}
+
+{{mustKnow
+  "ALB is the default for every HTTP workload — only skip it for static IP, non-HTTP, TLS passthrough, or sub-100us latency"
+  "One ALB with path-based rules serves multiple services for $16.43/mo base vs $164/mo for 10 separate ALBs"
+  "WAF + Cognito at ALB = security and auth without any application code"
+}}
 
 {{checklist
   "ALB = Layer 7, HTTP/HTTPS — default for all web workloads"

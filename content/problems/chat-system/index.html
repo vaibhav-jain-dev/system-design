@@ -50,6 +50,10 @@
   "HTTP/2 server push is unidirectional — server can push, but client must initiate new HTTP requests to send messages. WebSocket is bidirectional on a single TCP connection. Chat requires both directions constantly. HTTP/2 would need a separate POST for every outgoing message, adding connection overhead and latency."
 }}
 
+{{caveat "E2E encryption eliminates server-side search, spam filtering, and content moderation. You must address this trade-off explicitly — interviewers will probe it."}}
+
+{{mustKnow "WebSocket is the only viable option for real-time bidirectional chat — long polling adds 1-5s latency, SSE is unidirectional" "E2E encryption means the server is a dumb pipe — no server-side search, no content moderation, no compliance indexing" "The 256-member group cap is a deliberate engineering constraint that bounds fan-out cost to 256 writes per message" "Dual-path delivery: WebSocket for online users, persistent offline queue + push notification for offline users"}}
+
 {{phase 2 "Capacity Estimation" "3 min"}}
 
 {{say `500M DAU, each user sends about <strong>40 messages per day</strong> on average — here are the numbers that shape the architecture:
@@ -76,6 +80,15 @@
   (how "server count" "200M connections × 40KB = 8 TB total memory. At 64GB per server, that's 125,000 servers. With 100K connections per server and overhead, plan for ~5,000 WebSocket servers across all regions.")
   (whatIf "a region goes down" "200M connections / 5 regions = 40M connections per region. Failing over 40M connections to remaining regions means each absorbs 10M extra. Servers need 30% headroom for this.")
 }}
+
+{{collapseSection "Detailed Capacity Math" `<ul>
+  <li><strong>WebSocket memory per connection:</strong> ~40KB (TLS state + read/write buffers + session metadata). 100K connections × 40KB = 4GB per server, leaving 60GB for OS + application on a 64GB instance</li>
+  <li><strong>Kafka throughput:</strong> 700K msgs/sec × 100 bytes avg = 70MB/sec. A single Kafka broker handles ~200MB/sec writes. 100 brokers provides 20× headroom for spikes</li>
+  <li><strong>DynamoDB WCU:</strong> 20B msgs/day = 231K writes/sec average. On-demand can burst to 2× provisioned. At $1.25 per million WCU, steady state costs ~$25K/month for message writes alone</li>
+  <li><strong>Redis session registry:</strong> 200M keys × 60 bytes = 12GB. 20 shards at 600MB each — trivially small for Redis instances with 16GB+ RAM</li>
+</ul>`}}
+
+{{mustKnow "200M concurrent WebSocket connections is the dominant scaling constraint — drives server count, memory budget, and deploy strategy" "700K msgs/sec at peak requires Kafka-level throughput — no traditional message queue handles this" "Each WebSocket connection consumes ~40KB of server memory — this determines 100K connections/server and ~5,000 servers total"}}
 
 {{phase 3 "API Design" "5 min"}}
 
@@ -303,6 +316,10 @@ Messages are sent over WebSocket for lowest latency; REST provides durability an
   "The client maintains a local sequence number per conversation. On reconnect, it sends its last known message_id. The server queries DynamoDB for messages > that ID and streams them back. This handles both server crashes and client disconnects."
 }}
 
+{{caveat "The WebSocket API and REST API must share the same authentication token. If you design them with separate auth flows, the interviewer will flag it as a security gap — a stolen WS token could be replayed on REST endpoints and vice versa."}}
+
+{{mustKnow "Two-layer API: WebSocket for real-time events (messages, typing, receipts), REST for CRUD (history, groups, media upload)" "Client-generated UUID enables deduplication on retry — without it, a network hiccup causes duplicate messages" "ACK protocol: single checkmark = server received (Kafka write), double checkmark = recipient delivered — these are different events" "REST fallback if WebSocket ACK not received within 5 seconds — idempotent retry using the same client_msg_id"}}
+
 {{phase 4 "Core Architecture" "8 min"}}
 
 {{say `Four layers:
@@ -340,6 +357,12 @@ Messages are sent over WebSocket for lowest latency; REST provides durability an
   "How do you handle WebSocket connection drops and reconnection?"
   "Three mechanisms: 1) Client-side heartbeat — ping every 30 seconds; if no pong within 5 seconds, reconnect. 2) Server-side cleanup — if no heartbeat for 60 seconds, remove the session from Redis and close the socket. 3) On reconnection, the client sends the last received message_id. The server queries DynamoDB for all messages after that ID and delivers them in order. Messages are never lost because they are persisted before ACK is sent."
 }}
+
+{{caveat "NLB is mandatory for WebSocket connections — ALB has a 4000-second idle timeout that silently drops long-lived connections. This is a common mistake in interviews."}}
+
+{{goodToKnow "Session registry in Redis uses TTL=5min refreshed by heartbeat — if a WebSocket server crashes, stale entries auto-expire without requiring explicit cleanup" "Kafka buffering in WebSocket servers (bounded 1000-message queue) provides 30 seconds of resilience against Kafka outages without message loss"}}
+
+{{mustKnow "Separate connection management (WebSocket servers) from message routing (Chat Service) — a routing bug should not drop connections" "Session registry pattern: user_id to server_id mapping in Redis enables O(1) message routing to the correct WebSocket server" "Kafka as the message bus provides durability between services — messages are persisted before delivery is attempted" "NLB for WebSocket (Layer 4, no idle timeout), ALB for REST API (Layer 7, HTTP routing)"}}
 
 {{phase 5 "Message Delivery Flow" "8 min"}}
 
@@ -402,6 +425,17 @@ func (s *ChatService) DeliverMessage(ctx context.Context, msg *Message) {
   "Kafka partition by conversation_id ensures all messages in a group are in the same partition — totally ordered. The consumer processes them sequentially. Each message gets a monotonically increasing Snowflake ID. Clients render messages sorted by Snowflake ID. Even if two messages arrive out of order over WebSocket, the client reorders by ID."
 }}
 
+{{caveat "ACK happens after Kafka write, NOT after recipient delivery. If you say 'ACK after delivery' the interviewer will ask what happens when the recipient is offline — you will have no answer."}}
+
+{{collapseSection "Message Delivery Code Walkthrough" `<ul>
+  <li><strong>Line 3-4:</strong> Snowflake ID assignment happens at the Chat Service, not the client — the server controls ordering</li>
+  <li><strong>Line 6-8:</strong> Kafka publish is the durability boundary — if this fails, no ACK is sent, and the client retries with the same UUID</li>
+  <li><strong>Line 11:</strong> ACK to sender triggers single checkmark — this is the sender's confirmation that the message is persisted</li>
+  <li><strong>Lines 15-23:</strong> Delivery is async via Kafka consumer — fan-out to online/offline recipients is independent of the sender's flow</li>
+</ul>`}}
+
+{{mustKnow "Four-layer message guarantee: client retry until ACK, Kafka replication factor 3, consumer commits only after delivery/queue, offline queue in DynamoDB" "ACK after Kafka write (not after delivery) — single checkmark means server persisted, double checkmark means recipient received" "Kafka partitions by conversation_id — all messages in a conversation are totally ordered within a single partition" "Client-side dedup using Snowflake message_id handles at-least-once Kafka delivery semantics"}}
+
 {{phase 6 "Data Model & Storage" "8 min"}}
 
 {{say `<strong>DynamoDB</strong> is the primary store:
@@ -461,6 +495,18 @@ response = dynamodb.query(
     ScanIndexForward=False,  # newest first
 )`}}
 
+{{collapseSection "DynamoDB Table Schema Details" `<ul>
+  <li><strong>messages table:</strong> PK=conversation_id, SK=message_id (Snowflake). PAY_PER_REQUEST billing avoids capacity planning. TTL on ephemeral messages</li>
+  <li><strong>conversations GSI:</strong> PK=user_id, SK=updated_at — powers the inbox view sorted by most recent activity</li>
+  <li><strong>read_receipts table:</strong> PK=conversation_id#user_id — single GetItem for unread count per conversation per user</li>
+  <li><strong>participants table:</strong> PK=conversation_id, SK=user_id — Query returns all members for fan-out lookup</li>
+  <li><strong>users table:</strong> PK=user_id — profile data, device tokens for push notifications</li>
+</ul>`}}
+
+{{caveat "E2E encryption means no server-side search index. If the interviewer asks about search, the answer is client-side only — local SQLite on the device decrypts and indexes messages. Do not suggest Elasticsearch or any server-side search."}}
+
+{{mustKnow "DynamoDB with conversation_id as partition key and Snowflake message_id as sort key — gives ordered messages per conversation in single-digit ms" "GSI on user_id + updated_at powers the inbox view (most recent conversations first)" "No server-side search is possible with E2E encryption — search is client-side only using local SQLite" "On-demand DynamoDB capacity handles 20B writes/day without pre-provisioning — auto-scales with no operational overhead"}}
+
 {{phase 7 "Group Chat & Fan-out" "5 min"}}
 
 {{say `Group chat uses <strong>fan-out-on-write</strong>:
@@ -488,6 +534,10 @@ response = dynamodb.query(
   "In 1:1, read receipts are simple: sender sees blue checkmarks when the recipient reads. In groups, WhatsApp shows 'read by 15 of 20' when you tap the message. Each member sends a read ACK independently. We store per-member read status but only show aggregate counts in the UI to avoid N×M receipt fan-out. The key optimization: batch read ACKs — send one ACK with last_read_message_id rather than per-message receipts."
 }}
 
+{{caveat "Fan-out-on-write only works because of the 256-member cap. If the interviewer changes the constraint to 100K members per group, you must switch to fan-out-on-read. State this trade-off explicitly."}}
+
+{{mustKnow "Fan-out-on-write for groups: 256 WebSocket pushes per message — bounded and manageable" "Fan-out-on-read is the alternative for large groups (10K+ members) — each member queries on open instead of receiving pushes" "Partial failure handling: each member's delivery is independent — 3 failures out of 256 only affect those 3 members" "Group read receipts use aggregate counts in UI to avoid N×M receipt fan-out explosion"}}
+
 {{phase 8 "End-to-End Encryption" "5 min"}}
 
 {{say `Using the <strong>Signal Protocol</strong> for E2E encryption:
@@ -514,6 +564,12 @@ response = dynamodb.query(
   "How does E2E encryption work with message backup (iCloud, Google Drive)?"
   "Messages are backed up in their encrypted form with an additional backup encryption key. WhatsApp lets users create a backup password or use a 64-digit encryption key. Without this backup key, the cloud backup is unreadable — even by Apple or Google. If the user forgets the backup password, all backed-up messages are permanently lost."
 }}
+
+{{caveat "Never suggest 'rolling your own crypto' in an interview. Signal Protocol is battle-tested by 2B+ users. The interviewer expects you to name it specifically and explain forward secrecy and future secrecy."}}
+
+{{goodToKnow "Group E2E means N encrypt operations per message (one per member) — this is why group size is capped at 256, not a server limitation but a client battery/CPU constraint" "Key reinstallation after app reinstall triggers a 'security code changed' warning to all contacts — this is a feature, not a bug"}}
+
+{{mustKnow "Signal Protocol provides forward secrecy (compromised key cannot decrypt past messages) and future secrecy (key is healed on next ratchet step)" "Server is zero-knowledge — routes encrypted bytes without ever seeing plaintext. This eliminates server-side search, spam filtering, and compliance indexing" "Group E2E: sender encrypts message N times with each member's pairwise session key — the 256-member cap bounds this cost" "No server-side content moderation is possible — spam detection must happen client-side"}}
 
 {{phase 9 "Media Sharing" "5 min"}}
 
@@ -567,6 +623,17 @@ response = dynamodb.query(
   <li>Cost: <small>AWS Elemental MediaConvert, ~$0.015/min of video processed</small></li>
 </ul>`
 }}
+
+{{collapseSection "Media Cost Breakdown" `<ul>
+  <li><strong>S3 storage:</strong> 1 PB/day × $0.023/GB = ~$23K/day = ~$700K/month. With S3 Intelligent-Tiering, media older than 30 days moves to infrequent access ($0.0125/GB) — ~40% savings</li>
+  <li><strong>CloudFront transfer:</strong> At $0.085/GB for first 10TB, media-heavy usage could reach $500K-1M/month. Reserved capacity pricing brings this down 30-40%</li>
+  <li><strong>Deduplication savings:</strong> ~65% dedup rate on forwarded images reduces effective storage by 2.8× — critical at PB scale</li>
+  <li><strong>Lambda thumbnails:</strong> ~$0.20 per 1M invocations × 2B media messages/day = ~$400/day — negligible compared to storage and transfer</li>
+</ul>`}}
+
+{{caveat "Media deduplication must happen BEFORE encryption — encrypted blobs differ even for identical files because of random IVs. If you suggest dedup after encryption, the interviewer will catch the mistake."}}
+
+{{mustKnow "Client encrypts media locally with AES-256, uploads ciphertext to S3, sends URL + key inside E2E-encrypted message — server never sees plaintext media" "Presigned S3 URLs with short TTL (15 min) prevent unauthorized access — even if URL leaks, ciphertext is useless without the AES key" "Content-addressed dedup via SHA-256 hash saves ~65% storage on forwarded media — hash computed on plaintext before encryption" "Media never flows through the chat server — direct client-to-S3 upload via presigned URL keeps the chat path lean"}}
 
 {{phase 10 "Scaling & Reliability" "8 min"}}
 
@@ -630,6 +697,20 @@ response = dynamodb.query(
 
 {{diagram "cs-multi-device"}}
 
+{{collapseSection "Multi-Region Deployment Details" `<ul>
+  <li><strong>Per-region stack:</strong> WebSocket fleet + Chat Service + Kafka cluster + DynamoDB replica. Each region is fully self-contained for local users</li>
+  <li><strong>Cross-region message routing:</strong> Kafka MirrorMaker 2 replicates topics between regions with ~80-120ms lag (US-East to EU-West)</li>
+  <li><strong>DynamoDB Global Tables:</strong> Multi-region replication with ~1 second lag, last-writer-wins conflict resolution. Messages never conflict (unique Snowflake IDs). Read receipts use LWW correctly (latest read position wins)</li>
+  <li><strong>DNS failover:</strong> Route 53 health checks, latency-based routing. Regional failure recovers in ~30s DNS propagation + ~2s WebSocket reconnect</li>
+  <li><strong>Graduated traffic ramp:</strong> Recovered region starts at 10% weight in DNS, ramps to 100% over 5 minutes to prevent thundering herd</li>
+</ul>`}}
+
+{{caveat "Consistent hashing for WebSocket servers is critical during rolling deploys. Without it, a deploy of 5,000 servers reconnects all 200M clients. With consistent hashing, only 1/N connections move per server change."}}
+
+{{goodToKnow "Connection draining during deploys: mark server as draining in Redis, wait 60s for natural heartbeat-driven reconnection, then force-close remaining connections — limits reconnect storm to ~333/sec" "Alert on Kafka consumer lag (not throughput) — consumer lag > 60 seconds means delivery SLA is breached"}}
+
+{{mustKnow "5,000 WebSocket servers at 100K connections each for 200M concurrent connections — consistent hashing minimizes reconnections during deploys" "Multi-region deployment is mandatory for sub-200ms global delivery — you cannot CDN-cache real-time chat messages" "Graceful connection draining prevents thundering herd during rolling deploys — mark as draining, wait for heartbeat timeout, force-close remainder" "DynamoDB Global Tables for multi-region message replication with ~1s lag — last-writer-wins works because messages have unique Snowflake IDs"}}
+
 {{phase 11 "Read Receipts & Presence" "5 min"}}
 
 {{say `Read receipts and presence are <strong>high-frequency, low-value signals</strong> — they need different treatment than messages:
@@ -686,6 +767,12 @@ response = dynamodb.query(
 }}
 
 {{checklist "WebSocket for real-time delivery, offline queue for reliability" "Kafka as durable message bus between services" "DynamoDB partitioned by conversation_id with Snowflake sort keys" "Fan-out-on-write for groups (bounded by 256 cap)" "Signal Protocol for E2E encryption — server is zero-knowledge" "Per-device sync cursors for multi-device" "Redis for session registry and presence (heartbeat TTL)" "NLB for WebSocket, ALB for REST API"}}
+
+{{caveat "Typing indicators and presence are NOT persisted to Kafka or DynamoDB. They use Redis pub/sub (fire-and-forget). If the interviewer asks about durability for typing indicators, explain that losing a typing event is imperceptible — but losing a message is unacceptable. Different reliability requirements justify different delivery paths."}}
+
+{{goodToKnow "Presence fan-out is lazy — User B only subscribes to User A's presence channel when they open a chat with User A. No proactive push of presence changes to all contacts" "DND mode is a read-time filter on presence, not a write-time decision — internally the user is still 'online' for delivery routing"}}
+
+{{mustKnow "Typing indicators use Redis pub/sub (fire-and-forget) — different reliability requirement than messages, which use Kafka (durable)" "Presence uses Redis TTL heartbeat: set key with TTL=60s, heartbeat every 30s refreshes it. 2 missed heartbeats = user offline. O(1) check, sub-ms" "Batch read receipts: client buffers up to 20 receipts and flushes every 500ms — reduces WebSocket frames by 10-20x" "Privacy settings for presence are read-time filters — presence is still tracked internally for delivery routing decisions"}}
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 

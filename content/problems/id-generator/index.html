@@ -37,6 +37,8 @@
   "Approximate is fine. Snowflake guarantees IDs generated later have higher values within the same worker. Across workers and datacenters, IDs generated within the same millisecond may have any relative order. For strict ordering, you'd need a centralized sequencer — much higher latency."
 }}
 
+{{mustKnow "Snowflake IDs are 64-bit, time-ordered, and require no coordination after startup — unlike UUIDs (128-bit, random) or DB auto-increment (single bottleneck)" "The ID space is partitioned by worker ID — each server owns a unique slice, eliminating the need for distributed consensus on every ID" "Custom epoch maximizes usable timestamp range — 41 bits = 69.7 years from your chosen start date" "1M+ IDs/sec across the fleet with zero network calls per ID generation"}}
+
 {{phase 2 "API Design" "5 min"}}
 
 {{say `The API is simple — this is an internal service, not user-facing:
@@ -98,6 +100,8 @@
 
 {{hint "why return ID as string in JSON?" "JavaScript's Number type uses IEEE 754 double-precision float — only 53 bits of integer precision. Snowflake IDs use 63 bits, so large IDs lose precision when parsed as JSON numbers. Always return as string: {\"id\": \"1503238553034547201\"} not {\"id\": 1503238553034547201}. Twitter learned this the hard way."}}
 
+{{mustKnow "Always return IDs as strings in JSON — JavaScript MAX_SAFE_INTEGER is 2^53, Snowflake IDs use up to 63 bits" "The API is internal (service-to-service) — batch endpoint reduces network overhead by 1000x for high-throughput callers"}}
+
 {{phase 3 "64-Bit Snowflake Layout" "8 min"}}
 
 {{say `The key insight is bit partitioning — we split 64 bits into four fields, each responsible for one aspect of uniqueness:
@@ -133,6 +137,10 @@
   "Can you adjust the bit split for different needs?"
   "Yes — it's a design parameter. For fewer datacenters but more workers per DC: use 3 DC bits + 7 worker bits = 8 DCs × 128 workers. For higher per-node throughput: use 10 sequence bits + 3 worker bits = 1024 IDs/ms per node × 8 nodes. The total must stay at 22 bits (63 bits - 41 timestamp)."
 }}
+
+{{caveat "The sign bit must always be 0 — if you accidentally set it, the ID becomes negative in signed integer representations (Java long, SQL BIGINT), breaking sorting and comparisons."}}
+
+{{mustKnow "Bit layout: 1 sign + 41 timestamp + 5 datacenter + 5 worker + 12 sequence = 64 bits" "41-bit timestamp = 2^41 ms = 69.7 years; 12-bit sequence = 4096 IDs/ms/worker; 10-bit worker = 1024 total nodes" "Timestamp in the most-significant bits ensures numeric sorting equals approximate time ordering" "Max theoretical throughput: 1024 workers x 4096 IDs/ms = 4.19 billion IDs/sec"}}
 
 {{phase 4 "Generation Algorithm" "8 min"}}
 
@@ -207,6 +215,8 @@ class SnowflakeGenerator:
   "Thread.sleep(1) often oversleeps by 10-15ms due to OS scheduler resolution, especially under load. Busy-wait (spin until current_ms > last_ms) guarantees we advance exactly one millisecond. The spin loop is brief — at most 1ms — and only activates when sequence overflows, which is rare."
 }}
 
+{{mustKnow "Generation is O(1) — one lock, one timestamp read, three bit shifts, two ORs; sub-microsecond on modern hardware" "Sequence mask (& 0xFFF) prevents overflow into timestamp bits — without it, sequence > 4095 corrupts the ID" "When sequence exhausts (4096 IDs in 1ms), busy-wait for next millisecond — Thread.sleep(1) oversleeps by 10-15ms due to OS scheduler" "Clock backward detection (current_ts < last_ts) is mandatory — generating IDs with a past timestamp breaks time ordering"}}
+
 {{phase 5 "High-Level Architecture" "10 min"}}
 
 {{say `The architecture is intentionally simple — ID generation complexity is in the algorithm, not the infrastructure:
@@ -235,6 +245,10 @@ class SnowflakeGenerator:
   "Each node is independent. If node A goes down, clients route to nodes B and C — no data loss, no coordination needed. The only state each node holds is its worker_id and current sequence — both are recovered on restart (worker_id re-claimed from ZK, sequence resets to 0, which is safe because a new millisecond has passed)."
 }}
 
+{{goodToKnow "For Kubernetes-native deployments, StatefulSet pod ordinals (pod-0, pod-1, ...) can replace ZooKeeper entirely for worker ID assignment — simpler, deterministic, and survives restarts."}}
+
+{{mustKnow "ID generators are stateless after startup — the only state is worker_id + sequence counter, both recoverable" "ZooKeeper ephemeral nodes ensure exclusive worker ID assignment and automatic reclamation on crash" "Service vs. embedded library trade-off: service adds ~0.5ms latency but is simpler; embedded library gives <1us but requires distributing worker IDs to every process" "If ZooKeeper is down, new instances can't start but existing instances continue generating IDs normally"}}
+
 {{phase 6 "Throughput Optimization" "5 min"}}
 
 {{say `Single-node throughput is already very high, but there are patterns to push further:
@@ -249,6 +263,8 @@ class SnowflakeGenerator:
 {{diagram "idgen-throughput"}}
 
 {{hint "batch pre-allocation pattern" "Instead of calling the ID service per-record, allocate a block: 'give me IDs 5000–6000' → serve locally from that range without any coordination. When the block is exhausted, fetch the next block. This reduces ID service calls by 1000x while maintaining uniqueness — each block is exclusively owned by one caller."}}
+
+{{mustKnow "Batch pre-allocation (request 1000 IDs at once) reduces ID service calls by 1000x — each block is exclusively owned" "gRPC reduces per-call overhead from ~0.5ms (HTTP) to ~0.1ms"}}
 
 {{phase 7 "Multi-Datacenter Setup" "8 min"}}
 
@@ -265,6 +281,10 @@ class SnowflakeGenerator:
   (whyNot "one global ZooKeeper cluster for worker IDs" "Cross-DC ZooKeeper writes have 50-200ms latency (speed of light + network). At startup, this is acceptable — you only claim a worker ID once. But if you needed ZK for every ID generation, cross-DC latency would kill throughput.")
   (whatIf "two datacenters have the same datacenter_id due to a configuration error" "IDs can collide — this is the critical failure mode for multi-DC. Mitigation: automate datacenter ID assignment via your orchestration system (Terraform, Kubernetes labels). Never set it manually. Validate on startup: if datacenter_id conflicts detected → abort.")
 }}
+
+{{caveat "Duplicate datacenter_id across DCs is the most dangerous misconfiguration — IDs will collide silently. Automate DC ID assignment via Terraform/K8s labels and validate on startup; never set manually."}}
+
+{{mustKnow "Different datacenters use different datacenter_id bits — IDs from separate DCs can never collide, no cross-DC coordination needed" "Cross-DC ordering is approximate only — clock skew of 100ms between DCs means IDs may appear out of order when sorted globally" "NTP keeps intra-DC clocks within ~5ms; for strict cross-DC ordering you would need Google TrueTime (bounded clock uncertainty)"}}
 
 {{phase 8 "Failure Modes & Clock Skew" "8 min"}}
 
@@ -293,6 +313,8 @@ class SnowflakeGenerator:
   "Within a single DC: 5ms is the practical limit. Beyond 5ms, IDs from different workers start appearing out of order when sorted by ID. Across DCs: ordering across DCs is approximate anyway, so 100ms is acceptable. Monitor NTP offset with an alert at >1ms drift."
 }}
 
+{{mustKnow "Three failure modes: clock backward (refuse IDs until caught up), sequence exhaustion (wait for next ms), worker crash (re-claim worker ID from ZK)" "Use monotonic clock anchored to wall time — eliminates backward clock issue entirely within a process" "Forward clock jumps are safe for uniqueness but cause IDs to appear as if created in the future — alert on jumps >5s" "Maximum acceptable clock skew: <5ms intra-DC (affects sort order), <100ms cross-DC (approximate ordering anyway)"}}
+
 {{phase 9 "Security & Privacy" "3 min"}}
 
 {{say `Snowflake IDs have one security issue: they are enumerable and reveal information:
@@ -303,6 +325,8 @@ class SnowflakeGenerator:
 </ul>`}}
 
 {{hint "ID enumeration attack" "If your user profile URL is /user/1001, an attacker can try /user/1002, /user/1003... and scrape your entire user base. Use: 1) Non-enumerable IDs at the API layer (hash the internal ID), 2) Authorization checks (even if ID is guessed, user can't access without permission), 3) Rate limiting on resource lookups. Snowflake IDs are fine internally — just don't expose them in URLs."}}
+
+{{mustKnow "Raw Snowflake IDs leak creation timestamp, datacenter ID, worker ID, and approximate creation rate — never expose in public APIs" "Mitigation: hash or encode IDs at the API boundary (Hashids, SHA256+secret, or separate UUID for public URLs)"}}
 
 {{phase 10 "Monitoring & Alerting" "5 min"}}
 
@@ -319,6 +343,8 @@ class SnowflakeGenerator:
 
 {{hint "sequence utilization as a capacity signal" "Sequence utilization = (peak IDs generated in a 1ms window) / 4096. At 80%, you're getting close to sequence exhaustion, which causes brief wait periods (added latency). Solution: add more workers so each handles fewer requests, or implement batch pre-allocation to smooth traffic."}}
 
+{{mustKnow "Key metrics: IDs/sec per worker, clock drift (alert >5ms), sequence utilization (alert >80%), worker ID conflicts (alert >0), ZK session health" "Sequence utilization = peak IDs in a 1ms window / 4096 — approaching 80% means add workers or enable batch pre-allocation"}}
+
 {{phase 11 "Alternatives & Trade-offs" "5 min"}}
 
 {{compare "ID Generation Approach" (options
@@ -334,6 +360,12 @@ class SnowflakeGenerator:
   (row "DB auto-incr"    "8 bytes"  "Yes"           "~100K/sec"    "Every ID")
   (row "MongoDB ObjectID" "12 bytes" "Approximate"  "High"         "None")
 )}}
+
+{{goodToKnow "UUID v7 (IETF RFC) is the modern time-ordered UUID alternative — 128-bit but sortable, no coordination needed. Best for systems where simplicity matters more than storage efficiency. ULID is another option: 48-bit ms timestamp + 80-bit random, lexicographically sortable, language-agnostic."}}
+
+{{caveat "MongoDB ObjectID is 12 bytes (96 bits) — not 64-bit, so it doesn't fit in BIGINT. It includes a 4-byte timestamp (seconds, not milliseconds), 5-byte random, and 3-byte counter. Time precision is only 1 second vs Snowflake's 1 millisecond."}}
+
+{{mustKnow "Snowflake: 64-bit, time-ordered, 4B+/sec, coordination at startup only — best for high-volume systems needing sortability" "UUID v4: 128-bit, random, unlimited throughput, no coordination — best when you cannot coordinate at all (offline clients)" "DB auto-increment: sequential, simple, but single bottleneck at ~100K/sec and SPOF — never use for distributed systems" "UUID v7: 128-bit, time-ordered, no coordination — a good middle ground when 128-bit storage is acceptable"}}
 
 {{key "Snowflake IDs solve distributed ID generation with 64 bits: 41-bit timestamp for time-ordering + 10-bit worker ID for uniqueness across servers + 12-bit sequence for 4096 IDs/ms per worker — all generated in-memory in under 1 microsecond with no coordination after startup."}}
 

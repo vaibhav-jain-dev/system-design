@@ -30,6 +30,12 @@
   (row "Protocol"                                            "RESP (Redis Serialization Protocol)")
 )}}
 
+{{mustKnow
+  "Redis is an in-memory key-value store with sub-millisecond latency and 100K+ ops/sec per node"
+  "Not just GET/SET — sorted sets, HyperLogLog, bitmaps, streams each solve specific problem classes"
+  "Leader-follower async replication; 16,384 hash slots for clustering"
+}}
+
 {{phase 2 "Data Structures" "5 min"}}
 
 {{say "Redis is not just key-value. Its data structures solve specific problems elegantly. Understanding which structure to use for which problem is a key interview skill."}}
@@ -96,6 +102,17 @@ user_id = r.hget("session:abc123", "user_id")
   "A sorted set stores each entry with a 64-bit float score plus the member string, plus bookkeeping for the skip list — roughly 50-100 bytes per entry depending on member size. A list stores only the value with a ~20-byte overhead per node. For a simple chronological feed where you only need FIFO or LIFO, a list is more memory-efficient. Sorted sets are worth the overhead when you need range queries by score or rank lookups."
   "When would you choose a Stream over a List for a message queue?"
   "When you need consumer groups, message acknowledgment, and replay. Lists with BRPOP are destructive — once popped, the message is gone. Streams support multiple independent consumer groups, each tracking their own read position, plus XACK for acknowledgment and XRANGE to replay historical messages. Use a List for a simple single-consumer queue; use a Stream when you need Kafka-like semantics inside Redis."
+}}
+
+{{mustKnow
+  "Sorted sets: O(log N) ZADD/ZRANGEBYSCORE — use for leaderboards, rate limiting, feed timelines"
+  "HyperLogLog: 12KB per counter, 0.81% error — use for unique visitor counting at scale"
+  "Bitmap: 1 bit per user, 100M users = 12.5MB — use for DAU tracking and feature flags"
+}}
+
+{{goodToKnow
+  "Streams support consumer groups with XACK — Kafka-like semantics inside Redis"
+  "Hash fields are individually addressable — prefer over JSON strings for partial updates"
 }}
 
 {{phase 3 "Caching Strategies" "5 min"}}
@@ -180,6 +197,14 @@ async def delete_user_cache(user_id: int):
 
 {{key "Cache-aside is the right default for 90% of use cases. Write-through adds complexity but guarantees consistency. Always set a TTL on every key, even with write-through, as a safety net against bugs."}}
 
+{{mustKnow
+  "Cache-aside (lazy load) is the default pattern — only caches data on read miss"
+  "Thundering herd: popular key expires, thousands of requests hit DB simultaneously — fix with distributed lock"
+  "Always set TTL even with write-through — bounds inconsistency window if cache write silently fails"
+}}
+
+{{caveat "Write-behind (write-back) buffers writes in Redis before flushing to DB. If Redis crashes before flush, those writes are lost permanently. Never use for user-generated data."}}
+
 {{phase 4 "ElastiCache Configuration" "5 min"}}
 
 {{say "AWS ElastiCache is &lt;span class=\"hl-blue\">managed Redis&lt;/span> — AWS runs the Redis servers for you. You get automatic failover (if primary crashes, standby takes over), patching, backups, and monitoring. Here are the key configuration choices you need to make."}}
@@ -243,6 +268,19 @@ auth-token: <token>               # Require password
   "Single node + replicas: simpler, supports all multi-key operations (MGET, Lua scripts across keys), sufficient when dataset fits in one node's memory (under ~50 GB). Cluster mode: data sharded across multiple primaries, required when dataset exceeds single-node memory or write throughput exceeds ~100K ops/s. Trade-off: cluster mode restricts multi-key operations to keys in the same hash slot."
 }}
 
+{{mustKnow
+  "r6g (memory-optimized) for production — t4g burstable instances throttle under sustained load"
+  "Cluster mode disabled: simpler, supports all multi-key ops — use when dataset fits in one node (<50GB)"
+  "Cluster mode enabled: shards data across primaries — required when dataset exceeds single-node memory"
+}}
+
+{{caveat "ElastiCache does not support in-place migration from cluster mode disabled to enabled. Plan your topology upfront if dataset may exceed 50-60GB within 12 months."}}
+
+{{goodToKnow
+  "appendfsync everysec limits data loss to 1 second — use 'always' only when Redis is the primary store"
+  "3 shards with 2 replicas each = 9 nodes, triples write throughput vs 1 shard with 6 replicas"
+}}
+
 {{phase 5 "Eviction Policies" "3 min"}}
 
 {{say "When Redis runs out of memory, it needs to decide which keys to remove. The eviction policy determines this behavior."}}
@@ -284,6 +322,14 @@ auth-token: <token>               # Require password
 
 {{key "Always set a TTL on every key, even if you use LRU eviction. TTL is your safety net. A key without TTL that is accessed frequently will never be evicted by LRU, even if the data is stale. TTL guarantees eventual refresh."}}
 
+{{mustKnow
+  "allkeys-lru is the recommended default — evicts least recently used key regardless of TTL"
+  "volatile-lru only evicts keys with TTL set — keys without TTL stay forever and can cause OOM"
+  "Redis approximates LRU by sampling 5 random keys (configurable via maxmemory-samples)"
+}}
+
+{{caveat "Add random jitter to TTLs (e.g., 3300-3900s instead of 3600s) to prevent mass expiry stampedes when many keys are cached simultaneously."}}
+
 {{phase 6 "Persistence and Durability" "3 min"}}
 
 {{say "Redis is in-memory by default — restart means data loss. Two persistence mechanisms address this: RDB snapshots for periodic backups, and AOF logs for near-zero data loss. Choose based on your tolerance for data loss versus performance impact."}}
@@ -309,6 +355,17 @@ auth-token: <token>               # Require password
   "With Multi-AZ enabled, ElastiCache automatically promotes a read replica to primary. Failover takes 10-30 seconds. The DNS endpoint updates to point to the new primary. During failover, writes fail; reads continue from remaining replicas. Design your client to retry writes with backoff during this window."
   "Should I use Redis for my primary database?"
   "Only for ephemeral data. Redis is RAM-limited (expensive at TB scale), has weaker durability guarantees than PostgreSQL, and lacks SQL joins and transactions. Use it as a primary store only for sessions, rate-limit counters, leaderboards, and pub/sub — workloads where losing some data on an unexpected crash is acceptable and the dataset fits comfortably in RAM."
+}}
+
+{{mustKnow
+  "RDB uses fork() + copy-on-write — causes latency spikes on write-heavy instances with large memory"
+  "AOF with everysec fsync limits data loss to 1 second; RDB alone can lose minutes of data"
+  "ElastiCache Multi-AZ auto-failover promotes replica in 10-30 seconds on primary crash"
+}}
+
+{{goodToKnow
+  "BGREWRITEAOF compacts the AOF log — disable auto-rewrite and the log grows unbounded causing slow restarts"
+  "Redis uses AOF for recovery when both RDB+AOF are enabled (finer granularity)"
 }}
 
 {{phase 7 "Common Interview Patterns" "5 min"}}
@@ -394,6 +451,14 @@ def is_rate_limited(user_id: str, limit: int, window_sec: int) -> bool:
   "ZADD leaderboard score player_id on each score update. ZREVRANK leaderboard player_id returns the 0-indexed rank in O(log N). ZREVRANGE leaderboard 0 9 returns the top 10. The entire leaderboard for 10M players fits in roughly 800MB (80 bytes per entry for a sorted set). This is one of the strongest cases for Redis over a relational DB — RANK() in SQL on 10M rows requires a full table scan or a complex index, while ZREVRANK is always O(log N)."
 }}
 
+{{mustKnow
+  "SET NX EX for distributed locks — combines claim + TTL atomically to prevent deadlocks"
+  "Sorted set sliding window for rate limiting: ZREMRANGEBYSCORE + ZADD + ZCARD in a Lua script"
+  "Pub/Sub is fire-and-forget (messages lost if no subscriber); Streams persist with consumer groups"
+}}
+
+{{caveat "Never use SETNX then EXPIRE as two separate commands for distributed locks. A crash between them creates a permanent lock (deadlock)."}}
+
 {{phase 8 "Failure Scenarios" "3 min"}}
 
 {{say "Redis failure scenarios range from primary node crashes to hot keys overwhelming a single shard. Understanding these helps you design resilient caching layers."}}
@@ -419,6 +484,14 @@ def is_rate_limited(user_id: str, limit: int, window_sec: int) -> bool:
 {{diagram "fund-redis-failover"}}
 
 {{avoid "Consider persistence for any Redis data you cannot afford to lose on restart. Cold-start after restart means every request hits your DB simultaneously. At 50K RPS, that can overwhelm your database. Use RDB snapshots minimum so cache is warm on restart. Exception: pure ephemeral use cases like rate limiting counters can skip persistence safely."}}
+
+{{mustKnow
+  "Hot key: one shard overwhelmed — fix by sharding the key itself (key:0 through key:9)"
+  "Lua scripts block the single-threaded server — always benchmark and set aggressive time limits"
+  "Cold start after full restart sends all traffic to DB — use cache warming scripts before shifting traffic"
+}}
+
+{{collapseSection "Hot Key Sharding Example" "Instead of one <code>counter:global</code> key, split into <code>counter:0</code> through <code>counter:9</code>. Each write picks a random suffix. To read the total, sum all 10 keys. This spreads load across 10x the shards. Detect hot keys via CloudWatch per-node CPU (one node at 90% while others are at 10%) or <code>redis-cli --hotkeys</code> with LFU policy enabled."}}
 
 {{checklist
   "Cache-aside pattern for most read-heavy workloads"

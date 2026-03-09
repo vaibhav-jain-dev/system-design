@@ -34,6 +34,8 @@ These three non-functional targets drive every architectural decision that follo
   (row "Consistency" "Order state transitions must be ACID")
 )}}
 
+{{caveat "Matching latency < 2s and tracking freshness < 5s are the two NFRs that dictate every data store choice in this design. If the interviewer changes either number, the architecture may shift — always confirm these targets before proceeding."}}
+
 {{triggerQs "Questions this section triggers"
   "What happens if no delivery partner is available?"
   "Order stays in PLACED state. We retry matching every 30 seconds for up to 10 minutes, then auto-cancel with full refund. Customer gets notification at 3-minute and 5-minute marks."
@@ -42,6 +44,8 @@ These three non-functional targets drive every architectural decision that follo
   "What is the delivery SLA?"
   "45 minutes median, 60 minutes p95. These drive our surge pricing thresholds and partner density targets per city zone."
 }}
+
+{{mustKnow "The core hard problem is matching + tracking, not restaurant menus or payments — scope accordingly" "Three key NFRs: matching < 2s, tracking < 5s stale, ETA ± 3 min — these drive every architecture decision" "Order cancellation rules differ by state (free at PLACED, penalties at PREPARING+)" "Delivery SLA: 45 min median, 60 min p95 — these set surge pricing thresholds"}}
 
 {{phase 2 "Capacity Estimation" "3 min"}}
 
@@ -74,6 +78,9 @@ These three non-functional targets drive every architectural decision that follo
   <li><strong>Cassandra</strong> handles append-only location history — LSM-tree absorbs the write rate without MVCC overhead</li>
 </ul>`}}
 
+{{caveat "125K location writes/sec is the dominant load — not order writes (350/sec). Interviewers often expect candidates to miss this. Always calculate driver location traffic first; it is 350x the order volume."}}
+
+{{mustKnow "Location updates (125K/sec) are 350x order writes — this is the dominant scaling concern" "Design for 5x sustained peak, not just 3x average — festivals and weekends spike heavily" "Order storage is modest (~20 GB/day) but location history is 85 GB/day — different storage engines needed"}}
 
 {{phase 3 "API Design" "5 min"}}
 
@@ -302,12 +309,18 @@ These three non-functional targets drive every architectural decision that follo
 
 {{hint "SSE vs WebSocket for customer tracking" "Customers only receive tracking updates (read-only stream). SSE is simpler — unidirectional, works over HTTP/2, auto-reconnects. WebSocket is for delivery partners because they also receive assignments and confirmations (bidirectional)."}}
 
+{{caveat "SSE is for customer tracking (unidirectional read-only). WebSocket is for delivery partners (bidirectional: push location AND receive assignments). Mixing these up in an interview signals a misunderstanding of the protocol tradeoffs."}}
+
 {{triggerQs "API design questions"
   "How do you handle idempotent order placement?"
   "POST /v1/orders accepts an idempotency key header (X-Idempotency-Key). The order service stores key → order_id in Redis with 24h TTL. Duplicate requests within 24h return the original order_id with 200."
   "What does the tracking SSE stream return?"
   "Server-sent events with JSON: {partner_lat, partner_lng, eta_seconds, order_status, restaurant_eta}. Events fire on status change or every 10 seconds, whichever comes first."
 }}
+
+{{mustKnow "Three API groups: REST for customers, WebSocket for partners, gRPC for internal service-to-service" "SSE for customer tracking (unidirectional), WebSocket for partners (bidirectional)" "Idempotency key on order placement — store key → order_id in Redis with 24h TTL" "Partner WebSocket frame is ~250 bytes every 4s — persistent connection avoids TCP handshake overhead"}}
+
+{{goodToKnow "Partner app on 2G: increase update interval to 10s, widen ETA error bars by 1.5x" "HTTP/2 multiplexing means multiple SSE streams share one TCP connection per customer device"}}
 
 {{phase 4 "Order Lifecycle" "8 min"}}
 
@@ -387,6 +400,16 @@ class OrderSagaOrchestrator:
         # Payout is idempotent: payout_service.pay(order_id) → skips if already paid
         return SagaResult(success=True)`}}
 
+{{caveat "State machine must be persisted in PostgreSQL, never in Redis alone. Redis is not ACID — a crash between writing state and publishing the Kafka event creates split-brain between cache and event log."}}
+
+{{collapseSection "Saga Orchestrator Implementation Detail" `The saga orchestrator code above shows the three-step flow: charge customer → accept at restaurant → defer payout to delivery. Key implementation details:
+<ul>
+  <li>Each saga step stores its idempotency key (order_id + step_name) in the target service's DB before executing</li>
+  <li>On retry, if the key exists, skip the step — makes POST /payments/charge safe to call twice</li>
+  <li>Compensating transactions run in reverse order: refund customer if restaurant rejects</li>
+  <li>Saga log is persisted to PostgreSQL for audit and debugging</li>
+</ul>`}}
+
 {{triggerQs "Order lifecycle questions"
   "How do you handle a restaurant going offline mid-order?"
   "We detect via heartbeat miss (30s timeout). The order service transitions PREPARING → EXCEPTION. Customer gets notification, automatic refund initiated. The matching service blacklists the restaurant for 10 minutes to prevent new assignments."
@@ -395,6 +418,10 @@ class OrderSagaOrchestrator:
   "How is the order cancellation window enforced?"
   "POST /v1/orders/{id}/cancel checks current state in PostgreSQL. If state is PREPARING or later, return 409 with reason. Client shows appropriate message. No backend timeouts — state check is synchronous."
 }}
+
+{{mustKnow "Six states: PLACED → ACCEPTED → PREPARING → READY → PICKED_UP → DELIVERED (plus CANCELLED)" "Kafka consumers must be idempotent — INSERT ON CONFLICT DO NOTHING keyed on (order_id, from_state, to_state)" "Saga pattern for cross-service transactions (order → payment → restaurant), not 2PC" "Cancellation policy differs by state: free at PLACED, penalty at PREPARING+, impossible at PICKED_UP"}}
+
+{{goodToKnow "Geofence verification at pickup: partner must be within 200m of restaurant to confirm PICKED_UP" "2PC holds distributed locks at 350 orders/sec × 5s = 1750 concurrent locks — system grinds to a halt"}}
 
 {{phase 5 "System Architecture" "8 min"}}
 
@@ -425,12 +452,16 @@ class OrderSagaOrchestrator:
   <li><strong>Elasticsearch</strong> — restaurant search: full-text by name/cuisine/distance</li>
 </ul>`}}
 
+{{caveat "Location Service and Matching Service must be separate services with separate Redis clusters. Location updates arrive at 125K/sec regardless of order volume — coupling them means a location spike (festival day) can starve matching."}}
+
 {{triggerQs "Architecture questions"
   "How do services discover each other?"
   "Service mesh with Consul for service discovery, Envoy sidecar for mutual TLS and circuit breaking. Matching Service calls Location Service via gRPC, not REST, for lower overhead at 350 RPS of matching requests."
   "How do you handle the thundering herd when a major event ends and 100K orders are placed simultaneously?"
   "Order creation writes to Kafka topic partitioned by city_zone. Matching service consumers process from the partition. City zones act as natural sharding. Each zone processes independently — peak in Bangalore doesn't affect Delhi."
 }}
+
+{{mustKnow "Five core services: Order, Matching, Location, ETA, Notification — each scales independently" "Kafka is the event backbone (ordered, replayable), Redis handles geospatial state, PostgreSQL owns transactional data" "If Kafka goes down, Order Service writes synchronously to PostgreSQL; notifications degrade via CDC (Debezium) fallback"}}
 
 {{phase 6 "Partner Matching Algorithm" "10 min"}}
 
@@ -506,6 +537,17 @@ def score(partner: Partner, distance_km: float) -> float:
   (nofit "Full graph Dijkstra per candidate" "100–500ms per path, infeasible at 350 orders/sec with 20 candidates each")
 )}}
 
+{{caveat "Dijkstra on a city road graph takes 100-500ms per query. At 350 orders/sec with 20 candidates each, that is 7000 Dijkstra calls/sec — completely infeasible within a 2s SLA. Greedy GEORADIUS with Haversine is accurate to within 25% and takes 2ms."}}
+
+{{collapseSection "Partner Matching Scoring Implementation" `Scoring formula breakdown:
+<ul>
+  <li><strong>score = 0.6 × normalized_distance + 0.2 × (1 − normalized_rating) + 0.2 × (1 − acceptance_rate)</strong></li>
+  <li>Distance dominance (0.6 weight) ensures fast delivery — the primary customer satisfaction driver</li>
+  <li>Rating (0.2 weight) prevents quality floor violations without causing starvation of the top-rated partner</li>
+  <li>Acceptance rate (0.2 weight) penalizes cherry-picking partners who game the system</li>
+  <li>Fallback cascade: 5km/rating 4.0 → 8km/rating 3.8 → 12km/no rating filter → auto-cancel at 10 min</li>
+</ul>`}}
+
 {{triggerQs "Matching algorithm questions"
   "What if two orders are placed simultaneously and both want the same partner?"
   "Optimistic locking on the partner row. Matching service issues UPDATE partners SET status='ASSIGNED', order_id=X WHERE id=P AND status='AVAILABLE'. Exactly one transaction wins. The loser retries matching immediately — by the time the retry runs, a different partner is top of the GEORADIUS list."
@@ -514,6 +556,8 @@ def score(partner: Partner, distance_km: float) -> float:
   "What is the fallback if Redis is down?"
   "We fall back to PostgreSQL with a bounding-box query: SELECT * FROM partners WHERE lat BETWEEN X-0.05 AND X+0.05 AND lng BETWEEN Y-0.05 AND Y+0.05 AND status='AVAILABLE'. Covers ~5.5km radius. Performance degrades to ~50ms but correctness is maintained."
 }}
+
+{{mustKnow "Three-step matching: GEORADIUS (20 nearest) → hard constraint filter (status, rating, acceptance rate) → weighted score → optimistic-lock assignment" "Greedy with Haversine (2ms) beats Dijkstra (100-500ms) for real-time matching at 350/sec" "Optimistic locking resolves concurrent assignment: UPDATE WHERE status=AVAILABLE — exactly one transaction wins" "Fallback if Redis is down: PostgreSQL bounding-box query, 50ms latency but correct"}}
 
 {{phase 7 "Real-Time Location Tracking" "8 min"}}
 
@@ -566,12 +610,18 @@ def stream_order_tracking(order_id: str) -> Generator:
 
 {{hint "GEORADIUS complexity" "GEORADIUS is O(N + log M) where M is total partners in the set and N is results returned. With 500K partners per city and radius=5km returning ~20 results, this is ~500K + log(500K) ≈ 500,019 operations, running in ~2ms on Redis. This is why we cap returned results at 20."}}
 
+{{caveat "TTL-based partner offline detection (60s expiry) is the clever primitive — it handles phone crashes, force-quits, and battery deaths without any explicit heartbeat service. But it also means a partner who enters a tunnel for 61 seconds is marked offline and removed from matching."}}
+
 {{triggerQs "Location tracking questions"
   "How do you reduce battery drain on the partner app from continuous GPS?"
   "Adaptive update frequency: AVAILABLE (partner is idle) → 15s intervals. Accepted + moving → 4s intervals. Stationary for 30s → 30s intervals. This reduces GPS pings by ~60% on average while maintaining tracking accuracy when it matters."
   "How does the customer-facing tracking map stay smooth despite 4-second GPS updates?"
   "Client-side dead reckoning. The app stores last two GPS points, calculates bearing and speed, and interpolates the marker position every 500ms. The map appears smooth; actual GPS anchors the position every 4 seconds."
 }}
+
+{{mustKnow "Write path: GPS ping → Redis GEOADD (matching index) + Cassandra (history) + Kafka (fan-out to SSE streams)" "60-second TTL on Redis keys auto-expires offline partners — no heartbeat service needed" "Kafka partition key = partner_id guarantees ordered pings per partner on a single partition" "Client-side dead reckoning smooths the 4-second GPS update gap to 500ms visual updates"}}
+
+{{goodToKnow "Adaptive GPS frequency saves ~60% battery: 15s when idle, 4s when active, 30s when stationary" "GEORADIUS is O(N + log M) — with 500K partners and 20 results, runs in ~2ms on Redis"}}
 
 {{phase 8 "ETA & Surge Pricing" "8 min"}}
 
@@ -663,12 +713,24 @@ Surge pricing is a demand/supply ratio over a <strong>5-minute rolling window</s
 
 {{hint "tortuosity factor calibration" "1.3× is the median for Indian cities. Calibrate monthly by comparing predicted vs actual delivery times in the location history table. In cities with more grid-like streets (Chandigarh), use 1.2×. Dense historic areas (Old Delhi) use 1.5×."}}
 
+{{caveat "Surge pricing is a supply incentive mechanism, not just price gouging. A 2x surge increases partner online rate by ~35% within 10 minutes. Always frame it as a market-clearing mechanism in the interview."}}
+
+{{collapseSection "ETA Calculation Implementation" `The ETA function computes three components:
+<ul>
+  <li><strong>Restaurant prep remaining:</strong> historical median for cuisine, adjusted for elapsed time</li>
+  <li><strong>Partner → restaurant:</strong> Haversine × 1.3 tortuosity × traffic multiplier (1.0–2.0)</li>
+  <li><strong>Restaurant → customer:</strong> same formula + 10% buffer for pickup/handoff delays</li>
+</ul>
+Tortuosity calibration: 1.2× for grid cities (Chandigarh), 1.3× median (most Indian cities), 1.5× for dense historic areas (Old Delhi). Calibrate monthly against actual delivery times in location history.`}}
+
 {{triggerQs "ETA and pricing questions"
   "How accurate is Haversine vs actual map routing for ETA?"
   "Haversine with 1.3× tortuosity achieves ±4 minutes at p50, ±8 minutes at p90. Integrating Google Maps Distance Matrix API cuts this to ±2 min / ±5 min respectively but costs $5 per 1000 calls. At 350 orders/sec, routing costs would be $150K/day — uneconomical. We use Maps API only for extreme outliers detected by ML."
   "What if a partner is batch-delivering two orders — how does ETA work?"
   "ETA per order accounts for the intermediate stop. Order A ETA = travel-to-A directly. Order B ETA = travel-to-A + (A delivery time 3 min) + travel-A-to-B. The batch planner orders stops to minimize total travel distance (nearest-neighbor heuristic on 2-3 stops is trivially fast)."
 }}
+
+{{mustKnow "ETA = restaurant_prep_remaining + partner_to_restaurant_travel + restaurant_to_customer_travel (+ 10% buffer)" "Haversine × 1.3 tortuosity factor — achieves ±4 min at p50, good enough without expensive map API calls" "Surge = demand/supply ratio per city zone over 5-min rolling window — capped at 2.5x" "Google Maps API at 350/sec would cost $150K/day — use Haversine and reserve Maps API for ML-detected outliers"}}
 
 {{phase 9 "Data Model" "8 min"}}
 
@@ -746,6 +808,18 @@ CREATE TABLE order_events (
 
 {{hint "event_date in Cassandra partition key" "Without date in the key, a single partner row would accumulate all location pings forever — unbounded partition growth. Adding the date caps partition size to (1 update/4s × 86400s/day × 50 bytes) = 1.08 MB per partner per day. Well within Cassandra's 100MB partition limit."}}
 
+{{caveat "Cassandra partition key must include event_date alongside partner_id. Without it, a single partner row grows unbounded — exceeding Cassandra's 100MB partition limit within weeks. This is a common Cassandra modeling mistake interviewers test for."}}
+
+{{collapseSection "Full PostgreSQL Schema Details" `Additional indexes and constraints for production:
+<ul>
+  <li><code>idx_orders_status_zone</code> — compound index for surge zone analytics queries</li>
+  <li><code>idx_orders_partner_status</code> — partial index (only active states) for partner workload queries</li>
+  <li>Cassandra location_history has 30-day TTL (2592000s) — auto-purges cold data</li>
+  <li>Cassandra order_events uses order_id as partition key with ASC clustering on timestamp for event sourcing replay</li>
+</ul>`}}
+
+{{mustKnow "Three stores: PostgreSQL (orders, ACID), Redis (live locations, geospatial), Cassandra (location history, append-only)" "Cassandra partition key = (partner_id, event_date) — caps partition at ~1 MB/day, prevents unbounded growth" "PostgreSQL at 125K writes/sec is impossible — Cassandra with LSM-tree handles this write load trivially" "Partial index on partner status (WHERE status = AVAILABLE) keeps matching queries fast"}}
+
 {{phase 10 "Batch Delivery & Failure Handling" "5 min"}}
 
 {{say `Batch delivery — one partner carries 2–3 orders, improving utilization and reducing cost:
@@ -805,6 +879,12 @@ CREATE TABLE order_events (
   (nofit "Startup: polling every 30 seconds" "Order service polls partner location table every 30s and calls Google Maps API for ETA. Works at &lt; 1000 concurrent orders. Google Maps costs $0.005/request — at scale this is $1.5K/day for 300K orders. Functional but not scalable.")
 )}}
 
+{{caveat "Never auto-reassign a PICKED_UP order — the food is physically with the unreachable partner. This is a common mistake candidates make. The only option is escalation to human ops."}}
+
+{{mustKnow "Batch delivery constraints: max 2km between pickups, max 2km between dropoffs, max 10-min ETA inflation per order" "Five failure modes: partner phone dies, restaurant closes, matching crash, Redis failure, Kafka lag — each has a defined detection and fallback" "PICKED_UP orders cannot be reassigned — food is with the partner; escalate to human ops" "Redis TTL (60s) is the primary offline detection mechanism — no separate heartbeat service"}}
+
+{{goodToKnow "PostgreSQL bounding-box query is the Redis fallback for matching: 50ms vs 2ms but correct" "Batch acceptance rate is only ~30% due to the strict 10-min ETA inflation cap"}}
+
 {{phase 11 "Scaling & Cost Estimates" "5 min"}}
 
 {{say `Three independent scaling bottlenecks — each scales differently:
@@ -858,6 +938,20 @@ CREATE TABLE order_events (
 
 {{hint "Kafka partition count" "Start with 6 partitions per topic, one per shard key (city). At 350 orders/sec with 6 partitions, each partition handles ~58 events/sec — well within Kafka's 1MB/sec per partition limit. Scale to 12 partitions if you split into top-12 metros."}}
 
+{{caveat "Managed Cassandra (AWS Keyspaces) costs 3-5x self-managed for write-heavy workloads. At 125K writes/sec, Keyspaces would be ~$42K/month vs $8,400 self-managed. This cost difference is worth mentioning if the interviewer asks about managed vs self-hosted."}}
+
+{{collapseSection "Detailed Cost Breakdown" `Infrastructure cost analysis at 10M orders/day:
+<ul>
+  <li><strong>Redis Cluster (location):</strong> 6 × r6g.xlarge (32GB) = ~$4,320/mo</li>
+  <li><strong>PostgreSQL (orders):</strong> r6g.2xlarge primary + 3 read replicas = ~$6,800/mo</li>
+  <li><strong>Cassandra (location history):</strong> 6 × i3.2xlarge (1.9TB NVMe) = ~$8,400/mo</li>
+  <li><strong>Kafka (MSK):</strong> 3-broker, 6-partition topics = ~$2,100/mo</li>
+  <li><strong>Compute (all services):</strong> 50 pods avg, c6g.large = ~$5,500/mo</li>
+  <li><strong>Elasticsearch (search):</strong> 3-node 32GB cluster = ~$1,800/mo</li>
+  <li><strong>Total:</strong> ~$29K/mo = $0.097/order. At $2-3 delivery fee, infra is 3-5% of revenue.</li>
+</ul>
+Biggest optimization lever: Cassandra location history with ZSTD compression (4:1) cuts storage cost to ~$2,100/mo.`}}
+
 {{checklist "Key design decisions made"
   "Redis GEORADIUS with 60s TTL for live partner tracking — auto-expires offline partners"
   "Greedy constraint-filter matching (2ms) over Dijkstra (500ms) for sub-2s SLA"
@@ -868,6 +962,8 @@ CREATE TABLE order_events (
   "Batch delivery capped at 10-minute ETA inflation per order"
   "TTL-based partner offline detection — no heartbeat service needed"
 }}
+
+{{mustKnow "Three independent scaling bottlenecks: location writes (125K/s → Redis Cluster), matching (350/s → stateless pods), order writes (350/s → PostgreSQL + replicas)" "Total infra cost: ~$29K/month for 10M orders/day = $0.097/order (3-5% of delivery fee revenue)" "Aurora PostgreSQL beats DynamoDB above ~500K orders/day on cost; DynamoDB wins below that threshold" "Kafka partitions by city zone — each zone scales independently, peak in one city does not affect others"}}
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 

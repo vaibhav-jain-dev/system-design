@@ -26,6 +26,8 @@
   "MD5 or SHA-1 in legacy systems. MurmurHash3 or xxHash in modern ones — they're faster and have good distribution properties. The key requirement is uniform distribution across the 32-bit or 64-bit key space."
 }}
 
+{{mustKnow "Naive modulo hashing remaps ~100% of keys on node add/remove; consistent hashing remaps only 1/N" "Keys and servers share a 0 to 2^32 ring; each key walks clockwise to the first server token" "Adding a node moves only keys between the new node's predecessor and itself"}}
+
 {{phase 2 "The Ring & Virtual Nodes" "5 min"}}
 
 {{say "The ring alone has a load imbalance problem. With three physical nodes, each owns one-third of the ring — but hash boundaries are random, so one node might own 60% and another 10%. Virtual nodes fix this: each physical node is represented by many points on the ring."}}
@@ -54,6 +56,10 @@
   "Each key is replicated to the next R distinct physical nodes clockwise from its primary token. 'Distinct physical nodes' is important — you skip virtual node tokens that belong to the same physical node as the primary. Cassandra's replication strategy does exactly this."
 }}
 
+{{caveat "Too many virtual nodes (1000+) increases gossip overhead and metadata size. Too few (< 10) leads to significant load imbalance (~15% std dev). The sweet spot is 100-256 vnodes per physical node."}}
+
+{{mustKnow "Virtual nodes fix load imbalance — each physical node gets V tokens distributed across the ring" "Rule of thumb: V = replication_factor x 50; Cassandra defaults to 256, DynamoDB uses ~64" "At V=150, the heaviest node carries at most ~10% more than average; at V=1, it can be 60%+ more"}}
+
 {{phase 3 "Rebalancing Cost" "4 min"}}
 
 {{say "When you add a node to a consistent hashing ring, only the keys between the new node's tokens and their predecessors need to move. For a ring with N nodes and V virtual nodes, roughly 1/N of all keys transfer. Compare this to modulo hashing where every key potentially moves."}}
@@ -77,6 +83,10 @@
   "Does consistent hashing eliminate rebalancing entirely?"
   "No — it minimizes it. You still move 1/N of keys per node change. For 1 billion keys across 10 nodes, adding an 11th still moves 100M keys. That's why DynamoDB pre-shards to many more virtual partitions than physical servers — a physical server owns many virtual partitions, and rebalancing moves whole virtual partitions rather than individual keys."
 }}
+
+{{mustKnow "Consistent hashing minimizes rebalancing but does not eliminate it — still moves 1/N keys per node change" "For 10 nodes with 1M keys, adding a node moves ~100K keys (vs ~909K with modulo)" "Throttle rebalancing during traffic spikes — prioritize serving reads over data transfer"}}
+
+{{goodToKnow "DynamoDB moved from pure consistent hashing to fixed partition spaces with auto-splitting — rebalancing moves whole virtual partitions rather than individual keys"}}
 
 {{phase 4 "Implementation" "6 min"}}
 
@@ -161,6 +171,10 @@ print(ring.get_nodes("user:12345", 3))  # ["node-2", "node-1", "node-3"] (replic
 
 {{qa "What's the time complexity of consistent hashing operations?" "Lookup: O(log V×N) binary search on sorted tokens — with 10 nodes and 150 vnodes, that's ~11 comparisons. Add/remove node: O(V × log(V×N)) to insert/remove V tokens. Both are sub-millisecond for any realistic cluster size." "Does the ring metadata need to be replicated?" "Yes. Every client or coordinator must have the same ring view. In client-side hashing (Memcached), the ring is computed locally from the server list. In server-side systems (Cassandra), ring state propagates via Gossip protocol — converges in seconds after a topology change."}}
 
+{{mustKnow "Lookup is O(log V*N) binary search on sorted tokens — sub-millisecond for any realistic cluster" "Ring metadata is tiny: 10 nodes x 150 vnodes = 1500 entries, fits in a few KB of RAM" "Use copy-on-write for thread safety — atomically swap ring reference instead of locking readers"}}
+
+{{goodToKnow "bisect.insort is O(N) for list insertion; switch to SortedList at 100K+ vnodes for O(log N) insertion" "Every client must have the same ring view — Cassandra uses Gossip protocol, Memcached computes client-side from server list"}}
+
 {{phase 5 "Hotspot Mitigation" "4 min"}}
 
 {{say "Consistent hashing distributes keys uniformly — but if one key receives 10x the traffic of all others, virtual nodes don't help. The hot key still maps to one node. The fix is write sharding: split the hot key into N shards and scatter-gather on read."}}
@@ -200,6 +214,10 @@ def get_counter(redis_client, key: str) -> int:
   "Read scatter-gather latency increases linearly: 10 shards = 10 parallel reads (fast, ~1ms extra). 100 shards = 100 parallel reads (still fast but more connections). Write fan-out is random(0,N) so adds no overhead. Typically N=10 is sufficient for any realistic hot key."
 }}
 
+{{caveat "Consistent hashing solves hot NODES from uneven ring distribution. It does NOT solve hot KEYS — a single popular key still maps to one node. Write sharding (key#0..key#N-1) is the only fix for hot keys."}}
+
+{{mustKnow "Hot keys need write sharding: split key into N shards (key#0..key#N-1), scatter-gather on read" "DynamoDB has a hard 3000 WCU/partition limit — write sharding with N = ceil(peak_writes/3000)" "Consistent hashing distributes keys uniformly across nodes but cannot help when one key gets disproportionate traffic"}}
+
 {{phase 6 "Real-World Usage" "4 min"}}
 
 {{say "Consistent hashing appears at the core of every distributed cache and many distributed databases. Understanding where each system uses it — and where they deviate — is what interviewers want to hear."}}
@@ -221,6 +239,17 @@ def get_counter(redis_client, key: str) -> int:
   "Why did DynamoDB move away from pure consistent hashing?"
   "The 2022 DynamoDB paper describes moving to a fixed partition space with auto-splitting partitions. Consistent hashing worked but created 'hot partition' problems when a single physical server happened to own adjacent tokens for different popular tables. Fixed partitions allow more predictable isolation."
 }}
+
+{{collapseSection "Cassandra Gossip Protocol Details" "
+<ul>
+  <li>Every node maintains a complete ring view — updated via periodic Gossip rounds (1 per second)</li>
+  <li>Gossip convergence after topology change: <span class='hl'>2-3 seconds</span> for a 100-node cluster</li>
+  <li>Each Gossip message carries heartbeat state, schema version, and token ownership — ~1KB per node</li>
+  <li>No central coordinator: any node can serve any request by computing token ownership locally</li>
+</ul>
+"}}
+
+{{mustKnow "Cassandra: 256 vnodes, Murmur3 hash, RF=3 walks clockwise to next 3 distinct physical nodes" "Redis Cluster: 16384 fixed hash slots, NOT consistent hashing — closer to pre-sharding" "DynamoDB: started with consistent hashing, moved to fixed partition tokens with auto-splitting"}}
 
 {{qa "How does consistent hashing handle data replication?" "Each key is replicated to the next R distinct physical nodes clockwise from its primary. 'Distinct physical' is key — you skip vnodes belonging to the same physical server. With RF=3, three physical machines hold each key." "What happens if two replicas disagree on a value?" "That's a consistency problem, not a hashing problem. The system uses read repair (Cassandra), version vectors (DynamoDB), or quorum reads (W+R > N) to resolve conflicts. Consistent hashing determines WHERE data lives; the consistency protocol determines WHICH version wins."}}
 
@@ -249,6 +278,10 @@ def get_counter(redis_client, key: str) -> int:
   "Hinted handoff is Cassandra's (and DynamoDB's) mechanism for handling temporary node failure. When a write is destined for node A (its primary token owner) but A is down, the coordinator stores the write as a 'hint' on itself. When A comes back, the coordinator replays the hinted writes. This works because consistent hashing defines a deterministic ownership mapping — the coordinator knows exactly which node to replay hints to."
 }}
 
+{{mustKnow "On node death, 1/N keys reroute to successor; vnodes spread extra load across many survivors" "Without vnodes, one successor absorbs 100% of dead node's load (2x); with V=150, each survivor gets <1% extra" "Ring has no built-in health awareness — needs separate health checks or circuit breakers to trigger node removal"}}
+
+{{goodToKnow "Hinted handoff: when target node is down, coordinator stores writes as hints and replays them on recovery — works because consistent hashing defines deterministic ownership"}}
+
 {{phase 8 "Interview Summary" "2 min"}}
 
 {{say "Consistent hashing maps both keys and servers to a shared ring:
@@ -272,6 +305,8 @@ def get_counter(redis_client, key: str) -> int:
 {{qa "Why doesn't Redis Cluster use consistent hashing?" "Redis Cluster uses 16384 fixed hash slots — closer to pre-sharding. slot = CRC16(key) % 16384. Slots are explicitly assigned to nodes. This is simpler: no ring, no vnodes, no binary search. The trade-off is that adding a node requires manually (or auto) resharding slots, not automatic ring geometry." "Is consistent hashing or fixed slots better?" "Consistent hashing scales better for dynamic clusters where nodes frequently join/leave. Fixed slots are simpler for stable clusters with planned scaling. DynamoDB started with consistent hashing and moved toward fixed partitions — simplicity won at their scale."}}
 
 {{avoid "Don't conflate consistent hashing (solves hot RING SEGMENTS from uneven node distribution) with hot KEY mitigation (requires write sharding). These are different problems. Interviewers specifically test for this distinction."}}
+
+{{mustKnow "Core property: adding/removing a node remaps only 1/N keys vs ~100% with modulo hashing" "Virtual nodes (150 per server) balance load and diffuse failure impact across many survivors" "Hot keys need write sharding (key#0..key#N-1) — consistent hashing does not help with individual hot keys" "Real systems: Cassandra (token ring, 256 vnodes), DynamoDB (fixed partitions), Redis Cluster (16384 fixed slots)"}}
 
 {{checklist
   "Ring: servers and keys share a 0–2³² space; keys walk clockwise to first server token"

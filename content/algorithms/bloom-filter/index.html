@@ -26,6 +26,12 @@
   "Before generating a new short code, check the Bloom filter. A 'not present' result means the code is definitely unused — skip the DB uniqueness check entirely. A 'possibly present' result means do a DB lookup to confirm. This eliminates roughly 99% of DB reads during code generation."
 }}
 
+{{mustKnow
+  "Definitely-not-in-set or possibly-in-set — never produces false negatives"
+  "~10 bits per element at 1% false positive rate — 33x less memory than a HashSet"
+  "Cannot delete from a standard Bloom filter — bits are never cleared"
+}}
+
 {{phase 2 "How It Works" "5 min"}}
 
 {{say "A Bloom filter is a bit array of m bits, initially all zeros. It uses k independent hash functions. To insert an element, hash it k times and set those k bit positions to 1. To query, hash and check all k positions."}}
@@ -38,6 +44,14 @@
 }}
 
 {{hint "bit array vs byte array" "The actual storage is a bytearray (bytes), not a Python list of booleans. A list of booleans uses 28 bytes per element in CPython. A bytearray packs 8 bits per byte, matching the theoretical 10 bits/element target."}}
+
+{{caveat "A Bloom filter cannot be resized after creation. If you underestimate element count, the false positive rate degrades rapidly — 2x over capacity raises FP from 1% to ~15.7%. Always size for 2-3x expected growth upfront."}}
+
+{{mustKnow
+  "Insert: hash element k times, set those k bit positions to 1"
+  "Query: hash element k times, check all k positions — all 1 means 'possibly present', any 0 means 'definitely absent'"
+  "False positives increase as more bits become 1 — sizing the bit array correctly is critical"
+}}
 
 {{phase 3 "Optimal Parameters" "5 min"}}
 
@@ -85,6 +99,13 @@
   "m = -(1B * ln(0.01)) / (ln(2))^2 = -(1B * -4.605) / 0.480 = 9.6 billion bits = 1.2 GB. k = (9.6B / 1B) * ln(2) = 9.6 * 0.693 = 6.65, round to 7 hash functions."
   "What happens when you exceed the expected element count?"
   "The false positive rate rises above the target. At 2x expected elements with no resizing, FP rate increases roughly 16x (from ~1% to ~15.7%). Mitigation: size m for 2-3x expected growth, or use a Scalable Bloom Filter that adds layers dynamically."
+}}
+
+{{mustKnow
+  "m = -(n * ln(p)) / (ln(2))^2 — bit array size for n elements at FP rate p"
+  "k = (m/n) * ln(2) — optimal hash count; typically 7 for 1% FP"
+  "Bits per element = -1.44 * log2(p) — depends only on FP rate, not element count"
+  "1 billion elements at 1% FP = 9.6B bits = 1.2 GB with k=7 hash functions"
 }}
 
 {{phase 4 "Full Python Implementation" "8 min"}}
@@ -162,6 +183,14 @@ print("FP rate: {:.3f}% (expected: {:.3f}%)".format(
   (whatIf "you need the filter to persist across process restarts" "Serialize self.bits with pickle or write the bytearray directly to disk. The filter is just a fixed-size byte array. Store self.m, self.k, and self.count alongside the bytes so you can reconstruct the BloomFilter object.")
 }}
 
+{{caveat "MD5 is used here for clarity only. In production, use MurmurHash3 or xxHash — 5x faster (~3 GB/s vs 600 MB/s). Cryptographic security is irrelevant for Bloom filters; only uniform distribution matters."}}
+
+{{mustKnow
+  "Double hashing: h(i) = (h1 + i*h2) % m generates k positions from only 2 hash calls"
+  "Use bytearray (8 bits/byte), not list of booleans (28 bytes/element in CPython)"
+  "Production: use MurmurHash3 or xxHash instead of MD5 for 5x speedup"
+}}
+
 {{phase 5 "Use Cases in System Design" "5 min"}}
 
 {{say "Bloom filters appear in many system design problems as an optimization layer. They sit in front of expensive operations like database lookups or disk reads."}}
@@ -192,6 +221,13 @@ print("FP rate: {:.3f}% (expected: {:.3f}%)".format(
   "Each SSTable has a Bloom filter loaded in memory. A read request checks the filter for each SSTable before touching disk. If the filter says 'not present', the SSTable disk read is skipped. With 10 SSTables and 1% FP, roughly 9 of 10 SSTable reads are eliminated for a key that does not exist in most of them."
   "Why can a CDN use a Bloom filter but not a ban list?"
   "CDN false positives cause a cache miss, which just adds 20-50ms latency — users do not notice. Ban list false positives cause an innocent user to be blocked from the service, which is a serious business and legal problem. Bloom filters are only appropriate when the cost of a false positive is low and reversible."
+}}
+
+{{mustKnow
+  "URL shortener: skip DB uniqueness check for 99% of new codes (FP = extra query, harmless)"
+  "Cassandra/HBase: per-SSTable filter eliminates disk reads for absent keys"
+  "CDN one-hit-wonder: only cache items requested 2+ times — prevents cache pollution"
+  "Never use where FP causes serious harm: ban lists, payment dedup, safety-critical decisions"
 }}
 
 {{phase 6 "Bloom Filter Variants" "3 min"}}
@@ -227,6 +263,17 @@ print("FP rate: {:.3f}% (expected: {:.3f}%)".format(
   (how "does deletion work in a Cuckoo filter?" "A Cuckoo filter stores fingerprints (short hashes of items) rather than setting bits. To delete, remove the fingerprint from one of its two candidate buckets. Unlike bits, a specific fingerprint can be removed without affecting other items that happened to set the same bits.")
 }}
 
+{{goodToKnow
+  "Scalable Bloom Filters add layers with tighter FP rates: p * r^i where r=0.5 — useful when element count is unpredictable"
+  "Count-Min Sketch is the frequency estimation analog of Bloom filter — returns upper-bound count, not just membership"
+}}
+
+{{mustKnow
+  "Standard Bloom: no deletion, ~10 bits/element — covers 90% of interview use cases"
+  "Cuckoo Filter: supports deletion at ~12 bits/element — the modern choice for deletable sets"
+  "Counting Bloom Filter: 4-bit counters, 40 bits/element — obsoleted by Cuckoo in most cases"
+}}
+
 {{phase 7 "System Design Integration" "5 min"}}
 
 {{say "Bloom filters integrate as a fast-path optimization in front of expensive database operations. Here are the most common interview questions about how they fit into real systems."}}
@@ -249,6 +296,14 @@ print("FP rate: {:.3f}% (expected: {:.3f}%)".format(
 
 {{followup "How would you implement a distributed Bloom filter?" "Two approaches: 1) Partitioned — split the bit array across Redis nodes using <a class=\"dqa-link\" href=\"/algo/consistent-hashing\">consistent hashing</a>. Each query may hit multiple nodes. 2) Replicated — each app server holds a full local copy, updates broadcast asynchronously. Replicated is simpler and faster for read-heavy workloads like URL deduplication. Use Redis BITSET commands (SETBIT, GETBIT) for the storage layer."}}
 
+{{caveat "Redis SETBIT/GETBIT on a single key supports up to 512 MB (4 billion bits) — enough for ~400M elements at 1% FP. For larger filters, shard across multiple keys. Pipeline all k GETBIT calls in one round trip to keep latency under 0.2ms."}}
+
+{{mustKnow
+  "Redis SETBIT/GETBIT enables distributed Bloom filters with ~0.2ms latency per lookup"
+  "Partitioned vs Replicated: partition for writes, replicate for read-heavy workloads"
+  "Size filter for 2-3x expected growth — cannot resize after creation"
+}}
+
 {{phase 8 "Interview Checklist" "2 min"}}
 
 {{say "The Bloom filter interview tests three things: can you explain the space-accuracy trade-off, can you calculate optimal parameters, and do you know where false positives are acceptable versus dangerous."}}
@@ -262,6 +317,13 @@ print("FP rate: {:.3f}% (expected: {:.3f}%)".format(
   "Cannot delete from standard Bloom filter; use Cuckoo Filter for deletions"
   "Used in: URL shorteners, web crawlers, Cassandra SSTables, CDN caches, spell checkers"
   "False positives must be harmless for the use case (extra DB check is OK, banning users is not)"
+}}
+
+{{mustKnow
+  "10 bits/element, 7 hash functions, 1% FP rate — memorize these numbers"
+  "1 billion elements at 1% FP = 1.2 GB — fits on any app server"
+  "False positives must be harmless for your use case (extra DB read = OK, banning users = not OK)"
+  "Cuckoo filter is the modern choice when deletion is needed (~12 bits/element)"
 }}
 
 {{key "The Bloom filter interview tests whether you understand the space-accuracy trade-off, can calculate optimal parameters, and know where false positives are acceptable. Always mention concrete numbers: 10 bits per element, 7 hash functions, 1% false positive rate for 1 billion elements in 1.2 GB."}}

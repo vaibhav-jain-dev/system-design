@@ -26,6 +26,14 @@
   "Yes. Fine-tune the model on your domain's style and terminology so it understands the vocabulary, then use RAG to supply the actual facts. This is the best-of-both approach for specialized domains like legal or medical applications."
 }}
 
+{{caveat "RAG adds 200-500ms latency to every query (embedding + retrieval + reranking). If your application requires sub-200ms responses, RAG may not be viable without aggressive caching or pre-computation."}}
+
+{{mustKnow
+  "RAG retrieves relevant documents at query time and injects them into the prompt — grounding answers in real data"
+  "Fine-tuning bakes knowledge into weights (expensive, slow, no citations). RAG keeps knowledge in a searchable index (cheap, instant updates, full traceability)"
+  "Skip RAG when knowledge fits in the system prompt (under 10K tokens) or latency must be under 200ms"
+}}
+
 {{phase 2 "RAG Architecture Overview" "5 min"}}
 
 {{say "The RAG pipeline has two phases: an offline indexing phase where you prepare your documents, and an online query phase where you retrieve and generate answers."}}
@@ -51,6 +59,12 @@
   "Offline indexing runs once (or incrementally) and is latency-insensitive — you have seconds to minutes. Online query runs on every user request and must complete in under 500ms. This is why you pre-compute embeddings offline: embedding at query time only covers the user's question, not the entire corpus."
   "What is the role of metadata in RAG?"
   "Metadata enables filtering. Every chunk gets tagged with source, author, date, department, access level, etc. At query time you apply metadata filters to restrict retrieval to authorized or relevant subsets. Without metadata, you cannot implement access control, date-range filtering, or per-tenant isolation."
+}}
+
+{{mustKnow
+  "RAG has two phases: offline indexing (chunk, embed, store) and online query (embed query, retrieve, rerank, generate)"
+  "You must embed queries with the exact same model used for documents — different models produce incompatible vector spaces"
+  "Metadata on each chunk enables access control, date filtering, and per-tenant isolation at query time"
 }}
 
 {{phase 3 "Chunking Strategies" "8 min"}}
@@ -178,6 +192,14 @@ def chunk_recursive(
   "Match chunk size to your query granularity. FAQ documents: one chunk per question-answer pair (usually 100-200 tokens). Technical docs with long explanations: 400-600 tokens to capture a complete concept. Legal contracts: sentence-based chunking to preserve clause integrity. Then measure retrieval recall on a test set and adjust."
   "What is the overlap and why does it matter?"
   "Overlap is the number of tokens repeated between consecutive chunks. A 50-token overlap means the last 50 tokens of chunk N are also the first 50 tokens of chunk N+1. This ensures concepts that span a chunk boundary are fully captured in at least one chunk. Without overlap, queries about boundary-spanning ideas return incomplete chunks."
+}}
+
+{{caveat "Chunk size is the single highest-impact hyperparameter in RAG. Changing chunk size from 100 to 500 tokens can improve retrieval recall by 20-30%. Always tune on representative queries before deploying."}}
+
+{{mustKnow
+  "Sweet spot is 300-500 tokens per chunk with 10-15% overlap"
+  "Recursive chunking (split by headers, then paragraphs, then sentences) best preserves document structure"
+  "Bad chunking is the number one cause of poor RAG quality — fix chunking before tuning anything else"
 }}
 
 {{phase 4 "Embedding Models & Vector Storage" "8 min"}}
@@ -313,6 +335,19 @@ def search_similar(
 
     return [(row[0], float(row[1]), row[2]) for row in results]
 `}}
+
+{{goodToKnow
+  "HNSW index parameters: m=16 (connections per node) and ef_construction=64 are good defaults for up to 10M vectors"
+  "pgvector is the simplest production choice if you already run PostgreSQL — zero new infrastructure"
+}}
+
+{{collapseSection "Embedding Model Vendor Details" "Embedding costs scale linearly with corpus size. At $0.02/1M tokens, a 10M-document corpus costs ~$100 to embed. Self-hosted models like BGE-large eliminate per-token costs but require GPU infrastructure (~$150/mo for a g4dn.xlarge). The quality gap between hosted and open-source models has narrowed to 1-2 MTEB points — self-hosting is viable for cost-sensitive workloads above 10M embeddings/month."}}
+
+{{mustKnow
+  "Embedding model choice sets the retrieval quality ceiling — everything downstream is bounded by it"
+  "pgvector for simplicity (up to 10M vectors), Pinecone for zero-ops, Qdrant for advanced filtering"
+  "FAISS is a library, not a database — no persistence, no replication, not suitable for production serving"
+}}
 
 {{phase 5 "Retrieval & Reranking" "10 min"}}
 
@@ -456,6 +491,15 @@ def retrieve_and_rerank(
 {{think "Reranking is one of the highest-leverage improvements in RAG. Cross-encoders see both query and document together — they can judge relevance holistically rather than comparing independent vectors. The latency cost (~100ms for 50 candidates) is justified by 10-20% recall improvement."
   (whyNot "reranking always" "Cross-encoders are O(n) with the number of candidates — each pair requires a separate inference pass. For 50 candidates and a 12-layer model, that is 50 forward passes. This adds 80-150ms latency. Skip reranking if your p99 latency target is under 300ms total and your retrieval precision is already high.")
   (whatIf "reranker latency is too high" "Use a smaller cross-encoder model (MiniLM-L6 instead of L12) — roughly 2x faster with ~5% quality drop. Or reduce candidate count from 50 to 20. Or run the reranker asynchronously and stream the top bi-encoder results while reranking completes in the background.")
+}}
+
+{{caveat "Never go dense-only in production. Dense search fails on exact queries like error codes, product SKUs, and statute citations. Hybrid search (dense + BM25) catches both semantic and keyword queries."}}
+
+{{mustKnow
+  "Hybrid search (dense + BM25) with Reciprocal Rank Fusion is the production standard"
+  "Start with alpha=0.7 (70% dense, 30% sparse) and tune on a labeled query set"
+  "Cross-encoder reranking improves recall by 10-20% at ~100ms latency cost — retrieve 50 candidates, rerank to top 5"
+  "Bi-encoders embed query and document independently (fast). Cross-encoders compare them together (precise but slow)."
 }}
 
 {{phase 6 "Complete RAG Pipeline" "10 min"}}
@@ -611,6 +655,14 @@ class RAGPipeline:
 
 {{hint "temperature=0.1 for RAG" "Low temperature (0.0-0.2) keeps the model close to the retrieved facts and reduces hallucination. High temperature increases creativity but also increases the probability that the model deviates from the context and invents plausible-sounding but unsupported claims."}}
 
+{{collapseSection "Complete Pipeline Implementation Details" "The RAGPipeline class above uses a linear retrieve-rerank-generate flow. In production, add: (1) query rewriting for multi-turn conversations, (2) a semantic cache layer before retrieval to skip redundant LLM calls, (3) async reranking with streaming to reduce perceived latency, and (4) structured logging of retrieval scores for offline analysis. The build_prompt method uses numbered source citations — the LLM references [Source N] which maps back to specific chunks for auditability."}}
+
+{{mustKnow
+  "The system prompt must instruct the model to answer ONLY from provided context and cite sources"
+  "Temperature 0.0-0.2 for RAG to minimize hallucination"
+  "Always include at least one chunk even if it scores low — returning nothing is worse than a partial answer"
+}}
+
 {{phase 7 "Failure Modes & How to Fix Them" "5 min"}}
 
 {{say `RAG systems fail in predictable, diagnosable ways — interviewers expect you to know each one and its fix:
@@ -632,6 +684,8 @@ class RAGPipeline:
 )}}
 
 {{avoid "Never mix embeddings from different models in the same vector index. If you upgrade from text-embedding-ada-002 to text-embedding-3-small, you must re-embed your entire corpus. Old and new vectors exist in different embedding spaces and cannot be meaningfully compared."}}
+
+{{caveat "Embedding model changes require full re-indexing of the entire corpus. There is no way to incrementally migrate — old and new vectors are incompatible. Plan for re-embedding time and cost before switching models."}}
 
 {{code "python" `# Defensive RAG: handle failure modes gracefully
 
@@ -684,6 +738,13 @@ def defensive_query(rag: RAGPipeline, query: str) -> RAGResponse:
     )
 `}}
 
+{{mustKnow
+  "Top failure modes: hallucination despite context, wrong chunks retrieved, chunk boundary splits, stale index"
+  "Fix retrieval first — generation quality is bounded by retrieval quality"
+  "Set a similarity threshold (e.g. 0.3) to reject irrelevant chunks rather than forcing the LLM to work with bad context"
+  "Guard against context window overflow by counting tokens and capping total context size"
+}}
+
 {{phase 8 "Cost Analysis & Interview Q&A" "8 min"}}
 
 {{say "Three cost drivers dominate a production RAG system: &lt;strong>embedding generation&lt;/strong>, &lt;strong>vector storage&lt;/strong>, and &lt;strong>LLM inference&lt;/strong>. Embedding is nearly free — inference is the real bill."}}
@@ -724,6 +785,17 @@ def defensive_query(rag: RAGPipeline, query: str) -> RAGResponse:
 }}
 
 {{followup "How would you implement access control in RAG?" "Metadata filtering: every chunk gets tagged with access metadata: team, role, classification level. At query time the user's permissions are checked and passed as a metadata filter to the vector search. The vector database only returns chunks the user is authorized to see. This is non-negotiable for enterprise RAG where different teams should only access their own documents. Never rely on the LLM to enforce access control — enforce it at the retrieval layer."}}
+
+{{goodToKnow
+  "Semantic caching (matching queries with cosine similarity > 0.95) can reduce LLM costs by 30-50%"
+  "For multi-turn conversations, rewrite the latest message into a standalone query before retrieval"
+}}
+
+{{mustKnow
+  "LLM inference is 80%+ of RAG cost — embeddings are a rounding error"
+  "Evaluate with retrieval metrics (recall@k, MRR) and generation metrics (faithfulness, relevance)"
+  "Access control must be enforced at the retrieval layer via metadata filtering — never rely on the LLM"
+}}
 
 {{checklist
   "Chunk size 300-500 tokens with 10-15 percent overlap"

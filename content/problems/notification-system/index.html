@@ -38,6 +38,10 @@
   "Critical distinction. Transactional (OTP, purchase confirmation, password reset): never rate-limited, always delivered, user cannot opt out via the channel. Marketing: rate-limited (3/day max), respect quiet hours, user can opt out. CAN-SPAM requires a physical mailing address and one-click unsubscribe in every marketing email."
 }}
 
+{{caveat "Transactional notifications (OTP, payment) must NEVER be rate-limited or subject to opt-out — blocking an OTP delivery because of a rate limit is a critical bug that can lock users out of their accounts."}}
+
+{{mustKnow "Notification systems must be fully asynchronous — synchronous delivery blocks the triggering action and is unacceptable at scale (10M fan-out would take minutes)" "At-least-once delivery is the only practical guarantee — exactly-once is impossible across FCM/APNs boundaries" "Priority separation via distinct Kafka topics ensures OTP is never starved by marketing volume" "Transactional vs marketing is a legal distinction (CAN-SPAM/GDPR), not just a UX choice"}}
+
 {{phase 2 "API Design" "5 min"}}
 
 {{say `Two APIs: one for producers (services that trigger notifications) and one for consumers (users managing preferences):
@@ -127,6 +131,8 @@
 
 {{hint "idempotency key for notification sends" "If the triggering service retries (network failure), it sends the same notification twice. The idempotency_key prevents double delivery: Redis SET NX with 24h TTL. Second call with same key returns the original notification_id and status without re-queuing. Format: {service_id}:{event_id}."}}
 
+{{mustKnow "API returns 202 Accepted (not 200 OK) — delivery is async, the caller does not wait for send confirmation" "Idempotency keys prevent duplicate sends on producer retries — Redis SET NX with 24h TTL" "Notification type (otp/payment/marketing) drives priority routing, rate limiting, and opt-out behavior downstream"}}
+
 {{phase 3 "Data Model & Storage" "8 min"}}
 
 {{diagram "notif-data-model"}}
@@ -142,6 +148,10 @@
 )}}
 
 {{hint "why TTL on the notification log?" "Users don't need notification history older than 30 days (and most don't care after 7 days). DynamoDB TTL automatically deletes expired items in the background — no cron job needed, no storage cost for old data. Set TTL at 30 days on creation. Also prevents the table from growing unboundedly."}}
+
+{{goodToKnow "Device tokens expire and change frequently — APNs tokens rotate on app reinstall, OS update, or device restore. A stale token registry causes silent delivery failures, so you need a token refresh mechanism triggered by provider error responses (e.g., FCM's NotRegistered error)."}}
+
+{{mustKnow "DynamoDB for append-heavy notification logs — high write throughput with TTL for automatic cleanup" "Redis for ephemeral state: rate limit counters and dedup cache (no durability needed)" "Device token table is one-to-many (user has multiple devices) — critical for multi-device push delivery" "TTL on notification logs prevents unbounded table growth — 30 days is the standard retention"}}
 
 {{phase 4 "Message Queue Architecture" "8 min"}}
 
@@ -168,6 +178,10 @@
   "Auto-scale consumers based on consumer lag metric. High lag → scale out more consumer pods. AWS MSK (Managed Kafka) integrates with ECS/Kubernetes horizontal autoscaling based on Kafka consumer lag. Also: high-priority topics have dedicated consumers that don't starve — marketing consumers scale separately from transactional consumers."
 }}
 
+{{caveat "Partition by user_id (the recipient), not by notification_id or event_id. Wrong partition key breaks per-user notification ordering — a user could see 'Alice commented on your post' before 'Alice liked your post' from the same event."}}
+
+{{mustKnow "Separate Kafka topics per priority level (high/medium/low) — consumers poll high first for guaranteed OTP delivery" "Partition by recipient user_id for per-user ordering guarantees" "Kafka retention of 7 days enables replay after delivery outages — notifications delayed but never lost" "Consumer groups per channel (push/email/SMS) allow independent scaling and failure isolation"}}
+
 {{phase 5 "High-Level Architecture" "10 min"}}
 
 {{diagram "notif-architecture"}}
@@ -180,6 +194,8 @@
 {{diagram "notif-push-flow"}}
 
 {{hint "FCM vs APNs differences" "FCM (Android): single HTTP/2 connection handles thousands of pushes/sec, true batch via multicast (up to 1000 tokens per request). APNs (iOS): per-device connection required, HTTP/2 persistent connection per device, no multicast — must send individually but can pipeline. Push workers need separate logic for each provider. Use firebase-admin SDK (FCM) and apns2 library (APNs)."}}
+
+{{mustKnow "Circuit breaker on every external provider (FCM/APNs/SendGrid) — open after consecutive failures, half-open probe to detect recovery" "Template rendering is cached in Redis (1h TTL) — templates change rarely but are read on every notification" "FCM supports multicast (1000 tokens/batch) but APNs requires individual sends — push workers need separate logic per provider" "Transactional outbox pattern ensures zero message loss if Kafka is temporarily unavailable"}}
 
 {{phase 6 "Fan-Out & Delivery" "8 min"}}
 
@@ -195,6 +211,8 @@
   "How long does it take to deliver to all 10M followers?"
   "FCM allows 1000 device tokens per multicast request. 10M users × 1 push each = 10K FCM requests. At 100 concurrent consumers × 100ms per FCM batch = 10K / (100 × 10/sec) = 10 seconds for all 10M followers. With more consumers: horizontally scalable to under 5 seconds."
 }}
+
+{{mustKnow "Two-stage async fan-out: triggering service writes ONE event to Kafka, fan-out consumer expands to N user batches" "Batch fan-out into 10K-user chunks — never produce one Kafka message per recipient" "For mega-celebrities (100M+ followers), consider fan-out-on-read hybrid where clients pull on app open" "10M push notifications can be delivered in ~10 seconds with 100 concurrent FCM consumers using multicast batches"}}
 
 {{phase 7 "Multi-Channel Routing" "5 min"}}
 
@@ -215,6 +233,8 @@
   (row "SMS"      "$0.0075 (Twilio)"   "99.9%"        "OTP, critical alerts, authentication")
   (row "In-app"   "Free"               "100% (online)" "Non-urgent, social notifications")
 )}}
+
+{{mustKnow "OTP must always go via SMS (not push) — SMS works when the device is offline and does not require the app to be installed" "Channel selection is driven by notification type: OTP→SMS, transactional→push+email fallback, marketing→email only" "Push is free (FCM/APNs) but only 95% reliable; SMS is 18x more expensive but 99.9% reliable — cost drives channel strategy" "Fallback chain (push→email→SMS) reduces failed delivery rate significantly compared to single-channel delivery"}}
 
 {{phase 8 "Delivery Guarantees & Deduplication" "8 min"}}
 
@@ -255,6 +275,8 @@
   "FCM: push result includes per-token status (success, invalid_registration, not_registered). Parse response → remove invalid tokens from device_tokens table. APNs: HTTP/2 stream response per push with error code. apns-id header for correlation. Both providers have no guaranteed 'delivered to device' receipt — only 'delivered to provider's queue.' Actual device delivery is unconfirmable in most cases."
 }}
 
+{{mustKnow "Redis dedup with SET NX + 24h TTL prevents double-sends — check before every provider API call" "Exponential backoff with jitter (1s, 2s, 4s) prevents thundering herd on provider recovery" "DLQ captures permanently failed notifications — replay with freshness check (never send a 3-day-old marketing email)" "FCM/APNs only confirm delivery to provider queue, not to the actual device — true delivery is unconfirmable"}}
+
 {{phase 9 "Opt-Out, Rate Limiting & Compliance" "5 min"}}
 
 {{diagram "notif-rate-limiting"}}
@@ -262,6 +284,10 @@
 {{diagram "notif-opt-out"}}
 
 {{hint "CAN-SPAM and GDPR requirements" "CAN-SPAM (US): every marketing email must include physical mailing address, one-click unsubscribe link, and honor opt-out within 10 business days. GDPR (EU): users must explicitly opt IN to marketing (not opt-out by default), right to erasure. Storing opt-out in DynamoDB: user_preferences(user_id, channel, category, opted_out, opted_out_at). Never send to opted-out users — check preferences cache (Redis) before every send."}}
+
+{{goodToKnow "Quiet hours implementation: buffer notifications during the user's quiet window (e.g., 10pm-8am local time) in a scheduled_notifications table, then drain via a scheduler job. OTP and critical security alerts always bypass quiet hours."}}
+
+{{mustKnow "CAN-SPAM requires physical address + one-click unsubscribe in every marketing email; GDPR requires explicit opt-in (not opt-out)" "Rate limiting is per-user, per-channel, per-category — Redis token bucket with fixed window is sufficient for notifications" "OTP and security alerts must bypass both rate limits and opt-out preferences — these are never suppressible" "Check user preferences (cached in Redis) before every send — sending to an opted-out user is a compliance violation"}}
 
 {{phase 10 "Failure Handling & Retry" "5 min"}}
 
@@ -272,6 +298,8 @@
   (alt "Fixed interval retry (every 30s)" "Simple but causes synchronized retry storm when provider recovers")
   (nofit "Immediate retry (loop)" "Overwhelms provider, causes cascading failures, burns through rate limits instantly")
 )}}
+
+{{mustKnow "Exponential backoff WITH jitter is mandatory — without jitter, all retries synchronize and cause a thundering herd" "Circuit breaker pattern: open after N consecutive failures, half-open probe every 60s, auto-close on success" "DLQ replay must include freshness check — stale marketing notifications should be dropped, not delivered late" "Separate failure handling per provider: FCM invalid_registration triggers token cleanup, APNs error codes differ"}}
 
 {{phase 11 "Monitoring & SLAs" "5 min"}}
 
@@ -286,6 +314,8 @@
   (row "DLQ size"                   "0"               "&gt;1K"                  "Investigate failure cause")
   (row "Invalid token rate"         "&lt;1%"          "&gt;5%"                  "Audit token refresh logic")
 )}}
+
+{{mustKnow "OTP delivery SLA is <10s end-to-end — page on-call immediately if P99 exceeds 30s" "Kafka consumer lag is the primary autoscaling signal — scale out consumers when lag exceeds 100K messages" "Rising invalid token rate (>5%) indicates app churn — stale device tokens cause silent delivery failures" "Email sender reputation degrades if bounce rate exceeds 2% — monitor SendGrid domain reputation score"}}
 
 {{key "Notification system design: async Kafka fan-out decouples the triggering action from delivery, priority topics ensure OTP always gets through, at-least-once delivery with Redis dedup prevents double-sends, and circuit breakers on FCM/APNs/SendGrid prevent cascading failures during provider outages."}}
 

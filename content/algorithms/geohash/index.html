@@ -31,6 +31,12 @@
   "A query point at the corner of its geohash cell is closer to points in neighboring cells than to most points in its own cell. The corner case: query point is at the bottom-right corner of cell A. The nearest restaurant may be in cell B (directly right) just 10 meters away, while the nearest restaurant in cell A may be 500 meters away. Always query self + 8 neighbors."
 }}
 
+{{mustKnow
+  "Geohash converts 2D (lat, lon) to a 1D base32 string — shared prefix = geographic proximity"
+  "Precision 6 (~1.2 km) for restaurant search; precision 7 (~150 m) for driver matching"
+  "Always query 9 cells (self + 8 neighbors) to handle boundary cases"
+}}
+
 {{phase 2 "Encoding Algorithm" "5 min"}}
 
 {{say "Geohash encodes by repeatedly bisecting the coordinate space. Latitude range [-90, 90] and longitude range [-180, 180] are halved alternately, building a binary string that is then base32 encoded."}}
@@ -125,6 +131,14 @@ print(encode(19.0760, 72.8777, precision=6))  # "te7udw" (Mumbai)
   "Base32 uses 5 bits per character, which divides evenly into the alternating lon/lat bit pattern. Base64 (6 bits) would split a character across lon and lat dimensions, making prefix truncation lose precision unevenly. Hex (4 bits) wastes encoding space — you need 8 hex chars to represent the same 30 bits that 6 base32 chars cover."
 }}
 
+{{caveat "Geohash is lossy — two points in the same cell are not necessarily at the same location. Always compute exact Haversine distance after geohash filtering for final ranking and radius enforcement."}}
+
+{{mustKnow
+  "Encoding: repeatedly bisect lat/lon ranges, interleave bits (lon first), then base32 encode"
+  "Precision 6 = 30 bits = 15 lon splits + 15 lat splits = ~1.2 km x 0.6 km cell"
+  "Base32 uses 5 bits/char — divides evenly into the alternating lon/lat bit pattern"
+}}
+
 {{phase 3 "Neighbor Lookup" "4 min"}}
 
 {{say "The 8 neighbors of a geohash cell form a 3×3 grid. Computing them requires adjusting the decoded (lat, lon) by the cell dimensions and re-encoding."}}
@@ -171,6 +185,12 @@ def nearby_restaurants(lat: float, lon: float,
 {{think "Neighbor computation is O(1) — decode, offset, re-encode — not a search. The 9-cell pattern is fixed regardless of data size."
   (whyNot "expanding rings of cells instead of a fixed 9-cell query" "Expanding rings (query 9 cells, then 25, then 49) add latency with each round trip. For most use cases, 9 cells at the right precision covers the search radius. If the 9-cell coverage is too small, drop one precision level — that gives 9× the area per cell, covering a much larger radius in the same 9 queries.")
   (whatIf "the query point is exactly on the equator or prime meridian" "Neighboring cells may have completely different prefixes — 'ezs42' neighbors 'u10hf' across the equator. The neighbor function handles this correctly because it offsets decoded lat/lon and re-encodes, not by manipulating the string. Always compute neighbors by decode → offset → re-encode.")
+}}
+
+{{mustKnow
+  "Neighbor computation is O(1): decode center, offset lat/lon by cell dimensions, re-encode"
+  "9-cell query (self + 8 neighbors) handles all boundary cases including meridian/equator crossings"
+  "If coverage is too small, drop one precision level for 9x area — same 9 queries"
 }}
 
 {{phase 4 "Database Integration" "4 min"}}
@@ -241,6 +261,14 @@ results = r.georadius(
   "<a class=\"dqa-link\" href=\"/fund/storage/dynamodb\">DynamoDB</a> has no native geo support. Use a geohash as the partition key (precision 4-5 for coarse buckets) and a sort key of full-precision geohash. Query with begins_with(sort_key, 'prefix') across 9 partition keys. Libraries like dynamodb-geo handle this. Downside: 9 parallel Query operations per proximity search — higher latency than Redis but works at DynamoDB scale."
 }}
 
+{{caveat "Redis GEORADIUS is deprecated since Redis 6.2 — use GEOSEARCH and GEOSEARCHSTORE instead. The API is the same but the command name changed. Mentioning this in interviews shows awareness of API evolution."}}
+
+{{mustKnow
+  "Redis GEO: GEOADD + GEORADIUS (or GEOSEARCH) — sub-millisecond for 100K entries"
+  "SQL: B-tree index on geohash column, WHERE geohash IN (9 cells) + Haversine post-filter"
+  "DynamoDB: geohash as partition key + begins_with on sort key across 9 partitions"
+}}
+
 {{phase 5 "Geohash vs S2 vs H3" "3 min"}}
 
 {{say "Geohash is the simplest spatial index but not the only option. S2 (used by Google and <a class="dqa-link" href="/problem/ride-hailing">Uber</a>) and H3 (used by Uber for surge pricing) solve the non-uniform cell size problem that geohash has near the poles."}}
@@ -265,6 +293,17 @@ results = r.georadius(
   "Geohash rectangles vary in area by latitude — a precision-6 cell at the equator is ~1.2 km × 0.6 km but near the poles it's much narrower. S2 cells are near-equal-area everywhere on the globe. For <a class=\"dqa-link\" href=\"/problem/ride-hailing\">Uber</a>, equal-area matters because driver density and ETA calculations must be consistent whether you're in Singapore (1°N) or Helsinki (60°N). Geohash would over-count drivers in polar cells and under-count at the equator."
   "When would you pick H3 over S2?"
   "H3 hexagons have equidistant neighbors — every neighbor center is the same distance away. Rectangles (geohash) and quadrilaterals (S2) have corner neighbors farther than edge neighbors. For spatial aggregation like surge pricing heatmaps, ride density visualization, or k-ring expansion searches, hexagons give more uniform results. H3 also has a simpler API: h3.k_ring(cell, k) returns all cells within k hops."
+}}
+
+{{goodToKnow
+  "S2 cell IDs are 64-bit integers — fit in a database bigint column and support range queries like geohash"
+  "H3's k_ring(cell, k) returns all cells within k hops — much simpler than geohash neighbor computation for expanding searches"
+}}
+
+{{mustKnow
+  "Geohash: simplest, sufficient for most interviews — rectangular cells, prefix-based hierarchy"
+  "S2: near-equal-area cells on the sphere — used by Google Maps and Uber for global consistency"
+  "H3: hexagonal cells with equidistant neighbors — used by Uber for surge pricing and spatial aggregation"
 }}
 
 {{phase 6 "Production: Food Delivery Integration" "3 min"}}
@@ -329,6 +368,12 @@ results = r.georadius(
   "Partners' locations expire if not updated (TTL 30s). GEORADIUS may return a stale location for a partner who went offline &lt; 30s ago. Validate availability: after GEORADIUS, check partner status in <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a> (or a Redis hash 'partner:{id}:status'). If offline, exclude and try next result."
 }}
 
+{{mustKnow
+  "Two precision levels: precision 6 for restaurants (static), precision 7 for partners (moving)"
+  "Partner locations expire via TTL (30s) — auto-removes offline partners from GEORADIUS results"
+  "Progressive radius expansion (2→5→8 km) handles sparse areas without over-fetching in dense ones"
+}}
+
 {{phase 7 "Geohash Boundary Problem" "3 min"}}
 
 {{say `The critical failure mode: two points physically adjacent but with completely different geohash strings.
@@ -345,6 +390,14 @@ This happens at the 180° meridian, the equator, and the prime meridian (0°). A
 }}
 
 {{hint "the boundary problem has a fixed cost" "Querying 9 cells instead of 1 adds a constant &lt;span class='hl'>8 extra lookups&lt;/span> — not 8× latency. In Redis, pipeline all 9 GEORADIUS calls in a single round trip: total latency stays under &lt;span class='hl'>1ms&lt;/span>. In SQL, use a single query with WHERE geohash IN ('cell1', 'cell2', ..., 'cell9') — the B-tree handles 9 equality lookups in one index scan. The boundary fix is essentially free."}}
+
+{{caveat "Adjacent cells at major meridians (equator, 180° line) can have completely different prefixes — 'ezs42' neighbors 'u10hf'. Never compute neighbors by string manipulation. Always decode to (lat, lon), offset, and re-encode."}}
+
+{{mustKnow
+  "Boundary problem: adjacent points can have completely different geohash prefixes"
+  "Fix: always query 9 cells — cost is constant (8 extra lookups, pipelined in 1 round trip)"
+  "Post-filter with exact Haversine distance to enforce precise radius"
+}}
 
 {{phase 8 "Interview Summary" "2 min"}}
 
@@ -367,6 +420,13 @@ This happens at the 180° meridian, the equator, and the prime meridian (0°). A
   "Set TTL on active driver/partner locations — auto-remove stale positions"
   "Post-filter with exact Haversine distance after geohash lookup to handle cell boundary cases"
   "Mention S2 for <a class=\"dqa-link\" href=\"/problem/ride-hailing\">Uber</a>-scale equal-area requirements; H3 for surge pricing heatmaps"
+}}
+
+{{mustKnow
+  "Geohash = 2D → 1D conversion; enables O(log N) spatial queries via B-tree or sorted set"
+  "Always query 9 cells, always post-filter with Haversine — this handles all boundary cases"
+  "Redis GEO is the production standard for real-time matching (sub-ms latency)"
+  "Mention S2/H3 for bonus points, but geohash is sufficient for most interview answers"
 }}
 
 {{key "Geohash turns a 2D proximity problem into a 1D prefix string problem, enabling O(log N) spatial queries. Use precision 6-7 depending on matching radius, query 9 neighboring cells to handle boundary cases, and use Redis GEO as the production implementation for real-time location indexing."}}
