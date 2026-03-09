@@ -198,6 +198,17 @@ def get_tweet_key(user_id: int, shard_suffix: int) -> str:
   "How do you avoid making the directory a bottleneck?" "Cache aggressively. Shard assignments are stable for months at a time. Each app server caches the full mapping in a local dictionary. On re-sharding events, push invalidation to all servers. P99 lookup is a local hash map read: nanoseconds."
 }}
 
+{{mustKnow
+  "Directory-based: lookup table maps each key to a shard — most flexible but lookup service is a potential SPOF"
+  "Cache the mapping in each app server (shard assignments rarely change) — lookup becomes local hash map read"
+  "Re-sharding = update the lookup table and migrate data; no key-space math required"
+}}
+
+{{goodToKnow
+  "Vitess (MySQL sharding proxy) uses directory-based sharding with automated tooling"
+  "Fall back to hash sharding if lookup service fails — provides degraded but functional routing"
+}}
+
 {{phase 5 "Hotspot Mitigation" "5 min"}}
 
 {{say `A <span class="hl-blue">hotspot</span> is when a disproportionate fraction of traffic targets one shard:
@@ -280,6 +291,14 @@ def get_dynamo_partition_key(user_id: str, is_celebrity: bool = False) -> str:
 {{hint "DynamoDB burst capacity absorbs transient hotspots" "DynamoDB partitions have a sustained write limit (~1000 WCU/partition) but bank up to 5 minutes of unused capacity for bursts. A sudden spike that would overflow a partition is often absorbed. Design for sustained load, not single-second peaks."}}
 
 {{qa "How do you handle transactions that span multiple shards?" "You generally don't — that's the core tradeoff of sharding. Options: (1) avoid cross-shard transactions by choosing a shard key that co-locates related data, (2) use the Saga pattern for eventually-consistent cross-shard workflows, (3) use a database with native distributed transactions like CockroachDB or Google Spanner." "What about foreign keys across shards?" "Foreign keys cannot span shards. Enforce referential integrity in the application layer — check existence before insert, use soft deletes with async cleanup. This is why sharding is a last resort: you lose SQL guarantees."}}
+
+{{mustKnow
+  "Write sharding for hot keys: split key across N suffixes (key#0...key#9) — writes spread, reads scatter-gather"
+  "Replicas help reads, not writes — adding replicas does not reduce write load on the primary"
+  "Celebrity list pattern: flag hot users, apply write sharding only to them; misses new viral events"
+}}
+
+{{caveat "Cross-shard transactions are effectively eliminated by sharding. Options: co-locate related data on same shard, use Saga pattern for eventual consistency, or use CockroachDB/Spanner for native distributed transactions."}}
 
 {{phase 6 "Re-Sharding (Zero Downtime)" "6 min"}}
 
