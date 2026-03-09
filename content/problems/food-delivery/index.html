@@ -34,6 +34,8 @@ These three non-functional targets drive every architectural decision that follo
   (row "Consistency" "Order state transitions must be ACID")
 )}}
 
+{{caveat "Matching latency < 2s and tracking freshness < 5s are the two NFRs that dictate every data store choice in this design. If the interviewer changes either number, the architecture may shift — always confirm these targets before proceeding."}}
+
 {{triggerQs "Questions this section triggers"
   "What happens if no delivery partner is available?"
   "Order stays in PLACED state. We retry matching every 30 seconds for up to 10 minutes, then auto-cancel with full refund. Customer gets notification at 3-minute and 5-minute marks."
@@ -42,6 +44,8 @@ These three non-functional targets drive every architectural decision that follo
   "What is the delivery SLA?"
   "45 minutes median, 60 minutes p95. These drive our surge pricing thresholds and partner density targets per city zone."
 }}
+
+{{mustKnow "The core hard problem is matching + tracking, not restaurant menus or payments — scope accordingly" "Three key NFRs: matching < 2s, tracking < 5s stale, ETA ± 3 min — these drive every architecture decision" "Order cancellation rules differ by state (free at PLACED, penalties at PREPARING+)" "Delivery SLA: 45 min median, 60 min p95 — these set surge pricing thresholds"}}
 
 {{phase 2 "Capacity Estimation" "3 min"}}
 
@@ -74,6 +78,9 @@ These three non-functional targets drive every architectural decision that follo
   <li><strong>Cassandra</strong> handles append-only location history — LSM-tree absorbs the write rate without MVCC overhead</li>
 </ul>`}}
 
+{{caveat "125K location writes/sec is the dominant load — not order writes (350/sec). Interviewers often expect candidates to miss this. Always calculate driver location traffic first; it is 350x the order volume."}}
+
+{{mustKnow "Location updates (125K/sec) are 350x order writes — this is the dominant scaling concern" "Design for 5x sustained peak, not just 3x average — festivals and weekends spike heavily" "Order storage is modest (~20 GB/day) but location history is 85 GB/day — different storage engines needed"}}
 
 {{phase 3 "API Design" "5 min"}}
 
@@ -302,12 +309,18 @@ These three non-functional targets drive every architectural decision that follo
 
 {{hint "SSE vs WebSocket for customer tracking" "Customers only receive tracking updates (read-only stream). SSE is simpler — unidirectional, works over HTTP/2, auto-reconnects. WebSocket is for delivery partners because they also receive assignments and confirmations (bidirectional)."}}
 
+{{caveat "SSE is for customer tracking (unidirectional read-only). WebSocket is for delivery partners (bidirectional: push location AND receive assignments). Mixing these up in an interview signals a misunderstanding of the protocol tradeoffs."}}
+
 {{triggerQs "API design questions"
   "How do you handle idempotent order placement?"
   "POST /v1/orders accepts an idempotency key header (X-Idempotency-Key). The order service stores key → order_id in Redis with 24h TTL. Duplicate requests within 24h return the original order_id with 200."
   "What does the tracking SSE stream return?"
   "Server-sent events with JSON: {partner_lat, partner_lng, eta_seconds, order_status, restaurant_eta}. Events fire on status change or every 10 seconds, whichever comes first."
 }}
+
+{{mustKnow "Three API groups: REST for customers, WebSocket for partners, gRPC for internal service-to-service" "SSE for customer tracking (unidirectional), WebSocket for partners (bidirectional)" "Idempotency key on order placement — store key → order_id in Redis with 24h TTL" "Partner WebSocket frame is ~250 bytes every 4s — persistent connection avoids TCP handshake overhead"}}
+
+{{goodToKnow "Partner app on 2G: increase update interval to 10s, widen ETA error bars by 1.5x" "HTTP/2 multiplexing means multiple SSE streams share one TCP connection per customer device"}}
 
 {{phase 4 "Order Lifecycle" "8 min"}}
 

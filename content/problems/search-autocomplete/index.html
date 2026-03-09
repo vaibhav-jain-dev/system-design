@@ -40,6 +40,10 @@
   "We maintain separate tries per language code (en, es, zh, etc.). The client sends Accept-Language or the user's stored preference. This keeps trie sizes manageable — a single global trie would need Unicode normalization for every prefix."
 }}
 
+{{caveat "Autocomplete is non-critical infrastructure. Never let it block the search box — if the service is down, degrade to empty suggestions. Users can always type and submit manually."}}
+
+{{mustKnow "Sub-100ms p99 latency is the defining constraint — every design decision flows from this" "5B queries/day = 58K avg QPS, 290K peak — CDN caching is non-negotiable" "Autocomplete is a read-heavy, latency-sensitive, availability-first system — degrade gracefully, never block search" "Separate tries per language — a single global trie is too large and requires expensive Unicode normalization"}}
+
 {{phase 2 "API Design" "4 min"}}
 
 {{say `The autocomplete API is a read-heavy <strong>GET endpoint</strong> — cacheability is non-negotiable:
@@ -179,6 +183,12 @@
   "Rate limit by IP at the CDN layer: 200 requests per minute per IP. The uid is validated via JWT — an invalid uid gets global suggestions, not an error, so we don't leak whether a uid exists."
 }}
 
+{{caveat "Using POST for autocomplete is a common mistake. POST responses are not CDN-cacheable — at 290K QPS you would need 5x more origin capacity. Always use GET for idempotent, cacheable read paths."}}
+
+{{goodToKnow "Client debounce at 150ms cuts QPS by ~60% — mention this proactively to show you think about client-server cost holistically" "Including latency_ms in the response enables the client to show spinners vs instant results and feeds SLO dashboards without distributed tracing"}}
+
+{{mustKnow "Autocomplete MUST be GET, not POST — cacheability at CDN is the single biggest capacity lever" "Client debounce at 150ms reduces QPS from 700K to 290K — always mention client-side optimization" "Write path (query logging) is fire-and-forget via Kafka — never block the user on log writes" "Personalization via uid is blended at the service layer, not part of the CDN cache key"}}
+
 {{phase 3 "Trie Structure" "6 min"}}
 
 {{say `The trie is the core data structure:
@@ -257,6 +267,20 @@ class Trie:
   "How do you handle Unicode and non-Latin characters?"
   "We normalize to Unicode NFC form and build per-language tries. For Chinese (zh), we index on pinyin AND character sequences. The trie node children map uses full Unicode code points as keys, not just ASCII — the 26-child assumption is only for estimation."
 }}
+
+{{collapseSection "Storage Estimation Math" `
+<ul>
+  <li>Average query length: 6 characters → unique prefix paths up to depth 6</li>
+  <li>26^1 + 26^2 + ... + 26^6 ≈ 3M unique prefix nodes (English, ASCII-only estimate)</li>
+  <li>Each node stores top-10 suggestions × 50 bytes = 500 bytes per node</li>
+  <li>3M nodes × 500 bytes = <strong>1.5 GB</strong> for the English trie</li>
+  <li>Non-Latin tries (zh, ja) are smaller due to fewer unique prefixes but larger character sets</li>
+</ul>
+`}}
+
+{{caveat "Never traverse the subtree at query time to find top-K results. A DFS for prefix 'a' touches millions of nodes and takes 5-10ms. Pre-computing top-K at each node during build gives O(1) result return."}}
+
+{{mustKnow "Pre-compute top-K at every trie node — this is THE core insight; lookup is O(prefix_length) + O(1) result" "Trie shares prefix structure, using 2-3x less memory than an equivalent flat hash map of prefix → top-K" "~1.5 GB RAM for the English trie — fits in L3 cache on memory-optimized instances" "Trie depth capped at 20 chars — 99.9% of autocomplete prefixes are under 15 characters"}}
 
 {{phase 4 "Architecture" "6 min"}}
 

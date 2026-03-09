@@ -45,6 +45,12 @@
   "The surface-level read:write ratio is 10:1 (58K reads vs 6K writes). But fan-out-on-write amplifies each write: one post to 1K followers = 1K feed updates. This makes the effective write ratio much higher. The solution is hybrid fan-out: fan-out-on-write for normal users (&lt;10K followers), fan-out-on-read for celebrities (>10K followers). This keeps write amplification bounded."
 }}
 
+{{caveat "Scope aggressively in the first 2 minutes. Interviewers test whether you can separate core features from extensions. Mentioning Reels, DMs, or Shopping without being asked wastes time and signals poor prioritization."}}
+
+{{mustKnow "Read:write ratio is 10:1 at the surface, but fan-out amplifies writes by 100-1000x depending on follower count" "200TB/day media uploads drives every storage and CDN decision" "Three hard problems: fan-out strategy, media pipeline, and counter contention under write-heavy viral posts" "Scope to upload, feed, follow, like, comment — mention stories and explore as P1 extensions"}}
+
+{{goodToKnow "CDN transfer is the dominant cost at scale (~$3.8M/month at 500M DAU before negotiation)" "Instagram launched with just photo upload, feed, and likes — stories came 6 years later"}}
+
 {{phase 2 "API Design" "5 min"}}
 
 {{say "I'll define the core API contract now. The API design reflects our priorities — P0 endpoints handle the most traffic and need the most careful design."}}
@@ -343,6 +349,10 @@
   "POST. Like is creating a new resource (a like record), not updating the post. PUT implies idempotency — calling it twice should produce the same result. POST /like with a unique constraint (user_id, post_id) naturally handles double-like prevention at the database level. DELETE /posts/{id}/like for unlike."
 }}
 
+{{caveat "Never combine media upload and post creation in a single API call. A 5MB upload takes 2-10 seconds — combining them blocks the entire request and makes retry logic fragile."}}
+
+{{mustKnow "Two-phase upload: presigned S3 URL for media, then separate POST for metadata — keeps upload off your API servers" "Cursor-based pagination is mandatory for feeds — offset pagination breaks when new content is inserted between pages" "Composite PK (user_id, post_id) on likes table prevents double-likes at the database level"}}
+
 {{phase 3 "Stage 1: MVP (0-1M users)" "5 min"}}
 
 {{say "For MVP, I would build a monolith with Postgres, a single S3 bucket, and CloudFront. The goal is shipping fast with a clean data model we can shard later."}}
@@ -486,6 +496,12 @@ LIMIT 20;
   "Add Redis when your Postgres CPU consistently exceeds 60% or P99 query latency exceeds 100ms. For a social app, this typically happens around 500K-1M DAU. Start by caching user profiles (most frequently read, rarely updated) and hot post metadata. The feed query is the last thing to cache because it changes on every followee post."
 }}
 
+{{collapseSection "MVP Cost Breakdown Detail" "At MVP scale (~1M users), total infrastructure runs ~$500/month: RDS Postgres db.r6g.large ($200), 2x ECS Fargate t3.large ($120), ElastiCache Redis t4g.medium ($50), CloudFront for 10TB ($85), ALB ($25), S3 ($23/TB). This is intentionally cheap — do not over-invest in infrastructure at this stage. Instagram ran this exact stack until 10M+ users."}}
+
+{{mustKnow "Start with Postgres monolith — it handles 5K QPS with ACID, JOINs for feed, and costs $200/month" "MVP feed is pull-based: query follows table, then IN-clause on posts — no fan-out infrastructure needed" "Composite PK on likes (user_id, post_id) gives deduplication and efficient lookup for free" "S3 for media from day one — no filesystem scales to petabytes"}}
+
+{{goodToKnow "Instagram itself ran on Django/Postgres until 10M+ users before any sharding" "DynamoDB at MVP is over-engineering — it costs more at low scale and forces upfront access pattern design"}}
+
 {{phase 4 "Stage 1: Upload Flow (Hop-by-Hop)" "5 min"}}
 
 {{say `The upload flow has four hops:
@@ -514,6 +530,10 @@ LIMIT 20;
   "How do you prevent abuse of the upload endpoint?"
   "Rate limit pre-signed URL generation to 10/minute per user. Set a max Content-Length header on the pre-signed URL (e.g., 50MB). S3 rejects uploads exceeding this. Add a post-upload Lambda that checks file type via magic bytes — reject non-image/video files and delete the S3 object."
 }}
+
+{{caveat "If Lambda image processing fails, the original image is safe in S3 — only resized variants are missing. Always configure a DLQ with 3 retries for the processing pipeline."}}
+
+{{mustKnow "Four hops: Client to API Gateway (auth), Client to S3 (presigned URL upload), S3 to Lambda (resize to 4 variants), Lambda to CDN (edge delivery)" "Pre-signed URLs keep multi-MB uploads off your API servers entirely — S3 handles the heavy lifting" "S3 event notification triggers async image processing — the upload API returns immediately"}}
 
 {{phase 5 "Stage 2: Growing (1M-50M users)" "8 min"}}
 

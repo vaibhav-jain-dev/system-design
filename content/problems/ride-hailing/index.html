@@ -38,6 +38,10 @@ Does that align?`}}
   "Hot data (last known position) lives in Redis GEO with 30s TTL. Append-only trip path is written to Cassandra for audit and ETA model training. We don't store inter-ride location pings."
 }}
 
+{{caveat "Don't scope too broadly — scheduled rides, driver onboarding, and payment processing are each full system design problems. Explicitly exclude them or the interviewer will expect you to cover them."}}
+
+{{mustKnow "The two hard subproblems are geospatial driver lookup under real-time mutation and stateless dispatch — state this upfront" "Scale numbers: 100M users, 5M drivers, 1.25M location writes/sec, matching latency < 10s" "Driver location freshness target is < 5 seconds stale — this drives the 3-5s GPS update interval"}}
+
 {{phase 2 "APIs" "5 min"}}
 
 {{say `Three API groups:
@@ -244,6 +248,12 @@ Does that align?`}}
   "{ride_id, pickup_address, destination_address, estimated_fare_range, distance_km, pickup_eta_seconds}. Driver sees fare estimate upfront. System logs whether they accepted or rejected for acceptance rate scoring."
 }}
 
+{{caveat "WebSocket is required for driver connections — not SSE, not long polling. SSE is server-to-client only, but drivers need to both push GPS and receive ride offers. This is a common interview mistake."}}
+
+{{collapseSection "Detailed API Card Reference" `The detailed API view above shows request/response schemas for all endpoints. Key design decisions: POST /v1/rides uses X-Idempotency-Key header with 60s Redis TTL to prevent double-booking on network retries. The WebSocket frame for driver location is ~250 bytes — minimal overhead at 4s intervals. Ride offer expiry of 15 seconds is chosen to balance driver attention (they're driving) against rider wait time.`}}
+
+{{mustKnow "Drivers use WebSocket (bidirectional), riders use REST — explain why each protocol fits" "Idempotency key on POST /v1/rides prevents double-booking from client retries" "Driver ride offer has a 15-second timeout — sequential offers, not parallel broadcast"}}
+
 {{phase 3 "Ride Flow" "5 min"}}
 
 {{say `Six ride states — every transition is an atomic write to PostgreSQL + a Kafka event:
@@ -290,6 +300,12 @@ class RideMatchingService:
 
 {{hint "why 15s driver timeout" "15 seconds balances driver attention (they're on the road) against rider frustration. Uber uses 12–15s. After timeout, the system moves to the next ranked driver. No penalty to driver for the first rejection."}}
 
+{{caveat "If the matching service holds state in-memory and crashes mid-offer, the ride is stuck. All state must live in Postgres + Redis so any instance can resume from the last committed transition."}}
+
+{{goodToKnow "Kafka consumer groups with at-least-once delivery enable crash recovery — any matching instance can pick up where the crashed one left off" "The ride state machine is intentionally linear (no branching except CANCELLED) to simplify recovery logic"}}
+
+{{mustKnow "Dispatch loop is stateless — all state in Postgres + Redis, any worker can handle any ride" "Six ride states: REQUESTED -> MATCHED -> ARRIVING -> IN_PROGRESS -> COMPLETED (with CANCELLED branch)" "Sequential driver offers prevent the thundering-herd problem of parallel broadcast" "Every state transition is an atomic DB write + Kafka event — never one without the other"}}
+
 {{phase 4 "Architecture" "6 min"}}
 
 {{say `Four planes:
@@ -322,6 +338,10 @@ class RideMatchingService:
   "What happens to rides in flight during a Kafka broker failure?"
   "Ride state is in Postgres — that's durable. Kafka events are best-effort notifications to downstream consumers. If a billing event is missed, a reconciliation job catches up nightly by scanning completed rides with no billing record."
 }}
+
+{{caveat "A global single Redis cluster for 5M drivers won't work — hot cities (Mumbai, NYC) overwhelm one shard. City-based sharding is mandatory."}}
+
+{{mustKnow "Four planes: API, Matching, Tracking, Data — each scales independently" "City-based sharding: each city has its own Redis GEO, Postgres partition, and matching workers" "Redis GEO for hot location data, Postgres for ride state, Cassandra for GPS history, Kafka for event fan-out"}}
 
 {{phase 5 "Geospatial Indexing" "5 min"}}
 

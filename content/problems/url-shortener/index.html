@@ -51,6 +51,14 @@
   "No for the default case. Editing a URL after creation breaks 301 caching — browsers that cached the old redirect will keep going to the old destination until their cache expires. If editing is required (enterprise feature), issue 302 redirects for editable URLs so every click passes through your servers. Charge this as a premium feature."
 }}
 
+{{caveat "Always state your scale assumptions explicitly. An interviewer designing for 1K QPS wants a completely different architecture than one expecting 100K QPS. If you design for the wrong scale, the rest of your interview is off-target."}}
+
+{{mustKnow
+  "Read-to-write ratio of 10:1 drives the entire architecture toward caching and read optimization"
+  "Back-of-envelope math: 100M URLs/day = 1,157 writes/s, 1B redirects/day = 11,574 reads/s, 5x peak = 57,850 RPS"
+  "Priority framework: P0 (shorten + redirect) must be solved before discussing P1/P2 features"
+}}
+
 {{phase 2 "API Design" "5 min"}}
 
 {{say `Let me walk through the API contract:
@@ -312,6 +320,19 @@
   "The redirect path (GET /{code}) is versionless and permanent — it should never change because URLs are shared everywhere. API paths (POST /api/v1/urls) are versioned. When v2 launches, v1 continues working. Deprecation timeline: 12 months minimum with X-API-Deprecation headers."
 }}
 
+{{caveat "The redirect path (GET /{code}) is permanent and shared in tweets, QR codes, and emails. Never version it or change its format — this is a public contract that outlives your API."}}
+
+{{mustKnow
+  "301 vs 302 trade-off: 301 reduces server load by 30% (browser caching) but sacrifices analytics on cached clicks and prevents destination URL changes"
+  "Redirect endpoint is versionless; API endpoints use /api/v1/ versioning"
+  "POST returns 201 with Location header; DELETE is idempotent (returns 204 even for non-existent codes)"
+}}
+
+{{goodToKnow
+  "Idempotency-Key header pattern (same as Stripe) prevents duplicate URLs from retries"
+  "Cache-Control: max-age=86400 on 301 gives you a 24-hour escape hatch to update destinations"
+}}
+
 {{phase 3 "Data Model & Database Choice" "5 min"}}
 
 {{say `Core data model: <strong>short_code → long URL</strong>. The access pattern drives every database decision:
@@ -386,6 +407,20 @@ CREATE INDEX idx_urls_expires ON urls(expires_at) WHERE expires_at IS NOT NULL;
 -- Why NOT Hash index? Postgres hash indexes had no WAL logging before v10,
 -- don't support composite keys, and B-tree is just as fast for equality.
 `}}
+
+{{caveat "DynamoDB conditional writes (attribute_not_exists) are strongly consistent within a single region but do NOT prevent cross-region conflicts during network partitions when using Global Tables."}}
+
+{{mustKnow
+  "Access pattern is 99% single-key lookup — this drives the choice toward a key-value store over relational"
+  "DynamoDB partition key = short_code gives O(1) reads at any scale with no manual sharding"
+  "DynamoDB TTL handles URL expiration automatically — zero application code, zero cost"
+  "GSI on user_id with ALL projection avoids follow-up lookups for user dashboard queries"
+}}
+
+{{goodToKnow
+  "Separate analytics into its own table to avoid hot partition interference with redirect reads"
+  "DynamoDB adaptive capacity automatically redistributes throughput to hot partitions within minutes"
+}}
 
 {{phase 4 "Key Generation Deep Dive" "8 min"}}
 

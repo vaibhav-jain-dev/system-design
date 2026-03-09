@@ -50,6 +50,10 @@
   "HTTP/2 server push is unidirectional — server can push, but client must initiate new HTTP requests to send messages. WebSocket is bidirectional on a single TCP connection. Chat requires both directions constantly. HTTP/2 would need a separate POST for every outgoing message, adding connection overhead and latency."
 }}
 
+{{caveat "E2E encryption eliminates server-side search, spam filtering, and content moderation. You must address this trade-off explicitly — interviewers will probe it."}}
+
+{{mustKnow "WebSocket is the only viable option for real-time bidirectional chat — long polling adds 1-5s latency, SSE is unidirectional" "E2E encryption means the server is a dumb pipe — no server-side search, no content moderation, no compliance indexing" "The 256-member group cap is a deliberate engineering constraint that bounds fan-out cost to 256 writes per message" "Dual-path delivery: WebSocket for online users, persistent offline queue + push notification for offline users"}}
+
 {{phase 2 "Capacity Estimation" "3 min"}}
 
 {{say `500M DAU, each user sends about <strong>40 messages per day</strong> on average — here are the numbers that shape the architecture:
@@ -76,6 +80,15 @@
   (how "server count" "200M connections × 40KB = 8 TB total memory. At 64GB per server, that's 125,000 servers. With 100K connections per server and overhead, plan for ~5,000 WebSocket servers across all regions.")
   (whatIf "a region goes down" "200M connections / 5 regions = 40M connections per region. Failing over 40M connections to remaining regions means each absorbs 10M extra. Servers need 30% headroom for this.")
 }}
+
+{{collapseSection "Detailed Capacity Math" `<ul>
+  <li><strong>WebSocket memory per connection:</strong> ~40KB (TLS state + read/write buffers + session metadata). 100K connections × 40KB = 4GB per server, leaving 60GB for OS + application on a 64GB instance</li>
+  <li><strong>Kafka throughput:</strong> 700K msgs/sec × 100 bytes avg = 70MB/sec. A single Kafka broker handles ~200MB/sec writes. 100 brokers provides 20× headroom for spikes</li>
+  <li><strong>DynamoDB WCU:</strong> 20B msgs/day = 231K writes/sec average. On-demand can burst to 2× provisioned. At $1.25 per million WCU, steady state costs ~$25K/month for message writes alone</li>
+  <li><strong>Redis session registry:</strong> 200M keys × 60 bytes = 12GB. 20 shards at 600MB each — trivially small for Redis instances with 16GB+ RAM</li>
+</ul>`}}
+
+{{mustKnow "200M concurrent WebSocket connections is the dominant scaling constraint — drives server count, memory budget, and deploy strategy" "700K msgs/sec at peak requires Kafka-level throughput — no traditional message queue handles this" "Each WebSocket connection consumes ~40KB of server memory — this determines 100K connections/server and ~5,000 servers total"}}
 
 {{phase 3 "API Design" "5 min"}}
 
@@ -303,6 +316,10 @@ Messages are sent over WebSocket for lowest latency; REST provides durability an
   "The client maintains a local sequence number per conversation. On reconnect, it sends its last known message_id. The server queries DynamoDB for messages > that ID and streams them back. This handles both server crashes and client disconnects."
 }}
 
+{{caveat "The WebSocket API and REST API must share the same authentication token. If you design them with separate auth flows, the interviewer will flag it as a security gap — a stolen WS token could be replayed on REST endpoints and vice versa."}}
+
+{{mustKnow "Two-layer API: WebSocket for real-time events (messages, typing, receipts), REST for CRUD (history, groups, media upload)" "Client-generated UUID enables deduplication on retry — without it, a network hiccup causes duplicate messages" "ACK protocol: single checkmark = server received (Kafka write), double checkmark = recipient delivered — these are different events" "REST fallback if WebSocket ACK not received within 5 seconds — idempotent retry using the same client_msg_id"}}
+
 {{phase 4 "Core Architecture" "8 min"}}
 
 {{say `Four layers:
@@ -340,6 +357,12 @@ Messages are sent over WebSocket for lowest latency; REST provides durability an
   "How do you handle WebSocket connection drops and reconnection?"
   "Three mechanisms: 1) Client-side heartbeat — ping every 30 seconds; if no pong within 5 seconds, reconnect. 2) Server-side cleanup — if no heartbeat for 60 seconds, remove the session from Redis and close the socket. 3) On reconnection, the client sends the last received message_id. The server queries DynamoDB for all messages after that ID and delivers them in order. Messages are never lost because they are persisted before ACK is sent."
 }}
+
+{{caveat "NLB is mandatory for WebSocket connections — ALB has a 4000-second idle timeout that silently drops long-lived connections. This is a common mistake in interviews."}}
+
+{{goodToKnow "Session registry in Redis uses TTL=5min refreshed by heartbeat — if a WebSocket server crashes, stale entries auto-expire without requiring explicit cleanup" "Kafka buffering in WebSocket servers (bounded 1000-message queue) provides 30 seconds of resilience against Kafka outages without message loss"}}
+
+{{mustKnow "Separate connection management (WebSocket servers) from message routing (Chat Service) — a routing bug should not drop connections" "Session registry pattern: user_id to server_id mapping in Redis enables O(1) message routing to the correct WebSocket server" "Kafka as the message bus provides durability between services — messages are persisted before delivery is attempted" "NLB for WebSocket (Layer 4, no idle timeout), ALB for REST API (Layer 7, HTTP routing)"}}
 
 {{phase 5 "Message Delivery Flow" "8 min"}}
 

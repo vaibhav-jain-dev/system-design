@@ -42,6 +42,12 @@
   "Soft-delete with 30-day recovery window for end users. After 30 days, events move to cold storage (S3 Glacier) for compliance. Hard delete on user account deletion after 60 days."
 }}
 
+{{caveat "Don't underestimate the recurring events scope — 40%+ of all calendar events are recurring. If your design can't handle RRULE expansion efficiently, you've failed the core problem."}}
+
+{{mustKnow "500M MAU, 2B events/day, 35K write RPS and 350K read RPS at peak — these numbers drive every downstream decision" "Recurring events use RFC 5545 RRULE stored once on the master row, expanded on-the-fly — never pre-expand into N rows" "Soft deletes with actor_id audit trail — never hard delete calendar events" "99.99% availability target (52 min/year downtime) requires multi-AZ PostgreSQL with automatic failover"}}
+
+{{goodToKnow "Offline mobile support via local SQLite cache with delta sync protocol" "Free/busy queries are a separate read-optimized path backed by Redis sorted sets"}}
+
 {{phase 2 "API Design" "5 min"}}
 
 {{say `Designing idempotent APIs — <strong>PUT for create and update, not POST</strong>:
@@ -256,6 +262,12 @@
   "How do you paginate large calendars?"
   "next_page_token continues within the same time window. next_sync_token is returned when the last page is reached. The client stores next_sync_token for subsequent delta syncs. Page size is 250 events — large enough to cover most monthly views in one request."
 }}
+
+{{caveat "Using POST instead of PUT for event creation is a common mistake in interviews. PUT with client-generated UUID is idempotent — mobile retries on flaky networks won't create duplicate events."}}
+
+{{mustKnow "PUT (not POST) for event creation — client generates UUID before first request, making retries idempotent" "ETag + If-Match header for optimistic locking — prevents lost updates when two devices edit the same event" "sync_token encodes (calendar_id, last_modified_at) — delta sync returns only changed events, not the full calendar" "sync_token expires after 7 days — client falls back to full sync on 410 Gone"}}
+
+{{goodToKnow "Page size of 250 events covers most monthly views in one request" "Soft-deleted events appear in delta sync with status=CANCELLED so clients know to remove them locally"}}
 
 {{phase 3 "Recurring Events" "6 min"}}
 

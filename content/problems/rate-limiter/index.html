@@ -75,6 +75,20 @@
 </ul>`
 }}
 
+{{caveat "Fail-open vs fail-closed is NOT a global setting — it must be configurable per endpoint. Payment endpoints fail-closed; read-heavy APIs fail-open. Getting this wrong in either direction is a red flag in interviews."}}
+
+{{mustKnow
+  "Distributed rate limiting requires a shared store (Redis) — in-memory counters per server allow 2x the intended limit"
+  "Fail-open is the correct default; fail-closed only for security-critical endpoints like login and payments"
+  "Rate limit key hierarchy: API key > user ID > IP address — use the most specific identifier available"
+  "Three enforcement tiers: API gateway (coarse DDoS), service middleware (per-endpoint SLA), in-process (business logic)"
+}}
+
+{{goodToKnow
+  "IETF is standardizing RateLimit-* headers (without X- prefix) — mention this to show you follow evolving standards"
+  "Stripe, GitHub, and AWS all publish their rate limiting strategies — citing a real-world example strengthens your answer"
+}}
+
 {{phase 2 "Capacity Estimation" "3 min"}}
 
 {{say `Throughput math first — it drives the storage choice:
@@ -111,6 +125,14 @@ Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</
   <li><strong>Mitigation</strong>: fall back to in-process counters (approximate but <span class='hl'><0.1ms</span>) while you scale the cluster horizontally</li>
   <li>ElastiCache supports online resharding — add shards without downtime, but rebalancing takes <span class='hl'>10–30 minutes</span></li>
 </ul>`
+}}
+
+{{caveat "Do not conflate ops/sec with requests/sec when using Lua scripts. A single Lua script with 3 Redis commands counts as 1 op but replaces 3 round trips — your effective req/sec capacity is higher than raw ops/sec suggests."}}
+
+{{mustKnow
+  "Redis handles ~100K ops/s per node — capacity estimation drives the cluster sizing decision"
+  "Lua scripts reduce 3 round trips to 1, effectively doubling throughput for sliding window checks"
+  "Memory is rarely the bottleneck — 50M keys x 100 bytes = 5 GB fits in a single 13 GB node; sharding is for throughput"
 }}
 
 {{phase 3 "API Design with Rate Headers" "3 min"}}
@@ -334,6 +356,18 @@ Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</
 </ul>`
 }}
 
+{{caveat "X-RateLimit-Reset must be a Unix timestamp (absolute), not relative seconds. Using relative seconds causes clock-skew bugs across time zones. Retry-After is the one that uses relative seconds."}}
+
+{{mustKnow
+  "Rate headers go on EVERY response (200 and 429) — not just rejections"
+  "Three mandatory headers: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset"
+  "Retry-After (relative seconds) only appears on 429 responses — it tells clients exactly when to retry"
+}}
+
+{{goodToKnow
+  "The IETF RateLimit Fields draft (RFC 9110) standardizes these headers without the X- prefix — adoption is growing"
+}}
+
 {{phase 4 "Algorithm Deep Dive" "10 min"}}
 
 {{say "Four algorithms to compare — each trades off accuracy, memory usage, and burst tolerance differently:"}}
@@ -501,6 +535,29 @@ class SlidingWindowCounter:
 </ul>`
 }}
 
+{{caveat "Fixed Window's boundary burst problem is a classic interview trap. If you propose Fixed Window, the interviewer will ask about the 2x burst at window boundaries — have the Sliding Window Counter upgrade ready."}}
+
+{{collapseSection "Token Bucket vs Sliding Window Counter — Detailed Implementation Trade-offs" `
+<ul>
+  <li><strong>Token Bucket state</strong>: 2 fields (tokens float64 + last_refill timestamp) — requires floating-point math in Lua, which can accumulate precision errors over millions of refills</li>
+  <li><strong>Sliding Window Counter state</strong>: 2 integer counters (current + previous window) — INCR is atomic and exact; no floating-point drift</li>
+  <li><strong>Edge case</strong>: Token Bucket with very low refill rates (0.001 tokens/sec) can accumulate rounding errors over days — reset the bucket periodically or use integer math with a scaling factor</li>
+  <li><strong>Testing</strong>: Sliding Window Counter is easier to unit test — fixed timestamps produce deterministic results; Token Bucket requires mocking time.time() precisely</li>
+</ul>
+`}}
+
+{{mustKnow
+  "Four algorithms: Token Bucket, Sliding Window Counter, Fixed Window, Sliding Window Log — know trade-offs of each"
+  "Sliding Window Counter is the best default: O(1) memory, <1% error, no boundary burst"
+  "Token Bucket when burst tolerance is a product requirement (e.g., AWS API Gateway)"
+  "Fixed Window has a 2x boundary burst problem — never propose it without acknowledging this"
+}}
+
+{{goodToKnow
+  "GitHub uses dual-rate limiting: 5,000 req/hour (sliding window) + per-minute burst cap (token bucket)"
+  "Sliding Window Log is O(N) memory — only viable for very low limits like 5 login attempts per 15 minutes"
+}}
+
 {{phase 5 "Architecture (Hop-by-Hop)" "8 min"}}
 
 {{say `Three placement tiers — each trades latency for flexibility:
@@ -591,6 +648,23 @@ async def rate_limit_middleware(request: Request, call_next):
   <li><span class='hl-red'>Don't reject on extraction failure</span> — that lets a malformed auth header bypass rate limiting entirely by triggering an error path</li>
   <li>Log extraction failures as a security signal; repeated failures from the same IP are worth alerting on</li>
 </ul>`
+}}
+
+{{caveat "Load balancers should NOT do rate limiting — they lack shared state for distributed counting and coupling infrastructure config to business rules is an operational nightmare."}}
+
+{{collapseSection "Rate Limit Middleware Implementation Details" `
+<ul>
+  <li><strong>Connection pooling</strong>: Use a Redis connection pool (min 10, max 50 connections per app server) — creating a new TCP connection per rate check adds ~1ms overhead</li>
+  <li><strong>Timeout handling</strong>: Set Redis command timeout to 5ms — if the check takes longer, fall back to the configured fail-open/fail-closed policy</li>
+  <li><strong>Key construction</strong>: Build the rate limit key in the middleware: <code>rl:{tier}:{api_key}:{endpoint}:{window_start}</code> — include the endpoint so different endpoints can have different limits</li>
+  <li><strong>Header injection</strong>: Add rate limit headers in both the success and error paths — a common bug is only adding them on 429 responses</li>
+</ul>
+`}}
+
+{{mustKnow
+  "Three placement tiers: API gateway (DDoS), service middleware (SLA enforcement), in-process (business logic)"
+  "Rate limiter must add <1ms latency — Redis Lua scripts achieve this with a single round trip"
+  "On key extraction failure, fall back to the lowest-tier limit by IP — never skip rate limiting entirely"
 }}
 
 {{phase 6 "Distributed Rate Limiting" "8 min"}}
