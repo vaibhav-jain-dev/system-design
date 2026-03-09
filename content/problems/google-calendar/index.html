@@ -334,6 +334,23 @@ def get_events_in_window(calendar_id, window_start, window_end):
   "Cache expanded views in Redis per (calendar_id, month) with a 1-hour TTL. Invalidate on event mutation. For users with 1,000+ recurring events, pre-warm the cache asynchronously after a sync request. The calendar view hit rate on cache is >95% — expansion runs only on cache miss."
 }}
 
+{{caveat "Pre-expanding recurring events into N rows is a trap that interviewers test for. A weekly event with no end date generates infinite rows — the correct approach is on-the-fly expansion within the query window."}}
+
+{{collapseSection "RRULE RFC 5545 Reference" `<ul>
+  <li><strong>FREQ</strong> — DAILY, WEEKLY, MONTHLY, YEARLY</li>
+  <li><strong>BYDAY</strong> — MO,TU,WE,TH,FR,SA,SU (with optional ordinal: 2MO = 2nd Monday)</li>
+  <li><strong>BYMONTH</strong> — 1-12</li>
+  <li><strong>BYMONTHDAY</strong> — 1-31</li>
+  <li><strong>COUNT</strong> — max occurrences (mutually exclusive with UNTIL)</li>
+  <li><strong>UNTIL</strong> — end date for recurrence</li>
+  <li><strong>INTERVAL</strong> — every Nth frequency (e.g., INTERVAL=2 with FREQ=WEEKLY = biweekly)</li>
+  <li><strong>EXDATE</strong> — excluded dates (cancelled single instances)</li>
+</ul>`}}
+
+{{mustKnow "RRULE stored once on master event row — expand on-the-fly within the query window, never pre-expand into rows" "Exception handling: EXDATE for cancelled instances, separate modified_event_id row for edited instances, both keyed by (master_event_id, occurrence_date)" "'This and following' edit splits the master: set recur_until on original, create new master from the edit point forward" "RRULE expansion must use local timezone (IANA name), not UTC — DST transitions produce wrong times if expanded in UTC"}}
+
+{{goodToKnow "Weekly event for 1 year = 52 occurrences at ~1us each = 52us CPU — negligible expansion cost" "Cache expanded views in Redis per (calendar_id, month) with 1-hour TTL for >95% cache hit rate"}}
+
 {{phase 4 "Architecture" "6 min"}}
 
 {{say `Three layers:
@@ -361,6 +378,10 @@ def get_events_in_window(calendar_id, window_start, window_end):
   "How do you handle the API Gateway at 350K RPS?"
   "API Gateway (Kong or AWS API Gateway) handles TLS termination, auth token validation, and rate limiting. At 350K RPS, use a 20-node cluster with each node handling ~17.5K RPS — well within single-node capacity. Horizontal scaling behind an L4 load balancer."
 }}
+
+{{mustKnow "PostgreSQL as primary store — calendar queries are range scans with JOINs between master events and exceptions, which relational DBs handle natively" "Kafka decouples notification delivery from the event write path — reminder scheduling is async, never blocks event mutations" "Read replicas serve all GET requests; writes route to primary — replica lag ~100ms is acceptable for calendar views" "Multi-AZ PostgreSQL with automatic failover (~30s) for 99.99% availability"}}
+
+{{goodToKnow "Sync service is separated from API service for independent scaling — sync load spikes on Monday mornings while write load is uniform" "CalDAV is a protocol (HTTP + iCal), not a database — still needs a backing store that can scale to 500M users"}}
 
 {{phase 5 "Conflict Detection" "4 min"}}
 
@@ -416,6 +437,12 @@ WHERE acl.user_id = ANY($1::text[])   -- array of attendee user_ids
   "How do you handle tentative events in conflict detection?"
   "Events with status=TENTATIVE are included in free/busy queries but labeled as tentative in the response. The scheduling UI shows them as 'maybe busy'. For strict conflict detection (e.g., auto-reject double-booking), only CONFIRMED events count as conflicts."
 }}
+
+{{caveat "Recurring event conflicts can't be detected against the master row alone — you must expand the RRULE into occurrences within the query window first, then run the overlap predicate against each materialized occurrence."}}
+
+{{mustKnow "Interval overlap predicate: event_a.start_utc < requested_end AND event_a.end_utc > requested_start — this is the canonical formula" "Covering index (calendar_id, start_utc, end_utc) WHERE status != 'CANCELLED' makes the overlap query fast" "Redis sorted set per user per day for hot-path free/busy — ZRANGEBYSCORE returns busy blocks in O(log N)" "Free/busy queries across 10 attendees run in parallel against Redis, not sequentially against PostgreSQL"}}
+
+{{goodToKnow "All-day events stored as start=00:00:00 UTC to end=next_day 00:00:00 UTC — overlap predicate still works correctly" "Redis free/busy cache for 50M active users with ~5 events/day cached = 16GB across the cluster"}}
 
 {{phase 6 "Data Model" "5 min"}}
 

@@ -254,6 +254,19 @@ Booking APIs are the most sensitive — they interact with seat locks and paymen
 
 {{hint "why split lock and confirm into two calls" "Payment is handled by the gateway and takes 2–5 seconds. During that time, the seat must stay locked. If we did lock+confirm atomically, we'd hold a database transaction for 5 seconds — blocking all other operations on those seat rows. Two-phase: lock (Redis, instant), pay (gateway, 2–5s), confirm (DB write, &lt; 100ms)."}}
 
+{{caveat "Idempotency-Key is not optional — without it, a network timeout + retry creates duplicate locks. Interviewers will probe whether you handle retry semantics correctly on mutating endpoints."}}
+
+{{collapseSection "Detailed API Response Headers" `
+<ul>
+  <li><strong>POST /bookings/lock 200:</strong> <code>X-Lock-Expires: 2026-03-05T14:10:00Z</code>, <code>X-Idempotent: true</code></li>
+  <li><strong>POST /bookings/confirm 200:</strong> <code>X-Ticket-URL: /bookings/{id}/ticket</code> (available after async QR generation)</li>
+  <li><strong>GET /shows/{id}/seats 200:</strong> <code>Cache-Control: max-age=5</code>, <code>X-WS-Channel: seats:{show_id}</code></li>
+  <li><strong>POST /payments/webhook 200:</strong> Always return 200 to gateway on duplicates — returning 4xx causes infinite retries</li>
+</ul>
+`}}
+
+{{mustKnow "Two-phase booking: lock (Redis, instant) then confirm (Postgres, after payment) — never hold a DB transaction during payment" "Idempotency-Key on POST /bookings/lock prevents duplicate locks on network retry" "Webhook is the payment confirmation path — not synchronous API calls; always return 200 to gateway even on duplicates" "409 Conflict for seat unavailability, 410 Gone for expired locks — distinct failure modes with distinct client handling"}}
+
 {{phase 3 "Seat Locking" "6 min"}}
 
 {{say `Seat locking uses <span class="hl-blue">Redis SET NX EX</span> — set if not exists with expiry:
@@ -330,6 +343,12 @@ def release_lock(show_id: str, seat_ids: list[str], lock_token: str):
   "How do you handle partial failures — locking seat A successfully but seat B fails?"
   "All-or-nothing: if any seat fails to lock, we rollback all successful locks in the same request using the Lua check-and-delete script. Return 409. User sees which seat was unavailable and can choose alternatives."
 }}
+
+{{caveat "The Lua check-and-delete script for lock release is not optional — a raw DEL without value checking can delete another user's valid lock after TTL expiry, causing a phantom available seat and potential double-booking."}}
+
+{{goodToKnow "Redlock across 3 independent Redis nodes provides safety against single-node failure during async replication — single-node SET NX can silently lose a lock on failover" "For Redis Cluster with hash tags, all seat locks for one show land on one shard — enabling atomic multi-seat operations but creating a hot-shard risk for viral events"}}
+
+{{mustKnow "SET NX EX is the atomic lock primitive — set-if-not-exists with TTL, O(1), no race condition possible" "Lock release must use Lua script for atomic check-and-delete: verify the lock value matches before deleting" "Multi-seat locking is all-or-nothing: if any seat fails, rollback all previously acquired locks in the same request" "Lock value encodes lock_token:user_id — the token proves ownership; prevents one user from releasing another's lock"}}
 
 {{phase 4 "Architecture" "6 min"}}
 

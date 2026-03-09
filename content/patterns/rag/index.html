@@ -194,6 +194,14 @@ def chunk_recursive(
   "Overlap is the number of tokens repeated between consecutive chunks. A 50-token overlap means the last 50 tokens of chunk N are also the first 50 tokens of chunk N+1. This ensures concepts that span a chunk boundary are fully captured in at least one chunk. Without overlap, queries about boundary-spanning ideas return incomplete chunks."
 }}
 
+{{caveat "Chunk size is the single highest-impact hyperparameter in RAG. Changing chunk size from 100 to 500 tokens can improve retrieval recall by 20-30%. Always tune on representative queries before deploying."}}
+
+{{mustKnow
+  "Sweet spot is 300-500 tokens per chunk with 10-15% overlap"
+  "Recursive chunking (split by headers, then paragraphs, then sentences) best preserves document structure"
+  "Bad chunking is the number one cause of poor RAG quality — fix chunking before tuning anything else"
+}}
+
 {{phase 4 "Embedding Models & Vector Storage" "8 min"}}
 
 {{say `Embeddings convert text into dense vectors that capture semantic meaning:
@@ -327,6 +335,19 @@ def search_similar(
 
     return [(row[0], float(row[1]), row[2]) for row in results]
 `}}
+
+{{goodToKnow
+  "HNSW index parameters: m=16 (connections per node) and ef_construction=64 are good defaults for up to 10M vectors"
+  "pgvector is the simplest production choice if you already run PostgreSQL — zero new infrastructure"
+}}
+
+{{collapseSection "Embedding Model Vendor Details" "Embedding costs scale linearly with corpus size. At $0.02/1M tokens, a 10M-document corpus costs ~$100 to embed. Self-hosted models like BGE-large eliminate per-token costs but require GPU infrastructure (~$150/mo for a g4dn.xlarge). The quality gap between hosted and open-source models has narrowed to 1-2 MTEB points — self-hosting is viable for cost-sensitive workloads above 10M embeddings/month."}}
+
+{{mustKnow
+  "Embedding model choice sets the retrieval quality ceiling — everything downstream is bounded by it"
+  "pgvector for simplicity (up to 10M vectors), Pinecone for zero-ops, Qdrant for advanced filtering"
+  "FAISS is a library, not a database — no persistence, no replication, not suitable for production serving"
+}}
 
 {{phase 5 "Retrieval & Reranking" "10 min"}}
 
@@ -470,6 +491,15 @@ def retrieve_and_rerank(
 {{think "Reranking is one of the highest-leverage improvements in RAG. Cross-encoders see both query and document together — they can judge relevance holistically rather than comparing independent vectors. The latency cost (~100ms for 50 candidates) is justified by 10-20% recall improvement."
   (whyNot "reranking always" "Cross-encoders are O(n) with the number of candidates — each pair requires a separate inference pass. For 50 candidates and a 12-layer model, that is 50 forward passes. This adds 80-150ms latency. Skip reranking if your p99 latency target is under 300ms total and your retrieval precision is already high.")
   (whatIf "reranker latency is too high" "Use a smaller cross-encoder model (MiniLM-L6 instead of L12) — roughly 2x faster with ~5% quality drop. Or reduce candidate count from 50 to 20. Or run the reranker asynchronously and stream the top bi-encoder results while reranking completes in the background.")
+}}
+
+{{caveat "Never go dense-only in production. Dense search fails on exact queries like error codes, product SKUs, and statute citations. Hybrid search (dense + BM25) catches both semantic and keyword queries."}}
+
+{{mustKnow
+  "Hybrid search (dense + BM25) with Reciprocal Rank Fusion is the production standard"
+  "Start with alpha=0.7 (70% dense, 30% sparse) and tune on a labeled query set"
+  "Cross-encoder reranking improves recall by 10-20% at ~100ms latency cost — retrieve 50 candidates, rerank to top 5"
+  "Bi-encoders embed query and document independently (fast). Cross-encoders compare them together (precise but slow)."
 }}
 
 {{phase 6 "Complete RAG Pipeline" "10 min"}}

@@ -50,6 +50,10 @@
 
 {{hint "why 800 tweets cap" "800 is Twitter's actual internal cap. Users rarely scroll more than 200 tweets. Capping prevents runaway memory growth and keeps ZADD/ZRANGE O(log N) fast."}}
 
+{{mustKnow "Timeline cache: 300M DAU × 6.4KB = 1.9TB RAM in Redis — feasible with a cluster but drives the 800-tweet cap decision." "Write throughput: 8.3K tweets/s baseline, 25K/s peak — Cassandra handles this easily with LSM-tree append-only writes." "Read throughput: 325K timeline reads/s — this is the bottleneck that justifies pre-computed Redis timelines over on-demand queries."}}
+
+{{goodToKnow "Tweet storage grows at 50GB/day (18TB/year). With 3× Cassandra replication = 54TB/year — plan for data retention policies." "The 40:1 read/write ratio is the single number that justifies the entire fanout-on-write architecture."}}
+
 {{phase 3 "API Design" "5 min"}}
 
 {{say "Three core API surfaces: tweet creation, home timeline fetch, and real-time delivery. I'll design REST for tweet CRUD and timeline reads, with SSE for push notifications of new tweets."}}
@@ -240,6 +244,10 @@
   "The cursor is the lowest tweet_id in the last page. At read time, the merge function uses this as the starting point: scan the pre-computed timeline cache from cursor backward, then merge-in celebrity tweets above the cursor. The merged result is re-sorted by timestamp before slicing."
 }}
 
+{{caveat "Never use offset-based pagination for feeds. New tweets inserting at page 0 shift all offsets — users see duplicates or miss tweets. Snowflake ID cursors are stable because they are immutable identifiers, not positional indexes."}}
+
+{{mustKnow "Three core API surfaces: tweet CRUD (POST/DELETE), timeline reads (cursor-paginated GET), and real-time delivery (SSE stream)." "Use Snowflake IDs as cursors — they are time-sortable and stable across insertions, unlike offset pagination." "SSE (Server-Sent Events) is correct for feed push — unidirectional, auto-reconnects, works over HTTP/2. WebSocket is overkill for one-way feed delivery."}}
+
 {{phase 4 "Fan-out Strategies" "10 min"}}
 
 {{say "This is the core design challenge. I'll walk through three strategies and land on a hybrid. Fanout-on-write pushes tweet IDs to every follower's timeline cache at write time. Fanout-on-read generates the timeline dynamically at request time. The hybrid applies each strategy based on the follower count of the tweet's author."}}
@@ -288,6 +296,12 @@ def fanout_tweet(tweet_id: str, author_id: str, timestamp: float):
   "How do you handle the fanout queue backing up during a viral event?"
   "The fanout workers consume from a Kafka topic partitioned by author_id. During viral spikes, the queue depth grows but workers process at a steady rate — 100K fanout writes/s is sustainable with a Redis cluster. The tweet is immediately visible to anyone who directly visits the author's profile (tweets by user query). Timeline delivery just lags behind by seconds to minutes depending on queue depth."
 }}
+
+{{caveat "The 50K follower threshold is empirical, not algorithmic. If an interviewer asks you to justify it precisely, explain it as a tunable parameter based on aggregate write amplification budget — not a mathematically derived constant."}}
+
+{{collapseSection "Fanout Cost Math" "At 50K threshold: a user with 50K followers triggers 50K ZADD + 50K ZREMRANGEBYRANK = 100K Redis ops per tweet. At 100K ops/s cluster capacity, that's 1 second of dedicated throughput. Raising to 100K doubles to 200K ops (2 seconds). With 10 concurrent celebrity-ish tweets per second, 100K threshold saturates the cluster. 50K keeps aggregate fanout under 50% of cluster capacity."}}
+
+{{mustKnow "Three strategies: fanout-on-write (push tweet IDs to all followers' Redis caches), fanout-on-read (generate timeline dynamically at request time), hybrid (write for <50K followers, read for celebrities)." "Fanout-on-write: O(followers) writes per tweet but O(1) reads. Fanout-on-read: O(1) writes but O(follows) reads per timeline request. The hybrid optimizes both." "Redis pipeline is critical — without it, 200 followers × 2 commands = 400 round-trips at 0.1ms = 40ms. With pipeline: <1ms." "The 800-tweet cap per timeline sorted set bounds memory: ZREMRANGEBYRANK key 0 -801 after every ZADD."}}
 
 {{phase 5 "System Architecture" "8 min"}}
 

@@ -399,6 +399,10 @@ def find_nearby_drivers(city_id: str, pickup_lat: float, pickup_lng: float, radi
   "5M / 4 = 1.25M GEOADD writes/sec globally. With 10 city shards, that's 125K writes/sec per shard. A Redis instance handles 200K+ writes/sec for simple commands. Plus 6 replicas per shard absorbs read load. Redis cluster mode with 20 shards is the scaling lever."
 }}
 
+{{goodToKnow "Redis GEO uses 52-bit geohash internally — ~0.6m precision, more than sufficient for driver matching" "GEORADIUS uses Haversine formula for distance sorting, accurate to 0.3% at city scale"}}
+
+{{mustKnow "GEOADD is O(log N), GEORADIUS is O(N log N) — know the complexities" "Separate TTL key per driver (30s) acts as a heartbeat — GEOADD doesn't expire individual members" "City-sharded Redis keys: drivers:{city_id} — keeps each shard under 200K writes/sec"}}
+
 {{phase 6 "Matching" "6 min"}}
 
 {{say `Matching ranks nearby driver candidates using a <strong>weighted score</strong>:
@@ -465,6 +469,12 @@ def dispatch(ride_id, ranked_drivers):
   "Before sending an offer, matching service does SET NX driver:{id}:locked 1 EX 20 in Redis. If another instance already holds the lock, we skip that driver. This prevents double-offering without a distributed lock on the ride itself."
 }}
 
+{{caveat "Do not suggest the globally optimal Hungarian algorithm — it's O(N^3) and requires a global view of all rides and drivers. Greedy weighted scoring is the correct interview answer for real-time matching."}}
+
+{{collapseSection "Scoring Weight Tuning Details" `The 40/20/20/20 weight split (proximity/rating/acceptance/ETA) is a starting point. In production, these weights are tuned per-city using A/B testing on rider satisfaction and matching latency. Some cities weight ETA higher (congested roads make straight-line distance misleading). The scoring function is intentionally simple — a linear combination is interpretable and debuggable. ML-based scoring (gradient boosted trees on historical match outcomes) is a Phase 2 optimization.`}}
+
+{{mustKnow "Weighted scoring: 40% proximity, 20% rating, 20% acceptance rate, 20% ETA — greedy, not globally optimal" "Sequential offers to top candidates prevent double-acceptance thundering herd" "SET NX with TTL in Redis prevents two matching instances from offering the same driver simultaneously" "Expand radius on rejection (5km -> 10km) before falling back to surge pricing"}}
+
 {{phase 7 "Surge Pricing" "4 min"}}
 
 {{say `Surge pricing per <span class="hl-blue">H3 hex cell</span> (resolution 8, ~<span class="hl">0.7 km²</span>), updated every <span class="hl">5 minutes</span>:
@@ -509,6 +519,12 @@ def calculate_fare(base_fare, distance_km, duration_min, surge) -> int:
 }}
 
 {{hint "why show surge upfront" "Riders who see the surge multiplier before confirming have a chance to wait or take transit. Hidden surge creates chargeback disputes. Transparent pricing is also a legal requirement in several markets (NYC, EU)."}}
+
+{{caveat "Uncapped surge pricing creates PR disasters and regulatory risk. Always mention the hard cap (3x) and that riders must explicitly confirm surge before being charged."}}
+
+{{goodToKnow "H3 hexagonal grid (resolution 8, ~0.7 km^2) is better than geohash for surge zones — hexagons have uniform area and equal neighbor distances" "Surge is both a demand dampener (riders wait) and supply attractor (drivers relocate) — mention this feedback loop"}}
+
+{{mustKnow "Surge is computed per H3 cell, not city-wide — micro-supply-demand imbalances matter" "Hard cap at 3x surge multiplier — show to rider before confirmation" "Surge recomputed every 5 minutes — pre-cached in Redis, not calculated per-request"}}
 
 {{phase 8 "Live Tracking" "4 min"}}
 

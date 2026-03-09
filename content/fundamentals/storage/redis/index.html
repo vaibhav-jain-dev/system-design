@@ -451,6 +451,14 @@ def is_rate_limited(user_id: str, limit: int, window_sec: int) -> bool:
   "ZADD leaderboard score player_id on each score update. ZREVRANK leaderboard player_id returns the 0-indexed rank in O(log N). ZREVRANGE leaderboard 0 9 returns the top 10. The entire leaderboard for 10M players fits in roughly 800MB (80 bytes per entry for a sorted set). This is one of the strongest cases for Redis over a relational DB — RANK() in SQL on 10M rows requires a full table scan or a complex index, while ZREVRANK is always O(log N)."
 }}
 
+{{mustKnow
+  "SET NX EX for distributed locks — combines claim + TTL atomically to prevent deadlocks"
+  "Sorted set sliding window for rate limiting: ZREMRANGEBYSCORE + ZADD + ZCARD in a Lua script"
+  "Pub/Sub is fire-and-forget (messages lost if no subscriber); Streams persist with consumer groups"
+}}
+
+{{caveat "Never use SETNX then EXPIRE as two separate commands for distributed locks. A crash between them creates a permanent lock (deadlock)."}}
+
 {{phase 8 "Failure Scenarios" "3 min"}}
 
 {{say "Redis failure scenarios range from primary node crashes to hot keys overwhelming a single shard. Understanding these helps you design resilient caching layers."}}
@@ -476,6 +484,14 @@ def is_rate_limited(user_id: str, limit: int, window_sec: int) -> bool:
 {{diagram "fund-redis-failover"}}
 
 {{avoid "Consider persistence for any Redis data you cannot afford to lose on restart. Cold-start after restart means every request hits your DB simultaneously. At 50K RPS, that can overwhelm your database. Use RDB snapshots minimum so cache is warm on restart. Exception: pure ephemeral use cases like rate limiting counters can skip persistence safely."}}
+
+{{mustKnow
+  "Hot key: one shard overwhelmed — fix by sharding the key itself (key:0 through key:9)"
+  "Lua scripts block the single-threaded server — always benchmark and set aggressive time limits"
+  "Cold start after full restart sends all traffic to DB — use cache warming scripts before shifting traffic"
+}}
+
+{{collapseSection "Hot Key Sharding Example" "Instead of one <code>counter:global</code> key, split into <code>counter:0</code> through <code>counter:9</code>. Each write picks a random suffix. To read the total, sum all 10 keys. This spreads load across 10x the shards. Detect hot keys via CloudWatch per-node CPU (one node at 90% while others are at 10%) or <code>redis-cli --hotkeys</code> with LFU policy enabled."}}
 
 {{checklist
   "Cache-aside pattern for most read-heavy workloads"

@@ -335,6 +335,10 @@ class AutocompleteHandler:
   "CDN hit: 5ms. Redis hit: 8ms (2ms network + 6ms serialization). Trie lookup: 12ms (in-memory, L3 cache). Elasticsearch fallback: 40-60ms. Total p99 on trie path including personalization blend: 18-22ms."
 }}
 
+{{goodToKnow "Per-language tries allow independent update schedules — English trie can rebuild hourly while smaller language tries rebuild every 4 hours" "Elasticsearch is sized for 30K QPS fallback traffic only — not primary path capacity"}}
+
+{{mustKnow "Three-layer read path: CDN (90% hit, 5ms) → Redis L1 (8ms) → in-memory trie (12ms) → ES fallback (40-60ms)" "CDN absorbs ~90% of traffic by caching top 10K prefixes — origin sees only 29K QPS" "Per-language tries (300MB-1.5GB each) fit in L3 cache; a combined multi-language trie would be 8-10GB and thrash cache" "50 stateless replicas at 6K QPS each with 2x headroom — trivial horizontal scaling"}}
+
 {{phase 5 "Data Collection" "5 min"}}
 
 {{say `Two query signal sources:
@@ -387,6 +391,20 @@ def rebuild_trie(hourly_counts, historical_counts):
   "What's your Kafka partition strategy?"
   "Partition by lang+geo (e.g., 'en-US'). This ensures all English-US queries go to the same consumer group partition, making hourly aggregation a local reduce with no shuffle. We use 50 partitions per topic — handles 300K events/second at 10KB average batch."
 }}
+
+{{caveat "Never log raw user IDs with query text — this is PII under GDPR. Use a daily-salted SHA-256 hash of the uid so records cannot be linked across days."}}
+
+{{collapseSection "Hot Path Trending Detection Details" `
+<ul>
+  <li>Separate Flink job watches <strong>5-minute tumbling windows</strong> on Kafka stream</li>
+  <li>Queries exceeding <strong>10K submissions in 5 minutes</strong> are flagged as trending</li>
+  <li>Job writes directly to Redis with <strong>60-minute TTL</strong>, bypassing hourly rebuild</li>
+  <li>Autocomplete service polls Redis for trending overrides on every request</li>
+  <li>End-to-end latency from viral event to suggestion appearance: <strong>~6 minutes</strong></li>
+</ul>
+`}}
+
+{{mustKnow "Two signal sources: submitted queries (strong signal) and suggestion clicks (calibration signal)" "Hourly aggregation via Flink/Spark feeds the main trie rebuild; hot-path updater catches viral queries in under 5 minutes" "Privacy by design: uid is daily-salted SHA-256 before logging — cross-day linkage is impossible" "Min frequency filter (10 submissions/hour) eliminates 99% of long-tail queries and filters accidental PII"}}
 
 {{phase 6 "Ranking Algorithm" "5 min"}}
 
@@ -441,6 +459,10 @@ def compute_score(
   "How do you handle seasonality — 'valentines day gifts' spikes every February?"
   "We store a per-query seasonal baseline: the average count for that query in the same calendar week across prior years. The recency boost formula uses days_since_seasonal_baseline instead of absolute days. This means 'valentines day gifts' naturally resurfaces each year."
 }}
+
+{{goodToKnow "Log-scale popularity prevents mega-queries from dominating — 10M and 50M count queries are both just 'very popular'" "Seasonal baseline tracking resurfaces recurring queries (e.g., 'valentines day gifts') without manual intervention"}}
+
+{{mustKnow "Score = 70% global popularity (log-scaled) + 20% recency boost (exponential decay) + 10% personalization" "Log scale compresses popularity — prevents top queries from dominating all prefixes" "Recency uses exponential decay with 7-day half-life — trending queries surface naturally then fade" "Personalization is capped at 10% to prevent filter-bubble effects"}}
 
 {{phase 7 "Trie Updates" "5 min"}}
 

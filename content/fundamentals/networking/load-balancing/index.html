@@ -311,6 +311,12 @@ async def health_deep():
   "ALB auto-scales but needs 1-5 minutes to ramp up. For predictable events (product launch, marketing campaign), contact AWS support 48 hours ahead to pre-warm. For unpredictable spikes, the targets behind the ALB will saturate first — auto-scaling on the target group with aggressive scale-up (1-minute cooldown) is more impactful than ALB pre-warming."
 }}
 
+{{mustKnow
+  "Most common LB failure: target group misconfiguration during deploy — wrong health check path or port causes 502 for all traffic"
+  "Rolling or blue-green deploys limit blast radius to 1/N targets; never deploy to all targets simultaneously"
+  "ALB auto-scales but needs 1-5 minutes to ramp — pre-warm via AWS support for predictable traffic spikes"
+}}
+
 {{phase 7 "Cost Estimates" "3 min"}}
 
 {{say "Load balancer costs are negligible compared to the compute behind them. The real cost to watch is cross-AZ data transfer — it can be 20x the ALB base fee at high throughput."}}
@@ -346,6 +352,21 @@ async def health_deep():
 {{triggerQs "Cost Optimization"
   "How do I reduce cross-AZ data transfer costs?" "Deploy targets evenly across AZs and disable cross-zone load balancing on NLB. For internal service-to-service calls, use AZ-local internal ALBs — each service calls the ALB in its own AZ. At &lt;span class='hl'>1 TB/day&lt;/span> cross-AZ, this saves &lt;span class='hl'>$600/mo&lt;/span>."
   "When does NLB become cheaper than ALB?" "At very high throughput with simple routing. NLB NLCU is &lt;span class='hl'>$0.006/hr&lt;/span> vs ALB LCU at &lt;span class='hl'>$0.008/hr&lt;/span>, and NLB has no rule-evaluation dimension. At &lt;span class='hl'>100K RPS&lt;/span> with 20+ routing rules, ALB LCU costs can be 3-4x higher than NLB NLCU."
+}}
+
+{{collapseSection "Detailed LCU/NLCU Cost Calculations" "
+<ul>
+  <li><strong>LCU dimensions</strong> — new connections, active connections, processed bytes, rule evaluations. You pay for the highest dimension only.</li>
+  <li><strong>Rule evaluation trap</strong> — 10K RPS x 20 rules = 200K rule evals/s = 200 LCUs. At $0.008/LCU-hr that is $1.15/hr = <span class='hl'>$840/mo</span> just for rule evaluations.</li>
+  <li><strong>NLCU is simpler</strong> — only connections and bandwidth dimensions. No rule evaluation cost. At high RPS with complex routing, NLB can be 3-4x cheaper.</li>
+  <li><strong>Break-even point</strong> — ALB and NLB cost roughly the same at <span class='hl'>10K RPS</span> with <span class='hl'>5 routing rules</span>. Above that, ALB costs grow faster due to rule evaluations.</li>
+</ul>
+"}}
+
+{{mustKnow
+  "ALB base cost is ~$27/mo at 10K RPS — negligible compared to compute costs behind it"
+  "Cross-AZ data transfer ($0.01/GB each way) is the real hidden LB cost, not the LB fee itself"
+  "One ALB with path-based rules serves multiple microservices — avoid one ALB per service"
 }}
 
 {{phase 8 "Interview Q&A" "5 min"}}

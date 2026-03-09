@@ -425,6 +425,17 @@ func (s *ChatService) DeliverMessage(ctx context.Context, msg *Message) {
   "Kafka partition by conversation_id ensures all messages in a group are in the same partition — totally ordered. The consumer processes them sequentially. Each message gets a monotonically increasing Snowflake ID. Clients render messages sorted by Snowflake ID. Even if two messages arrive out of order over WebSocket, the client reorders by ID."
 }}
 
+{{caveat "ACK happens after Kafka write, NOT after recipient delivery. If you say 'ACK after delivery' the interviewer will ask what happens when the recipient is offline — you will have no answer."}}
+
+{{collapseSection "Message Delivery Code Walkthrough" `<ul>
+  <li><strong>Line 3-4:</strong> Snowflake ID assignment happens at the Chat Service, not the client — the server controls ordering</li>
+  <li><strong>Line 6-8:</strong> Kafka publish is the durability boundary — if this fails, no ACK is sent, and the client retries with the same UUID</li>
+  <li><strong>Line 11:</strong> ACK to sender triggers single checkmark — this is the sender's confirmation that the message is persisted</li>
+  <li><strong>Lines 15-23:</strong> Delivery is async via Kafka consumer — fan-out to online/offline recipients is independent of the sender's flow</li>
+</ul>`}}
+
+{{mustKnow "Four-layer message guarantee: client retry until ACK, Kafka replication factor 3, consumer commits only after delivery/queue, offline queue in DynamoDB" "ACK after Kafka write (not after delivery) — single checkmark means server persisted, double checkmark means recipient received" "Kafka partitions by conversation_id — all messages in a conversation are totally ordered within a single partition" "Client-side dedup using Snowflake message_id handles at-least-once Kafka delivery semantics"}}
+
 {{phase 6 "Data Model & Storage" "8 min"}}
 
 {{say `<strong>DynamoDB</strong> is the primary store:
@@ -484,6 +495,18 @@ response = dynamodb.query(
     ScanIndexForward=False,  # newest first
 )`}}
 
+{{collapseSection "DynamoDB Table Schema Details" `<ul>
+  <li><strong>messages table:</strong> PK=conversation_id, SK=message_id (Snowflake). PAY_PER_REQUEST billing avoids capacity planning. TTL on ephemeral messages</li>
+  <li><strong>conversations GSI:</strong> PK=user_id, SK=updated_at — powers the inbox view sorted by most recent activity</li>
+  <li><strong>read_receipts table:</strong> PK=conversation_id#user_id — single GetItem for unread count per conversation per user</li>
+  <li><strong>participants table:</strong> PK=conversation_id, SK=user_id — Query returns all members for fan-out lookup</li>
+  <li><strong>users table:</strong> PK=user_id — profile data, device tokens for push notifications</li>
+</ul>`}}
+
+{{caveat "E2E encryption means no server-side search index. If the interviewer asks about search, the answer is client-side only — local SQLite on the device decrypts and indexes messages. Do not suggest Elasticsearch or any server-side search."}}
+
+{{mustKnow "DynamoDB with conversation_id as partition key and Snowflake message_id as sort key — gives ordered messages per conversation in single-digit ms" "GSI on user_id + updated_at powers the inbox view (most recent conversations first)" "No server-side search is possible with E2E encryption — search is client-side only using local SQLite" "On-demand DynamoDB capacity handles 20B writes/day without pre-provisioning — auto-scales with no operational overhead"}}
+
 {{phase 7 "Group Chat & Fan-out" "5 min"}}
 
 {{say `Group chat uses <strong>fan-out-on-write</strong>:
@@ -510,6 +533,10 @@ response = dynamodb.query(
   "How do read receipts work in group chats?"
   "In 1:1, read receipts are simple: sender sees blue checkmarks when the recipient reads. In groups, WhatsApp shows 'read by 15 of 20' when you tap the message. Each member sends a read ACK independently. We store per-member read status but only show aggregate counts in the UI to avoid N×M receipt fan-out. The key optimization: batch read ACKs — send one ACK with last_read_message_id rather than per-message receipts."
 }}
+
+{{caveat "Fan-out-on-write only works because of the 256-member cap. If the interviewer changes the constraint to 100K members per group, you must switch to fan-out-on-read. State this trade-off explicitly."}}
+
+{{mustKnow "Fan-out-on-write for groups: 256 WebSocket pushes per message — bounded and manageable" "Fan-out-on-read is the alternative for large groups (10K+ members) — each member queries on open instead of receiving pushes" "Partial failure handling: each member's delivery is independent — 3 failures out of 256 only affect those 3 members" "Group read receipts use aggregate counts in UI to avoid N×M receipt fan-out explosion"}}
 
 {{phase 8 "End-to-End Encryption" "5 min"}}
 

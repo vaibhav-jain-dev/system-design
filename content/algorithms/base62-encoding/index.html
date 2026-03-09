@@ -122,6 +122,14 @@ print(f"Max 7-char value: {BASE ** 7 - 1:,}")  # 3,521,614,606,207
   (whatIf "two IDs encode to the same string" "Impossible with counter-based IDs. The encode/decode pair is a bijection: every integer maps to exactly one string and back. Collisions only occur with hash-based generation.")
 }}
 
+{{caveat "ALPHABET.index(char) in the decode loop is O(62) per character. For hot-path decoding at scale, replace with a precomputed 128-byte lookup table mapping ASCII ordinal to index — reduces decode to pure arithmetic."}}
+
+{{mustKnow
+  "Left-pad with ALPHABET[0] for fixed-length output — never right-pad"
+  "Encode/decode is a bijection: every integer maps to exactly one string and back"
+  "Special-case num=0 to return the padding character repeated min_length times"
+}}
+
 {{phase 4 "Go Implementation" "5 min"}}
 
 {{say "Same algorithm in Go — optimized with a stack-allocated buffer to avoid heap allocations."}}
@@ -166,6 +174,17 @@ func Decode(encoded string) (uint64, error) {
 `}}
 
 {{hint "stack buffer" "The Go implementation uses a fixed [12]byte stack buffer instead of a slice. A uint64 Base62 encodes to at most 11 characters (62^11 > 2^64). No heap allocation needed — this is the zero-copy approach used in production ID services."}}
+
+{{goodToKnow
+  "Go's strings.IndexRune in Decode is O(62) — production systems use a [128]byte lookup array for O(1)"
+  "Stack-allocated [12]byte buffer avoids GC pressure; critical for services encoding millions of IDs/sec"
+}}
+
+{{mustKnow
+  "uint64 max encodes to at most 11 Base62 characters (62^11 > 2^64)"
+  "Stack buffer avoids heap allocation — zero-copy encode path"
+  "Always validate input characters in Decode — return error for invalid chars"
+}}
 
 {{phase 5 "Collision Handling Strategies" "5 min"}}
 
@@ -224,6 +243,15 @@ def create_short_url(long_url: str, db) -> str:
   "Three patterns: 1) Single auto-increment DB (bottleneck but simple). 2) Range allocation — server A owns 1–1M, server B owns 1M–2M. 3) <a class="dqa-link" href="/algo/snowflake-id">Snowflake ID</a> (timestamp + machine + sequence) then Base62-encode the result. Range allocation is the most common for URL shorteners."
   "What is a KGS and when do you use it?"
   "A Key Generation Service pre-generates Base62 codes offline and stores them in a database with 'available' and 'used' partitions. App servers fetch batches of ~1000 codes. Use KGS when you want zero-latency code generation with guaranteed uniqueness and no counter coordination complexity."
+}}
+
+{{caveat "Hash-based generation with MD5 truncation has a subtle trap: taking the first N hex digits of MD5 does not give uniform distribution over Base62. Convert hex to integer first, then mod by 62^7 for proper distribution."}}
+
+{{mustKnow
+  "Counter-based = zero collisions by construction; hash-based = needs retry loop"
+  "Birthday paradox: at 1B existing URLs in 3.52T keyspace, collision rate is ~0.028% per insert"
+  "KGS (Key Generation Service) pre-generates codes offline for O(1) collision-free writes"
+  "Range allocation gives each server a pre-allocated ID block — no coordination per write"
 }}
 
 {{phase 6 "Comparison: Encoding Schemes" "5 min"}}

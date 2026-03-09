@@ -751,6 +751,20 @@ return {1, limit - count - 1, 0}
 </ul>`
 }}
 
+{{caveat "Redis hash tags force all keys for a user onto one shard. This is required for Lua atomicity but creates hot-key risk if one user generates disproportionate traffic — have the local in-memory fallback strategy ready."}}
+
+{{mustKnow
+  "Multi-region rate limiting requires async gossip sync — synchronous cross-region reads add 50-150ms per request"
+  "Lua scripts guarantee atomicity — without them, concurrent read-modify-write creates race conditions allowing 2x the limit"
+  "Redis hash tags ({user:123}) co-locate keys on the same shard — required for cross-key Lua scripts in Cluster mode"
+  "Accept slight over-counting (1.1-1.5x) during sync windows — exact global accuracy is not worth the latency cost"
+}}
+
+{{goodToKnow
+  "Cloudflare uses hierarchical sync: PoP-local → regional (~1s) → global (~5s), accepting up to 3x limit for a few seconds"
+  "EVALSHA sends only the 40-byte SHA1 hash instead of the full Lua script — reduces network bandwidth by ~92% per check"
+}}
+
 {{phase 7 "Data Model & Redis Schema" "3 min"}}
 
 {{say `The Redis data model depends on the algorithm. Three schemas:
@@ -794,6 +808,14 @@ return {1, limit - count - 1, 0}
   <li>Critical for incident response: if a customer is sending malicious traffic, you want to reduce their limit immediately</li>
   <li>Store rules as JSON keyed by <code>api_key</code> or tier; use a short <span class='hl'>60s in-process cache TTL</span> to avoid a Redis lookup on every request</li>
 </ul>`
+}}
+
+{{caveat "When switching algorithms for a live endpoint, old Redis keys have the wrong data structure. Let them expire naturally (within one window duration) rather than running a migration — rate limit keys have short TTLs by design."}}
+
+{{mustKnow
+  "Each algorithm maps to a natural Redis data structure: sliding window counter → string (INCR), token bucket → hash, sliding window log → sorted set"
+  "Memory comparison at 50M users: sliding window counter ~50 GB vs sorted set log ~250 GB — a 5x difference"
+  "TTL = window duration + buffer (e.g., 120s for a 60s window) to keep previous window available for weighted calculation"
 }}
 
 {{phase 8 "Redis Configuration" "3 min"}}
@@ -852,6 +874,22 @@ activedefrag: yes                 # Defragment memory proactively
   <li>When a Lua script exceeds the limit, Redis accepts new connections but responds with <span class='hl-red'>BUSY</span> errors until the script finishes or is killed with <code>SCRIPT KILL</code></li>
   <li>Monitor <strong>lua script execution time</strong> in ElastiCache CloudWatch metrics — alert at p99 > <span class='hl'>5ms</span></li>
 </ul>`
+}}
+
+{{collapseSection "ElastiCache Cluster Sizing & Configuration Details" `
+<ul>
+  <li><strong>Instance selection</strong>: r6g.large (2 vCPU, 13 GB) is the sweet spot — r6g.xlarge doubles cost but rate limiting is CPU-bound (Lua scripts), not memory-bound</li>
+  <li><strong>Replication</strong>: 1 replica per shard for HA; 2 replicas only if you need read replicas for analytics queries against rate limit data</li>
+  <li><strong>Parameter group tuning</strong>: <code>hz=100</code> increases event loop frequency from default 10 → faster expired key cleanup; <code>activedefrag=yes</code> prevents memory fragmentation from short-lived keys</li>
+  <li><strong>Maintenance window</strong>: Schedule during lowest-traffic hours; ElastiCache patches one node at a time with automatic failover</li>
+  <li><strong>Encryption</strong>: Enable in-transit encryption (TLS) for compliance but expect ~10% throughput reduction; in-memory encryption (at-rest) is free on r6g instances</li>
+</ul>
+`}}
+
+{{mustKnow
+  "Disable Redis persistence (RDB/AOF) for rate limiting — counters are ephemeral and rebuild from traffic within one window"
+  "volatile-lru eviction policy (not allkeys-lru) — only evicts keys with TTL, protecting non-ephemeral config data"
+  "Cluster mode for production: single shard maxes at ~100K ops/s; cluster gives horizontal scaling + automatic failover"
 }}
 
 {{phase 9 "Trade-offs & Edge Cases" "5 min"}}

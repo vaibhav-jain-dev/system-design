@@ -400,6 +400,16 @@ class OrderSagaOrchestrator:
         # Payout is idempotent: payout_service.pay(order_id) → skips if already paid
         return SagaResult(success=True)`}}
 
+{{caveat "State machine must be persisted in PostgreSQL, never in Redis alone. Redis is not ACID — a crash between writing state and publishing the Kafka event creates split-brain between cache and event log."}}
+
+{{collapseSection "Saga Orchestrator Implementation Detail" `The saga orchestrator code above shows the three-step flow: charge customer → accept at restaurant → defer payout to delivery. Key implementation details:
+<ul>
+  <li>Each saga step stores its idempotency key (order_id + step_name) in the target service's DB before executing</li>
+  <li>On retry, if the key exists, skip the step — makes POST /payments/charge safe to call twice</li>
+  <li>Compensating transactions run in reverse order: refund customer if restaurant rejects</li>
+  <li>Saga log is persisted to PostgreSQL for audit and debugging</li>
+</ul>`}}
+
 {{triggerQs "Order lifecycle questions"
   "How do you handle a restaurant going offline mid-order?"
   "We detect via heartbeat miss (30s timeout). The order service transitions PREPARING → EXCEPTION. Customer gets notification, automatic refund initiated. The matching service blacklists the restaurant for 10 minutes to prevent new assignments."
@@ -408,6 +418,10 @@ class OrderSagaOrchestrator:
   "How is the order cancellation window enforced?"
   "POST /v1/orders/{id}/cancel checks current state in PostgreSQL. If state is PREPARING or later, return 409 with reason. Client shows appropriate message. No backend timeouts — state check is synchronous."
 }}
+
+{{mustKnow "Six states: PLACED → ACCEPTED → PREPARING → READY → PICKED_UP → DELIVERED (plus CANCELLED)" "Kafka consumers must be idempotent — INSERT ON CONFLICT DO NOTHING keyed on (order_id, from_state, to_state)" "Saga pattern for cross-service transactions (order → payment → restaurant), not 2PC" "Cancellation policy differs by state: free at PLACED, penalty at PREPARING+, impossible at PICKED_UP"}}
+
+{{goodToKnow "Geofence verification at pickup: partner must be within 200m of restaurant to confirm PICKED_UP" "2PC holds distributed locks at 350 orders/sec × 5s = 1750 concurrent locks — system grinds to a halt"}}
 
 {{phase 5 "System Architecture" "8 min"}}
 
@@ -438,12 +452,16 @@ class OrderSagaOrchestrator:
   <li><strong>Elasticsearch</strong> — restaurant search: full-text by name/cuisine/distance</li>
 </ul>`}}
 
+{{caveat "Location Service and Matching Service must be separate services with separate Redis clusters. Location updates arrive at 125K/sec regardless of order volume — coupling them means a location spike (festival day) can starve matching."}}
+
 {{triggerQs "Architecture questions"
   "How do services discover each other?"
   "Service mesh with Consul for service discovery, Envoy sidecar for mutual TLS and circuit breaking. Matching Service calls Location Service via gRPC, not REST, for lower overhead at 350 RPS of matching requests."
   "How do you handle the thundering herd when a major event ends and 100K orders are placed simultaneously?"
   "Order creation writes to Kafka topic partitioned by city_zone. Matching service consumers process from the partition. City zones act as natural sharding. Each zone processes independently — peak in Bangalore doesn't affect Delhi."
 }}
+
+{{mustKnow "Five core services: Order, Matching, Location, ETA, Notification — each scales independently" "Kafka is the event backbone (ordered, replayable), Redis handles geospatial state, PostgreSQL owns transactional data" "If Kafka goes down, Order Service writes synchronously to PostgreSQL; notifications degrade via CDC (Debezium) fallback"}}
 
 {{phase 6 "Partner Matching Algorithm" "10 min"}}
 

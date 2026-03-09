@@ -650,6 +650,12 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
   "Add a ranking score to each post combining recency (exponential decay), engagement rate (likes + comments / impressions), and user affinity (how often the viewer interacts with the poster). Store the score as the ZSET score instead of raw timestamp. Recompute scores periodically via a batch job and update the sorted set."
 }}
 
+{{caveat "Fan-out-on-read with aggressive caching sounds appealing but cache invalidation kills it — with 200 followees each posting daily, the cache invalidates every 7 minutes, dropping hit ratio below 30%."}}
+
+{{mustKnow "Hybrid fan-out: fan-out-on-write for normal users (<100K followers), fan-out-on-read for celebrities" "Redis sorted sets (ZSET) for feed: O(log N) insert, ZREVRANGE for pagination, ZREMRANGEBYRANK to cap at 500 entries" "Fan-out math: 10M DAU x 200 followees x 10 loads/day = 20B queries/day with pure fan-out-on-read — Postgres cannot handle this" "Stop pre-computing feeds for users inactive >7 days — saves ~40% of fan-out write volume"}}
+
+{{goodToKnow "SQS for async likes/comments absorbs viral spikes (100K+/sec) — Lambda batch-writes at a steady 1K/sec" "The celebrity detection threshold (100K followers) is tunable — some systems use 50K, others 500K depending on infra costs"}}
+
 {{phase 6 "Stage 3: Scaling (50M-500M users)" "8 min"}}
 
 {{say "At 50M+ users, Postgres becomes the bottleneck. We need to shard the database, move to microservices, and add Kafka for async event processing."}}
@@ -705,6 +711,14 @@ async def get_feed(user_id: int, page: int = 0, size: int = 20):
   "How do you debug issues across multiple services?"
   "Distributed tracing with a correlation ID (trace_id) propagated through every gRPC call and Kafka message header. Use OpenTelemetry to instrument all services, send traces to Jaeger or AWS X-Ray. When a feed load is slow, the trace shows exactly which service call took the most time — e.g., Post Service hydration at 45ms instead of the expected 10ms."
 }}
+
+{{caveat "Avoid distributed transactions across services. Use the saga pattern with compensating events instead. For feeds, eventual consistency is acceptable — a missed fan-out catches up when the consumer recovers."}}
+
+{{collapseSection "Write Path Cost Breakdown (per hop)" "W1: S3 PUT at $0.005/1K requests. W2: Lambda at $0.20/1M invocations (~200ms per image resize). W3: 4 S3 PUTs for resized variants. W4: DynamoDB write at $1.25/M. W5: Kafka ingress at $0.10/GB. W6: Redis ZADD per follower (~0.05ms each). W7: SNS push at $0.50/1M notifications. Total per-post cost for a user with 1K followers: approximately $0.002."}}
+
+{{mustKnow "Each microservice owns its database — no shared DB, services communicate via Kafka events and gRPC" "Kafka for inter-service events: ordered, replayable, multi-consumer — adding a new consumer requires zero producer changes" "DynamoDB for posts at scale: auto-scales writes, PK=user_id/SK=timestamp matches access pattern, TTL for stories" "Read path at scale: Feed Service checks Redis, hydrates via gRPC to Post/User services — total ~36ms"}}
+
+{{goodToKnow "Saga pattern for cross-service writes: each service publishes events, failures trigger compensating events — no distributed transactions needed" "Elasticsearch replaces Postgres full-text search at scale — prefix autocomplete, faceted filtering, horizontal scaling"}}
 
 {{phase 7 "Stage 4: Handling Peak Hours" "5 min"}}
 
@@ -773,6 +787,10 @@ class ShardedCounter:
 }}
 
 {{avoid "Never design for peak as your baseline. You will burn money 95% of the time. Design for normal load, scale for peak. Auto-scaling + write buffering + circuit breakers handle the delta."}}
+
+{{mustKnow "Sharded counters for viral posts: split counter into 100 shards, random shard selection, aggregate lazily every 5 seconds" "Three-layer cache defense: local in-memory (30s), circuit breaker to CDN-cached feed, DynamoDB trending fallback" "Degrade in order of user impact: explore batch jobs first, then write buffer size, then celebrity merge, then story tracking" "Pre-warm ECS capacity 30 minutes before known events (Super Bowl, New Year) using scheduled scaling"}}
+
+{{caveat "A single Redis key serializes all writes to one CPU core — max ~100K ops/sec. For 1M likes/sec on a viral post, you must shard the counter across 100+ keys."}}
 
 {{phase 8 "Stage 5: Global Scale (500M+ users)" "5 min"}}
 

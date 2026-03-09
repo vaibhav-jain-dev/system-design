@@ -505,6 +505,22 @@ def base62_decode(s: str) -> int:
   "A UUID is 128 bits (36 characters with hyphens). Truncating to 7 characters discards most of the randomness that makes UUIDs unique, dramatically increasing collision probability. You're better off generating random 7-character Base62 strings directly — UUIDs add complexity without benefit for short codes."
 }}
 
+{{caveat "MD5/SHA truncation suffers from the Birthday Paradox — at ~1.9M keys you have a 50% chance of collision with a 7-char truncated hash. At 100B URLs, collisions become frequent enough to require a retry loop on every write."}}
+
+{{collapseSection "Base62 Encoding Implementation Detail" `<p>The Base62 implementation uses <code>string.ascii_letters + string.digits</code> (a-zA-Z0-9) and left-pads small numbers to always produce exactly 7 characters. This is a straightforward algorithm — know the concept but the implementation is rarely asked in detail.</p>`}}
+
+{{mustKnow
+  "7 Base62 characters = 62^7 = 3.52 trillion unique codes — enough for 96 years at 100M/day"
+  "Three approaches: Counter+Base62 (zero collision, guessable), Hash truncation (collision-prone), KGS (best overall)"
+  "KGS pre-generates batches of 1000 keys per server — zero collisions, zero coordination during normal operation"
+  "If KGS goes down, local batch provides ~15 minutes of buffer at 1,157 writes/sec"
+}}
+
+{{goodToKnow
+  "Base62 avoids URL-unsafe characters (+, /) unlike Base64, and avoids underscore/hyphen ambiguity issues"
+  "Range allocation with Zookeeper/etcd is a viable alternative to KGS if you already run a coordination service"
+}}
+
 {{phase 5 "High-Level Architecture" "8 min"}}
 
 {{say `Seven core components — each with a specific job:
@@ -553,6 +569,15 @@ def base62_decode(s: str) -> int:
   "Lambda cold starts add &lt;span class='hl'>100-500ms&lt;/span> latency on first invocation. For a URL shortener where p99 must be &lt;span class='hl'>&lt;50ms&lt;/span>, cold starts are unacceptable. Provisioned concurrency fixes this but costs &lt;span class='hl'>$15/month per 100 concurrent invocations&lt;/span> — at 100K req/sec, that is prohibitively expensive vs a simple container fleet."
   "How do you handle the read/write split in the architecture?"
   "Writes go to the primary database and invalidate the Redis cache. Reads check Redis first (cache-aside pattern), then fall through to read replicas on miss. The 10:1 read:write ratio means &lt;span class='hl'>90%&lt;/span> of traffic never touches the primary. Read replicas can be scaled horizontally — add more replicas as read traffic grows."
+}}
+
+{{caveat "Lambda cold starts (100-500ms) make it unsuitable for the redirect hot path where p99 must be under 10ms. Use always-running containers (ECS/EKS) for latency-critical endpoints."}}
+
+{{mustKnow
+  "Four caching layers: Browser 301 (30%) → CloudFront edge (60%) → ElastiCache (95%) → DynamoDB (source of truth)"
+  "Only ~5% of peak traffic reaches DynamoDB — the rest is absorbed by caches"
+  "Read path and write path scale independently: reads are stateless + cached, writes go through KGS + DynamoDB"
+  "Analytics pipeline is fully async (Kinesis → Lambda) — never on the redirect hot path"
 }}
 
 {{phase 6 "Caching Deep Dive" "5 min"}}
@@ -610,6 +635,19 @@ async def resolve_short_url(short_code: str) -> str:
   "Calculate: 20% of URLs are hot (Pareto). At 1B total URLs, that is 200M hot URLs. Average URL record is ~500 bytes (short_code + long_url + metadata). 200M × 500B = 100GB. An r6g.2xlarge ElastiCache node has 52GB RAM. You need 2 nodes with replication = 4 nodes total. At $0.252/hr per node, that is ~$735/month for the cache tier."
   "What happens when a cache node fails and all its keys are lost?"
   "ElastiCache Multi-AZ promotes the replica within 10-30 seconds. During failover, cache misses spike and DynamoDB absorbs the load. At 95% normal hit rate, a full cache loss means 20x more DynamoDB reads. DynamoDB auto-scales on-demand, so it handles the spike without throttling. Cache warms back up within minutes as popular URLs get re-cached."
+}}
+
+{{caveat "Do not cache 404 responses with long TTLs. If a URL is created right after a 404 lookup, it will appear non-existent until the negative cache expires. Use 60-second TTL for negative caching at most."}}
+
+{{mustKnow
+  "Read-through (cache-aside) pattern: only cache URLs when accessed, not on creation — avoids wasting memory on never-clicked URLs"
+  "Thundering herd solution: distributed lock (Redis SET NX) so only one request fetches from DB on cache miss"
+  "Cache sizing: 20% hot URLs × 500 bytes each — at 1B total URLs, that is ~100GB across 2 ElastiCache nodes with replication"
+}}
+
+{{goodToKnow
+  "Stale-while-revalidate pattern: serve expired cache entry while a single background request refreshes it — zero user-visible latency on cache expiry"
+  "CloudFront invalidation costs $0.005 per path — use it for URL deletion but batch invalidations for cost control"
 }}
 
 {{phase 7 "Scaling & Sharding" "5 min"}}
