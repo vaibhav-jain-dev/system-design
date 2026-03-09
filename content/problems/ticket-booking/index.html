@@ -763,3 +763,107 @@ Bot traffic detected by behavior patterns: <span class="hl-red">sub-second lock 
 `}}
 
 {{key "Critical invariant: seat state transitions are monotonic (available → locked → booked | expired) and the Redis lock + Postgres confirm are the two serialization points that make double-booking impossible."}}
+
+<div class="alt-section">
+  <div class="alt-section-hdr">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+    Market Reality: How Indian Startups &amp; Products Solve This
+  </div>
+  <div class="alt-section-body">
+    <div class="alt-cards">
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">BookMyShow</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge indian">🇮🇳 Entertainment Ticketing</span>
+            <span class="alt-scale">15M+ tickets/month, 100K concurrent users during blockbuster launches</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> Redis SETNX for distributed seat locks with a 10-minute TTL. Kafka drives the order state machine (reserved → payment initiated → confirmed → expired). PostgreSQL holds the authoritative booking records with ACID guarantees for payment. Elasticsearch powers event and venue search.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Redis SETNX</span>
+            <span class="alt-tech">Kafka</span>
+            <span class="alt-tech">PostgreSQL</span>
+            <span class="alt-tech">Elasticsearch</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> The seat map is stored as a Redis bitfield — 1 bit per seat — so checking and locking 1,000 seats is a single <code>BITFIELD GET</code> command, not 1,000 individual Redis GETs. For a sold-out 50,000-seat stadium show, the entire available-seat bitmap fits in 6KB and can be atomically read and compared in one round-trip. This is the interview differentiator: the canonical textbook design stores seat state as individual keys.</div>
+        </div>
+      </div>
+
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">IRCTC</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge indian">🇮🇳 Government / Rail</span>
+            <span class="alt-scale">1M+ concurrent users during Tatkal window (10am daily)</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> Oracle Database with row-level pessimistic locking for seat reservations. Custom Java middleware orchestrates the booking flow. IRCTC has a recent AWS partnership for cloud burst capacity, but the core booking engine remains Oracle-centric with decades of battle-tested logic.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Oracle DB (row locks)</span>
+            <span class="alt-tech">Java middleware</span>
+            <span class="alt-tech">AWS (burst)</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> Pessimistic database-level row locking instead of Redis SETNX — the government system prioritizes correctness over latency. The Tatkal rush (1M users competing for seats in 60 seconds at 10am) is absorbed by a request queue, not horizontal scale. This is why IRCTC's server occasionally struggles during Tatkal: the queue becomes the bottleneck, not the DB. It's the canonical example of correctness-first design accepting availability tradeoffs.</div>
+        </div>
+      </div>
+
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">MakeMyTrip / Goibibo</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge indian">🇮🇳 Travel Commerce</span>
+            <span class="alt-scale">Multi-leg bookings: flight + hotel + train in one transaction</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> PostgreSQL for booking records, Redis for session and cart state, Elasticsearch for inventory search across flights and hotels. The booking flow uses a distributed saga pattern — each leg (flight, hotel) is booked independently, and compensating transactions automatically undo confirmed legs if a later leg fails.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">PostgreSQL</span>
+            <span class="alt-tech">Redis</span>
+            <span class="alt-tech">Elasticsearch</span>
+            <span class="alt-tech">saga pattern</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> Distributed saga for multi-leg bookings — if a hotel booking fails after a flight is confirmed, a compensating transaction automatically initiates the flight refund. This replaces 2PC (two-phase commit across external airline and hotel APIs, which is impossible) with an eventually consistent saga that guarantees no customer is charged for a partially completed itinerary.</div>
+        </div>
+      </div>
+
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">Paytm Insider</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge indian">🇮🇳 Event Ticketing</span>
+            <span class="alt-scale">Concerts, comedy shows, IPL pre-sales</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> Redis SETNX seat locking with a shorter 5-minute TTL than BookMyShow's 10-minute lock — optimized for concert ticket psychology where users decide faster than movie-goers. Abandoned cart detection runs as a Redis keyspace notification consumer, releasing locks the moment TTL expires rather than waiting for the next background sweep.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Redis SETNX</span>
+            <span class="alt-tech">Redis keyspace notifications</span>
+            <span class="alt-tech">PostgreSQL</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> Aggressive lock TTL (5 min vs 10 min) combined with instant lock release via Redis keyspace notifications. When a user abandons checkout, the seat re-enters the available pool within milliseconds of TTL expiry, not after the next background sweep. For high-demand events where seats sell out in under 2 minutes, this recapture speed is the difference between a sold-out show and stranded inventory.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="alt-oss-row">
+      <div class="alt-oss-label">OSS &amp; Managed Alternatives</div>
+      <div class="alt-oss-items">
+        <div class="alt-oss-item"><strong>Redis SETNX</strong> — the canonical seat-locking primitive; used by every Indian ticketing platform; the pattern is so standard it's become the interview expected answer</div>
+        <div class="alt-oss-item"><strong>Cloudflare Waiting Room</strong> — managed virtual queue for high-demand sale events; Indian e-commerce platforms (Flipkart Big Billion Day, Meesho sales) use it to protect origin from flash crowds without building custom queue infrastructure</div>
+        <div class="alt-oss-item"><strong>Fastly / custom Redis queue</strong> — alternative waiting room implementations; Fastly's Compute@Edge can serve queued users at the CDN layer; Redis sorted sets (score = arrival timestamp) implement fair FIFO queuing at the application layer</div>
+        <div class="alt-oss-item"><strong>AWS ElastiCache + DynamoDB</strong> — managed alternative to self-hosted Redis + PostgreSQL; BookMyShow-scale on AWS would use ElastiCache for seat locks and DynamoDB for booking records, avoiding database operations management</div>
+      </div>
+    </div>
+
+    <div class="alt-verdict"><strong>Market verdict:</strong> Every Indian ticketing platform — BookMyShow, Paytm Insider, TicketNew — converges on Redis SETNX for seat locking. It's the canonical solution and the correct interview answer. The meaningful divergence is in lock TTL (5–15 minutes depending on purchase urgency) and lock release strategy (background sweep vs keyspace notification). IRCTC is the deliberate outlier: Oracle row locks and queue-based admission are the right choices for a government system where correctness under legislative scrutiny matters more than millisecond latency. The BookMyShow bitfield optimization is the architectural detail that separates a good interview answer from an excellent one.</div>
+  </div>
+</div>
