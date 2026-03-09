@@ -295,6 +295,17 @@ results = r.georadius(
   "H3 hexagons have equidistant neighbors — every neighbor center is the same distance away. Rectangles (geohash) and quadrilaterals (S2) have corner neighbors farther than edge neighbors. For spatial aggregation like surge pricing heatmaps, ride density visualization, or k-ring expansion searches, hexagons give more uniform results. H3 also has a simpler API: h3.k_ring(cell, k) returns all cells within k hops."
 }}
 
+{{goodToKnow
+  "S2 cell IDs are 64-bit integers — fit in a database bigint column and support range queries like geohash"
+  "H3's k_ring(cell, k) returns all cells within k hops — much simpler than geohash neighbor computation for expanding searches"
+}}
+
+{{mustKnow
+  "Geohash: simplest, sufficient for most interviews — rectangular cells, prefix-based hierarchy"
+  "S2: near-equal-area cells on the sphere — used by Google Maps and Uber for global consistency"
+  "H3: hexagonal cells with equidistant neighbors — used by Uber for surge pricing and spatial aggregation"
+}}
+
 {{phase 6 "Production: Food Delivery Integration" "3 min"}}
 
 {{say `In a food delivery system, geohash works at two levels:
@@ -357,6 +368,12 @@ results = r.georadius(
   "Partners' locations expire if not updated (TTL 30s). GEORADIUS may return a stale location for a partner who went offline &lt; 30s ago. Validate availability: after GEORADIUS, check partner status in <a class="dqa-link" href="/fund/storage/dynamodb">DynamoDB</a> (or a Redis hash 'partner:{id}:status'). If offline, exclude and try next result."
 }}
 
+{{mustKnow
+  "Two precision levels: precision 6 for restaurants (static), precision 7 for partners (moving)"
+  "Partner locations expire via TTL (30s) — auto-removes offline partners from GEORADIUS results"
+  "Progressive radius expansion (2→5→8 km) handles sparse areas without over-fetching in dense ones"
+}}
+
 {{phase 7 "Geohash Boundary Problem" "3 min"}}
 
 {{say `The critical failure mode: two points physically adjacent but with completely different geohash strings.
@@ -373,6 +390,14 @@ This happens at the 180° meridian, the equator, and the prime meridian (0°). A
 }}
 
 {{hint "the boundary problem has a fixed cost" "Querying 9 cells instead of 1 adds a constant &lt;span class='hl'>8 extra lookups&lt;/span> — not 8× latency. In Redis, pipeline all 9 GEORADIUS calls in a single round trip: total latency stays under &lt;span class='hl'>1ms&lt;/span>. In SQL, use a single query with WHERE geohash IN ('cell1', 'cell2', ..., 'cell9') — the B-tree handles 9 equality lookups in one index scan. The boundary fix is essentially free."}}
+
+{{caveat "Adjacent cells at major meridians (equator, 180° line) can have completely different prefixes — 'ezs42' neighbors 'u10hf'. Never compute neighbors by string manipulation. Always decode to (lat, lon), offset, and re-encode."}}
+
+{{mustKnow
+  "Boundary problem: adjacent points can have completely different geohash prefixes"
+  "Fix: always query 9 cells — cost is constant (8 extra lookups, pipelined in 1 round trip)"
+  "Post-filter with exact Haversine distance to enforce precise radius"
+}}
 
 {{phase 8 "Interview Summary" "2 min"}}
 

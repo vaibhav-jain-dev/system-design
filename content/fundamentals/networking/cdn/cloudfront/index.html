@@ -29,6 +29,12 @@
   "Unlimited bandwidth at flat rate (Cloudflare Pro is $20/mo unlimited). Sub-150ms purge times (Fastly has instant purge, CloudFront takes 1-2 minutes). Stack not on AWS and you want simpler integration."
 }}
 
+{{mustKnow
+  "CloudFront = AWS CDN with 750+ PoPs, native S3/ALB/API Gateway integration"
+  "Free S3-to-CloudFront transfer — always cheaper than serving S3 directly to users"
+  "Key differentiators: OAC for private S3, Lambda@Edge for edge compute, free Shield Standard DDoS"
+}}
+
 {{phase 2 "Architecture: Origins and Behaviors" "5 min"}}
 
 {{say `CloudFront sits in front of your origin servers. You configure <strong>distributions</strong> with one or more origins and <strong>behaviors</strong> that define:
@@ -131,6 +137,23 @@ resource "aws_cloudfront_distribution" "main" {
 
 {{key "Always use Origin Access Control (OAC), not the legacy Origin Access Identity (OAI). OAC supports SSE-KMS encryption and S3 bucket policies. OAI is being deprecated."}}
 
+{{caveat "Forwarding too many headers in a cache policy silently kills caching. Forwarding User-Agent (thousands of variants) creates a separate cache entry per variant — effective hit rate drops to ~0%. Only include headers that genuinely change the response."}}
+
+{{collapseSection "Terraform Multi-Origin Configuration Details" "
+<ul>
+  <li><strong>origin_access_control_id</strong> — use OAC for S3 origins. The S3 bucket policy must grant <code>s3:GetObject</code> to the CloudFront service principal.</li>
+  <li><strong>custom_origin_config</strong> — for ALB/EC2 origins. Set <code>origin_protocol_policy = https-only</code> and <code>origin_ssl_protocols = [TLSv1.2]</code>.</li>
+  <li><strong>ordered_cache_behavior</strong> — evaluated in order, most specific path pattern first. Default behavior is the catch-all.</li>
+  <li><strong>price_class</strong> — PriceClass_100 for US/EU/Asia only (saves ~30%). PriceClass_All for global coverage.</li>
+</ul>
+"}}
+
+{{mustKnow
+  "Behaviors route paths to origins: /api/* → ALB (no cache), /static/* → S3 (aggressive cache)"
+  "Cache policy = what gets cached (TTL, cache key). Origin request policy = what gets forwarded to origin on miss"
+  "OAC (not OAI) for all S3 origins — OAC supports SSE-KMS, OAI is deprecated"
+}}
+
 {{phase 3 "Lambda@Edge vs CloudFront Functions" "5 min"}}
 
 {{say `CloudFront has two edge compute options:
@@ -227,6 +250,17 @@ def handler(event, context):
     response['headers']['content-type'] = [{'value': 'image/webp'}]
     return response
 `}}
+
+{{mustKnow
+  "CloudFront Functions: <1ms, no network, $0.10/1M — for URL rewrites, header manipulation, simple JWT validation"
+  "Lambda@Edge: up to 30s, network access, $0.60/1M — for DynamoDB lookups, image resize, OAuth flows"
+  "CloudFront Functions handle 90% of edge compute needs — only use Lambda@Edge when you need network or body access"
+}}
+
+{{goodToKnow
+  "CloudFront Functions run at all 218+ edge locations; Lambda@Edge runs at 13 regional edge caches"
+  "CloudFront Functions support ES 2024+ with the cloudfront-js-2.0 runtime — not limited to ES 5.1"
+}}
 
 {{phase 4 "Security: OAC, Signed URLs, WAF" "5 min"}}
 

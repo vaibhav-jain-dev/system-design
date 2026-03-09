@@ -295,6 +295,8 @@ class LeakyBucket:
   "What is the tradeoff with leaky bucket over <a class="dqa-link" href="/algo/token-bucket">token bucket</a>?" "Leaky bucket smooths traffic but adds latency (requests wait in queue). Token bucket lets bursts through immediately and rejects when capacity is exceeded. Token bucket is lower latency but sends bursty traffic downstream."
 }}
 
+{{mustKnow "Fixed window is vulnerable to boundary burst attack — always mention this in interviews" "Leaky bucket smooths traffic (constant drain rate) but adds latency; token bucket allows bounded bursts" "Token bucket is the interview default: O(1) memory, handles bursts, easy to implement with Redis Lua"}}
+
 {{phase 5 "Distributed Rate Limiter" "6 min"}}
 
 {{say "A single app server can track counters in memory. But with 10 app servers, each server only sees 1/10 of traffic. You need a shared counter store — <a class="dqa-link" href="/fund/storage/redis">Redis</a> is the standard solution."}}
@@ -372,6 +374,10 @@ def is_allowed_distributed(r, user_id: str, limit: int, window_seconds: int) -> 
 
 {{hint "Redis hash tags keep user counters on one shard" "Key pattern {user_id}:rl:sliding guarantees all rate limit keys for one user land on the same Redis cluster shard. Without hash tags, Lua scripts that touch multiple keys fail if keys are on different shards."}}
 
+{{caveat "Naive Redis INCR+GET is not race-safe: two servers can both read count=99, both allow, and serve 101 requests against a limit of 100. Always use Lua scripts for atomic check-and-act."}}
+
+{{mustKnow "Redis Lua scripts are atomic (single-threaded execution) — eliminates race conditions between check and act" "Use hash tags {user_id}:rl:key to keep all rate limit keys for one user on the same Redis shard" "Redis adds ~0.5-1ms per rate limit check — acceptable for 10ms+ SLA APIs, use in-process counters for sub-1ms SLAs"}}
+
 {{qa "Why Redis over DynamoDB for rate limiting?" "Sub-millisecond latency. Rate limit checks are on the hot path of every API request — adding 10ms (DynamoDB p50) is unacceptable. Redis Lua scripts execute in ~0.5ms. Also, Redis supports atomic multi-step operations natively; DynamoDB requires conditional writes with retries." "What about using DynamoDB with DAX?" "DAX reduces DynamoDB reads to ~1ms but writes still go to DynamoDB at ~10ms. Rate limiting is write-heavy (every request updates a counter). Redis handles 100K+ writes/second per node with consistent sub-ms latency."}}
 
 {{phase 6 "Strategy: Per User vs Per IP" "4 min"}}
@@ -431,6 +437,10 @@ def check_rate_limits(request, redis_client) -> tuple[bool, str]:
   "Stripe charges per-customer per-endpoint. Why per-endpoint?" "Different endpoints have different costs. A payment creation hits DB, fraud check, and external processor — maybe 500ms and $0.01 of compute. A balance read is a cache hit — 1ms. Limiting both at the same rate either wastes capacity on cheap ops or does not protect expensive ones."
   "How does GitHub implement 5000 req/hour?" "Per OAuth token (not per user). This allows bots and CI systems to have separate limits from interactive users. It also means revoking a token immediately removes its quota without touching the user's limit."
 }}
+
+{{mustKnow "Layer limits: per-IP (before auth, cheap) → per-user (after auth) → per-endpoint (expensive ops)" "Per-IP is weak alone — CGNAT puts thousands of mobile users behind one IP" "Different endpoints have different costs — limit by operation cost, not just request count"}}
+
+{{goodToKnow "GitHub limits per OAuth token, not per user — allows separate quotas for bots vs interactive users" "GraphQL rate limiting should use query complexity scoring, not request count"}}
 
 {{phase 7 "Failure & Bypass" "4 min"}}
 
@@ -496,6 +506,10 @@ class RateLimiterWithFallback:
 }}
 
 {{qa "How do you rate limit WebSocket connections?" "Two layers: limit connection establishment per IP/user (token bucket on the upgrade request), and limit messages per connection per second (in-process counter since each connection is stateful on one server). WebSocket messages don't go through the API gateway, so in-process limiting is the only option." "What about rate limiting GraphQL?" "GraphQL is tricky because one request can trigger expensive nested queries. Rate limit by query complexity score, not request count. Parse the query, assign cost per field/resolver, sum the cost, and apply token bucket against a complexity budget instead of a request count."}}
+
+{{mustKnow "Fail-open with local in-memory fallback when Redis is unavailable — brief rate limit bypass is better than full API outage" "Never trust X-Forwarded-For without validating it comes from your own load balancer's IP range" "Return 429 Too Many Requests with Retry-After header so well-behaved clients can back off"}}
+
+{{goodToKnow "Redis Sentinel or Cluster for HA, plus circuit breaker on Redis calls — after N timeouts, stop trying Redis for 30 seconds to avoid cascade delays"}}
 
 {{phase 8 "Interview Summary" "3 min"}}
 

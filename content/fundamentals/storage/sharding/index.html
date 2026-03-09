@@ -399,6 +399,14 @@ class ResharderService:
   "What managed databases handle re-sharding automatically?" "DynamoDB: auto-splits partitions when they exceed 10GB or 3000 RCU/1000 WCU. Cassandra: vnodes allow adding nodes and the ring re-balances automatically. CockroachDB: automatic range splitting and rebalancing. Vitess: manual re-sharding but automated tooling. These are strong arguments to use managed databases over self-managed sharding."
 }}
 
+{{mustKnow
+  "Re-sharding: dual-write → backfill → verify checksums → cutover reads → stop old writes → decommission"
+  "1TB shard takes 28-48 hours to backfill and verify — 2x write cost during entire migration"
+  "Checksum verification is non-negotiable before cutover — a backfill bug means silent data loss"
+}}
+
+{{caveat "This operational nightmare is the primary argument for managed databases (DynamoDB, Cassandra, CockroachDB) that re-shard automatically. If you are designing a new system, strongly prefer managed over self-managed sharding."}}
+
 {{phase 7 "Cross-Shard Queries" "4 min"}}
 
 {{say `Sharding eliminates cross-shard joins at the database layer. Three strategies for queries spanning multiple shards:
@@ -477,6 +485,17 @@ def lookup_user_by_email(email: str, index_shard, db_pool):
   "What is the latency impact of scatter-gather across 10 shards?" "In parallel: P99 latency = P99 of the slowest shard + merge overhead. If each shard P99 is 5ms, scatter-gather P99 is ~8ms (slowest shard + merge). In series it would be 50ms. Always parallelize scatter-gather — never query shards sequentially."
 }}
 
+{{mustKnow
+  "Three strategies for cross-shard queries: scatter-gather (parallel fan-out), global secondary index (2 round trips), denormalization"
+  "Scatter-gather latency = max(slowest shard), not sum — always parallelize, never query shards sequentially"
+  "Global secondary index is itself a potential hotspot on writes — may need its own sharding or use Elasticsearch"
+}}
+
+{{goodToKnow
+  "Instagram maintains a separate inverted index (Cassandra/ES) for hashtag search across user_id shards"
+  "10-shard scatter-gather with 5ms per-shard P99: overall P99 is ~8ms (max + merge), not 50ms"
+}}
+
 {{phase 8 "Interview Summary" "3 min"}}
 
 {{say `Key decisions when designing a sharded system:
@@ -505,6 +524,14 @@ def lookup_user_by_email(email: str, index_shard, db_pool):
   (row "<a class="dqa-link" href="/problem/twitter-feed">Twitter</a>"      "Tweets"          "user_id"            "Hash + write sharding for celebs")
   (row "Shopify"      "Orders"          "shop_id (tenant)"   "Hash (tenant isolation)")
 )}}
+
+{{mustKnow
+  "Shard key is the most critical decision — hash on user_id for social/user-centric systems"
+  "Hash sharding: even distribution, no range queries; Range sharding: locality, hotspot risk"
+  "Managed databases (DynamoDB, Cassandra, CockroachDB) re-shard automatically — strong preference for new systems"
+}}
+
+{{collapseSection "Sharded Postgres vs DynamoDB Decision Guide" "Sharded Postgres: manual re-sharding (days of ops work), manual scatter-gather in app code, full SQL per shard, ~$800/mo for 4x db.r6g.large primaries at 1TB/10K WPS. Choose when you have existing Postgres and need complex joins. DynamoDB: automatic partition splits, managed GSIs for alternate access, no joins, ~$650/mo at same scale, zero ops overhead. Choose for greenfield, scale-first designs where access patterns are known."}}
 
 {{checklist
   "Exhaust vertical scaling and read replicas before sharding — sharding adds massive complexity."
