@@ -1128,3 +1128,109 @@ activedefrag: yes                 # Defragment memory proactively
   </div>
 </div>
 `}}
+
+<div class="alt-section">
+  <div class="alt-section-hdr">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+    Market Reality: How Indian Startups &amp; Products Solve This
+  </div>
+  <div class="alt-section-body">
+    <div class="alt-cards">
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">Razorpay</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge indian">🇮🇳 Fintech</span>
+            <span class="alt-scale">50M+ API calls/day, p99 limit check &lt;1ms</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> Custom Go middleware in their API gateway runs a two-tier check: a soft limit using a Redis sliding window per API key + IP pair, and a hard in-memory token bucket for the remaining high-rate tail. A 6-node Redis Cluster holds all counters with a target p99 of 1ms for the limit check itself.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Go middleware</span>
+            <span class="alt-tech">Redis Cluster (6-node)</span>
+            <span class="alt-tech">sliding window</span>
+            <span class="alt-tech">token bucket</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> Two-tier design — Redis sliding window handles the 95th percentile of traffic where accuracy matters; an in-memory token bucket handles the top 5% during Redis latency spikes. This means the rate limiter degrades gracefully under Redis pressure rather than either failing open (allowing abuse) or failing closed (dropping legitimate traffic). The textbook single-Redis solution lacks this fallback tier.</div>
+        </div>
+      </div>
+
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">Freshworks</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge indian">🇮🇳 SaaS</span>
+            <span class="alt-scale">60K+ business customers, multi-tenant API gateway</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> Kong API Gateway with a custom Redis rate-limit plugin. Per-tenant rate limits are stored in PostgreSQL (the config plane) and synced to Redis on change. Redis holds only the live counters (data plane). The separation means a rate limit configuration update doesn't require a Redis schema migration.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Kong Gateway</span>
+            <span class="alt-tech">Redis (counters)</span>
+            <span class="alt-tech">PostgreSQL (config)</span>
+            <span class="alt-tech">custom Lua plugin</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> Explicit config-plane / data-plane separation — limits are configuration that changes rarely (Postgres), while counters are data that changes on every request (Redis). The canonical textbook design stores everything in Redis, which means a limit change requires updating Redis keys and risks inconsistency during propagation. Freshworks' split architecture makes limit changes an atomic Postgres write that propagates on the next request cycle.</div>
+        </div>
+      </div>
+
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">Juspay</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge indian">🇮🇳 Payments Orchestration</span>
+            <span class="alt-scale">Critical path for Swiggy, BigBasket, dozens of Indian merchants</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> Envoy proxy with a custom Lua rate-limit filter. Rate limits are enforced at the proxy layer before requests reach application services. The Lua filter checks Redis counters and rejects early — the application service never sees over-limit traffic.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Envoy proxy</span>
+            <span class="alt-tech">Lua filter</span>
+            <span class="alt-tech">Redis</span>
+            <span class="alt-tech">circuit breaker</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> Circuit breaker integrated directly with the rate limiter — when downstream error rate exceeds 5%, the rate limit automatically drops by 50% to give the recovering service breathing room. The canonical design treats rate limiting and circuit breaking as separate concerns (separate middleware). Juspay's integration means a degraded downstream automatically gets less traffic without any operator intervention.</div>
+        </div>
+      </div>
+
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">Kong Gateway</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge">🌐 OSS / Most-used in Indian startups</span>
+            <span class="alt-scale">Used by Meesho, Urban Company, Dunzo, and hundreds of others</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> Built-in rate-limit plugin with Redis or cluster mode. Declarative configuration via YAML/Admin API. Supports sliding window, fixed window, and token bucket out of the box. Indian startups adopt Kong as their first API gateway because the rate limiting, auth, and logging plugins eliminate custom middleware for the first few years of growth.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Kong (Lua/Go plugins)</span>
+            <span class="alt-tech">Redis</span>
+            <span class="alt-tech">PostgreSQL (config store)</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> Zero custom code for common rate-limit patterns — the plugin handles key extraction, counter logic, and 429 responses. The tradeoff is that Kong's plugin model makes it hard to implement non-standard strategies (e.g., GraphQL query complexity scoring, adaptive limits tied to downstream health) without forking the plugin in Lua or Go.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="alt-oss-row">
+      <div class="alt-oss-label">OSS &amp; Managed Alternatives</div>
+      <div class="alt-oss-items">
+        <div class="alt-oss-item"><strong>redis-cell</strong> — Redis module implementing GCRA (Generic Cell Rate Algorithm) as a single atomic command; used by teams that want a mathematically correct leaky bucket without custom Lua scripts</div>
+        <div class="alt-oss-item"><strong>envoy-ratelimit</strong> — Lyft's open-source gRPC rate-limit service; the reference implementation for Envoy-based service meshes; adopted by Indian unicorns running Istio</div>
+        <div class="alt-oss-item"><strong>nginx limit_req_zone</strong> — leaky bucket built into nginx; the default rate limiter for Indian startups before they adopt a dedicated API gateway; zero additional infrastructure</div>
+        <div class="alt-oss-item"><strong>AWS API Gateway throttling</strong> — free, zero-ops, per-stage and per-method limits; the standard choice for Indian startups on AWS until they outgrow the 10K req/s regional limit</div>
+        <div class="alt-oss-item"><strong>Cloudflare Rate Limiting</strong> — edge-enforced, DDoS-grade; Indian startups with high public API traffic (gaming, fintech) use this to absorb abuse before it reaches origin</div>
+      </div>
+    </div>
+
+    <div class="alt-verdict"><strong>Market verdict:</strong> Indian startups at early stage use AWS API Gateway throttling — it's free, requires no ops, and handles the first 10M requests/day without configuration. At scale (beyond 10M req/day), teams migrate to Kong + Redis or build custom Go middleware. Razorpay, PhonePe, and Juspay all run custom solutions because the p99 overhead budget for payment API rate limiting is under 2ms — each Redis round-trip costs ~0.5ms, making the two-tier (Redis + in-memory fallback) architecture the industry standard for Indian fintech.</div>
+  </div>
+</div>

@@ -1086,3 +1086,111 @@ Biggest optimization lever: Cassandra location history with ZSTD compression (4:
   "How do you integrate with third-party delivery fleets (Dunzo, external logistics)?"
   "Third-party fleet integration uses an adapter pattern: a FleetAdapter interface with assign(order) → assignment_id, track(assignment_id) → location, cancel(assignment_id). Each third-party fleet has a concrete adapter. The matching service treats external fleet partners as first-class candidates with one difference: their location data comes via webhook (push from fleet API) rather than direct Redis writes. ETA calculation uses their API's estimate, not OSRM."
 }}
+
+<div class="alt-section">
+  <div class="alt-section-hdr">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+    Market Reality: How Indian Startups &amp; Products Solve This
+  </div>
+  <div class="alt-section-body">
+    <div class="alt-cards">
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">Swiggy</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge indian">🇮🇳 Food Delivery</span>
+            <span class="alt-scale">100M+ orders/month, 300K+ delivery partners across India</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> Go microservices throughout, Kafka for the order pipeline, Redis GEO for driver location (updated every 3 seconds from the driver app), and a PostgreSQL + DynamoDB hybrid for order records — Postgres for transactional writes, DynamoDB for high-read order history queries. ETA prediction runs a custom XGBoost gradient-boosted model trained on 50M+ historical deliveries.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Go microservices</span>
+            <span class="alt-tech">Kafka</span>
+            <span class="alt-tech">Redis GEO</span>
+            <span class="alt-tech">XGBoost ETA model</span>
+            <span class="alt-tech">Google Maps Distance Matrix</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> ETA prediction is not a distance/speed formula — it's a gradient-boosted model with real-time traffic signals from Google Maps Distance Matrix API injected as features. The model accounts for restaurant prep variability, driver acceptance rate by zone, and time-of-day traffic patterns. The canonical textbook answer (distance ÷ average speed) would be off by 5–10 minutes at Indian traffic density. Accurate ETA is Swiggy's #1 retention driver, not architecture elegance.</div>
+        </div>
+      </div>
+
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">Zomato</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge indian">🇮🇳 Food Delivery (Public)</span>
+            <span class="alt-scale">Engineering blog documents production architecture publicly</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> Go services, Redis Cluster for driver location state, Apache Flink for real-time order aggregation and metrics, Elasticsearch for restaurant search and ranking. Location updates from the driver app flow through a dedicated location service that writes to Redis GEO and emits Kafka events for downstream consumers (ETA service, dispatch service).</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Go</span>
+            <span class="alt-tech">Redis Cluster</span>
+            <span class="alt-tech">Apache Flink</span>
+            <span class="alt-tech">Elasticsearch</span>
+            <span class="alt-tech">Kafka</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> Geohash-based Kafka topic partitioning — each geohash cell (roughly 5km²) maps to a dedicated Kafka partition. Driver location updates in Bengaluru don't compete for throughput with Hyderabad events. This partitioning strategy means the dispatch consumer for each city only reads its local partitions, reducing cross-partition coordination and enabling city-level consumer groups to scale independently.</div>
+        </div>
+      </div>
+
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">Dunzo</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge indian">🇮🇳 Quick Commerce (shut down 2024)</span>
+            <span class="alt-scale">10-minute delivery from dark stores</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> Architecture similar to Swiggy but optimized for sub-10-minute delivery polygons (each dark store serves a ~2km radius). Dark store inventory was managed as a Redis hash per store, not a separate inventory service — stock checks during order acceptance ran against Redis directly for sub-100ms response.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Redis hash (inventory)</span>
+            <span class="alt-tech">Go</span>
+            <span class="alt-tech">PostgreSQL</span>
+            <span class="alt-tech">Kafka</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> Inventory embedded in Redis as a hash per dark store, not a separate inventory microservice. For a dark store stocking 2,000 SKUs, the entire inventory fits in a single Redis hash that can be read, checked, and decremented atomically using Lua — eliminating a network hop to a separate inventory service on every order acceptance. The tradeoff: Redis becomes the single source of truth for inventory, requiring careful persistence and replication configuration.</div>
+        </div>
+      </div>
+
+      <div class="alt-card">
+        <div class="alt-card-top">
+          <div class="alt-card-name">ONDC / Namma Yatri Food</div>
+          <div class="alt-card-meta">
+            <span class="alt-badge indian">🇮🇳 Open Protocol (Government-backed)</span>
+            <span class="alt-scale">Decentralized food delivery network</span>
+          </div>
+        </div>
+        <div class="alt-card-body">
+          <div class="alt-how"><strong>How they solve it:</strong> Restaurants publish menus and accept orders via the Beckn open protocol. Any buyer-side app (Paytm, PhonePe, Namma Yatri) can discover restaurants on ONDC and place orders through a standardized API. Each logistics provider (Dunzo, Shadowfax, Loadshare) connects via open logistics API — no single platform owns the driver pool.</div>
+          <div class="alt-stack-row">
+            <span class="alt-stack-label">Stack:</span>
+            <span class="alt-tech">Beckn protocol</span>
+            <span class="alt-tech">REST APIs</span>
+            <span class="alt-tech">decentralized registry</span>
+          </div>
+          <div class="alt-diff"><strong>Key difference:</strong> Fully decentralized — there is no Swiggy-equivalent central platform. The order flows from buyer app → ONDC gateway → seller app → logistics provider, with each hop using the Beckn protocol. Driver matching is the logistics provider's responsibility, not the platform's. This eliminates the central dispatch problem entirely but introduces coordination latency between loosely coupled participants.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="alt-oss-row">
+      <div class="alt-oss-label">OSS &amp; Managed Alternatives</div>
+      <div class="alt-oss-items">
+        <div class="alt-oss-item"><strong>OSRM</strong> — open-source routing engine (C++); Zomato and Swiggy use OSRM for internal route optimization and ETA baseline; much cheaper than Google Maps at millions of requests/day</div>
+        <div class="alt-oss-item"><strong>Uber H3</strong> — hexagonal geo-indexing library; used by Indian startups for driver search radius queries; H3 hex cells at resolution 8 (~0.7km²) map cleanly to delivery zones and Kafka partition keys</div>
+        <div class="alt-oss-item"><strong>PostGIS</strong> — spatial extension for PostgreSQL; used for polygon-based delivery zone management (which restaurants are in delivery range) — simpler than a dedicated geo service for moderate query volumes</div>
+        <div class="alt-oss-item"><strong>Google Maps Platform</strong> — most Indian food delivery startups use Google Maps for routing and ETA until they cross ~1M orders/month, at which point OSRM + custom ML becomes cost-competitive</div>
+        <div class="alt-oss-item"><strong>Socket.io + Redis Pub/Sub</strong> — standard stack for real-time driver tracking in the customer app; Redis Pub/Sub broadcasts location updates to connected WebSocket sessions per order</div>
+      </div>
+    </div>
+
+    <div class="alt-verdict"><strong>Market verdict:</strong> Swiggy and Zomato are textbook-quality implementations — their engineering blogs are required reading for this problem. Both converge on Go + Kafka + Redis GEO as the core stack, validating the canonical architecture. The real differentiator at Indian scale is ETA model accuracy, not infrastructure cleverness — a 2-minute ETA improvement drives measurable retention gains. Most Indian food delivery startups at early stage use Google Maps for routing and skip custom geo-indexing entirely until they exceed 1M orders/month, at which point the API cost justifies building on OSRM + H3.</div>
+  </div>
+</div>
