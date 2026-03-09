@@ -212,6 +212,17 @@ class CircuitBreaker:
 
 {{qa "How do you test a circuit breaker?" "Three approaches: (1) &lt;strong>Unit test the state machine&lt;/strong> — inject failures to verify CLOSED→OPEN→HALF_OPEN→CLOSED transitions. (2) &lt;strong>Chaos testing&lt;/strong> — use Chaos Monkey or Litmus to kill downstream pods in staging and verify the circuit opens within expected time. (3) &lt;strong>Load test with fault injection&lt;/strong> — Toxiproxy or Istio fault injection to simulate 50% failure rate and verify fallback activation." "Should I use the same circuit breaker library across all services?" "Yes. Standardize on one library per language — &lt;span class='hl-blue'>Resilience4j&lt;/span> for Java, &lt;span class='hl-blue'>Polly&lt;/span> for .NET. This ensures consistent metric naming, dashboarding, and configuration patterns. A centralized config service can push circuit breaker parameters to all services via feature flags."}}
 
+{{collapseSection "Production Library Comparison" "
+<ul>
+  <li><strong>Resilience4j</strong> (Java) — Hystrix successor, reactive-friendly, Micrometer metrics integration, supports count-based and time-based sliding windows</li>
+  <li><strong>Polly</strong> (.NET) — built into HttpClientFactory pipeline, supports policy wrapping (retry + circuit breaker + timeout)</li>
+  <li><strong>pybreaker</strong> (Python) — decorator-based, thread-safe, supports custom failure predicates</li>
+  <li><strong>gobreaker</strong> (Go) — Sony's implementation, simple API, supports custom readiness check</li>
+</ul>
+"}}
+
+{{mustKnow "Use a library in production (Resilience4j, Polly, pybreaker) — hand-rolled implementations miss metrics, slow-call tracking, and thread safety" "Lock-free sliding window is critical at high QPS — a lock on every call adds measurable contention at 10K+ req/s" "HALF_OPEN must enforce single-request probing with atomic compare-and-swap"}}
+
 {{phase 5 "Fallback Strategies" "4 min"}}
 
 {{say "When the circuit is OPEN, you need a fallback — a degraded but functional response. The right fallback depends on the business impact of the failing dependency. &lt;span class='hl-red'>Not all failures justify showing an error page.&lt;/span>"}}
@@ -272,6 +283,8 @@ class FallbackChain:
         )`}}
 
 {{hint "warm the fallback cache proactively" "Do not wait for the circuit to open to discover the fallback cache is empty. On every successful call to the primary service, write the response to the fallback cache with a long TTL (6-24 hours). When the circuit opens, the fallback cache is already warm. Cold fallback caches during an outage are the most common circuit breaker failure mode."}}
+
+{{caveat "Cold fallback caches during an outage are the most common circuit breaker failure mode. Always warm the fallback cache proactively on every successful call."}}
 
 {{table "Fallback Strategy by Dependency Type" (rows
   (row "Dependency" "Fallback" "Acceptable Staleness" "Example")
