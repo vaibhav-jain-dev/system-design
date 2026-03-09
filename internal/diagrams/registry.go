@@ -91,5 +91,13 @@ func BuildDefault() *Registry {
 	registerSearchAutocomplete(r)
 	registerTwitterFeed(r)
 	registerGoogleCalendar(r)
+	registerGoogleDocs(r)
+	registerPaymentSystem(r)
+	registerIDGenerator(r)
+	registerDistributedCache(r)
+	registerNotificationSystem(r)
+	registerFileStorage(r)
+	registerLoggingSystem(r)
+	registerRecommendationSystem(r)
 	return r
 }

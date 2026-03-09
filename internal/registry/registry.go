@@ -78,6 +78,7 @@ type Problem struct {
 	Title       string                  `yaml:"title"`
 	Description string                  `yaml:"description"`
 	Path        string                  `yaml:"path"`
+	Category    string                  `yaml:"category"` // e.g. "distributed" — used to group in sidebar
 	Docs        []DocMeta               `yaml:"docs"`
 	NFRs        []ProblemNFR            `yaml:"nfrs"`
 	FRs         []FunctionalRequirement `yaml:"functional_requirements"`

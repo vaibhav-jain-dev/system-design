@@ -1,0 +1,391 @@
+{{stageNav "Requirements & Problem Scope" 1 "API Design" 2 "Data Partitioning" 3 "Consistent Hashing Deep Dive" 4 "Architecture & Replication" 5 "Eviction Policies" 6 "Consistency Models" 7 "Failure Handling" 8 "Hot Key Problem" 9 "Write Policies" 10 "Memory Management & Cost" 11 "Interview Deep-Dive Q&A" 12}}
+
+{{phase 1 "Requirements & Problem Scope" "5 min"}}
+
+{{say `Let me clarify what we're designing — a distributed cache like Redis, not just how to use Redis:
+<ul>
+  <li>We're building the <strong>cache service itself</strong> — the system that clients talk to</li>
+  <li>Target: <span class="hl">1TB data</span>, <span class="hl">500K ops/sec</span>, <span class="hl">&lt;1ms P99 latency</span></li>
+  <li>Key operations: GET, SET (with TTL), DELETE, INCR/DECR, EXPIRE</li>
+  <li>Horizontal scaling: add nodes without downtime or full cache invalidation</li>
+</ul>`}}
+
+{{diagram "dc-requirements"}}
+
+{{table "Functional Requirements" (rows
+  (row "Operation"   "Description"                          "Priority"  "Constraint")
+  (row "GET key"     "Return value or null if not cached"   "P0"        "<1ms P99")
+  (row "SET key TTL" "Store value with expiration"          "P0"        "<1ms P99")
+  (row "DELETE key"  "Remove key immediately"               "P0"        "<1ms P99")
+  (row "INCR/DECR"   "Atomic counter operations"            "P1"        "Atomicity required")
+  (row "EXPIRE"      "Set/update TTL on existing key"       "P1"        "<1ms")
+  (row "Eviction"    "LRU or LFU when memory full"          "P0"        "Configurable policy")
+  (row "Replication" "Primary-replica for HA"               "P1"        "Async or sync")
+)}}
+
+{{hint "why design a cache system rather than just 'use Redis'?" "Interviewers asking 'design a distributed cache' want to see: consistent hashing for partitioning, eviction algorithm implementation, replication strategy, and failure handling. This demonstrates understanding of distributed systems fundamentals, not just Redis config knowledge."}}
+
+{{think "The fundamental tension in cache design: latency vs. consistency. Sub-millisecond reads require serving from RAM (no disk I/O). But RAM is volatile — node failure loses all cached data. The resolution: caches are volatile by design. Cache misses fall through to the source of truth (DB). Consistency is eventual: accept brief staleness for latency."
+  (whyNot "synchronous replication for strong consistency" "Synchronous replication means every write must wait for replica acknowledgment — adding replica RTT to every write. At 0.5ms replica latency, that doubles write latency. Caches are used specifically to reduce latency — synchronous replication defeats the purpose.")
+  (whatIf "the entire cache cluster goes down" "All reads miss and fall through to the database. DB must be sized to handle the full request load — cache failure shouldn't cause full DB outage. This is why caches should have database fallback as a first-class consideration, not an afterthought.")
+}}
+
+{{triggerQs "Scope questions"
+  "Redis vs Memcached — which would you use as the foundation?"
+  "Redis wins in almost every production scenario: supports data structures (lists, sets, sorted sets, hashes), optional persistence (RDB/AOF), replication with Sentinel, clustering, pub/sub, Lua scripting. Memcached: simpler, slightly faster for pure string caching (less overhead), multi-threaded. Choose Memcached only if you exclusively cache plain strings and every microsecond matters."
+}}
+
+{{phase 2 "API Design" "5 min"}}
+
+{{say `Simple key-value API — the challenge is what happens underneath:
+<ul>
+  <li>Clients talk to a <strong>client library</strong>, not directly to cache nodes — the library handles routing</li>
+  <li>The client library maintains the consistent hash ring and routes each key to the right node</li>
+  <li>This is client-side load balancing — no proxy needed for the hot path</li>
+</ul>`}}
+
+<div class="api-doc">
+  <div class="api-view-tabs">
+    <button class="api-view-tab active" data-view="quick">Quick</button>
+    <button class="api-view-tab" data-view="detailed">Detailed</button>
+  </div>
+  <div class="api-view-pane active" data-view="quick">
+    <div class="api-quick">
+      <div class="api-quick-block">
+        <div class="api-quick-section"># Core Cache API (Redis wire protocol / RESP)</div>
+        <div class="api-quick-row">
+          <span class="api-method GET">GET</span>
+          <span class="api-quick-path"><span class="pp">key</span></span>
+          <span class="api-quick-comment"># Returns value or null</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method POST">SET</span>
+          <span class="api-quick-path"><span class="pp">key</span> <span class="pq">value [EX ttl_seconds]</span></span>
+          <span class="api-quick-comment"># Set with optional TTL</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method DELETE">DEL</span>
+          <span class="api-quick-path"><span class="pp">key</span></span>
+          <span class="api-quick-comment"># Delete key immediately</span>
+        </div>
+        <div class="api-quick-row">
+          <span class="api-method POST">INCR</span>
+          <span class="api-quick-path"><span class="pp">key</span></span>
+          <span class="api-quick-comment"># Atomic increment, returns new value</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="api-view-pane" data-view="detailed">
+    <div class="api-card">
+      <div class="api-card-header">
+        <div class="api-card-left">
+          <span class="api-method GET">GET</span>
+          <span class="api-path">/{key}</span>
+          <span class="api-desc">Retrieve cached value</span>
+        </div>
+      </div>
+      <div class="api-card-body">
+        <div class="api-responses">
+          <div class="api-tabs">
+            <span class="api-tab s2 active" data-code="200">200 Hit</span>
+            <span class="api-tab s4" data-code="404">404 Miss</span>
+          </div>
+          <div class="api-response-body active" data-code="200"><span class="jp">{</span><span class="jk">"value"</span><span class="jp">:</span> <span class="jv">"cached_data"</span><span class="jp">,</span> <span class="jk">"ttl_remaining"</span><span class="jp">:</span> <span class="jn">3542</span><span class="jp">}</span></div>
+          <div class="api-response-body" data-code="404"><span class="jp">{</span><span class="jk">"error"</span><span class="jp">:</span> <span class="jv">"cache_miss"</span><span class="jp">}</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{{phase 3 "Data Partitioning" "8 min"}}
+
+{{say `1TB of data can't fit on one node — we need to split it across multiple nodes:
+<ul>
+  <li>Naive approach: <code>node = hash(key) % num_nodes</code> — simple but catastrophic when nodes change</li>
+  <li>Better: <strong>consistent hashing</strong> — adding/removing nodes only moves <span class="hl">K/N keys</span> (not all keys)</li>
+  <li>With 4 nodes: adding a 5th node only moves ~20% of keys — 80% of cache remains warm</li>
+</ul>`}}
+
+{{diagram "dc-data-partitioning"}}
+
+{{think "Modulo hashing (hash % N) is a trap. With 4 nodes: key 'user:123' → hash 789 % 4 = 1 → Node 1. Add node 5: hash 789 % 5 = 4 → Node 4. The key moved. In fact, for most keys, adding one node causes ~80% to move to different nodes — equivalent to a full cache invalidation. Consistent hashing moves only 1/N keys on average when adding one node."
+  (whyNot "range-based partitioning (user_id 0-1M on node 1, 1M-2M on node 2)" "Range partitioning creates hot shards when data has non-uniform access patterns. If user IDs 0-1000 are all premium accounts who use the product heavily, node 1 gets all the traffic. Consistent hashing distributes load uniformly regardless of ID distribution.")
+}}
+
+{{diagram "dc-consistent-hashing"}}
+
+{{hint "why 150 virtual nodes per physical node?" "Without virtual nodes, adding one node could cause uneven distribution — the ring isn't perfectly balanced with just 4 points. 150 virtual nodes per node = 600 points on the ring. Statistical law of large numbers ensures each node handles approximately 25% of the ring. More vnodes = better balance but more memory for the ring data structure. 100-200 is the sweet spot."}}
+
+{{triggerQs "Partitioning deep-dives"
+  "How does consistent hashing handle a node failure?"
+  "When Node 2 fails, all keys that mapped to Node 2 now map to Node 3 (the next clockwise node on the ring). Node 3 handles the extra load temporarily. When Node 2 recovers, it rejoins the ring and reclaims its keys — they're cache misses until repopulated from the source of truth. No manual key migration needed."
+  "What's the performance impact of the virtual node ring lookup?"
+  "Ring lookup is O(log N) binary search on a sorted array of virtual node positions. With 4 physical nodes × 150 virtual nodes = 600 entries. Binary search on 600 entries = 10 comparisons. This happens per cache operation but is pure CPU (no I/O) and takes ~100ns — negligible compared to the network round-trip."
+}}
+
+{{phase 4 "Consistent Hashing Deep Dive" "8 min"}}
+
+{{say `Let me walk through the mechanics of consistent hashing:
+<ul>
+  <li>Think of the hash space as a ring from 0 to 2^32 (or 2^64)</li>
+  <li>Each physical node maps to 150 virtual nodes, each at a random position on the ring</li>
+  <li>To find which node owns a key: <code>hash(key) → find nearest virtual node clockwise → get physical node</code></li>
+  <li>Adding a node: insert 150 new virtual nodes → each steals a small portion of the ring from its neighbor</li>
+</ul>`}}
+
+{{code "python" `import hashlib
+import bisect
+
+class ConsistentHashRing:
+    def __init__(self, nodes: list[str], vnodes: int = 150):
+        self.vnodes = vnodes
+        self.ring = {}          # position → node_name
+        self.sorted_keys = []   # sorted list of positions
+
+        for node in nodes:
+            self.add_node(node)
+
+    def add_node(self, node: str):
+        for i in range(self.vnodes):
+            # Each vnode gets a unique hash by appending vnode index
+            vnode_key = f"{node}:vnode:{i}"
+            position = int(hashlib.md5(vnode_key.encode()).hexdigest(), 16)
+            self.ring[position] = node
+            bisect.insort(self.sorted_keys, position)
+
+    def remove_node(self, node: str):
+        for i in range(self.vnodes):
+            vnode_key = f"{node}:vnode:{i}"
+            position = int(hashlib.md5(vnode_key.encode()).hexdigest(), 16)
+            del self.ring[position]
+            self.sorted_keys.remove(position)
+
+    def get_node(self, key: str) -> str:
+        if not self.ring:
+            raise Exception("Ring is empty")
+        key_hash = int(hashlib.md5(key.encode()).hexdigest(), 16)
+        # Find first position >= key_hash (clockwise on ring)
+        idx = bisect.bisect(self.sorted_keys, key_hash)
+        if idx == len(self.sorted_keys):
+            idx = 0  # Wrap around to start of ring
+        return self.ring[self.sorted_keys[idx]]`}}
+
+{{hint "bisect for O(log N) ring lookup" "bisect.bisect() performs binary search on a sorted array — O(log N) where N is the number of virtual nodes. For 600 virtual nodes, that's 10 comparisons. The ring is stored in memory as a sorted array — no disk I/O, no network. Ring lookup adds effectively zero latency to cache operations."}}
+
+{{phase 5 "Architecture & Replication" "10 min"}}
+
+{{say `The cluster architecture has three layers:
+<ul>
+  <li><strong>Client library:</strong> maintains consistent hash ring, routes requests directly to correct node</li>
+  <li><strong>Primary nodes:</strong> handle all writes + reads, asynchronously replicate to replicas</li>
+  <li><strong>Replica nodes:</strong> handle read overflow, promote to primary on failure (via Sentinel)</li>
+</ul>`}}
+
+{{diagram "dc-architecture"}}
+
+{{diagram "dc-replication"}}
+
+{{think "Why async replication by default? Redis's default is async — primary acknowledges write before replica confirms. This means: (1) sub-millisecond writes (no waiting for replica), (2) possible data loss of last few writes if primary fails. For a cache, this is acceptable — the source of truth (DB) can always repopulate on cache miss. For durability-critical data, use sync replication (but accept write latency penalty)."
+  (whatIf "the primary crashes between write and replica sync" "The replica is promoted to primary. The last few writes (since last async sync) are lost. Clients get cache misses for those keys and fall through to the DB. This is the correct behavior — the DB is authoritative, cache is a performance optimization. No data corruption occurs.")
+  (how "Redis Sentinel handles failover" "Sentinel quorum: 3 Sentinel nodes monitor the primary. If primary is unreachable, Sentinels vote — majority needed to trigger failover. Sentinel promotes the most up-to-date replica to primary and reconfigures clients. Failover takes 5-30 seconds — during this window, writes fail or fall through to DB.")
+}}
+
+{{triggerQs "Architecture questions"
+  "When would you use synchronous replication?"
+  "For financial counters (account balances), inventory counts, or any value where data loss on failover means incorrect business state. Sync replication adds replica RTT (~0.5ms intra-DC) to every write — acceptable for critical data, unacceptable for a generic cache."
+  "How does Redis Cluster differ from Sentinel?"
+  "Sentinel: single primary per shard, Sentinel manages failover — simple, good for small clusters. Redis Cluster: built-in sharding (16384 hash slots), automatic failover, no Sentinel needed — better for large clusters needing horizontal scale. Sentinel = HA for a single Redis instance. Cluster = HA + sharding for distributed cache."
+}}
+
+{{phase 6 "Eviction Policies" "8 min"}}
+
+{{say `When memory fills up, the cache must evict entries — the policy determines which ones:
+<ul>
+  <li><strong>LRU (Least Recently Used):</strong> evict the entry that hasn't been accessed for the longest time — good for temporal locality</li>
+  <li><strong>LFU (Least Frequently Used):</strong> evict the entry accessed least often — good for stable hot keys</li>
+  <li><strong>FIFO:</strong> evict oldest inserted — simple but poor hit rate</li>
+  <li>Redis also offers: allkeys-random, volatile-lru (only keys with TTL), volatile-ttl</li>
+</ul>`}}
+
+{{diagram "dc-eviction-policies"}}
+
+{{code "python" `from collections import OrderedDict
+
+class LRUCache:
+    """O(1) get and put using doubly-linked OrderedDict"""
+
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self.cache = OrderedDict()  # key → value, ordered by access time
+
+    def get(self, key: str):
+        if key not in self.cache:
+            return None
+        # Move to end (most recently used)
+        self.cache.move_to_end(key)
+        return self.cache[key]
+
+    def put(self, key: str, value, ttl_seconds: int = None):
+        if key in self.cache:
+            self.cache.move_to_end(key)
+        self.cache[key] = value
+        if len(self.cache) > self.capacity:
+            # Evict least recently used (first item in OrderedDict)
+            self.cache.popitem(last=False)
+`}}
+
+{{hint "why OrderedDict gives O(1) LRU?" "Python's OrderedDict uses a doubly-linked list under the hood, so move_to_end() is O(1) — just pointer updates. popitem(last=False) removes the head of the list in O(1). A plain dict + linked list gives the same result; OrderedDict is a built-in implementation. The HashMap part gives O(1) lookup, the linked list gives O(1) eviction."}}
+
+{{compare "Eviction Policy" (options
+  (best "LRU (allkeys-lru)" "Best default for web caches — temporal locality means recently used keys are likely to be needed again soon")
+  (alt "LFU (allkeys-lfu)" "Better when hot keys are stable over time (CDN, static assets) — protects popular items from one-time scan eviction")
+  (nofit "FIFO / Random" "FIFO ignores access patterns, random has poor hit rate — only use when access pattern is truly uniform")
+)}}
+
+{{triggerQs "Eviction deep-dives"
+  "What is the 'scan attack' problem with LRU?"
+  "A sequential scan of N keys evicts N keys from the LRU cache — even if those keys are accessed only once. For example, a nightly batch job that reads all 100K user profiles will evict all 100K cached profiles, causing cache stampede for regular users. LFU protects against this: batch scan items have frequency=1 and get evicted first on next eviction round."
+  "Redis uses approximated LRU, not true LRU — why?"
+  "True LRU requires a doubly-linked list across all 100M keys, which is expensive memory overhead. Redis uses approximated LRU: on eviction, sample 5-10 random keys, evict the oldest among the sample. With a sample of 10, the approximation is very close to true LRU with much lower overhead. The maxmemory-samples config controls sample size."
+}}
+
+{{phase 7 "Consistency Models" "5 min"}}
+
+{{say `Caches are fundamentally eventual consistent systems — understanding the models prevents surprises:
+<ul>
+  <li><strong>Read-after-write:</strong> a client writes key, then immediately reads — may get stale data from replica</li>
+  <li><strong>Monotonic reads:</strong> once you read version V, you'll never see version V-1 — not guaranteed with random replica reads</li>
+  <li><strong>Strong consistency (read-from-primary):</strong> always current but slower (no replica reads)</li>
+</ul>`}}
+
+{{diagram "dc-consistency-model"}}
+
+{{hint "read-your-own-writes pattern" "After a write, route subsequent reads for the same key to the same primary for 1-2 seconds. Implementation: client library tags the write with a write_version, subsequent reads check if version > replica's version → if yes, redirect to primary. This gives read-after-write consistency without making all reads go to the primary."}}
+
+{{phase 8 "Failure Handling" "8 min"}}
+
+{{diagram "dc-failure-handling"}}
+
+{{think "Cache stampede (thundering herd) is the most dangerous failure mode: popular key expires → 10,000 requests simultaneously miss → all 10,000 go to DB → DB overwhelmed → cascade failure. The mutex lock pattern prevents this: only ONE request fetches from DB, rest wait. But distributed mutex is complex — probabilistic early expiration is simpler."
+  (how "probabilistic early expiration works" "Instead of letting a key expire at time T, each cache read checks: should I refresh early? Probability = exp(-β × (T_expire - T_current) / value_compute_time). As expiry approaches, probability of early refresh increases. Some client recomputes the value before expiry, warming the cache without ever letting it go cold.")
+  (whatIf "the mutex lock holder crashes during DB fetch" "If using Redis SETNX as distributed mutex: the lock has a TTL (e.g., 5s). Lock-holder crash → lock expires after 5s → another request acquires lock → fetches from DB. Brief 5s period where all requests miss, then one fetches and warms cache. Acceptable for most use cases.")
+}}
+
+{{triggerQs "Failure scenario questions"
+  "How do you prevent thundering herd on cache miss?"
+  "Three approaches: (1) Request coalescing — only one request per key fetches from DB at a time (mutex via Redis SETNX TTL). Others wait for the winner to populate cache. (2) Background refresh — asynchronously refresh keys approaching expiry before they actually expire. (3) Probabilistic early expiration — gradually increase refresh probability as TTL decreases."
+  "What happens to your service if the entire cache cluster goes down?"
+  "All requests fall through to the DB. If DB is sized only for cache-assisted load, it gets overwhelmed — cascade failure. Mitigation: (1) Size DB to handle 20-30% of peak load (rest should be cache hits). (2) Circuit breaker on DB to fail fast rather than overwhelming it. (3) Background pre-warming: populate cache from DB dump after cluster recovery."
+}}
+
+{{phase 9 "Hot Key Problem" "5 min"}}
+
+{{say `Hot keys are a common production incident — one key getting millions of requests per second:
+<ul>
+  <li>Example: <code>trending:viral-video</code> → 90% of requests hit the single node owning this key</li>
+  <li><strong>Solution 1:</strong> Local L1 cache in each app server — top 1000 keys cached in-process, no network hop</li>
+  <li><strong>Solution 2:</strong> Key splitting — <code>trending:viral-video:shard_0</code> through <code>shard_9</code> → spread across 10 nodes</li>
+  <li><strong>Solution 3:</strong> Read replicas for hot keys — direct reads to replicas, not primary</li>
+</ul>`}}
+
+{{diagram "dc-hot-key-problem"}}
+
+{{hint "local L1 cache pattern" "Each application server maintains an in-process LRU cache (e.g., Caffeine in Java, lru-cache in Node.js) for the top 1000 hot keys with a short TTL (1-5 seconds). This absorbs the hottest traffic before it even hits the cache cluster. Netflix does this with Hollow — a read-only in-memory dataset replicated to every service instance. The tradeoff: 1-5 second staleness for hot keys."}}
+
+{{phase 10 "Write Policies" "5 min"}}
+
+{{diagram "dc-write-policies"}}
+
+{{compare "Write Policy" (options
+  (best "Write-Through" "Write to cache AND DB synchronously — consistent, good for financial data. +2ms write latency.")
+  (alt "Write-Behind" "Write to cache immediately, async to DB — low write latency, risk of data loss on crash. Good for analytics counters.")
+  (nofit "Write-Around" "Write directly to DB, cache populated on first read — good for write-heavy/infrequent-read data. High miss rate initially.")
+)}}
+
+{{hint "write-behind risks" "Write-behind (write-back) means data exists in cache but hasn't been persisted to DB yet. If the cache node crashes before the async write completes, that data is lost forever. Only use write-behind for data where loss is acceptable: metrics counters, view counts, non-critical analytics. Never for financial transactions or user data."}}
+
+{{phase 11 "Memory Management & Cost" "5 min"}}
+
+{{diagram "dc-memory-management"}}
+
+{{diagram "dc-monitoring"}}
+
+{{table "Redis Memory Cost Estimate" (rows
+  (row "Component"               "Size"             "Cost (us-east-1)")
+  (row "r6g.4xlarge (128GB RAM)" "128GB per node"   "$1.20/hr = $864/mo")
+  (row "4 primary + 4 replica"   "8 nodes × 128GB"  "$6,912/mo")
+  (row "Actual data capacity"    "~900GB usable"    "Redis overhead ~28%")
+  (row "Data per node"           "~112GB each"      "Including key overhead")
+  (row "Total throughput"        "~200K ops/sec"    "Per node, 8 nodes = 1.6M/sec")
+)}}
+
+{{hint "Redis key overhead" "Redis stores more than just your data: each key adds ~72 bytes overhead (pointer, LRU bits, encoding, expiry). For 100M keys with 100-byte average value: 100M × 72B = 7.2GB overhead. At large scale this is significant — factor it into capacity planning. Use smaller keys, avoid unnecessary fields, use binary protocol."}}
+
+{{key "Distributed cache design comes down to: consistent hashing to partition data without hot rebuilds on node changes, LRU eviction for memory management, async replication for low-latency writes with eventual consistency, and explicit hot key handling to prevent single-node overload — all keeping GET/SET latency under 1ms."}}
+
+{{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
+
+{{deepQA "Critical Interview Questions" `
+<div class="dqa-item">
+  <div class="dqa-q">How does consistent hashing work, and why do you need 150 virtual nodes?</div>
+  <div class="dqa-a">Consistent hashing maps both cache nodes and keys to positions on a circle (hash ring). To find which node owns a key: hash the key, find the nearest node clockwise on the ring. Adding/removing a node only moves keys that were between the old and new node positions — on average <span class="dqa-key">K/N keys</span> (1/4 with 4 nodes). Without virtual nodes, real node positions are unevenly distributed — one node might own 40% of the ring, another 10%. 150 virtual nodes per physical node = 600 points on the ring → statistical distribution ensures each node owns approximately 25% ± 5%.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What's the concrete difference in cache invalidation between modulo hashing and consistent hashing?</div>
+    <div class="dqa-sub-a">With 4 nodes using <strong>modulo hashing (hash % 4)</strong>: adding node 5 changes the modulo for ~80% of keys — 80% cache miss rate immediately after adding a node. With <strong>consistent hashing</strong>: adding node 5 moves only ~20% of keys (those between node 5 and its predecessor on the ring). 80% of cache remains warm — dramatically better during scaling events.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you handle rebalancing when a node is added — do you migrate keys?</div>
+      <div class="dqa-deep-a">You don't migrate keys — you let them naturally repopulate. The new node joins the ring. Keys that now map to it will be cache misses → callers fetch from DB and populate the new node. The old node still has the data but won't receive requests for keys that moved — those entries will expire naturally via TTL. Active migration is only needed for large caches where cold-start miss rate would overwhelm the DB. In that case, warm the new node by reading from the previous owner: new_node.set(key, old_node.get(key)) before switching traffic.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How do you implement LRU cache in O(1) for both get and put?</div>
+  <div class="dqa-a">Combine a <strong>HashMap</strong> (O(1) key lookup) with a <strong>doubly-linked list</strong> (O(1) front/back removal and insertion). HashMap stores key → node_in_list. List is ordered by recency: most recently used at tail, least recently used at head. GET: lookup in map, move node to tail (O(1) pointer updates). PUT: if exists, update and move to tail. If new and at capacity, remove head node (LRU), insert new node at tail, add to map.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What's the memory overhead of the LRU data structure?</div>
+    <div class="dqa-sub-a">Each entry: 2 pointers in doubly-linked list (prev, next) = 16 bytes + HashMap entry = ~48 bytes overhead per cached item. For 10M items: ~480MB overhead. Plus Redis's own per-key overhead (~72 bytes). Total: ~120 bytes per key for the LRU bookkeeping. At 10M keys this is 1.2GB — significant but acceptable for a cache serving billions of requests.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">What happens to LRU performance when the cache is 99% full?</div>
+      <div class="dqa-deep-a">No performance degradation — LRU eviction is always O(1) regardless of cache size. Remove from head of list = 2 pointer updates + 1 HashMap delete. The doubly-linked list head always points directly to the LRU item. This is why LRU is the standard choice: constant-time eviction at any fill level. Contrast with LFU which requires a priority queue — O(log N) eviction.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How do you prevent cache stampede / thundering herd?</div>
+  <div class="dqa-a">Three approaches: (1) <strong>Mutex lock</strong>: when key expires, only one client fetches from DB (using Redis SETNX as distributed lock with TTL). Others wait, then read from cache after winner populates it. (2) <strong>Probabilistic early expiration</strong>: re-compute value before it expires — as expiry approaches, probability of refresh increases, so cache is never fully cold. (3) <strong>Background refresh</strong>: a background thread refreshes keys with TTL &lt;10% remaining, before clients experience a miss.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What's the risk with the mutex lock approach?</div>
+    <div class="dqa-sub-a">Lock holder timeout: if the DB fetch takes longer than the mutex TTL, the lock expires and another client starts a parallel DB fetch — both populate the cache. Mitigation: set mutex TTL = 2× max expected DB fetch time. Also: if lock holder crashes, lock TTL ensures eventual release (no deadlock). Downside: all clients except the winner are blocked waiting — adds P99 latency during cache miss events.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How does probabilistic early expiration work mathematically?</div>
+      <div class="dqa-deep-a">Each cache read checks: <code>p_refresh = exp(-β × remaining_ttl / compute_time)</code>. When remaining_ttl is large → p_refresh ≈ 0 (no early refresh). As remaining_ttl → 0 → p_refresh → 1 (always refresh). β controls aggressiveness (β=1 is standard). A single random client re-computes and updates the cache before expiry — key never goes cold. No locking, no blocking, works even with multiple clients simultaneously — each independently rolls the dice.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">What's the difference between write-through and write-behind cache?</div>
+  <div class="dqa-a"><strong>Write-through</strong>: write to cache AND DB synchronously in the same request. Cache and DB always consistent. Extra ~2ms per write (DB write latency). Safe: no data loss on cache crash. <strong>Write-behind (write-back)</strong>: write to cache immediately, queue DB write asynchronously. Low write latency (~0.1ms). Risk: data in cache but not yet in DB — cache crash loses those writes permanently. Write-behind only appropriate when data loss is tolerable (view counts, analytics).</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">When would write-around be the right choice?</div>
+    <div class="dqa-sub-a"><strong>Write-around</strong>: bypass the cache entirely on write, go directly to DB. Cache is only populated on the first subsequent read. Best for: (1) Write-heavy data that's rarely read (audit logs, event streams — you write millions but read few). (2) Large batch ingestion where you don't want the cache polluted with data that won't be re-read. (3) Cold data that's accessed once then forgotten — no benefit from caching.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you invalidate cache entries when a DB update happens outside the cache layer?</div>
+      <div class="dqa-deep-a">Three strategies: (1) <strong>Event-driven invalidation</strong>: DB change event (via CDC like Debezium) → Kafka → cache invalidation service → DEL key. (2) <strong>Short TTL</strong>: let cache entries expire quickly (60s TTL) — accept brief staleness. (3) <strong>Version tags</strong>: cache key includes version: <code>user:123:v5</code>. On DB update, write cache with new version tag. Old version key expires naturally. Version stored in DB alongside data. At read time, construct key with current version — old version never served again.</div>
+    </div>
+  </div>
+</div>
+<div class="dqa-item">
+  <div class="dqa-q">How would you handle a hot key getting 90% of traffic to one cache node?</div>
+  <div class="dqa-a">Three-tier solution: (1) <strong>Local L1 cache in app servers</strong>: top 1000 hot keys cached in-process with 1-5s TTL. Zero network hop. Absorbs 80% of hot key traffic before it hits the cache cluster. (2) <strong>Key sharding</strong>: <code>viral_video → viral_video:shard_0 ... viral_video:shard_9</code>, spread across 10 nodes. Random shard selection on read. Write to all shards. (3) <strong>Read replicas</strong>: for genuinely popular keys, add dedicated read replicas for that shard.</div>
+  <div class="dqa-sub">
+    <div class="dqa-sub-q">What are the trade-offs of key sharding for hot keys?</div>
+    <div class="dqa-sub-a"><strong>Pros</strong>: distributes read load across N nodes (10 shards = 10x the bandwidth). <strong>Cons</strong>: (1) Writes must go to all N shards (10x write amplification). (2) Inconsistency window — if shard_3 is updated but shard_7 isn't yet, different clients see different values. (3) Complex invalidation — delete all N shards on expiry. Works best for read-heavy, write-rare keys (static config, feature flags). For frequently updated keys: prefer local L1 cache with short TTL instead.</div>
+    <div class="dqa-deep">
+      <div class="dqa-deep-q">How do you detect hot keys before they become a production incident?</div>
+      <div class="dqa-deep-a">Redis built-in: <code>redis-cli --hotkeys</code> samples key access frequency using the approximated LFU counter. Returns top-N hot keys. Also: <code>OBJECT FREQ key</code> returns frequency estimate for any key. For proactive detection: instrument the client library to track per-key request counts with a sliding window. Alert when any single key exceeds 10% of total cache traffic — that's a hot key at 10 nodes × 10% = 100% of one node equivalent. Automatic sharding can kick in based on this metric.</div>
+    </div>
+  </div>
+</div>
+`}}
