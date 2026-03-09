@@ -92,7 +92,7 @@ Finished: <HMAC of handshake transcript>
 
 {{say `<span class="hl-blue">Certificates</span> are how TLS proves the server is who it claims to be — not just encrypted, but authenticated:
 <ul>
-  <li><strong>Root CA</strong> — ~200 pre-installed in OS/browsers; self-signed; private key stored in air-gapped HSM; never directly issues leaf certs</li>
+  <li><strong>Root CA</strong> — ~200 pre-installed in OS/browsers; self-signed; private key stored in an air-gapped HSM (Hardware Security Module — a tamper-resistant physical device for storing cryptographic keys); never directly issues leaf certs</li>
   <li><strong>Intermediate CA</strong> — signed by Root CA; used online to issue leaf certs; if compromised, only this can be revoked</li>
   <li><strong>Leaf certificate</strong> — your server's cert; contains: public key, domain name (CN + SAN), validity period (typically 90 days), signature by Intermediate</li>
   <li>Browser verifies: signature valid → issuer is trusted → hostname matches → not expired → not revoked (OCSP)</li>
@@ -121,7 +121,7 @@ Finished: <HMAC of handshake transcript>
   "What happens when a certificate is revoked?"
   "The CA adds the certificate's serial number to a Certificate Revocation List (CRL) or flags it via OCSP (Online Certificate Status Protocol). Browsers check OCSP in real-time during the handshake — this adds a round trip to a CA server. OCSP Stapling solves this: the server fetches its own OCSP response and includes it in the TLS handshake, so the browser doesn't need to query the CA separately. Reduces handshake latency and CA server load."
   "What is certificate pinning and when should you use it?"
-  "Certificate pinning binds a client to a specific certificate or public key — rejects any other cert even if valid and CA-signed. Prevents MITM by corporate proxies or compromised CAs. Use for: mobile apps communicating with known backend APIs, high-security applications (banking, healthcare). Drawback: certificate rotation breaks pinned apps — you must pin multiple certs and ship an app update before the old cert expires. Dynamic pin management (fetch updated pins from a trusted server) reduces this risk."
+  "Certificate pinning binds a client to a specific certificate or public key — rejects any other cert even if valid and CA-signed. Prevents MITM (Man-in-the-Middle) attacks by corporate proxies or compromised CAs. Use for: mobile apps communicating with known backend APIs, high-security applications (banking, healthcare). Drawback: certificate rotation breaks pinned apps — you must pin multiple certs and ship an app update before the old cert expires. Dynamic pin management (fetch updated pins from a trusted server) reduces this risk."
 }}
 
 {{phase 4 "mTLS: Mutual Authentication" "5 min"}}
@@ -137,7 +137,7 @@ Finished: <HMAC of handshake transcript>
 {{diagram "fund-https-mtls"}}
 
 {{think "mTLS eliminates the need for API keys or JWT between internal services — the certificate IS the credential."
-  (how "Istio mTLS" "Istio's control plane (Citadel/istiod) acts as the internal CA. At pod startup, it issues a SPIFFE-compliant X.509 cert with the service's identity (e.g., spiffe://cluster.local/ns/default/sa/payment-svc). The Envoy sidecar handles mTLS automatically — your app code never touches TLS. Certs rotate every 24 hours.")
+  (how "Istio mTLS" "Istio's control plane (istiod) acts as the internal CA. At pod startup, it issues a SPIFFE-compliant X.509 certificate — SPIFFE (Secure Production Identity Framework For Everyone) is a standard that encodes a service's identity as a URI like spiffe://cluster.local/ns/default/sa/payment-svc. The Envoy sidecar (a proxy container running alongside your app) handles mTLS automatically — your application code never touches TLS. Certificates rotate every 24 hours.")
   (whyNot "JWT tokens between microservices" "JWTs require the receiving service to validate the signature (CPU cost), check expiry, and maintain a key rotation mechanism. mTLS validation is done by the TLS layer (Envoy sidecar) with zero application code. mTLS also encrypts the channel, JWT does not. For internal services, mTLS is strictly better.")
   (whatIf "an mTLS client certificate is compromised" "Short-lived certs (24h) limit blast radius — attacker can impersonate the service for at most 24 hours. With long-lived API keys, a leak is permanent until manually rotated. Add to CRL or use OCSP for immediate revocation if detected.")
 }}
@@ -214,7 +214,7 @@ func newMTLSClient(certFile, keyFile, caFile string) (*http.Client, error) {
   "What is an SSL downgrade attack and how does HSTS prevent it?"
   "A downgrade attack intercepts the initial HTTP request and prevents the HTTP→HTTPS redirect, keeping the connection in plaintext. The attacker acts as MITM — user sees HTTPS in the browser (connected to attacker), attacker sees HTTP to the real server. HSTS prevents this by making the browser refuse to connect via HTTP — if the browser has a cached HSTS policy for the domain, it immediately redirects to HTTPS internally before any network request."
   "How would you design certificate rotation for a large fleet without downtime?"
-  "Multi-cert support: serve both old and new certificates simultaneously during rotation. ALB supports multiple certificates on the same listener — use SNI to select. For internal mTLS: use short-lived certs (24h) with automated renewal (Istio, cert-manager). Rotation: (1) provision new cert, (2) add to all servers, (3) update DNS/validation, (4) shift traffic, (5) remove old cert after TTL expires. Never remove old cert before all clients have seen the new one."
+  "Multi-cert support: serve both old and new certificates simultaneously during rotation. ALB supports multiple certificates on the same listener — use SNI (Server Name Indication, the TLS extension that tells the server which certificate to present based on the requested hostname) to select. For internal mTLS: use short-lived certs (24h) with automated renewal (Istio, cert-manager). Rotation: (1) provision new cert, (2) add to all servers, (3) update DNS/validation, (4) shift traffic, (5) remove old cert after TTL expires. Never remove old cert before all clients have seen the new one."
 }}
 
 {{phase 6 "TLS Termination Architecture" "4 min"}}
@@ -230,7 +230,7 @@ func newMTLSClient(certFile, keyFile, caFile string) (*http.Client, error) {
 {{think "TLS termination at the load balancer is the standard choice — but compliance requirements may force re-encryption."
   (how "re-encryption" "ALB terminates TLS from client using its public certificate. Then ALB establishes a new TLS connection to the backend using the backend's private certificate. Two separate TLS sessions — no plaintext on the wire at any point. Required for PCI-DSS Level 1 and HIPAA if data must be encrypted in transit everywhere including internal network.")
   (whyNot "TLS on every app server without a load balancer" "Each app server needs cert management (provisioning, rotation, renewal). N servers = N cert management problems. ALB centralizes this: one certificate, auto-renewed by ACM, one place to configure cipher suites. ACM certificates are free and auto-renewed — eliminate manual cert work entirely.")
-  (whatIf "the load balancer's private key is compromised" "Attacker can decrypt all current TLS traffic routed through that load balancer. Mitigate: HSM-backed keys (ALB stores private keys in CloudHSM by default), automatic rotation via ACM, short cert TTL. Re-encryption (end-to-end TLS) doesn't help — the load balancer still has to decrypt at some point.")
+  (whatIf "the load balancer's private key is compromised" "Attacker can decrypt all current TLS traffic routed through that load balancer. Mitigate: HSM-backed keys (AWS ALB stores private keys in CloudHSM — a Hardware Security Module — by default), automatic rotation via ACM, short cert TTL (Time-To-Live, how long the certificate is valid). Re-encryption (end-to-end TLS) doesn't help — the load balancer still has to decrypt at some point.")
 }}
 
 {{table "TLS Termination Modes" (rows
