@@ -886,20 +886,22 @@ response = dynamodb.query(
   </div>
 </details>
 
-{{caveat "Consistent hashing for WebSocket servers is critical during rolling deploys. Without it, a deploy of 5,000 servers reconnects all 200M clients. With consistent hashing, only 1/N connections move per server change."}}
+{{caveat "Consistent hashing is critical for WebSocket deploys. Without it, deploying 5,000 servers reconnects all 200M clients."}}
 
-{{goodToKnow "Connection draining during deploys: mark server as draining in Redis, wait 60s for natural heartbeat-driven reconnection, then force-close remaining connections — limits reconnect storm to ~333/sec" "Alert on Kafka consumer lag (not throughput) — consumer lag > 60 seconds means delivery SLA is breached"}}
+{{goodToKnow "Connection draining: mark as draining in Redis, wait 60s, force-close remainder — limits reconnect storm to ~333/sec" "Alert on Kafka consumer lag (not throughput) — lag > 60 seconds means delivery SLA is breached"}}
 
-{{mustKnow "5,000 WebSocket servers at 100K connections each for 200M concurrent connections — consistent hashing minimizes reconnections during deploys" "Multi-region deployment is mandatory for sub-200ms global delivery — you cannot CDN-cache real-time chat messages" "Graceful connection draining prevents thundering herd during rolling deploys — mark as draining, wait for heartbeat timeout, force-close remainder" "DynamoDB Global Tables for multi-region message replication with ~1s lag — last-writer-wins works because messages have unique Snowflake IDs"}}
+{{mustKnow "5,000 WebSocket servers at 100K connections each — consistent hashing minimizes reconnections during deploys" "Multi-region is mandatory for sub-200ms global delivery — you can't CDN-cache real-time messages" "Graceful connection draining prevents thundering herd during rolling deploys" "DynamoDB Global Tables for multi-region replication with ~1s lag — last-writer-wins works because Snowflake IDs are unique"}}
 
 {{phase 11 "Read Receipts & Presence" "5 min"}}
 
-{{say `Read receipts and presence are <strong>high-frequency, low-value signals</strong> — they need different treatment than messages:
+{{say `Read receipts and presence are <strong>high-frequency, low-value signals</strong> — different treatment than messages:
 <ul>
   <li>Optimize for <strong>low latency</strong>, accept some loss — a typing indicator 3 seconds late is useless</li>
   <li>Use <span class="hl-blue">Redis pub/sub</span> for typing indicators (fire-and-forget is fine)</li>
-  <li>Use <strong>Redis TTL heartbeat</strong> for presence — no writes to DynamoDB at heartbeat frequency</li>
+  <li>Use <strong>Redis TTL heartbeat</strong> for presence — no DynamoDB writes at heartbeat frequency</li>
 </ul>`}}
+
+<p>{{fundLink "storage/redis" "Redis"}} handles both presence (TTL-based heartbeat) and typing indicators (pub/sub). These are ephemeral signals that never touch {{fundLink "storage/dynamodb" "DynamoDB"}}.</p>
 
 {{diagram "cs-read-receipts"}}
 

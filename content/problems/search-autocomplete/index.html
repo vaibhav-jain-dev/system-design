@@ -764,16 +764,27 @@ Each server needs enough RAM for the trie: <span class="hl">1.5 GB per language<
 
 {{checklist "Scaling checklist" "CDN caches top 10K prefixes with 60s TTL — verify cache hit ratio > 88%" "Each trie service replica handles 6K QPS — load test before production" "Redis cluster has 3 nodes for HA — no single point of failure" "Kafka partitions match consumer parallelism — 50 partitions, 50 Flink workers" "Trie rebuild job completes in &lt;30 min — alert on >45 min runtimes" "Multi-region: push trie snapshots to regional S3 buckets within 5 min of rebuild"}}
 
-{{hint "horizontal scaling is trivial for the trie" "The trie is read-only after build — horizontal scaling is trivial. Each new instance downloads the trie snapshot from S3, loads it into RAM, and starts serving in <span class=\"hl\">60 seconds</span>. No leader, no coordination needed during queries. The only constraint is the <span class=\"hl\">60-second rebuild window</span> — during that window the instance serves no traffic, so maintain <strong>N+1 capacity headroom</strong> at all times."}}
+{{hint "horizontal scaling is trivial" "The trie is read-only after build. Each new server downloads the trie from S3, loads it into RAM, and starts serving in <span class=\"hl\">60 seconds</span>. No leader election, no coordination. Keep <strong>N+1 capacity headroom</strong> so one server can restart without overloading the others."}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Scaling Q&A</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{triggerQs "Scaling Questions"
-  "How do you handle a trie node going down during peak traffic?"
-  "The trie service is stateless — each instance holds a <strong>full copy of the trie in RAM</strong>. The load balancer routes around the failed node in <span class=\"hl\">~30 seconds</span> (health check interval). The replacement node needs <span class=\"hl\">~60 seconds</span> to rebuild its trie on startup (download S3 snapshot + deserialize). During this window, traffic is split across the remaining N-1 nodes, which may be at 100% capacity — maintain <strong>N+1 capacity headroom</strong> so no single failure causes saturation."
-  "What's the maximum trie size for a language before memory pressure becomes a problem?"
-  "At <span class=\"hl\">1.5 GB per language trie</span>, a 64 GB r6g.2xlarge handles 10+ language tries. The real constraint is <strong>trie rebuild time</strong> — <span class=\"hl\">60 seconds at 1.5 GB</span>. If the trie grows to <span class=\"hl\">5 GB</span>, rebuild takes 3–4 minutes, widening the stale-data window. Mitigations: increase trie sync frequency (hourly → 15 min) to reduce staleness, or <span class=\"hl-blue\">shard the trie by prefix range</span> (A–M on one node set, N–Z on another) to keep each shard under 1.5 GB."
-  "How do you avoid a thundering herd when all trie nodes rebuild simultaneously?"
-  "Stagger rebuilds with a <span class=\"hl-blue\">random jitter</span> of 0–15 minutes. In a 10-node cluster, rebuilds are spread across 10 non-overlapping windows. A <strong>Redis distributed lock</strong> (background mutex) ensures at most 1–2 nodes rebuild simultaneously — the others serve the current trie while waiting. This caps the number of S3 download streams and prevents synchronized CPU spikes."
+  "How do you handle a trie server going down during peak traffic?"
+  "Each server has a full copy of the trie. The load balancer routes around the failed server in ~30 seconds. A replacement needs ~60 seconds to load the trie from S3. Keep N+1 headroom so the remaining servers can absorb the traffic."
+  "What if the trie grows beyond 1.5 GB?"
+  "At 5 GB, rebuild takes 3-4 minutes instead of 60 seconds, widening the stale-data window. Fix: shard the trie by prefix range (A-M on one set of servers, N-Z on another) to keep each shard under 1.5 GB."
+  "How do you avoid a thundering herd when all servers rebuild at once?"
+  "Stagger rebuilds with random jitter (0-15 minutes). A Redis lock ensures only 1-2 servers rebuild at the same time. The rest keep serving the current trie."
 }}
+
+  </div>
+</details>
 
 {{goodToKnow "Multi-region trie distribution: push snapshots to regional S3 buckets; accept 1-2 hours staleness between regions" "If trie grows beyond 5GB, shard by prefix range (A-M / N-Z) to keep rebuild times under 60 seconds"}}
 
@@ -781,12 +792,14 @@ Each server needs enough RAM for the trie: <span class="hl">1.5 GB per language<
 
 {{phase 11 "Failure Modes" "4 min"}}
 
-{{say `Autocomplete is non-critical — degraded suggestions are better than a broken search box:
+{{say `Autocomplete is not critical — bad suggestions are better than a broken search box:
 <ul>
-  <li><strong>Always return something</strong> in under <span class="hl">200ms</span>, even if stale, globally generic, or empty</li>
-  <li><span class="hl-red">Never let autocomplete block search</span> — users can always submit a query manually</li>
-  <li>Graceful degradation order: Redis cache → in-memory trie → Elasticsearch fallback → empty []</li>
+  <li><strong>Always return something</strong> in under <span class="hl">200ms</span>, even if the results are stale or empty</li>
+  <li><span class="hl-red">Never let autocomplete block search</span> — users can always type and submit manually</li>
+  <li>Degradation order: Redis cache → in-memory trie → Elasticsearch fallback → empty list</li>
 </ul>`}}
+
+<p>Each layer falls back to the next. If {{fundLink "storage/redis" "Redis"}} is down, we hit the trie directly. If the trie is down, {{fundLink "storage/elasticsearch" "Elasticsearch"}} takes over.</p>
 
 {{diagram "sa-failure-modes"}}
 
@@ -800,12 +813,12 @@ Each server needs enough RAM for the trie: <span class="hl">1.5 GB per language<
   (row "CDN outage" "All traffic hits origin" "290K QPS to 50 replicas — 5.8K QPS each" "Marginal — within capacity headroom")
 )}}
 
-{{think "What's the blast radius if the hot-path trending updater writes bad data to Redis?"
-  (whyNot "no circuit breaker on trending writes" "A bug in the trending detector could inject garbage queries into suggestions for all users. Without a circuit breaker, this would propagate globally in 60 seconds.")
-  (how "circuit breaker" "The trending job validates: query length &lt; 200 chars, no control characters, count &lt; 10M (sanity bound). If validation fails, it logs and skips the write. The trie falls back to hourly rebuild data. Monitoring alerts on 'trending writes rejected > 100/min'.")
+{{think "What if the trending updater writes bad data to Redis?"
+  (whyNot "no validation on trending writes" "A bug could inject garbage queries into suggestions for all users. Without a check, bad data propagates globally in 60 seconds.")
+  (how "circuit breaker" "The trending job validates each entry: query under 200 chars, no special characters, count under 10M. Invalid entries are skipped and logged. If rejections spike above 100/min, we alert on-call.")
 }}
 
-{{hint "Elasticsearch fallback SLA" "Elasticsearch fallback handles cold-path misses and full trie outages. Size the ES cluster for 30K QPS (10% of total traffic). At that QPS, use 5 ES nodes with 16 vCPU each. Keep the autocomplete index warm with a background ping job."}}
+{{hint "Elasticsearch fallback sizing" "Size the Elasticsearch cluster for 30K QPS (10% of total traffic) — 5 nodes with 16 vCPU each. Keep the autocomplete index warm with a background health-check job so it's ready when needed."}}
 
 {{triggerQs "Failure Mode Questions"
   "How do you detect trie corruption vs a legitimate trie that just has different results?"

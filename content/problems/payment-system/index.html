@@ -655,25 +655,34 @@
 
 {{hint "circuit breaker for bank APIs" "If the bank API returns 5xx on >20% of requests in 1 minute, open the circuit — fail new authorizations immediately. Re-probe every 30s. Prevents cascading timeouts."}}
 
-{{mustKnow "Sweeper job queries payments stuck in 'pending' >30s and resumes the Saga from the last confirmed step" "Daily reconciliation: compare internal ledger totals with bank statement — every discrepancy gets a ticket" "Circuit breaker for bank APIs: open at >20% 5xx rate in 1-minute window, re-probe every 30s" "Database failover via Patroni in <30s; multi-region active-passive with 15-minute RPO"}}
+{{mustKnow "Sweeper job finds stuck payments (>30s in pending) and resumes the Saga" "Daily reconciliation: ledger vs bank statement — every discrepancy gets a ticket" "Circuit breaker for bank APIs: trip at >20% error rate, re-probe every 30s" "DB failover via Patroni in <30s; active-passive across regions with 15-min RPO"}}
 
 {{phase 11 "Monitoring & SLAs" "5 min"}}
 
-{{say `Three <strong>SLOs</strong> (Service Level Objectives — specific, measurable targets that define acceptable system performance) that define success for a payment system:
+{{say `Three SLOs (Service Level Objectives) that define success:
 <ul>
-  <li><strong>Payment success rate</strong>: &gt;<span class="hl">99.5%</span> of initiated payments reach <code>succeeded</code> or <code>failed</code> (not stuck in pending)</li>
-  <li><strong>P99 latency</strong> (99th percentile — the slowest 1% of requests; this is the latency your worst-performing users experience): &lt;<span class="hl">2 seconds</span> from POST /payments to final status available</li>
-  <li><strong>Availability</strong>: <span class="hl">99.999%</span> — API responds to requests (even if returning cached failure)</li>
-  <li>Alert on: fraud decline rate spike &gt;2% (card testing attack), P99 &gt;1.5s, pending payments older than 60s</li>
+  <li><strong>Payment success rate</strong>: &gt;<span class="hl">99.5%</span> of payments reach a final state (<code>succeeded</code> or <code>failed</code>), not stuck in pending</li>
+  <li><strong>P99 latency</strong>: &lt;<span class="hl">2 seconds</span> from POST /payments to final status</li>
+  <li><strong>Availability</strong>: <span class="hl">99.999%</span> — API responds (even if returning a cached failure)</li>
+  <li>Alert on: fraud decline spike &gt;2%, P99 &gt;1.5s, pending payments older than 60s</li>
 </ul>`}}
 
 {{diagram "pay-monitoring"}}
 
-{{think "What metrics are uniquely important for payments vs generic web services?"
-  (whyNot "only monitoring HTTP error rate and latency" "A payment system can have 100% HTTP 200s and still be losing money — if fraud is bypassed, if double charges happen, if settlements aren't batching. Business metrics (settlement success rate, chargeback rate, fraud rate) are as important as technical metrics.")
-  (how "golden signals for payments" "Four payment-specific signals: (1) authorization rate (approvals/attempts), (2) chargeback rate (disputes/captures, should be <0.1%), (3) settlement lag (time from capture to bank confirmation), (4) idempotency key hit rate (detects retry storms).")
-  (whatIf "chargeback rate exceeds 1%" "Visa and Mastercard impose fines and can terminate card processing rights if chargeback rate exceeds 1% for 3 consecutive months. At 1000 TPS, 1% = 10 chargebacks/second. Automated fraud model tuning kicks in: lower the score threshold from 30 to 20.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Payment-specific metrics beyond HTTP errors</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "What metrics matter for payments beyond standard web monitoring?"
+  (whyNot "only monitoring HTTP errors and latency" "A payment system can return 100% HTTP 200s and still lose money — bypassed fraud, double charges, unbatched settlements. Business metrics matter as much as technical ones.")
+  (how "golden signals for payments" "Four signals: (1) authorization rate (approvals/attempts), (2) chargeback rate (should be <0.1%), (3) settlement lag, (4) idempotency key hit rate (detects retry storms).")
+  (whatIf "chargeback rate exceeds 1%" "Visa/Mastercard impose fines and can terminate your processing rights after 3 months. Automated response: lower the fraud score threshold from 30 to 20.")
 }}
+  </div>
+</details>
 
 {{hint "distributed tracing across the Saga" "Each payment gets a trace_id that propagates through all Saga steps — API Gateway → Payment Service → Fraud Service → Ledger Service → Settlement Service. One Datadog trace shows the full payment lifecycle. Critical for debugging the 0.01% of payments that get stuck."}}
 

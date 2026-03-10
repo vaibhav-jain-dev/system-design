@@ -798,11 +798,11 @@ def get_trending_hashtags(top_n: int = 50) -> list:
   (whatIf "a Redis primary node dies during peak traffic" "Redis Cluster promotes a replica in 1-10 seconds. During the gap, fanout workers retry with backoff, and timeline reads fall back to Cassandra. Latency spikes from under 5ms to ~50ms for affected users — visible but not catastrophic.")
 }}
 
-{{avoid "Don't skip read-time fallback for cold cache. If Redis is down or cold, the Timeline Service must fall back to Cassandra — without this, a Redis restart would mean 300M users see empty feeds until all timelines are rehydrated."}}
+{{avoid "Always have a Cassandra fallback for cold cache. Without it, a Redis restart means 300M users see empty feeds until all timelines are rebuilt."}}
 
-{{avoid "Timeline inconsistency during Kafka lag — don't ignore this. If fanout workers are 30s behind, some followers see a tweet and others don't. Mitigation: read repair — if a user requests a timeline and their Redis sorted set is > 60s stale (detected via a watermark key), force-refresh from Cassandra before returning. This trades latency for consistency during lag windows."}}
+{{avoid "Don't ignore timeline inconsistency during Kafka lag. If fanout is 30s behind, some followers see a tweet and others don't. Fix: read repair — if the Redis sorted set is >60s stale (check a watermark key), refresh from Cassandra before returning."}}
 
-{{avoid "Cache stampede on a viral tweet. When a tweet goes viral (10M likes in 1 hour), every timeline request fetches the tweet object from Redis. If the key expires at the same time, 10K requests simultaneously hit Cassandra — thundering herd. Mitigation: request collapsing (singleflight pattern) — first request fetches, all concurrent requestors wait for the same result. Also use probabilistic early expiration: refresh the key before it expires based on P = exp(-delta * beta / remaining_ttl)."}}
+{{avoid "Cache stampede on viral tweets. When a hot tweet's cache key expires, thousands of requests hit Cassandra simultaneously. Fix: singleflight pattern (first request fetches, others wait for the same result) + probabilistic early expiration (refresh before TTL hits)."}}
 
 {{table "Sharding Strategy" (rows
   (row "Data" "Shard Key" "Method" "Notes")
