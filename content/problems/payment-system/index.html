@@ -617,32 +617,43 @@
   </div>
 </details>
 
-{{caveat "Never store CVV/CVV2 — it is illegal under PCI DSS, even encrypted. This is a hard rule that interviewers will test. CVV is purged from memory immediately after authorization."}}
+{{caveat "Never store CVV — illegal under PCI DSS, even encrypted. Interviewers will test this. Purge from memory immediately after authorization."}}
 
-{{mustKnow "Never store CVV — illegal under PCI DSS even encrypted; delete from memory after authorization" "Tokenization via HSM: real card number lives only inside hardware that will never export the key" "JS tokenization (e.g., Stripe.js) sends card directly to processor — merchant servers never touch raw card data" "Reducing PCI scope from SAQ D (300+ controls) to SAQ A (22 controls) by never handling raw card data"}}
+{{mustKnow "Never store CVV — illegal even encrypted; purge after authorization" "Tokenization via HSM: real card lives inside hardware that never exports the key" "Stripe.js sends card data directly to the processor — merchant servers never see it" "This drops PCI scope from SAQ D (300+ controls) to SAQ A (22 controls)"}}
 
 {{phase 10 "Failure Handling & Recovery" "5 min"}}
 
-{{say `Every external call can fail. Here's the failure budget and recovery strategy:
+{{say `Every external call can fail. Here's the recovery plan:
 <ul>
-  <li><strong>Bank API timeout</strong>: 3s timeout, 2 retries with exponential backoff. If all fail, mark payment <code>failed</code> — never leave it in <code>pending</code> indefinitely</li>
-  <li><strong>Payment stuck in processing</strong>: a sweeper job queries for payments &gt;30s in <code>pending</code> and resumes the Saga from the last confirmed step</li>
-  <li><strong>Kafka consumer lag</strong>: dead-letter queue for messages that fail 3× delivery attempts; ops alert if DLQ depth &gt;100</li>
-  <li><strong>Database primary failure</strong>: automatic failover to replica in <span class="hl">&lt;30s</span> via Patroni; app reconnects via PgBouncer</li>
-  <li><strong>Multi-region failover</strong>: active-passive with <span class="hl">15-minute RPO</span> — acceptable for payments (no data loss for committed transactions)</li>
+  <li><strong>Bank API timeout</strong>: 3s timeout, 2 retries with backoff. If all fail, mark payment <code>failed</code> — never leave it stuck in <code>pending</code></li>
+  <li><strong>Stuck payments</strong>: a sweeper job finds payments in <code>pending</code> for &gt;30s and resumes the Saga from the last completed step</li>
+  <li><strong>Kafka failures</strong>: dead-letter queue after 3 failed delivery attempts; alert if DLQ depth &gt;100</li>
+  <li><strong>DB primary down</strong>: automatic failover to replica in <span class="hl">&lt;30s</span> via Patroni; app reconnects through PgBouncer</li>
+  <li><strong>Region failure</strong>: active-passive with <span class="hl">15-minute RPO</span> — no data loss for committed transactions</li>
 </ul>`}}
 
 {{diagram "pay-failure-handling"}}
 
+<p>For bank APIs, use a {{fundLink "distributed/circuit-breaker" "circuit breaker"}}: if &gt;20% of requests fail in a 1-minute window, stop calling and fail fast. Re-probe every 30s.</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">How the sweeper job recovers stuck payments</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{think "The sweeper job is the most important recovery mechanism — it closes the gap between 'we think it succeeded' and 'we know it succeeded'."
-  (whyNot "relying on client retries alone for recovery" "Mobile clients go offline. Users close their browser. The client may never retry — the payment sits in pending forever. The sweeper is server-side and operates independently of client behavior.")
-  (how "sweeper implementation" "A scheduled job (every 30 seconds) runs: SELECT * FROM payments WHERE status='pending' AND created_at < NOW() - INTERVAL '30 seconds'. For each result, check the external payment processor's status API. Update the local record. If the processor has no record, void any auth and mark failed.")
-  (whatIf "the sweeper and a client retry run simultaneously for the same payment" "Idempotency keys prevent double-processing. The sweeper uses the same idempotency key as the original payment. Redis SET NX will return 0 for the second attempt — whichever arrives second sees the cached response and does nothing.")
+  (whyNot "relying on client retries alone" "Mobile clients go offline. Users close the browser. The payment sits in pending forever. The sweeper runs server-side, independent of client behavior.")
+  (how "sweeper implementation" "Every 30 seconds: SELECT payments WHERE status='pending' AND created_at < NOW() - 30s. For each, check the processor's status API. If the processor has no record, void the auth and mark failed.")
+  (whatIf "sweeper and client retry run simultaneously" "Idempotency keys prevent double-processing. The sweeper uses the same key. Redis SET NX returns 0 for the second attempt — whoever arrives second does nothing.")
 }}
+  </div>
+</details>
 
-{{hint "reconciliation is not optional" "Daily reconciliation: compare internal ledger totals with bank statement CSV. Every discrepancy gets a ticket. At scale, even a 0.001% error rate is thousands of dollars per day. Stripe runs reconciliation every hour, not daily."}}
+{{hint "reconciliation is not optional" "Compare ledger totals vs bank statements daily (Stripe does it hourly). Even a 0.001% error rate is thousands of dollars/day at scale. Every discrepancy gets a ticket."}}
 
-{{hint "circuit breaker for bank APIs" "If the bank API returns 5xx errors on >20% of requests in a 1-minute window, open the circuit — fail all new authorizations immediately without calling the API. Re-probe every 30 seconds. This prevents cascading timeouts from consuming all threads."}}
+{{hint "circuit breaker for bank APIs" "If the bank API returns 5xx on >20% of requests in 1 minute, open the circuit — fail new authorizations immediately. Re-probe every 30s. Prevents cascading timeouts."}}
 
 {{mustKnow "Sweeper job queries payments stuck in 'pending' >30s and resumes the Saga from the last confirmed step" "Daily reconciliation: compare internal ledger totals with bank statement — every discrepancy gets a ticket" "Circuit breaker for bank APIs: open at >20% 5xx rate in 1-minute window, re-probe every 30s" "Database failover via Patroni in <30s; multi-region active-passive with 15-minute RPO"}}
 

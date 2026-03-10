@@ -309,6 +309,13 @@
 
 {{diagram "notif-delivery-guarantee"}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Delivery Service with Retry & Dedup</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{code "python" `class NotificationDeliveryService:
     def send_with_retry(self, notification: Notification, max_retries=3):
         """At-least-once delivery with exponential backoff"""
@@ -334,15 +341,26 @@
                     dlq.publish(notification)
                     db.update_status(notification.id, "failed")
                     raise`}}
+  </div>
+</details>
 
 {{hint "why 24-hour dedup TTL?" "FCM's own deduplication window is 14 days (by collapse_key). But within our system, the dedup window only needs to cover our retry period — max 3 retries × max 8s total = about 15 seconds. Using 24h gives a comfortable buffer for rare edge cases (Kafka consumer restart, delayed retry) without excessive Redis memory use. Key size: SHA256(notification_id + channel) = 64 chars × 50B overhead ≈ 5.7GB for 100M daily notifications."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Delivery Guarantee Questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Delivery guarantee questions"
   "What's in the Dead Letter Queue (DLQ) and how is it handled?"
   "DLQ contains notifications that failed after all retries — usually due to: provider extended outage, invalid device token (app uninstalled), permanent user opt-out detected mid-delivery. Operations team monitors DLQ size. On provider recovery, notifications are replayed (with freshness check — don't send a 3-day-old marketing email). Invalid token errors trigger token cleanup in the device_tokens table."
   "How do you handle delivery receipts from FCM/APNs?"
   "FCM: push result includes per-token status (success, invalid_registration, not_registered). Parse response → remove invalid tokens from device_tokens table. APNs: HTTP/2 stream response per push with error code. apns-id header for correlation. Both providers have no guaranteed 'delivered to device' receipt — only 'delivered to provider's queue.' Actual device delivery is unconfirmable in most cases."
 }}
+  </div>
+</details>
 
 {{mustKnow "Redis dedup with SET NX + 24h TTL prevents double-sends — check before every provider API call" "Exponential backoff with jitter (1s, 2s, 4s) prevents thundering herd on provider recovery" "DLQ captures permanently failed notifications — replay with freshness check (never send a 3-day-old marketing email)" "FCM/APNs only confirm delivery to provider queue, not to the actual device — true delivery is unconfirmable"}}
 

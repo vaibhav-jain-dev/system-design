@@ -516,12 +516,23 @@ def dispatch(ride_id, ranked_drivers):
 
 {{hint "why acceptance rate in scoring" "A driver with 80% acceptance takes ~1.25 offers to match. One with 20% takes 5 offers — wasting 4x the offer slots and slowing matching for everyone. Including acceptance rate in the score pushes drivers to only go online when they actually want to drive."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Matching Follow-up Questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+
 {{triggerQs "Matching algorithm questions"
   "How do you prevent the same driver from being offered the same ride twice?"
-  "The matching service keeps a per-ride set of already-offered driver IDs in Redis (SADD ride:{id}:offered driver_id). Before scoring, we filter out any driver in this set. TTL matches the ride's max wait time (15 minutes)."
-  "What prevents two matching service instances from offering the same driver simultaneously?"
-  "Before sending an offer, matching service does SET NX driver:{id}:locked 1 EX 20 in Redis. If another instance already holds the lock, we skip that driver. This prevents double-offering without a distributed lock on the ride itself."
+  "Keep a per-ride set in Redis (SADD ride:{id}:offered driver_id). Before scoring, filter out any driver already in the set. TTL matches max wait time (15 minutes)."
+  "What prevents two matching workers from offering the same driver at the same time?"
+  "Before sending an offer, do SET NX driver:{id}:locked 1 EX 20 in Redis. NX means 'set only if key doesn't exist' — atomic, so only one worker wins. Lock auto-expires after 20s if the worker crashes."
 }}
+
+  </div>
+</details>
 
 {{caveat "Do not suggest the globally optimal Hungarian algorithm — it's O(N^3) and requires a global view of all rides and drivers. Greedy weighted scoring is the correct interview answer for real-time matching."}}
 

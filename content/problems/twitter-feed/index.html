@@ -684,71 +684,84 @@ Ranking is a layer on top of retrieval — same underlying data, just re-ordered
 
 {{diagram "tf-trending-topics"}}
 
-{{code "python" `# Trending topics: sliding 1-hour window with Redis sorted sets
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Trending Topics Implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{code "python" `# Sliding 1-hour window with 5-minute Redis sorted set buckets
 import time
 
 def record_hashtag_mention(hashtag: str):
-    """Called by Tweet Service for each hashtag in new tweet."""
     now = time.time()
-    window_key = f"trending:{int(now // 300)}"  # 5-minute bucket
-
-    # Increment this hashtag's count in the current 5-min bucket
+    window_key = f"trending:{int(now // 300)}"  # 5-min bucket
     redis.zincrby(window_key, 1, hashtag)
-    redis.expire(window_key, 3600)  # Keep for 1 hour
-
+    redis.expire(window_key, 3600)
 
 def get_trending_hashtags(top_n: int = 50) -> list:
-    """Aggregate last 12 × 5-min buckets = 1 hour window."""
     now = time.time()
     current_bucket = int(now // 300)
 
-    # ZUNIONSTORE across the last 12 buckets
-    bucket_keys = [
-        f"trending:{current_bucket - i}"
-        for i in range(12)
-    ]
-
+    # Union last 12 buckets (= 1 hour)
+    bucket_keys = [f"trending:{current_bucket - i}" for i in range(12)]
     result_key = f"trending:merged:{current_bucket}"
     redis.zunionstore(result_key, bucket_keys, aggregate="SUM")
-    redis.expire(result_key, 300)  # Cache for 5 minutes
+    redis.expire(result_key, 300)
 
-    # Return top N hashtags by count
     return redis.zrevrange(result_key, 0, top_n - 1, withscores=True)
+# → [("#WorldCup", 142500.0), ("#AI", 98300.0), ...]`}}
+  </div>
+</details>
 
-
-# Example output:
-# [("#WorldCup", 142500.0), ("#AI", 98300.0), ("#TechNews", 45200.0), ...]`}}
-
-{{hint "5-minute buckets vs 1-second buckets" "One key per second for 3600 seconds = 3600 Redis keys per metric. Impractical. 5-minute buckets = 12 keys per hour. ZUNIONSTORE over 12 keys is cheap and gives 1-hour trending with 5-minute granularity — sufficient for trending detection."}}
+{{hint "5-minute buckets vs 1-second buckets" "1-second buckets = 3600 Redis keys per hour — impractical. 5-minute buckets = 12 keys. ZUNIONSTORE over 12 keys is cheap and gives good enough granularity for trending."}}
 
 {{diagram "tf-search-indexing"}}
 
-{{code "yaml" `# Elasticsearch tweet index mapping
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Elasticsearch Index Mapping</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{code "yaml" `# Elasticsearch tweet index
 {
   "mappings": {
     "properties": {
-      "tweet_id":    { "type": "keyword" },
-      "author_id":   { "type": "keyword" },
-      "text":        { "type": "text", "analyzer": "english" },
-      "hashtags":    { "type": "keyword" },
-      "created_at":  { "type": "date" },
-      "like_count":  { "type": "integer" },
+      "tweet_id":      { "type": "keyword" },
+      "author_id":     { "type": "keyword" },
+      "text":          { "type": "text", "analyzer": "english" },
+      "hashtags":      { "type": "keyword" },
+      "created_at":    { "type": "date" },
+      "like_count":    { "type": "integer" },
       "retweet_count": { "type": "integer" }
     }
   }
 }
+# Sync: Cassandra → Kafka → ES consumer (<5s lag)
+# Only index non-deleted, non-spam tweets`}}
+  </div>
+</details>
 
-# Sync flow: Cassandra → Kafka → ES consumer
-# Kafka consumer reads tweet_created events, writes to ES
-# Lag target: < 5 seconds for search index freshness
-# Index only non-deleted, non-spam tweets (filtered by moderation service)`}}
+{{fundLink "storage/elasticsearch" "Elasticsearch"}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Trending & Search Interview Questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Phase 10 interview triggers"
-  "How do you prevent spam hashtags from dominating trending?"
-  "Two layers: first, the trending counter only counts tweets from non-spam accounts (moderation service maintains a blocklist; spam tweets are not counted). Second, apply velocity damping: a hashtag that jumps from 0 to 100K mentions in 5 minutes is anomalous — flag for human review and optionally throttle its trending score. Twitter also applies geographic normalization so a local hashtag doesn't trend globally."
-  "How do you make tweet search feel instant given ES indexing lag?"
-  "For the author's own tweets, return results directly from Cassandra (strong consistency). For general search, ES handles it. The 5-second indexing lag is invisible to users in practice — they don't search for tweets posted in the last 5 seconds. For breaking news search, prioritize higher-engagement tweets which are indexed first due to Kafka partition ordering."
+  "How do you prevent spam from gaming trending?"
+  "Two layers: (1) only count tweets from non-spam accounts, (2) velocity damping — a hashtag jumping from 0 to 100K in 5 minutes is flagged for review. Also apply geographic normalization so local hashtags don't trend globally."
+  "How does search feel instant with 5s ES indexing lag?"
+  "For your own tweets, return results from Cassandra (strong consistency). For general search, 5s lag is invisible — nobody searches for tweets posted 5 seconds ago. Breaking news tweets get indexed first due to Kafka ordering."
 }}
+  </div>
+</details>
 
 {{collapseSection "Elasticsearch Index Mapping Details" "The tweet index uses 'english' analyzer for the text field (stemming, stop words). Hashtags are keyword type for exact match. like_count and retweet_count are integers for boosting popular tweets in search results. Sync flow: Cassandra → Kafka → ES consumer with <5s lag target. Only non-deleted, non-spam tweets are indexed (filtered by moderation service)."}}
 
@@ -758,7 +771,12 @@ def get_trending_hashtags(top_n: int = 50) -> list:
 
 {{phase 11 "Scaling & Failure Modes" "5 min"}}
 
-{{say "horizontal scaling for each layer and the top failure modes with mitigations. Three highest-risk failure modes: Redis timeline cache failure, Cassandra partition hotspot, and fanout worker backlog during viral events."}}
+{{say `Three highest-risk failure modes to address:
+<ul>
+  <li><strong>Redis timeline cache failure</strong> — users see empty feeds without a fallback</li>
+  <li><strong>Cassandra partition hotspot</strong> — viral tweets concentrate writes on one node</li>
+  <li><strong>Fanout worker backlog</strong> — viral events queue up millions of writes</li>
+</ul>`}}
 
 {{diagram "tf-scaling"}}
 
@@ -775,9 +793,9 @@ def get_trending_hashtags(top_n: int = 50) -> list:
   (row "Elasticsearch" "Add shard replicas for read scale" "Index lag during tweet storms")
 )}}
 
-{{think "Redis cluster sharding is the most operationally complex piece."
-  (whyNot "use a single Redis instance for all timelines" "1.9TB of timeline data in a single Redis instance requires a server with > 2TB RAM — costly, and a single point of failure. Redis Cluster shards by key hash slot: user:12345:timeline hashes to slot 4501, routed to the owning node. Transparent to clients using cluster-aware client libraries.")
-  (whatIf "the Redis cluster loses a primary node during peak traffic" "Redis Cluster promotes a replica to primary within 1-10 seconds (cluster-node-timeout). During this window, writes to that shard return CLUSTERDOWN errors. The fanout worker retries with exponential backoff. Timeline reads for affected users fall back to Cassandra cold-start query. Latency spikes from &lt;5ms to ~50ms for affected users — visible but not catastrophic.")
+{{think "Redis cluster sharding is the trickiest operational piece."
+  (whyNot "a single Redis instance for all timelines" "1.9TB needs a 2TB+ RAM server — expensive and a single point of failure. Redis Cluster shards by key hash: user:12345:timeline goes to a specific shard node. Transparent to clients with cluster-aware libraries.")
+  (whatIf "a Redis primary node dies during peak traffic" "Redis Cluster promotes a replica in 1-10 seconds. During the gap, fanout workers retry with backoff, and timeline reads fall back to Cassandra. Latency spikes from under 5ms to ~50ms for affected users — visible but not catastrophic.")
 }}
 
 {{avoid "Don't skip read-time fallback for cold cache. If Redis is down or cold, the Timeline Service must fall back to Cassandra — without this, a Redis restart would mean 300M users see empty feeds until all timelines are rehydrated."}}

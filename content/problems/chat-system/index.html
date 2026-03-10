@@ -801,7 +801,7 @@ response = dynamodb.query(
 
 {{diagram "cs-scaling"}}
 
-{{hint "why consistent hashing for WebSocket servers?" "When a WebSocket server is added or removed, we want to redistribute minimum connections. &lt;span class='hl-red'>Random assignment means a rolling deploy reconnects everyone.&lt;/span> &lt;span class='hl-blue'>Consistent hashing&lt;/span> means only &lt;span class='hl'>1/N connections&lt;/span> need to move when one server changes. With virtual nodes, load stays balanced."}}
+{{hint "why consistent hashing for WebSocket servers?" "When a server is added or removed, we want to move as few connections as possible. &lt;span class='hl-red'>Random assignment means a rolling deploy reconnects everyone.&lt;/span> Consistent hashing means only &lt;span class='hl'>1/N connections&lt;/span> move per server change. Virtual nodes keep the load balanced."}}
 
 {{table "Scaling by Component" (rows
   (row "Component" "Strategy" "Numbers")
@@ -822,43 +822,69 @@ response = dynamodb.query(
   <li><small>NLB deregistration delay (default 300s) handles this automatically if the NLB target group is configured correctly</small></li>
 </ul>`}}
 
-{{think "Multi-region is essential for a global chat service — users expect sub-200ms message delivery."
-  (how "region-based consistent hashing for WebSocket servers" "Users are assigned to a WebSocket server using consistent hashing on user_id mod virtual_nodes. The hash ring has 5,000 real servers × 150 virtual nodes = 750K points. When a server is added (scale-out event), only 1/5000 of users need to move — ~40,000 connections reassigned vs 200M for random assignment. The session registry update is atomic: Redis HSET user_id → new_server_ip, TTL=5min.")
-  (how "multi-region message routing" "Each region has its own Kafka cluster and WebSocket fleet. If sender is in US-East and receiver is in EU-West, the message flows: sender → US-East Kafka → cross-region replicator → EU-West Kafka → EU-West Chat Service → receiver. Cross-region latency adds ~80ms (US-East to EU-West). Total delivery: ~150ms P99 (99th percentile — the slowest 1% of requests).")
-  (whatIf "an entire region goes down" "DNS failover (Route 53 health checks) redirects users to the nearest healthy region. The user's WebSocket reconnects to a server in the new region. The new server queries DynamoDB Global Tables (multi-region replicated) for missed messages. Recovery time: ~30 seconds for DNS propagation + ~2 seconds for WebSocket reconnect.")
-  (whyNot "single region with CDN" "CDN helps for static content and media, but chat messages are dynamic and personalized. You cannot cache a real-time message stream. The only way to reduce latency for a user in Tokyo is to have servers in Tokyo.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Multi-Region Architecture Details</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "Multi-region is essential — users expect sub-200ms message delivery."
+  (how "consistent hashing for WebSocket servers" "Hash ring: 5,000 servers x 150 virtual nodes = 750K points. Adding a server only moves ~40,000 connections (1/5000) vs 200M for random assignment. Session registry update is atomic: Redis HSET user_id -> new_server_ip, TTL=5min.")
+  (how "multi-region message routing" "Each region has its own Kafka cluster and WebSocket fleet. Cross-region message: sender -> US-East Kafka -> replicator -> EU-West Kafka -> receiver. Adds ~80ms latency. Total: ~150ms P99.")
+  (whatIf "an entire region goes down" "DNS failover (Route 53) redirects to the nearest healthy region. WebSocket reconnects in ~2s. New server queries DynamoDB Global Tables for missed messages. Total recovery: ~30s.")
+  (whyNot "single region with CDN" "CDN helps for media, but chat messages are dynamic and personalized. You can't cache a real-time message stream. The only way to reduce latency for a user in Tokyo is to have servers in Tokyo.")
 }}
+  </div>
+</details>
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Rolling Deploy & Kafka Back-Pressure Questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Scaling Questions"
-  "What happens during a rolling deploy of WebSocket servers — do all connected users lose their connections?"
-  `<strong>Connection draining</strong> prevents mass disconnection. The deploy sequence per server:
+  "What happens during a rolling deploy — do users lose connections?"
+  `<strong>Connection draining</strong> prevents mass disconnection:
 <ul>
-  <li>Mark server as <span class='hl-blue'>draining</span> in Redis — Load balancer stops routing new connections to it</li>
-  <li>Wait <span class='hl'>60 seconds</span> — heartbeat timeout is 30s, so clients that miss 2 heartbeats reconnect naturally; most connections drain within 40s</li>
-  <li>Force-close remaining connections; clients reconnect in <span class='hl'>2-3 seconds</span></li>
-  <li>With <span class='hl'>5,000 servers</span> and one server deploying every 2 minutes: only <span class='hl'>~40,000 clients</span> reconnect at any given time — spread over the 2-min window, that's <span class='hl'>~333 reconnects/sec</span>, well within Redis capacity</li>
-  <li><span class='hl-red'>No messages are lost</span> — reconnection triggers an offline-queue sync, delivering any messages that arrived during the ~3s reconnect window</li>
+  <li>Mark server as <span class='hl-blue'>draining</span> in Redis — no new connections routed to it</li>
+  <li>Wait <span class='hl'>60 seconds</span> — most connections drain naturally (heartbeat timeout is 30s)</li>
+  <li>Force-close remaining; clients reconnect in <span class='hl'>2-3 seconds</span></li>
+  <li>With 5,000 servers deploying one every 2 minutes: only ~40,000 reconnects at a time = <span class='hl'>~333/sec</span></li>
+  <li><span class='hl-red'>No messages lost</span> — reconnection triggers offline-queue sync</li>
 </ul>`
-  "How does Kafka handle back-pressure when message volume spikes to 700K msgs/sec?"
-  `Kafka's partitioned architecture absorbs spikes with no producer-side back-pressure:
+  "How does Kafka handle 700K msgs/sec spikes?"
+  `Kafka absorbs spikes without producer back-pressure:
 <ul>
-  <li><span class='hl'>10,000 partitions</span> across <span class='hl'>100 brokers</span> = 100 partitions/broker; each broker handles ~7,000 msgs/sec at steady state</li>
-  <li>Producers use <strong>async batching</strong> (<code>linger.ms=5</code>, <code>batch.size=64KB</code>) — at 700K msgs/sec, batching reduces broker round trips by <span class='hl'>~20x</span></li>
-  <li>During a spike, Kafka consumers (Chat Service) fall behind — messages accumulate in partitions (consumer lag). Chat Service auto-scales horizontally: new pods claim idle partitions within <span class='hl'>30 seconds</span></li>
-  <li><span class='hl-red'>Back-pressure risk</span>: if Chat Service can't keep up and lag grows beyond <span class='hl'>60 seconds</span>, the delivery <strong>SLA</strong> (Service Level Agreement — a contract guaranteeing message delivery within a time bound) is breached — alert on consumer lag, not throughput</li>
-  <li><small>Kafka retention: 7 days. Even if consumers are down for 6 days, no messages are lost.</small></li>
+  <li><span class='hl'>10,000 partitions</span> across <span class='hl'>100 brokers</span> — each broker handles ~7,000 msgs/sec steady state</li>
+  <li>Async batching reduces broker round trips by <span class='hl'>~20x</span></li>
+  <li>During spikes, consumers fall behind (consumer lag). Chat Service auto-scales: new pods claim partitions in <span class='hl'>30 seconds</span></li>
+  <li><span class='hl-red'>Alert on consumer lag > 60 seconds</span>, not throughput — lag means delivery SLA is breached</li>
 </ul>`
 }}
+  </div>
+</details>
 
 {{diagram "cs-multi-device"}}
 
-{{collapseSection "Multi-Region Deployment Details" `<ul>
-  <li><strong>Per-region stack:</strong> WebSocket fleet + Chat Service + Kafka cluster + DynamoDB replica. Each region is fully self-contained for local users</li>
-  <li><strong>Cross-region message routing:</strong> Kafka MirrorMaker 2 replicates topics between regions with ~80-120ms lag (US-East to EU-West)</li>
-  <li><strong>DynamoDB Global Tables:</strong> Multi-region replication with ~1 second lag, last-writer-wins conflict resolution. Messages never conflict (unique Snowflake IDs). Read receipts use LWW correctly (latest read position wins)</li>
-  <li><strong>DNS failover:</strong> Route 53 health checks, latency-based routing. Regional failure recovers in ~30s DNS propagation + ~2s WebSocket reconnect</li>
-  <li><strong>Graduated traffic ramp:</strong> Recovered region starts at 10% weight in DNS, ramps to 100% over 5 minutes to prevent thundering herd</li>
-</ul>`}}
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Multi-Region Deployment Details</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+<ul>
+  <li><strong>Per-region stack:</strong> WebSocket fleet + Chat Service + Kafka + DynamoDB replica. Each region is self-contained</li>
+  <li><strong>Cross-region routing:</strong> Kafka MirrorMaker 2 replicates with ~80-120ms lag</li>
+  <li><strong>DynamoDB Global Tables:</strong> ~1 second replication lag, last-writer-wins. Messages never conflict (unique Snowflake IDs)</li>
+  <li><strong>DNS failover:</strong> Route 53 health checks. Recovery: ~30s DNS + ~2s WebSocket reconnect</li>
+  <li><strong>Graduated ramp:</strong> Recovered region starts at 10% in DNS, ramps to 100% over 5 minutes</li>
+</ul>
+  </div>
+</details>
 
 {{caveat "Consistent hashing for WebSocket servers is critical during rolling deploys. Without it, a deploy of 5,000 servers reconnects all 200M clients. With consistent hashing, only 1/N connections move per server change."}}
 

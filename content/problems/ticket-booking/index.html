@@ -874,25 +874,25 @@ Key bot signal: <span class="hl-red">sub-second lock attempts across multiple ac
 {{deepQA "Critical Interview Questions" `
 <div class="dqa-item">
   <div class="dqa-q">How do you absolutely guarantee no double-booking at 100K concurrent users?</div>
-  <div class="dqa-a"><a class='dqa-link' href='/fund/storage/redis'>Redis</a> SET NX is atomic at the key level — guaranteed by <a class='dqa-link' href='/fund/storage/redis'>Redis</a>'s single-threaded command execution. Two concurrent SETNX on the same key: one returns 1 (acquired), one returns 0 (rejected). There is no race condition possible within a single Redis instance. With Redlock across 3 nodes, the lock is safe against single-node failures. Final safety net: Postgres SERIALIZABLE transaction on confirm prevents any write conflict that somehow slipped past Redis.</div>
+  <div class="dqa-a"><a class='dqa-link' href='/fund/storage/redis'>Redis</a> SET NX is atomic — two concurrent attempts on the same key: one wins, one loses. No race condition is possible. With Redlock across 3 nodes, we're safe against single-node failures. Final safety net: Postgres SERIALIZABLE transaction on confirm catches anything that slipped past Redis.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">What if the Redis lock says "available" but Postgres says "booked"?</div>
     <div class="dqa-sub-a">This can happen if the lock key expired (10min TTL) but the Postgres booking record was committed. This means the seat is booked in Postgres — Postgres is the source of truth. The confirm handler always re-reads Postgres: if a confirmed booking for those seat_ids + show_id already exists, it rejects the new confirm. The Redis stale state is irrelevant for post-lock decisions.</div>
     <div class="dqa-deep">
       <div class="dqa-deep-q">Why not use Postgres SERIALIZABLE transactions alone — do you really need Redis?</div>
-      <div class="dqa-deep-a">SERIALIZABLE transactions serialize conflict detection at commit time. During a rush, 10K concurrent transactions all trying to lock the same seat would queue on the same row — Postgres serializes them, first wins, rest abort. The retry storm under high contention causes 100K-seat-request load on Postgres. Redis SETNX handles 10K concurrent attempts in O(1) per attempt, O(log N) throughput — no retry storm, no DB connection exhaustion. Redis is the fast pre-filter; Postgres is the durable ledger.</div>
+      <div class="dqa-deep-a">With SERIALIZABLE, 10K concurrent transactions trying the same seat all queue on one row — first wins, rest abort and retry. The retry storm exhausts DB connections. Redis SETNX handles 10K concurrent attempts instantly, O(1) each, no retries. Redis is the fast pre-filter; Postgres is the durable ledger.</div>
     </div>
   </div>
 </div>
 <div class="dqa-item">
   <div class="dqa-q">Walk me through exactly what happens when 100K users hit "Book Now" for a show with 500 seats.</div>
-  <div class="dqa-a">Step 1: All 100K requests hit CloudFront (browsing state). Step 2: ~100K simultaneous POST /bookings/lock requests arrive at ALB — routed to Booking Service instances (auto-scaled). Step 3: Each request tries SET NX on its seat keys in <a class='dqa-link' href='/fund/storage/redis'>Redis</a>. ~500 succeed (one per seat). ~99,500 get 0 back and return 409. Step 4: 500 successful locks enter the payment flow. Step 5: 15% (~75) of those abandon — keys expire at 10 minutes, seats re-enter pool. Net result: 425 confirmed bookings, 75 seats recycled to waitlist.</div>
+  <div class="dqa-a">100K users hit "Book Now". Each POST /bookings/lock tries SET NX in <a class='dqa-link' href='/fund/storage/redis'>Redis</a>. ~500 succeed (one per seat), ~99,500 get rejected (409). The 500 winners enter payment. ~15% (~75) abandon — locks expire, seats return to the pool. Net result: ~425 confirmed bookings, 75 seats recycled to the waitlist.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">How does the system handle 100K simultaneous lock requests without crashing?</div>
-    <div class="dqa-sub-a">Booking Service is stateless — horizontally scaled to 50+ ECS tasks at peak. Each task processes requests independently, hitting <a class='dqa-link' href='/fund/storage/redis'>Redis</a> directly. Redis handles 200K+ SET NX commands/second on a single instance. With a 6-node cluster, theoretical throughput is 1.2M ops/sec. 100K concurrent requests arriving over 1-2 seconds = ~50K–100K ops/sec peak. Well within capacity.</div>
+    <div class="dqa-sub-a">Booking Service is stateless — scaled to 50+ ECS tasks at peak. Each hits <a class='dqa-link' href='/fund/storage/redis'>Redis</a> directly. A single Redis instance handles 200K+ SET NX/sec; a 6-node cluster handles 1.2M ops/sec. 100K requests over 1-2 seconds is well within capacity.</div>
     <div class="dqa-deep">
       <div class="dqa-deep-q">How do you prevent the 99,500 rejected users from retrying in a loop and amplifying load?</div>
-      <div class="dqa-deep-a">On 409 response, the client shows "Seats Unavailable — try other dates" and does NOT auto-retry. Exponential backoff with jitter applies only if the user manually selects different seats. Rate limiting at the API gateway: 10 lock attempts per user per show per 5 minutes. This converts the retry storm into at most 10x the initial load — manageable vs unbounded retries.</div>
+      <div class="dqa-deep-a">On 409, the client shows "Seats Unavailable" and does NOT auto-retry. Retry only happens if the user manually picks different seats. API gateway rate limit: 10 lock attempts per user per show per 5 minutes. This caps retry load at 10x — manageable vs unbounded retries.</div>
     </div>
   </div>
 </div>

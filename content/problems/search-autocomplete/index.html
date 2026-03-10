@@ -725,24 +725,24 @@ def blend_personal(
 
 {{triggerQs "Personalization Questions"
   "What if a user searches from two devices — do histories merge?"
-  "Yes. The history key is uid-based, not device-based. Both devices read and write the same Redis Hash. We use HINCRBY for atomic increments — concurrent writes from two devices don't corrupt data, they just add up."
-  "How do you handle a user who wants to clear their search history?"
-  "DELETE /user/history triggers a Redis DEL on the user's history key and adds all their queries to the blocklist for 30 days (so suggestions they cleared don't immediately reappear). Takes effect within 60 seconds (next CDN TTL expiry)."
+  "Yes. History is keyed by user ID, not device. Both devices read and write the same Redis Hash. Concurrent writes from two devices just add up — no data corruption."
+  "How do you handle clearing search history?"
+  "DELETE /user/history removes the Redis hash and adds all cleared queries to a blocklist for 30 days (so they don't immediately reappear as suggestions). Takes effect within 60 seconds."
 }}
 
-{{caveat "Personalization must never be included in the CDN cache key. Adding uid to cache keys creates 100M users x 1K prefixes = 100B cache entries — CDN becomes useless. Blend personalization at the service layer after the CDN cache hit."}}
+{{caveat "Never include user ID in the CDN cache key. That would create 100M users x 1K prefixes = 100B entries, making the CDN useless. Always blend personalization at the service layer after the CDN returns global results."}}
 
 {{mustKnow "Personalization blends user history into global top-10 — it never replaces global results" "0.3 boost multiplier for user-relevant queries; personalization capped at 10% of total score" "Blending is ephemeral (computed at query time, never stored) — prevents filter-bubble feedback loops" "History stored in Redis Hash per uid with 90-day TTL; HGETALL under 1ms for 100 entries"}}
 
 {{phase 10 "Scaling" "5 min"}}
 
-{{say `<span class="hl">290K peak QPS</span> with <span class="hl">&lt;100ms p99</span> requires three independent scaling axes:
+{{say `<span class="hl">290K peak QPS</span> with <span class="hl">&lt;100ms p99</span> — here's how each layer scales:
 <ul>
-  <li><strong>CDN</strong> absorbs <span class="hl">~90%</span> of traffic — top 10K prefixes cached at the edge</li>
-  <li><strong>Autocomplete service</strong> — stateless replicas; <span class="hl">50 replicas</span> at 6K QPS each for the remaining 10%</li>
-  <li><strong>Kafka pipeline</strong> — scale partition count for ingestion; 50 partitions handles 57K events/sec average</li>
+  <li><strong>CDN</strong> absorbs <span class="hl">~90%</span> of traffic — the top 10K prefixes are cached at edge servers worldwide</li>
+  <li><strong>Autocomplete service</strong> — <span class="hl">50 stateless replicas</span>, each handling 6K QPS with the full trie in memory</li>
+  <li><strong>Kafka pipeline</strong> — 50 partitions handle 57K events/sec for query logging</li>
 </ul>
-Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memory-optimized instances (r6g.2xlarge, 64GB RAM).`}}
+Each server needs enough RAM for the trie: <span class="hl">1.5 GB per language</span>. Use memory-optimized instances.`}}
 
 {{diagram "sa-scaling"}}
 
@@ -755,12 +755,12 @@ Memory constraint: <span class="hl">1.5 GB trie per language</span> — use memo
   (row "Trie rebuild (Flink)" "1M queries/min" "10 workers" "30 min to process 30-day window")
 )}}
 
-{{think "How do we handle multi-region distribution of the trie?"
-  (whyNot "single-region trie with global CDN" "CDN adds &lt;10ms for cached prefixes but uncached requests from APAC to us-east-1 add 150ms round-trip. For cold trie lookups this blows the 100ms budget.")
-  (whatIf "trie is stale in a remote region" "We accept 1-2 hours of staleness. The trie rebuild is pushed to regional S3 buckets simultaneously. Each region's autocomplete service downloads and hot-swaps independently. Trending queries use Redis replication with ~100ms cross-region lag.")
+{{think "How do we handle multiple geographic regions?"
+  (whyNot "single-region trie with global CDN" "CDN is fast for cached prefixes, but uncached requests from Asia to US add 150ms round-trip — that blows the 100ms budget.")
+  (whatIf "a remote region's trie is stale" "We accept 1-2 hours of staleness. Each region downloads trie snapshots from its own S3 bucket and swaps independently. Trending queries replicate via Redis with ~100ms cross-region lag.")
 }}
 
-{{hint "instance sizing" "Use memory-optimized instances (r6g.2xlarge, 64GB RAM). Each trie service holds 1.5GB per language × 3 languages = 4.5GB for the trie, plus 2GB for OS/runtime. 64GB allows 13 language tries per instance if needed."}}
+{{hint "instance sizing" "Use memory-optimized instances (r6g.2xlarge, 64GB RAM). Three language tries = 4.5GB + 2GB for OS overhead. 64GB gives plenty of headroom for growth."}}
 
 {{checklist "Scaling checklist" "CDN caches top 10K prefixes with 60s TTL — verify cache hit ratio > 88%" "Each trie service replica handles 6K QPS — load test before production" "Redis cluster has 3 nodes for HA — no single point of failure" "Kafka partitions match consumer parallelism — 50 partitions, 50 Flink workers" "Trie rebuild job completes in &lt;30 min — alert on >45 min runtimes" "Multi-region: push trie snapshots to regional S3 buckets within 5 min of rebuild"}}
 

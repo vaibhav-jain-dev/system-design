@@ -1311,10 +1311,19 @@ Error Responses:
   (row "Error Rate (5xx)"          "ALB"                  "> 0.1% for 5 minutes"                "Check ECS task health, DB connectivity")
 )}}
 
-{{think "The most critical alert is redirect success rate. A URL shortener that returns 500 errors means broken links everywhere — worse than not having a shortener at all. Cache hit ratio serves as an early warning indicator: if it drops below 60%, something is wrong with TTL configuration or cache invalidation logic."
-  (whyNot "just monitor error rate" "Error rate catches complete failures but misses degradations. A redirect that takes 500ms instead of 10ms is technically successful but functionally broken for users. Latency percentile monitoring (p95, p99) catches these silent degradations that error rate monitoring alone would miss.")
-  (how "set up dashboards" "Three dashboards: (1) Real-time operations: RPS, latency percentiles (p50/p95/p99), error rates, cache hit ratio. (2) Business metrics: new URLs/day, top domains shortened, geographic distribution, active users. (3) Cost tracking: daily spend by service (DynamoDB, CloudFront, ECS, Kinesis) with month-over-month trend lines.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Alert Design and Dashboard Setup</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "Most critical alert: redirect success rate. 500 errors mean broken links everywhere. Cache hit ratio is an early warning — below 60% means something is wrong with TTL config or invalidation."
+  (whyNot "just monitor error rate" "Error rate catches complete failures but misses degradations. A 500ms redirect is technically successful but broken for users. Latency percentiles (p95, p99) catch silent degradations.")
+  (how "set up dashboards" "Three dashboards: (1) Real-time: RPS, latency p50/p95/p99, error rates, cache hit ratio. (2) Business: new URLs/day, top domains, geo distribution. (3) Cost: daily spend by service with month-over-month trends.")
 }}
+  </div>
+</details>
 
 {{table "Distributed Tracing (AWS X-Ray)" (rows
   (row "Trace Point"        "What It Captures"                              "Expected Latency")
@@ -1325,7 +1334,7 @@ Error Responses:
   (row "Total Redirect"     "End-to-end redirect latency"                   "5-10ms (cache hit), 10-15ms (miss)")
 )}}
 
-{{hint "why X-Ray over Jaeger?" "X-Ray is native to AWS — zero setup with ALB, ECS, DynamoDB, and Lambda. Auto-instruments SDK calls. Jaeger requires deploying and operating collectors, storage (Cassandra/Elasticsearch), and a query UI. For an all-AWS stack, X-Ray gives 80% of the value at 10% of the operational cost. Switch to Jaeger only if you need multi-cloud or fine-grained custom spans."}}
+{{hint "why X-Ray over Jaeger?" "X-Ray is native to AWS — zero setup with ALB, ECS, DynamoDB, Lambda. Jaeger requires deploying collectors, storage (Cassandra/ES), and a query UI. For an all-AWS stack, X-Ray gives 80% of the value at 10% of the ops cost."}}
 
 {{diagram "url-cost-scaling"}}
 
@@ -1342,20 +1351,38 @@ Error Responses:
   (row "Total"            "~$400/mo"         "~$2,400/mo"          "~$12,100/mo")
 )}}
 
-{{think "At scale, CloudFront accounts for 35% of total cost — the single biggest cost lever to optimize."
-  (whyNot "serve without CDN to save money" "Without a CDN, every redirect request traverses the internet to your origin region. Latency jumps from under 10ms (edge) to 50-200ms (cross-continent). More importantly, your ALB and ECS fleet must handle 20x more traffic without edge absorption. The increased compute cost far exceeds what you'd save by dropping the CDN.")
-  (whatIf "traffic is 90% from one region" "Use PriceClass_100 (covers US, EU, and Asia only; excludes South America, Africa, and Middle East) to save roughly 30% on CDN cost. Even if traffic is 95%+ US-only, the CDN is still cheaper than the additional compute you'd need without it.")
-  (how "reduce CDN cost by 40%" "Three changes: 1) PriceClass_100 saves ~30% by limiting edge coverage. 2) Increase Cache-Control max-age to 604800 (7 days) for stable URLs — most destinations never change. 3) Enable Brotli compression on response headers for lower egress bytes. Combined, these reduce CDN cost by roughly 40%.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">CDN Cost Optimization Strategies</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "CloudFront accounts for 35% of total cost at scale — the biggest lever to optimize."
+  (whyNot "serve without CDN to save money" "Without CDN, every redirect traverses the internet to origin. Latency jumps from <10ms to 50-200ms. Your ALB and ECS fleet must handle 20x more traffic. The compute increase exceeds CDN savings.")
+  (whatIf "traffic is 90% from one region" "Use PriceClass_100 (US, EU, Asia only) to save ~30%. Even with 95%+ US traffic, CDN is cheaper than the extra compute without it.")
+  (how "reduce CDN cost by 40%" "Three changes: 1) PriceClass_100 saves ~30%. 2) max-age=604800 (7 days) for stable URLs. 3) Brotli compression for lower egress bytes. Combined: ~40% CDN cost reduction.")
 }}
+  </div>
+</details>
 
-{{hint "why CDN dominates cost at scale?" "CDN charges per GB of egress. A 301 redirect response is ~500 bytes, but at 100K QPS that is 50TB/month in egress. CloudFront charges $0.085/GB for the first 10TB, dropping to $0.020/GB at 500TB+. The per-request cost ($0.0075 per 10K requests) is negligible compared to transfer."}}
+{{hint "why CDN dominates cost at scale?" "CDN charges per GB of egress. A 301 response is ~500 bytes, but at 100K QPS that is 50TB/month. CloudFront charges $0.085/GB for the first 10TB, dropping to $0.020/GB at 500TB+."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Interviewer Questions About Monitoring and Cost</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Questions about monitoring and cost"
-  "How do you set up alerts that do not cause alert fatigue?"
-  "Three tiers: P1 (pages on-call) for redirect success rate below 99.9% or any 5XX above 0.1% — these indicate user-facing impact. P2 (Slack notification) for cache hit ratio below 60% or DynamoDB throttles — early warnings that need attention within hours. P3 (dashboard only) for cost anomalies and batch job delays. Most teams start with too many P1 alerts and tune down within the first month."
-  "What is the single most important metric for a URL shortener?"
-  "Redirect success rate — the percentage of GET /{code} requests that return 301 or 302. If this drops below 99.9%, short URLs are broken and trust is lost. Every other metric (latency, cache hit rate, error rate) is an input to this one metric."
+  "How do you avoid alert fatigue?"
+  "Three tiers: P1 (pages on-call) for redirect success rate below 99.9% or 5XX above 0.1%. P2 (Slack) for cache hit below 60% or DynamoDB throttles. P3 (dashboard only) for cost anomalies. Start with fewer P1 alerts and tune."
+  "What is the single most important metric?"
+  "Redirect success rate — percentage of GET /{code} returning 301 or 302. Below 99.9% means broken links and lost trust. Every other metric is an input to this one."
 }}
+  </div>
+</details>
 
 {{diagram "url-sub-problems"}}
 
