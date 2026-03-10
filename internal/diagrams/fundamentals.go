@@ -1752,4 +1752,304 @@ func registerFundamentals(r *Registry) {
   <div class="d-caption">1-second end-to-end indexing lag (DB write → searchable). Design applications to tolerate this: 'your tweet is being indexed...' is acceptable. Use force_refresh only for critical paths (costs ~50ms per refresh).</div>
 </div>`,
 	})
+
+	// -------------------------------------------------------
+	// HTTPS & TLS
+	// -------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "fund-https-tls-handshake",
+		Title:       "TLS 1.3 Handshake",
+		Description: "Full TLS 1.3 handshake showing 1-RTT connection establishment vs TLS 1.2's 2-RTT",
+		ContentFile: "fundamentals/networking/https",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols" style="grid-template-columns: 1fr 1fr; gap: 2rem;">
+  <div class="d-flow-v">
+    <div class="d-group-title">TLS 1.3 — 1 Round Trip</div>
+    <div class="d-box blue" data-tip="Client sends ClientHello with supported cipher suites, key_share (Diffie-Hellman public key), and supported versions.">Client → ClientHello<br><small>key_share + cipher list</small></div>
+    <div class="d-arrow-down"><span class="d-step">1 RTT</span></div>
+    <div class="d-box green" data-tip="Server picks cipher, responds with its key_share. Both sides now derive the session key. Server immediately sends Certificate + Finished.">Server → ServerHello<br>+ Certificate + Finished<br><small>derives session key here</small></div>
+    <div class="d-arrow-down"></div>
+    <div class="d-box amber" data-tip="Client verifies certificate, sends Finished. Encrypted application data can now flow.">Client → Finished<br><span class="d-tag green">Encrypted data starts</span></div>
+    <div class="d-caption">1-RTT: ~50ms faster than TLS 1.2. 0-RTT resumption skips the round trip entirely for known servers.</div>
+  </div>
+  <div class="d-flow-v">
+    <div class="d-group-title">TLS 1.2 — 2 Round Trips (legacy)</div>
+    <div class="d-box gray" data-tip="Client sends ClientHello with cipher suites and random bytes.">Client → ClientHello</div>
+    <div class="d-arrow-down"><span class="d-step">RTT 1</span></div>
+    <div class="d-box gray" data-tip="Server picks cipher, sends its public certificate and ServerHelloDone.">Server → ServerHello<br>+ Certificate + Done</div>
+    <div class="d-arrow-down"></div>
+    <div class="d-box gray" data-tip="Client verifies certificate, encrypts a pre-master secret with the server's public key, sends ChangeCipherSpec.">Client → KeyExchange<br>+ ChangeCipherSpec</div>
+    <div class="d-arrow-down"><span class="d-step">RTT 2</span></div>
+    <div class="d-box gray" data-tip="Server decrypts pre-master secret, both derive session key, server sends ChangeCipherSpec + Finished.">Server → Finished</div>
+    <div class="d-arrow-down"></div>
+    <div class="d-box gray">Client → Finished<br><span class="d-tag amber">Encrypted data starts</span></div>
+    <div class="d-caption">2-RTT: adds 100-200ms on top of TCP. TLS 1.2 is deprecated — migrate to TLS 1.3.</div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-https-certificate-chain",
+		Title:       "Certificate Chain of Trust",
+		Description: "Root CA → Intermediate CA → Leaf certificate — how browsers verify server identity",
+		ContentFile: "fundamentals/networking/https",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow" style="gap: 1.5rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
+    <div class="d-number"><div class="d-number-value">~200</div><div class="d-number-label">Trusted Root CAs in browsers</div></div>
+    <div class="d-number"><div class="d-number-value">90 days</div><div class="d-number-label">Let's Encrypt cert lifetime</div></div>
+    <div class="d-number"><div class="d-number-value">2048-bit</div><div class="d-number-label">Minimum RSA key size</div></div>
+  </div>
+  <div class="d-box purple" data-tip="~200 Root CAs are pre-installed in OS/browser trust stores. They never issue leaf certs directly — they sign Intermediate CAs offline and keep their private keys in air-gapped HSMs.">Root CA <span class="d-tag purple">self-signed · stored in browser/OS</span><br><small>DigiCert, Let's Encrypt ISRG Root, Comodo, GlobalSign</small></div>
+  <div class="d-arrow-down">&#8595; signs (offline, air-gapped)</div>
+  <div class="d-box indigo" data-tip="Intermediate CAs are signed by Root CAs and used online to issue leaf certificates. If compromised, only the Intermediate can be revoked without touching the Root.">Intermediate CA <span class="d-tag indigo">online · revocable</span><br><small>Let's Encrypt R3, DigiCert TLS RSA SHA256</small></div>
+  <div class="d-arrow-down">&#8595; issues (ACME / manual)</div>
+  <div class="d-box green" data-tip="The leaf certificate is what your server presents. Contains: Subject (domain), Public Key, Validity period, SAN (Subject Alternative Names), Signature by Intermediate CA.">Leaf Certificate <span class="d-tag green">your server's cert</span><br><small>CN=api.example.com · Valid: 90 days · SAN: *.example.com</small></div>
+  <div class="d-arrow-down">&#8595; presented during TLS handshake</div>
+  <div class="d-box blue" data-tip="Browser verifies: (1) cert signature is valid (signed by trusted Intermediate), (2) Intermediate cert is signed by trusted Root, (3) hostname matches CN/SAN, (4) cert not expired, (5) cert not revoked (OCSP/CRL).">Browser validates chain<br><small>signature → issuer → hostname → expiry → revocation</small></div>
+  <div class="d-caption">Full chain must be served: leaf + intermediates. Missing intermediates cause 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' errors in some clients even if the Root is trusted.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-https-mtls",
+		Title:       "mTLS: Mutual Authentication",
+		Description: "Standard TLS vs mTLS — both client and server present certificates; zero-trust microservices pattern",
+		ContentFile: "fundamentals/networking/https",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols" style="grid-template-columns: 1fr 1fr; gap: 2rem;">
+  <div class="d-flow-v">
+    <div class="d-group-title">Standard TLS (one-way)</div>
+    <div class="d-box blue">Client <small>(browser, mobile app)</small></div>
+    <div class="d-arrow-down">→ ClientHello</div>
+    <div class="d-box green">Server presents certificate</div>
+    <div class="d-arrow-down">← Client verifies server identity</div>
+    <div class="d-box amber">Session established<br><span class="d-tag green">Server authenticated ✓</span><br><span class="d-tag red">Client anonymous ✗</span></div>
+    <div class="d-caption">Used for: public HTTPS. Client is not authenticated at TLS layer — use JWT/OAuth at application layer instead.</div>
+  </div>
+  <div class="d-flow-v">
+    <div class="d-group-title">mTLS (zero-trust, both sides)</div>
+    <div class="d-box blue">Service A <small>(e.g., payment-svc)</small><br><span class="d-tag blue">has client cert from internal CA</span></div>
+    <div class="d-arrow-down">→ ClientHello + client cert</div>
+    <div class="d-box green">Service B <small>(e.g., fraud-svc)</small><br><span class="d-tag green">verifies client cert</span></div>
+    <div class="d-arrow-down">← Server cert + CertificateRequest</div>
+    <div class="d-box amber">Session established<br><span class="d-tag green">Server authenticated ✓</span><br><span class="d-tag green">Client authenticated ✓</span></div>
+    <div class="d-caption">Used for: microservices (Istio, Linkerd auto-provision), IoT devices, zero-trust internal APIs. Short-lived certs (24h) — Istio rotates automatically.</div>
+  </div>
+</div>`,
+	})
+
+	// -------------------------------------------------------
+	// gRPC
+	// -------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "fund-grpc-overview",
+		Title:       "gRPC Architecture",
+		Description: "Client stub → HTTP/2 streams → server handler: how gRPC multiplexes calls over one connection",
+		ContentFile: "fundamentals/networking/grpc",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow" style="gap: 1.5rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
+  <div class="d-number"><div class="d-number-value">10x</div><div class="d-number-label">Throughput vs REST (large payloads)</div></div>
+  <div class="d-number"><div class="d-number-value">3x</div><div class="d-number-label">Smaller payload vs JSON</div></div>
+  <div class="d-number"><div class="d-number-value">~20</div><div class="d-number-label">Languages with generated stubs</div></div>
+</div>
+<div class="d-flow-v">
+  <div class="d-cols" style="grid-template-columns: 1fr 1fr; gap: 2rem;">
+    <div class="d-flow-v">
+      <div class="d-group-title">Client side</div>
+      <div class="d-box blue" data-tip="Your application code calls methods on a generated stub as if they were local functions. The stub handles serialization, framing, and HTTP/2 transport transparently.">Application code<br><small>calls stub methods</small></div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box indigo" data-tip="Auto-generated from .proto file. Serializes arguments to Protobuf binary. Creates HTTP/2 stream. Handles retries and deadlines.">Generated Stub<br><small>protobuf serialize → HTTP/2 stream</small></div>
+    </div>
+    <div class="d-flow-v">
+      <div class="d-group-title">Server side</div>
+      <div class="d-box green" data-tip="Your handler implements the interface generated from .proto. Receives deserialized Protobuf objects. Returns typed response.">Service Handler<br><small>implements .proto interface</small></div>
+      <div class="d-arrow-down">&#8593;</div>
+      <div class="d-box indigo" data-tip="Deserializes Protobuf binary from HTTP/2 stream. Dispatches to correct handler. Sends response as Protobuf on same stream.">gRPC Server Runtime<br><small>HTTP/2 stream → deserialize → dispatch</small></div>
+    </div>
+  </div>
+  <div class="d-arrow-down">single TCP connection → multiple concurrent streams (HTTP/2 multiplexing)</div>
+  <div class="d-box amber" data-tip="HTTP/2 multiplexes many gRPC calls over a single TCP connection. No head-of-line blocking per stream. Header compression (HPACK) reduces overhead. Bidirectional streaming native.">HTTP/2 Connection<br><span class="d-tag amber">stream 1: GetUser</span> <span class="d-tag blue">stream 3: CreateOrder</span> <span class="d-tag green">stream 5: StreamFeed</span><br><small>all multiplexed — no connection overhead per call</small></div>
+  <div class="d-caption">One TCP connection handles dozens of concurrent gRPC calls. REST requires connection-per-request or HTTP keep-alive pool — gRPC's HTTP/2 base is more efficient at scale.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-grpc-streaming-modes",
+		Title:       "gRPC 4 Streaming Modes",
+		Description: "Unary, server streaming, client streaming, bidirectional streaming — when to use each",
+		ContentFile: "fundamentals/networking/grpc",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols" style="grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+  <div class="d-flow-v">
+    <div class="d-group-title">1. Unary RPC</div>
+    <div class="d-box blue">Client → Request</div>
+    <div class="d-arrow-down">&#8595;</div>
+    <div class="d-box green">Server → Response</div>
+    <div class="d-caption">Same as REST. Use for: CRUD operations, auth, simple lookups. Most common mode.</div>
+  </div>
+  <div class="d-flow-v">
+    <div class="d-group-title">2. Server Streaming</div>
+    <div class="d-box blue">Client → Request (once)</div>
+    <div class="d-arrow-down">&#8595;</div>
+    <div class="d-box green">Server → stream of responses<br><small>msg 1 → msg 2 → msg 3 → done</small></div>
+    <div class="d-caption">Use for: live stock prices, log streaming, large dataset pagination, ML model inference results.</div>
+  </div>
+  <div class="d-flow-v">
+    <div class="d-group-title">3. Client Streaming</div>
+    <div class="d-box blue">Client → stream of requests<br><small>chunk 1 → chunk 2 → done</small></div>
+    <div class="d-arrow-down">&#8595;</div>
+    <div class="d-box green">Server → Response (once)</div>
+    <div class="d-caption">Use for: file upload in chunks, bulk data ingestion, IoT sensor readings aggregation.</div>
+  </div>
+  <div class="d-flow-v">
+    <div class="d-group-title">4. Bidirectional Streaming</div>
+    <div class="d-box blue">Client → stream</div>
+    <div class="d-arrow" style="align-self: center;">⇄ simultaneously</div>
+    <div class="d-box green">Server → stream</div>
+    <div class="d-caption">Use for: real-time chat between services, collaborative editing sync, game state updates, trading order book.</div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-grpc-vs-rest",
+		Title:       "gRPC vs REST Decision Guide",
+		Description: "When to choose gRPC vs REST for service communication — performance, compatibility, use case matrix",
+		ContentFile: "fundamentals/networking/grpc",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow" style="gap: 1.5rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
+    <div class="d-number"><div class="d-number-value">25-30%</div><div class="d-number-label">gRPC throughput gain (medium load)</div></div>
+    <div class="d-number"><div class="d-number-value">10x</div><div class="d-number-label">gRPC throughput (large payloads)</div></div>
+    <div class="d-number"><div class="d-number-value">~1/3</div><div class="d-number-label">Protobuf payload size vs JSON</div></div>
+  </div>
+  <div class="d-cols" style="grid-template-columns: 1fr 1fr; gap: 2rem; margin-top: 1rem;">
+    <div class="d-group">
+      <div class="d-group-title">Use gRPC when</div>
+      <div class="d-flow-v" style="gap: 0.5rem;">
+        <div class="d-box green" data-tip="gRPC generates type-safe stubs in 20+ languages from .proto files. One schema definition serves Go, Java, Python, Node.js simultaneously."><strong>Internal microservice-to-microservice</strong><br><small>type-safe contracts, multi-language stubs</small></div>
+        <div class="d-box green" data-tip="Server streaming is first-class in gRPC. REST requires SSE or WebSocket for streaming — gRPC streaming is built into the protocol."><strong>Streaming data</strong><br><small>4 streaming modes native to protocol</small></div>
+        <div class="d-box green" data-tip="Protobuf binary is ~3x smaller than JSON. HTTP/2 multiplexing means less latency per call. Critical for high-frequency calls between services."><strong>High-throughput, low-latency paths</strong><br><small>payment processing, fraud detection, real-time feeds</small></div>
+        <div class="d-box green" data-tip="Google, Netflix, Square, CoreOS, Docker use gRPC for internal service communication."><strong>Polyglot microservices</strong><br><small>Go services calling Python ML models, Java backends</small></div>
+      </div>
+    </div>
+    <div class="d-group">
+      <div class="d-group-title">Use REST when</div>
+      <div class="d-flow-v" style="gap: 0.5rem;">
+        <div class="d-box amber" data-tip="Browsers can't call gRPC directly — need grpc-web proxy (Envoy). REST works natively in every browser with fetch() or XMLHttpRequest."><strong>Public APIs / browser clients</strong><br><small>third-party developers, mobile SDKs, web frontends</small></div>
+        <div class="d-box amber" data-tip="curl, Postman, HTTPie all work with REST out of the box. gRPC requires grpcurl or generated clients."><strong>Human-readable APIs</strong><br><small>debugging, partner integrations, webhooks</small></div>
+        <div class="d-box amber" data-tip="REST responses can be cached by CDN, browser, or proxy. gRPC POST requests are not HTTP-cacheable."><strong>Cacheable responses</strong><br><small>CDN-cacheable GET endpoints, read-heavy public data</small></div>
+        <div class="d-box amber" data-tip="Teams familiar with REST don't need to learn .proto files, code generation, and gRPC ecosystem. REST has lower initial overhead."><strong>Simple CRUD, team REST expertise</strong><br><small>no build step, no protoc toolchain</small></div>
+      </div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	// -------------------------------------------------------
+	// GraphQL
+	// -------------------------------------------------------
+
+	r.Register(&Diagram{
+		Slug:        "fund-graphql-overview",
+		Title:       "GraphQL Architecture",
+		Description: "Single endpoint, schema, resolvers, and how a client query maps to resolver execution",
+		ContentFile: "fundamentals/networking/graphql",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-cols" style="grid-template-columns: 1fr auto 1fr; gap: 1rem; align-items: start;">
+    <div class="d-flow-v">
+      <div class="d-group-title">Client Query</div>
+      <div class="d-box blue" style="font-family: monospace; font-size: 0.8rem; white-space: pre; text-align: left;" data-tip="Client specifies exactly which fields it needs. No over-fetching — only requested fields are returned. Nested queries traverse the schema graph.">query {
+  user(id: "123") {
+    name
+    email
+    posts(first: 5) {
+      title
+      likes
+    }
+  }
+}</div>
+    </div>
+    <div class="d-arrow" style="align-self: center;">→</div>
+    <div class="d-flow-v">
+      <div class="d-group-title">GraphQL Server</div>
+      <div class="d-box green" data-tip="GraphQL parses the query, validates against the schema, then executes each field resolver in parallel where possible.">Parse → Validate → Execute</div>
+      <div class="d-arrow-down">&#8595; resolver chain</div>
+      <div class="d-box amber" data-tip="userResolver: SELECT * FROM users WHERE id = 123 (1 query). postsResolver: DataLoader batches all post lookups into one query.">userResolver → postsResolver<br><small>DataLoader batches N+1 → 1 query</small></div>
+      <div class="d-arrow-down">&#8595;</div>
+      <div class="d-box indigo" data-tip="Response contains exactly the requested fields — nothing more, nothing less. Nested structure mirrors query structure.">Response: exactly what was asked<br><small>{ user: { name, email, posts: [...] } }</small></div>
+    </div>
+  </div>
+  <div class="d-arrow-down">single endpoint: POST /graphql</div>
+  <div class="d-box purple" data-tip="GraphQL uses a single endpoint for all operations. The query body determines what data is returned. Unlike REST's N endpoints, GraphQL has 1 endpoint with a query language.">POST /graphql <span class="d-tag purple">one endpoint for all operations</span><br><small>Content-Type: application/json · body: { query, variables, operationName }</small></div>
+  <div class="d-caption">GraphQL eliminates over-fetching (REST returns full objects) and under-fetching (REST requires N requests for N related resources). One query = one network round trip.</div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-graphql-n1-problem",
+		Title:       "N+1 Problem & DataLoader Solution",
+		Description: "Without DataLoader: 1 query for posts + N queries for authors. With DataLoader: 2 queries total",
+		ContentFile: "fundamentals/networking/graphql",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols" style="grid-template-columns: 1fr 1fr; gap: 2rem;">
+  <div class="d-flow-v">
+    <div class="d-group-title" style="color: var(--red);">Without DataLoader — N+1 queries</div>
+    <div class="d-box gray">Client requests: 100 posts + their authors</div>
+    <div class="d-arrow-down">&#8595;</div>
+    <div class="d-box red" data-tip="postsResolver fetches all 100 posts in 1 query. Then authorResolver is called once per post — 100 separate SELECT queries.">SELECT * FROM posts LIMIT 100<br><span class="d-tag red">1 query</span></div>
+    <div class="d-arrow-down">&#8595; for each of 100 posts</div>
+    <div class="d-box red" data-tip="Each post triggers its own author lookup. 100 posts = 100 separate DB round trips. At 1ms each = 100ms latency just for author lookups.">SELECT * FROM users WHERE id = 1<br>SELECT * FROM users WHERE id = 2<br>...<br>SELECT * FROM users WHERE id = 100<br><span class="d-tag red">100 queries</span></div>
+    <div class="d-caption" style="color: var(--red);">Total: 101 DB queries. At 1ms each = 101ms just for DB. N becomes unbounded as client queries deeper.</div>
+  </div>
+  <div class="d-flow-v">
+    <div class="d-group-title" style="color: var(--green);">With DataLoader — 2 queries total</div>
+    <div class="d-box gray">Client requests: 100 posts + their authors</div>
+    <div class="d-arrow-down">&#8595;</div>
+    <div class="d-box green" data-tip="postsResolver fetches all 100 posts in 1 query. Each post's authorResolver calls dataloader.load(author_id) — not a DB query yet.">SELECT * FROM posts LIMIT 100<br><span class="d-tag green">1 query</span></div>
+    <div class="d-arrow-down">&#8595; DataLoader collects all author_ids</div>
+    <div class="d-box green" data-tip="DataLoader batches all 100 .load(id) calls into a single IN query. Results cached for the request lifetime — same author fetched multiple times = 1 DB hit.">SELECT * FROM users<br>WHERE id IN (1, 2, ..., 100)<br><span class="d-tag green">1 batched query</span></div>
+    <div class="d-caption" style="color: var(--green);">Total: 2 DB queries regardless of result size. Per-request cache means duplicate author IDs don't re-query. This is the standard fix — use DataLoader in every resolver.</div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "fund-graphql-schema",
+		Title:       "GraphQL Schema: Operations & Types",
+		Description: "Query, Mutation, Subscription operations and how the type system enables compile-time validation",
+		ContentFile: "fundamentals/networking/graphql",
+		Type:        TypeHTML,
+		HTML: `<div class="d-cols" style="grid-template-columns: 1fr 1fr; gap: 2rem;">
+  <div class="d-flow-v">
+    <div class="d-group-title">Three Operation Types</div>
+    <div class="d-box blue" data-tip="Query is read-only. Resolvers run in parallel. Multiple queries can be batched in one network request. Idempotent — safe to retry.">Query (read)<br><small>query { user(id: 123) { name } }</small></div>
+    <div class="d-box green" data-tip="Mutation is write. Resolvers run sequentially (to preserve order). Each mutation gets its own transaction context.">Mutation (write)<br><small>mutation { createPost(input: {...}) { id } }</small></div>
+    <div class="d-box purple" data-tip="Subscription uses WebSocket (or SSE). Client subscribes to events; server pushes updates. Requires persistent connection — different infra than Query/Mutation.">Subscription (real-time)<br><small>subscription { onNewMessage { text sender } }</small></div>
+    <div class="d-caption">Subscriptions require WebSocket infrastructure — separate from HTTP query/mutation servers. Scale differently.</div>
+  </div>
+  <div class="d-flow-v">
+    <div class="d-group-title">Type System</div>
+    <div class="d-box indigo" style="font-family: monospace; font-size: 0.78rem; white-space: pre; text-align: left;" data-tip="Every field has an explicit type. ! means non-nullable. [Post!]! means a non-nullable list of non-nullable Posts. Type system enforced at parse time — invalid queries rejected before execution.">type User {
+  id: ID!
+  name: String!
+  email: String!
+  posts: [Post!]!
+  createdAt: DateTime!
+}
+
+type Post {
+  id: ID!
+  title: String!
+  author: User!
+  likes: Int!
+}</div>
+    <div class="d-caption">Strong type system: invalid queries are rejected at parse time (before any DB call). Client tooling (introspection) auto-generates TypeScript types.</div>
+  </div>
+</div>`,
+	})
 }

@@ -53,7 +53,7 @@
   (whyNot "a background timer that adds tokens every millisecond" "Background timers in distributed systems require either a dedicated thread per bucket (impractical at 10 million users) or a shared timer that updates all buckets (lock contention nightmare). Lazy refill is mathematically equivalent and requires zero background work.")
 }}
 
-{{hint "time.monotonic vs time.time" "Use time.monotonic() for the single-server implementation. It is guaranteed never to go backward (unlike time.time() which NTP can adjust). For the Redis implementation, time.time() is necessary because all servers must share the same clock reference."}}
+{{hint "time.monotonic vs time.time" "Use time.monotonic() for the single-server implementation. It is guaranteed never to go backward (unlike time.time() which NTP — Network Time Protocol — can adjust backward during clock corrections). For the Redis implementation, time.time() is necessary because all servers must share the same absolute clock reference."}}
 
 {{caveat "Without the min(bucket_size, ...) cap on refill, an idle client could accumulate unlimited tokens and fire millions of requests at once. The cap is essential — it enforces the burst limit regardless of how long the client has been idle."}}
 
@@ -127,7 +127,7 @@ for i in range(15):
 `}}
 
 {{think "The RateLimiter class has two locks: one coarse lock to create buckets, and each TokenBucket has its own fine-grained lock. This prevents two threads from simultaneously creating a bucket for the same key while allowing different users' buckets to be checked concurrently."
-  (whatIf "you have 10 million active users and each has a bucket in memory" "At ~100 bytes per TokenBucket (two floats + lock overhead) and 10M users, that is ~1 GB RAM. Manageable on a single server, but a distributed cache (Redis) is better for horizontal scaling. Also add TTL cleanup: remove buckets for users inactive for > bucket_capacity/refill_rate seconds.")
+  (whatIf "you have 10 million active users and each has a bucket in memory" "At ~100 bytes per TokenBucket (two floats + lock overhead) and 10M users, that is ~1 GB RAM. Manageable on a single server, but a distributed cache (Redis) is better for horizontal scaling. Also add TTL (Time-To-Live) cleanup: remove buckets for users inactive for > bucket_capacity/refill_rate seconds — this is the time it would take a full bucket to drain, after which the user's slot is stale.")
   (how "do you return rate limit headers to the client?" "Populate standard HTTP headers from the allow() response: X-RateLimit-Limit: {capacity}, X-RateLimit-Remaining: {remaining}, X-RateLimit-Reset: {unix_timestamp_when_full}, Retry-After: {retry_after} (only on 429 responses).")
 }}
 
@@ -278,11 +278,11 @@ else:
 {{diagram "algo-token-bucket-api-arch"}}
 
 {{table "Configuration by API Tier" (rows
-  (row "API Tier"      "Bucket Size (burst)"  "Refill Rate"      "Effective Limit"              "Use Case")
-  (row "Free"          "20 requests"          "1 req/sec"        "20 burst, 60/min sustained"   "Hobbyist developers")
-  (row "Pro"           "100 requests"         "10 req/sec"       "100 burst, 600/min sustained"  "Production apps")
-  (row "Enterprise"    "500 requests"         "50 req/sec"       "500 burst, 3000/min sustained" "High-traffic services")
-  (row "Login"         "5 requests"           "0.1 req/sec"      "5 burst, 6/min sustained"     "Brute-force protection")
+  (row "API Tier"      "Bucket Size (burst)"  "Refill Rate (RPS — Requests Per Second)"      "Effective Limit"              "Use Case")
+  (row "Free"          "20 requests"          "1 RPS"        "20 burst, 60/min sustained"   "Hobbyist developers")
+  (row "Pro"           "100 requests"         "10 RPS"       "100 burst, 600/min sustained"  "Production apps")
+  (row "Enterprise"    "500 requests"         "50 RPS"       "500 burst, 3000/min sustained" "High-traffic services")
+  (row "Login"         "5 requests"           "0.1 RPS"      "5 burst, 6/min sustained"     "Brute-force protection")
 )}}
 
 {{think "The Login tier configuration is a common interview point. Brute-force protection needs a very small burst (5 attempts) and a very slow refill (0.1/sec = 1 attempt per 10 seconds). This matches real threat models: an attacker can try 5 passwords instantly, but then faces 10-second waits between each additional attempt — making dictionary attacks impractical."

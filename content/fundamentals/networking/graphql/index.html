@@ -1,0 +1,494 @@
+{{phase 1 "What Is GraphQL?" "3 min"}}
+
+{{say `<span class="hl-blue">GraphQL</span> is a query language for APIs and a runtime for executing those queries:
+<ul>
+  <li>Created by Facebook in 2012, open-sourced in 2015 — solves the <strong>over-fetching and under-fetching</strong> problems of REST</li>
+  <li><strong>One endpoint</strong> (<code>POST /graphql</code>) replaces dozens of REST endpoints — clients describe exactly what they need</li>
+  <li><strong>Strongly typed schema</strong> — all data types defined in SDL (Schema Definition Language); invalid queries rejected before execution</li>
+  <li><strong>3 operation types:</strong> Query (read), Mutation (write), Subscription (real-time push via WebSocket)</li>
+  <li>Used by: GitHub, Twitter, Shopify, Airbnb, Netflix, PayPal, Coursera</li>
+</ul>`}}
+
+{{diagram "fund-graphql-overview"}}
+
+{{think "GraphQL shifts the 'what data do I need' question from the server to the client — powerful but requires careful server-side protection."
+  (whyNot "REST for client-driven flexible data needs" "REST requires multiple round trips for related data (N+1 API calls). REST over-fetches — GET /user/123 returns all user fields even if you only need the name. REST under-fetches — GET /feed needs separate calls for post, author, likes, comments. GraphQL resolves all in one query. But: GraphQL shifts complexity to the server — one badly designed query can join 10 tables and bring down a database.")
+  (how "schema introspection" "GraphQL servers expose a __schema type that describes every type, field, and operation available. Clients can query this to auto-generate TypeScript types, documentation, and IDE autocomplete. This is why GraphQL tooling (Apollo Studio, Insomnia, Postman) can provide schema-aware query building.")
+  (whatIf "a client sends a deeply nested query" "Without depth limiting: query { users { posts { comments { author { posts { comments { ... } } } } } } } can exhaust server memory and DB connections. Add query complexity analysis (each field has a cost), depth limiting (reject queries deeper than 10 levels), and max execution timeout as guards.")
+}}
+
+{{hint "GraphQL is not a database" "GraphQL is a query layer over your existing data sources. Resolvers can fetch from SQL, Redis, gRPC microservices, REST APIs — anything. The client sees a unified graph regardless of how the data is stored. This makes GraphQL ideal as a Backend-for-Frontend (BFF) layer that aggregates data from multiple microservices into one client-optimized query."}}
+
+{{triggerQs "Phase 1 Interview Questions"
+  "What problems does GraphQL solve that REST doesn't?"
+  "Over-fetching: REST returns full objects; GraphQL returns only requested fields — reduces payload size, especially important on mobile with limited bandwidth. Under-fetching: REST requires N requests for N related resources (post → author → comments); GraphQL fetches all in one query. Schema as contract: GraphQL schema is the living documentation — introspectable, strongly typed, versioning-friendly. Limitations: N+1 resolver problem, complex query protection required, caching harder than REST."
+  "When would you NOT use GraphQL?"
+  "Simple CRUD with fixed data shapes (REST is simpler). Public APIs for external developers (REST is more familiar, easier to document). File upload/download (REST's multipart/binary support is more natural). Highly cacheable public data (REST GET endpoints cache well at CDN level; GraphQL POST requests don't). High-throughput micro-APIs where JSON parsing overhead matters (gRPC is better)."
+}}
+
+{{phase 2 "Schema Design" "5 min"}}
+
+{{say `The <span class="hl-blue">GraphQL schema</span> is the contract between frontend and backend:
+<ul>
+  <li>Written in <strong>SDL</strong> (Schema Definition Language) — type definitions, queries, mutations, subscriptions</li>
+  <li><strong>Scalar types:</strong> String, Int, Float, Boolean, ID — plus custom scalars (DateTime, URL, JSON)</li>
+  <li><strong>Object types:</strong> User, Post, Comment — each field has a type and optional arguments</li>
+  <li><strong>Non-null (!)</strong> — field can never return null; violating this crashes the query for that field</li>
+  <li><strong>Lists ([Type!]!)</strong> — non-nullable list of non-nullable items</li>
+</ul>`}}
+
+{{diagram "fund-graphql-schema"}}
+
+{{code "graphql" `# Complete e-commerce GraphQL schema
+
+type Query {
+  # Nullable return — user might not exist
+  user(id: ID!): User
+  # Non-null list — always returns array (may be empty)
+  products(filter: ProductFilter, first: Int = 20, after: String): ProductConnection!
+  order(id: ID!): Order
+}
+
+type Mutation {
+  createOrder(input: CreateOrderInput!): CreateOrderPayload!
+  updateAddress(orderId: ID!, address: AddressInput!): Order!
+  cancelOrder(orderId: ID!): CancelOrderPayload!
+}
+
+type Subscription {
+  orderStatusUpdated(orderId: ID!): Order!
+  # Requires WebSocket connection
+}
+
+type User {
+  id: ID!
+  name: String!
+  email: String!
+  orders(first: Int, status: OrderStatus): [Order!]!  # Paginated
+  cart: Cart
+}
+
+type Order {
+  id: ID!
+  status: OrderStatus!       # Enum
+  items: [OrderItem!]!
+  total: Float!
+  createdAt: DateTime!       # Custom scalar
+  user: User!                # Back-reference (be careful — can cause cycles)
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+# Pagination — Relay cursor spec
+type ProductConnection {
+  edges: [ProductEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type ProductEdge {
+  cursor: String!
+  node: Product!
+}
+
+input CreateOrderInput {
+  items: [OrderItemInput!]!
+  shippingAddressId: ID!
+  paymentMethodId: ID!
+}`}}
+
+{{think "Schema design is permanent — adding fields is safe, removing is breaking. Design for evolution from day one."
+  (how "cursor-based pagination" "Use the Relay cursor spec (Connection / Edge / PageInfo) for all paginated lists. Cursor-based pagination (after: cursor) is stable under inserts — offset pagination (page=2, size=20) skips items if new items are inserted between requests. Cursor = opaque base64-encoded position marker. PageInfo.hasNextPage tells client if there are more items.")
+  (whyNot "deeply nested schema without depth limits" "A client can craft a query like: { users { orders { user { orders { user { ... } } } } } } — exponential data fetching. Each level triggers more resolvers. Set max depth = 10 and max complexity = 100 (each field costs 1, each list field costs 10). Reject queries that exceed these limits before any resolver runs.")
+}}
+
+{{table "Schema Design Best Practices" (rows
+  (row "Pattern" "Recommendation" "Why")
+  (row "Pagination" "Relay cursor spec (Connection/Edge/PageInfo)" "Stable under concurrent inserts; standard tooling support")
+  (row "Mutations" "Return the modified object, not just success/failure" "Client updates its cache automatically")
+  (row "Error handling" "Use union types (Success | Error) not null returns" "Explicit error paths; null is ambiguous")
+  (row "Naming" "camelCase fields, PascalCase types" "JavaScript client convention; auto-generated types match")
+  (row "Deprecation" "Mark with @deprecated(reason: ...)   never remove" "Clients don't break; deprecation shows in introspection")
+  (row "Custom scalars" "DateTime, URL, Email — add with custom parsers" "Validation at schema level; clients get correct types")
+)}}
+
+{{triggerQs "Phase 2 Interview Questions"
+  "How do you version a GraphQL API?"
+  "GraphQL is designed to be versionless — add new fields without removing old ones. Clients that don't request new fields are unaffected. Mark deprecated fields with @deprecated(reason) in the schema — they remain available but signal removal timeline. If you must remove a field: deprecate → wait 6+ months for adoption → remove when analytics shows zero usage. Compare to REST: /v1/, /v2/ endpoints. GraphQL avoids version proliferation entirely."
+  "How do you paginate large lists in GraphQL?"
+  "Two patterns: (1) Offset pagination: skip/take or page/pageSize — simple but unstable under concurrent writes (new items inserted shift offsets). (2) Cursor-based: first/after where after is an opaque cursor (typically base64-encoded: user_id:created_at or auto-incremented ID). Cursor pagination is stable — insertions don't affect already-fetched pages. Use the Relay cursor spec (Connection/Edge/PageInfo) for consistency with client tooling."
+}}
+
+{{phase 3 "Resolvers & Execution Model" "5 min"}}
+
+{{say `A <span class="hl-blue">resolver</span> is a function that fetches data for one field in the schema:
+<ul>
+  <li>Every field can have a resolver — if absent, GraphQL uses a default property accessor (<code>obj[fieldName]</code>)</li>
+  <li>Resolvers receive: <code>(parent, args, context, info)</code> — parent = parent object, args = field arguments, context = per-request shared state (auth, DataLoader instances)</li>
+  <li>Execution model: GraphQL resolves fields <strong>depth-first</strong>; each level completes before the next; list items are resolved in parallel</li>
+  <li><strong>Context</strong> is the key injection point — put DataLoader instances, auth user, DB connections in context</li>
+</ul>`}}
+
+{{code "javascript" `// Apollo Server — resolver implementation
+const resolvers = {
+  Query: {
+    // Query.user resolver
+    user: async (_, { id }, context) => {
+      // context.dataloaders: pre-created per request
+      return context.dataloaders.users.load(id);
+    },
+
+    // Paginated products
+    products: async (_, { filter, first = 20, after }, context) => {
+      const cursor = after ? decodeCursor(after) : null;
+      const items = await context.db.products.findMany({
+        where: filter,
+        take: first + 1,  // Fetch one extra to check hasNextPage
+        cursor: cursor ? { id: cursor } : undefined,
+        orderBy: { createdAt: 'desc' },
+      });
+      const hasNextPage = items.length > first;
+      return buildConnection(items.slice(0, first), hasNextPage);
+    },
+  },
+
+  // Field resolver on Order type
+  Order: {
+    // This runs for each Order in a result set — N+1 risk!
+    user: async (order, _, context) => {
+      // DataLoader batches all user loads in this request
+      return context.dataloaders.users.load(order.userId);
+    },
+  },
+
+  Mutation: {
+    createOrder: async (_, { input }, context) => {
+      if (!context.user) throw new GraphQLError('Unauthenticated', {
+        extensions: { code: 'UNAUTHENTICATED' }
+      });
+      const order = await context.db.orders.create({ data: mapInput(input) });
+      return { success: true, order };
+    },
+  },
+};`}}
+
+{{think "Resolvers are the performance hot spot — each nested field is a potential DB call."
+  (how "resolver execution" "GraphQL executes: (1) Query resolver returns list of N objects. (2) For each object, field resolvers run. If field resolver makes a DB call, that's N calls for N objects. Solution: DataLoader batches all calls within the same 'tick' into one. Rule: every resolver that fetches by ID should go through a DataLoader.")
+  (whyNot "storing DB connection in resolver closure" "Each request should get a fresh context with per-request DataLoader instances. DataLoader caches results for the request lifetime — sharing DataLoader across requests means stale data. Pass DB connection via context, create fresh DataLoader instances in the context factory function called once per request.")
+}}
+
+{{table "Resolver Arguments" (rows
+  (row "Argument" "Type" "What It Contains" "When Useful")
+  (row "parent" "Object" "Return value of parent field resolver" "Field resolvers on nested types (Order.user, Post.author)")
+  (row "args" "Object" "Field arguments from the query" "Filtering, pagination (first, after, filter), ID lookups")
+  (row "context" "Object" "Shared per-request state" "Auth user, DataLoader instances, DB connections, feature flags")
+  (row "info" "Object" "Query AST, field name, path" "Advanced: field selection sets for DB query optimization")
+)}}
+
+{{hint "info.fieldNodes for DB optimization" "The info argument contains the parsed query AST. Advanced resolver optimization: check which sub-fields the client requested (info.fieldNodes) and SELECT only those columns from the database. If client only asks for user.name, don't SELECT all user columns. Libraries like graphql-fields or graphql-parse-resolve-info make this easy. Performance gain: reduces DB I/O and network data for wide tables."}}
+
+{{triggerQs "Phase 3 Interview Questions"
+  "What is the GraphQL context object and what should go in it?"
+  "Context is a per-request shared object passed to every resolver. It should contain: (1) authenticated user (decoded JWT claims — userID, roles), (2) per-request DataLoader instances (fresh per request to avoid cache poisoning), (3) database connection or ORM (Object-Relational Mapper — a library that maps database rows to objects in your programming language) instance, (4) request headers and locale, (5) feature flags. Do NOT put global singletons (shared cache, connection pool) directly in context — they're shared across requests, which is fine, but don't confuse them with per-request context."
+  "How does GraphQL execution order work for mutations vs queries?"
+  "Queries: top-level query fields execute in parallel — multiple Query fields in one query run concurrently (assuming resolvers are async). List items within a field also resolve in parallel. Mutations: top-level mutation fields execute sequentially in order — createOrder, then updateAddress, then sendNotification run one after another. This preserves mutation ordering semantics (createOrder must complete before updateAddress can reference the order ID)."
+}}
+
+{{phase 4 "N+1 Problem & DataLoader" "6 min"}}
+
+{{say `The <span class="hl-red">N+1 problem</span> is the most critical GraphQL production issue — every interviewer will ask about it:
+<ul>
+  <li><strong>What it is:</strong> a list query fetches N items, then for each item, a field resolver makes 1 DB call → <span class="hl-red">N+1 total DB queries</span></li>
+  <li>Example: 100 posts with their authors = 1 query for posts + 100 queries for author data = <span class="hl-red">101 DB round trips</span></li>
+  <li><strong>Fix:</strong> <span class="hl-blue">DataLoader</span> — batches multiple <code>.load(id)</code> calls within the same event loop tick into one <code>IN (id1, id2, ...)</code> query</li>
+  <li><strong>Rule:</strong> every resolver that fetches by ID must go through a DataLoader — no exceptions</li>
+</ul>`}}
+
+{{diagram "fund-graphql-n1-problem"}}
+
+{{code "javascript" `// DataLoader implementation — the standard N+1 fix
+import DataLoader from 'dataloader';
+
+// Factory function — called once per request in context setup
+function createLoaders(db) {
+  return {
+    users: new DataLoader(async (userIds) => {
+      // Called once with ALL userIds collected in one tick
+      // userIds = [1, 2, 3, 4, ..., 100]
+      const users = await db.users.findMany({
+        where: { id: { in: userIds } }
+      });
+      // DataLoader requires results IN THE SAME ORDER as keys
+      const userMap = new Map(users.map(u => [u.id, u]));
+      return userIds.map(id => userMap.get(id) ?? null);
+    }),
+
+    // Caching: within a request, loading user 123 twice = 1 DB call
+    // Different requests get fresh DataLoader instances (no stale cache)
+  };
+}
+
+// In Apollo Server context factory (runs once per request):
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  context: ({ req }) => ({
+    user: verifyJWT(req.headers.authorization),
+    dataloaders: createLoaders(db),  // Fresh per request
+    db,
+  }),
+});
+
+// In resolver — just .load(), DataLoader handles batching:
+Order: {
+  user: (order, _, context) =>
+    context.dataloaders.users.load(order.userId),  // Not a DB call yet!
+}`}}
+
+{{think "DataLoader batches calls from all resolvers that execute within the same event loop tick."
+  (how "DataLoader batching mechanism" "DataLoader waits until the current event loop tick completes, then calls the batch function with all accumulated keys. This works because GraphQL resolvers for list items run in parallel (all in the same tick). 100 Order.user resolvers all call dataloaders.users.load(userId) — DataLoader collects all 100 userIds, then executes one SQL IN query. Returns results mapped back to each resolver's promise.")
+  (whyNot "caching resolvers manually" "Manual cache in closure: works for same-user lookups, but you must manage cache invalidation and per-request lifetime. DataLoader provides per-request caching automatically — same key in same request = single load. Cross-request caching risks stale data. Use Redis for cross-request caching of stable data (product catalog), DataLoader for per-request deduplication.")
+  (whatIf "DataLoader batch function throws" "All pending loads in the batch fail with the thrown error. Handle errors per-item: catch DB errors and return null (or an Error instance) for individual items so other items in the batch succeed. A failure for user_id=5 shouldn't fail the entire batch of 100 users.")
+}}
+
+{{table "DataLoader vs Manual Batching" (rows
+  (row "Approach" "N+1 Queries" "Request Cache" "Code Complexity" "Batching")
+  (row "Naive resolvers" "Yes — N+1 DB calls" "No" "Low" "None")
+  (row "Manual batch (pre-load)" "No" "Manual" "High" "Yes (complex)")
+  (row "DataLoader" "No — batches automatically" "Yes (per-request)" "Low (add .load())" "Automatic")
+  (row "ORM eager loading (e.g. Prisma includes)" "Partial — join at ORM level" "No" "Medium" "Limited")
+)}}
+
+{{hint "DataLoader doesn't help cross-resolver parent fields" "DataLoader batches calls within the same GraphQL execution. But if resolver A and resolver B run at different levels (different depths in the query), they may not be in the same batch. Use the 'deferred resolvers' pattern or tools like graphql-query-complexity to pre-load data for the entire query before execution. For most cases, DataLoader with field-level resolvers is sufficient."}}
+
+{{triggerQs "Phase 4 Interview Questions"
+  "Explain the N+1 problem and how DataLoader solves it."
+  "N+1: query returns N items; for each item, a resolver makes 1 DB call → N+1 total queries. Example: 100 posts, each with an author field resolver that does SELECT * FROM users WHERE id = {post.authorId} → 100 separate queries. DataLoader solves it: instead of immediate DB calls, each resolver calls dataloader.load(authorId) which returns a Promise. DataLoader collects all IDs from concurrent calls in one event loop tick, then executes SELECT * FROM users WHERE id IN (1, 2, ..., 100) — one batch query. Results are mapped back per ID."
+  "How would you handle the N+1 problem for a deeply nested query with 3 levels?"
+  "Create a DataLoader for each entity type: usersLoader, postsLoader, commentsLoader. Each resolver at each level calls the appropriate DataLoader. Query { users { posts { comments { author { name } } } } }: usersLoader batches all user loads, postsLoader batches all post loads, commentsLoader batches all comment loads, and usersLoader (author) batches those loads separately. Total DB queries = 4 (one per type), not 1 + N + N² + N³. Each level runs in parallel within its DataLoader batch."
+}}
+
+{{phase 5 "Query Protection & Rate Limiting" "4 min"}}
+
+{{say `GraphQL's flexibility is also its biggest security risk — clients can craft expensive queries:
+<ul>
+  <li><strong>Query depth limit:</strong> reject queries nested deeper than <span class="hl">N levels</span> (typically 10) — prevents exponential data fetching</li>
+  <li><strong>Query complexity:</strong> assign a cost to each field (scalar = 1, list = 10, nested list = 100); reject queries exceeding a budget (e.g., <span class="hl">1000</span>)</li>
+  <li><strong>Query timeout:</strong> kill execution after N seconds regardless of progress — last line of defense</li>
+  <li><strong>Persisted queries:</strong> production clients register queries by hash; server only executes known hashes — prevents ad-hoc attacks</li>
+  <li><strong>Rate limiting:</strong> limit by complexity cost per user/IP per second — expensive queries count for more</li>
+</ul>`}}
+
+{{think "Without query protection, one malicious query can DOS your database."
+  (how "query complexity scoring" "Assign a cost to each field type: scalar fields = 1 point, list fields = multiplier × child cost. Example: users(first: 100) costs 100 (100 items × 1 each), users { posts { comments } } costs 100 × 100 × 100 = 1M if uncapped. Set max complexity = 1000 per query, max list multiplier = 50. Reject at parse time, before any resolver runs.")
+  (whyNot "only using timeout as protection" "Timeout kills execution after N seconds — but the DB query may have already started (joined 10 tables, full table scan). The DB server pays the cost even if the HTTP response is terminated. Complexity analysis rejects at parse time — zero DB load for over-budget queries.")
+  (whatIf "authenticated users send expensive queries" "Don't trust authenticated users with unlimited complexity. Rate limit by complexity score: user gets 10,000 complexity points per minute. A complex query costs 500 points; they can run 20 of them per minute. Simple queries cost 10 points; they can run 1,000 per minute. This is fairer than request-count rate limiting — penalizes expensive queries, not simple ones.")
+}}
+
+{{code "javascript" `// Apollo Server with query protection middleware
+
+import depthLimit from 'graphql-depth-limit';
+import { createComplexityLimitRule } from 'graphql-validation-complexity';
+
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  validationRules: [
+    // Reject queries deeper than 10 levels
+    depthLimit(10),
+    // Reject queries with complexity > 1000
+    createComplexityLimitRule(1000, {
+      scalarCost: 1,
+      objectCost: 1,
+      listFactor: 10,  // Lists multiply child cost by 10
+    }),
+  ],
+  // Per-query timeout
+  plugins: [
+    {
+      requestDidStart: () => ({
+        executionDidStart: () => ({
+          // Kill execution after 5 seconds
+          willResolveField({ context }) {
+            const deadline = context.requestDeadline;
+            if (Date.now() > deadline) {
+              throw new Error('Query execution timeout');
+            }
+          },
+        }),
+      }),
+    },
+  ],
+});`}}
+
+{{table "Query Protection Layers" (rows
+  (row "Layer" "What It Prevents" "When Applied")
+  (row "Depth limit (10)" "Exponential nested queries" "Parse time — zero DB cost")
+  (row "Complexity budget (1000)" "Wide expensive queries" "Parse time — zero DB cost")
+  (row "DataLoader batching" "N+1 DB queries" "Execution time — DB optimization")
+  (row "Query timeout (5s)" "Long-running queries" "Execution time — last resort")
+  (row "Persisted queries" "Ad-hoc attack queries" "Parse time — production hardening")
+  (row "Rate limit by complexity" "DDoS via repeated expensive queries" "Request time — per user/IP")
+)}}
+
+{{triggerQs "Phase 5 Interview Questions"
+  "How would you protect a public GraphQL API from abuse?"
+  "Four layers: (1) Depth limit — reject queries deeper than 10 levels at parse time. (2) Complexity analysis — assign costs to field types, reject queries exceeding budget (1000 points) at parse time. (3) Rate limiting — limit by complexity score per IP/user per minute (not just request count). (4) Persisted queries — in production, only allow pre-registered query hashes; reject arbitrary strings. For authenticated APIs: add per-user complexity quotas. Use query timeout (5s) as final backstop."
+  "What is a persisted query and why does it improve performance?"
+  "A persisted query stores the full query string on the server keyed by a hash (SHA256 of the query text). Client sends only the hash: GET /graphql?operationName=GetUser&extensions={\"persistedQuery\":{\"version\":1,\"sha256Hash\":\"abc123\"}}. Benefits: (1) bandwidth — send 32-byte hash instead of 500-byte query string; (2) security — server only executes known queries, rejecting arbitrary GraphQL; (3) CDN caching — GET requests with hashes are cacheable (unlike POST with body). Downside: requires build step to register queries before deploying client."
+}}
+
+{{phase 6 "Subscriptions & Real-Time" "4 min"}}
+
+{{say `<span class="hl-blue">GraphQL Subscriptions</span> add real-time push over WebSocket:
+<ul>
+  <li>Client sends a subscription query — server keeps the WebSocket open and pushes updates as events occur</li>
+  <li>Subscription transport: <strong>graphql-ws</strong> (modern, WebSocket subprotocol) or <strong>subscriptions-transport-ws</strong> (legacy Apollo)</li>
+  <li><strong>PubSub backend:</strong> use Redis Pub/Sub or Kafka to fan-out subscription events across multiple GraphQL server instances</li>
+  <li>Subscriptions are <strong>stateful</strong> — same scaling challenges as WebSockets; need sticky sessions + shared pub/sub</li>
+  <li>Alternative for simpler use cases: <strong>SSE</strong> (Server-Sent Events) with polling resolver — no WebSocket complexity</li>
+</ul>`}}
+
+{{code "javascript" `// GraphQL Subscription server with Redis PubSub
+import { createClient } from 'redis';
+import { RedisPubSub } from 'graphql-redis-subscriptions';
+
+// Shared PubSub instance — backed by Redis for multi-server fan-out
+const pubsub = new RedisPubSub({
+  publisher: createClient({ url: 'redis://redis-cluster:6379' }),
+  subscriber: createClient({ url: 'redis://redis-cluster:6379' }),
+});
+
+const resolvers = {
+  Subscription: {
+    orderStatusUpdated: {
+      // subscribe: return AsyncIterator that yields events
+      subscribe: (_, { orderId }, context) => {
+        if (!context.user) throw new GraphQLError('Unauthenticated');
+        // Subscribe to order-specific channel
+        return pubsub.asyncIterator(['ORDER_UPDATED:' + orderId]);
+      },
+      // resolve: transform event to match return type
+      resolve: (payload) => payload.order,
+    },
+  },
+
+  Mutation: {
+    updateOrderStatus: async (_, { orderId, status }, context) => {
+      const order = await db.orders.update({ where: { id: orderId }, data: { status } });
+      // Publish to all subscribers for this order (on any server)
+      await pubsub.publish('ORDER_UPDATED:' + orderId, { order });
+      return order;
+    },
+  },
+};`}}
+
+{{think "Subscriptions use WebSocket under the hood — they have the same scaling challenges as WebSockets."
+  (how "subscription fan-out at scale" "Server A holds a WebSocket connection for user watching order #123. Server B processes the mutation that updates order #123. Server B publishes to Redis channel ORDER_UPDATED:123. Server A is subscribed to that Redis channel via RedisPubSub. Server A receives the event and pushes it to the client's WebSocket. Same Redis Pub/Sub pattern as WebSocket scaling.")
+  (whyNot "in-memory PubSub for production" "Apollo's default EventEmitter-based PubSub stores events in-memory. Works fine with a single server instance. With multiple instances (horizontal scaling), only the server that published the event delivers it — clients on other servers never receive the update. Use RedisPubSub or Kafka-backed PubSub for multi-server deployments.")
+}}
+
+{{table "Subscription vs Polling" (rows
+  (row "Approach" "Latency" "Server Load" "Client Complexity" "When to Use")
+  (row "GraphQL Subscription (WebSocket)" "Real-time (ms)" "Low (push)" "High (WS setup)" "High-frequency updates, collaborative features")
+  (row "Polling (re-query every N seconds)" "N seconds" "Higher (constant)" "Low" "Low-frequency, low criticality")
+  (row "SSE via HTTP streaming" "Real-time (ms)" "Low (push)" "Low" "Unidirectional server→client feeds")
+)}}
+
+{{hint "When to use polling vs subscriptions" "Use polling for: status checks every 30 seconds, feeds that update a few times per minute, low-traffic use cases. Use subscriptions for: live collaboration (cursor positions, edits), order tracking, live scores, anything where seconds of latency matters. Subscriptions add WebSocket infra complexity — only add them when polling clearly isn't fast enough."}}
+
+{{phase 7 "GraphQL at Scale: Caching & Federation" "4 min"}}
+
+{{say `GraphQL caching is harder than REST because POST requests aren't HTTP-cacheable by default:
+<ul>
+  <li><strong>Persisted queries (GET):</strong> stable queries become GET requests — CDN and browser cacheable; best for frequently-read data</li>
+  <li><strong>Apollo Client cache:</strong> client-side normalized cache keyed by <code>__typename + id</code> — same object referenced in multiple queries is updated once</li>
+  <li><strong>Response caching:</strong> cache entire query responses by query + variables hash (e.g., Redis); short TTL (Time-To-Live — the duration before a cached value expires) for mutable data</li>
+  <li><strong>GraphQL Federation (Apollo Federation):</strong> split large schema across multiple subgraph services — each team owns their types; a supergraph gateway merges them</li>
+</ul>`}}
+
+{{think "GraphQL Federation solves the monolith schema problem — each microservice owns its GraphQL types."
+  (how "Apollo Federation" "Each service defines its slice of the schema as a subgraph. The gateway (Apollo Router) stitches them together: query { user(id: 123) { name orders { total } } } — user fields come from user-service, orders fields come from order-service. The gateway generates a query plan, fetches from each subgraph in parallel where possible, and merges the response. Client sees one unified schema.")
+  (whyNot "one monolithic GraphQL schema" "As the company grows, 50 teams contributing to one schema file leads to: merge conflicts, slow review cycles, accidental breaking changes, ownership ambiguity. Federation gives each team ownership of their types — order-service owns Order type, user-service owns User type. Schema composition happens at the gateway, not in a single repo.")
+  (whatIf "a subgraph is slow or down" "The gateway has a timeout per subgraph (default 30s). If a subgraph is down, the gateway returns partial results with errors for the failed fields. Client receives: { data: { user: { name: 'Alice', orders: null } }, errors: [{ message: 'order-service unavailable', path: ['user', 'orders'] }] }. Partial responses are a key GraphQL feature — REST would fail the entire request.")
+}}
+
+{{table "GraphQL Caching Strategies" (rows
+  (row "Strategy" "Scope" "Latency" "Stale Risk" "Use When")
+  (row "Apollo Client normalized cache" "Client-side" "0ms (in memory)" "Yes (client-controlled TTL)" "SPA (Single-Page App) with frequent same-object access")
+  (row "Persisted query + CDN cache" "Edge/CDN" "~5ms" "TTL-controlled" "Public queries, product catalogs, static data")
+  (row "Response cache (Redis)" "Server-side" "~1ms" "TTL-controlled" "Heavy queries that recompute slowly")
+  (row "DataLoader (per-request)" "Request-scoped" "0ms (in batch)" "None (fresh per request)" "N+1 deduplication — always use this")
+)}}
+
+{{triggerQs "Phase 7 Interview Questions"
+  "How would you design a GraphQL API for a mobile app with strict bandwidth constraints?"
+  "Three strategies: (1) Fragment-based queries — client defines reusable fragments per component; each component requests only its fields. (2) Persisted queries with GET — register queries during build; send hash + GET request; CDN-cached for static data. (3) Field-level TTL with response caching — cache expensive computed fields at the resolver level using a shared Redis cache keyed by (fieldName + args hash). (4) Pagination with cursor-based Relay spec — load 20 items, cursor for next 20, never load the full list. (5) @defer directive (experimental) — stream expensive fields after fast fields arrive."
+  "What is GraphQL Federation and when would you use it?"
+  "Federation splits a monolithic GraphQL schema across multiple subgraph services. Each service owns its types (user-service owns User, order-service owns Order). An API gateway (Apollo Router) stitches the schemas at runtime and generates a query plan that fetches from multiple subgraphs in parallel. Use when: multiple teams own different data domains, you want independent deployments per service, or the monolith schema is causing coordination bottlenecks. Don't use for: small teams with one service, or when the added operational complexity isn't justified."
+}}
+
+{{phase 8 "Interview Summary" "2 min"}}
+
+{{say `The GraphQL story for system design interviews:
+<ul>
+  <li><strong>What it solves:</strong> over-fetching (REST returns everything), under-fetching (REST needs N requests for N resources)</li>
+  <li><strong>Single endpoint:</strong> <code>POST /graphql</code> — schema as contract, introspectable, versioning-free</li>
+  <li><strong>N+1 problem:</strong> field resolvers per list item → N DB calls → fix with <span class="hl-blue">DataLoader</span> (batch + per-request cache)</li>
+  <li><strong>Query protection:</strong> depth limit (10) + complexity budget (1000) at parse time — before any DB call</li>
+  <li><strong>Subscriptions:</strong> real-time via WebSocket + Redis Pub/Sub for multi-server fan-out</li>
+  <li><strong>Federation:</strong> split schema across microservices — each team owns their types</li>
+</ul>`}}
+
+{{avoid "Don't say GraphQL is always better than REST. GraphQL is better when: clients have varying data needs, you're aggregating multiple microservices (BFF layer), mobile bandwidth matters. REST is better for: public APIs (familiar to all developers), cacheable read-heavy data, file upload/download, simple CRUD."}}
+
+{{avoid "Don't say DataLoader is optional. Every GraphQL server handling relational data MUST use DataLoader or N+1 queries will DOS your database in production. The interviewer will ask — always mention DataLoader when the query involves nested types."}}
+
+{{table "Real Company GraphQL Usage" (rows
+  (row "Company" "GraphQL Usage" "Notable Detail")
+  (row "GitHub" "Public API v4" "GraphQL replaced REST v3 for complex queries; introspection for auto-docs")
+  (row "Shopify" "Storefront API + Admin API" "Federation for product, order, customer graphs")
+  (row "Twitter (X)" "Mobile API BFF layer" "Reduces mobile bandwidth; one query for entire timeline item")
+  (row "Airbnb" "Internal BFF" "Aggregates 30+ microservices into one client-facing schema")
+  (row "Netflix" "Federated Studio API" "50+ subgraph teams; Apollo Federation at scale")
+)}}
+
+{{checklist
+  "GraphQL: single endpoint, schema-first, client specifies exactly what fields it needs."
+  "N+1 problem: field resolver per list item = N DB queries. Fix: DataLoader batches all .load(id) calls into one IN query per tick."
+  "DataLoader is mandatory for every resolver that fetches by ID. Create fresh instances per request (in context)."
+  "Query protection: depth limit (10) + complexity budget (1000) — applied at parse time, zero DB cost."
+  "Subscriptions: WebSocket + Redis Pub/Sub for multi-server fan-out — same scaling challenge as WebSockets."
+  "Caching: persisted queries (GET) for CDN cacheability; DataLoader for per-request dedup; Redis for response cache."
+  "Federation: each microservice owns its GraphQL types; gateway stitches at runtime — Apollo Router."
+}}
+
+{{key "GraphQL's killer feature is eliminating over-fetching and under-fetching — one query returns exactly what the client needs from multiple data sources. The non-negotiable fix for production GraphQL is DataLoader: without it, N list items trigger N database queries. Depth limiting and complexity budgets prevent clients from crafting queries that exhaust server resources."}}
+
+<div class="fund-resources" style="margin-top: 2rem; padding: 1.5rem; border: 1px solid var(--border); border-radius: 8px; background: var(--surface);">
+  <div style="font-weight: 600; margin-bottom: 1rem; color: var(--text-primary);">Further Learning — Indian YouTube Channels</div>
+  <ul style="list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.75rem;">
+    <li>
+      <a href="https://www.youtube.com/@ArpitBhayani" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">Arpit Bhayani — Asli Engineering</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">Deep engineering dives into API design, caching strategies, and distributed data fetching patterns. Former Google Staff Engineer, creator of DiceDB.</span>
+    </li>
+    <li>
+      <a href="https://www.youtube.com/@gkcs" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">Gaurav Sen</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">System design walkthroughs covering API layer design and data fetching patterns at scale. His InterviewReady course covers GraphQL in BFF architecture context.</span>
+    </li>
+    <li>
+      <a href="https://www.youtube.com/@ConceptandCoding" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">Concept && Coding — Shrayansh Jain</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">HLD/LLD system design playlist. Covers REST vs GraphQL vs gRPC comparisons and when to choose each. 55,000+ students across courses. <a href="https://www.youtube.com/playlist?list=PL6W8uoQQ2c63W58rpNFDwdrBnq5G3EfT7" class="dqa-link" target="_blank">HLD Playlist →</a></span>
+    </li>
+    <li>
+      <a href="https://www.youtube.com/@sudocode" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">sudoCODE — Yogita Sharma</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">System design primer focusing on the WHY behind architectural decisions. Good for understanding GraphQL trade-offs before deep dives.</span>
+    </li>
+  </ul>
+</div>

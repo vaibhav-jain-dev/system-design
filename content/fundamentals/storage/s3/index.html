@@ -6,13 +6,13 @@
   <li><strong>GET</strong> — read an entire object by key</li>
   <li><strong>DELETE</strong> — remove an object</li>
 </ul>
-S3 stores objects in <strong>buckets</strong>. A bucket is a flat namespace — keys can contain slashes to look like paths, but S3 sees them as opaque strings.`}}
+<strong>S3</strong> (Simple Storage Service — AWS's object storage service) stores objects in <strong>buckets</strong>. A bucket is a flat namespace — keys can contain slashes to look like paths, but S3 sees them as opaque strings.`}}
 
 {{diagram "fund-s3-overview"}}
 
 {{think "Object storage is the right answer whenever you are storing large blobs that are written once and read many times. The 'flat namespace with a key' model is the exact opposite of how databases work — and that's the point: no schema, no index maintenance, no query optimizer needed."
-  (whyNot "storing blobs in Postgres/MySQL" "A 5 MB image stored in Postgres requires: binary escaping, WAL log entry, buffer pool space, replication payload — all for bytes you cannot query. Postgres is optimized for structured rows, not opaque bytes. At 1 million images that is 5 TB of database storage — S3 costs $115/mo, Postgres RDS would cost thousands.")
-  (how "S3 achieves 11 nines of durability" "Every object is automatically replicated across at least 3 Availability Zones within the region. Each AZ is an independent data center with its own power and networking. The probability of losing all three copies simultaneously is astronomically low — 10^-11 per year per object.")
+  (whyNot "storing blobs in Postgres/MySQL" "A 5 MB image stored in Postgres requires: binary escaping, <strong>WAL</strong> (Write-Ahead Log — the durability journal that records every change before it is applied) log entry, buffer pool space, replication payload — all for bytes you cannot query. Postgres is optimized for structured rows, not opaque bytes. At 1 million images that is 5 TB of database storage — S3 costs $115/mo, Postgres RDS would cost thousands.")
+  (how "S3 achieves 11 nines of durability" "Every object is automatically replicated across at least 3 <strong>Availability Zones</strong> (AZs — physically separate data centers within a region, each with independent power and networking) within the region. The probability of losing all three copies simultaneously is astronomically low — 10^-11 per year per object.")
 }}
 
 {{hint "bucket names are globally unique" "S3 bucket names are globally unique across all AWS accounts. &lt;strong>my-images&lt;/strong> is gone once any customer uses it. Use a prefix like &lt;strong>acme-prod-media-us-east-1&lt;/strong>. Include region in bucket names for clarity on cross-region replication."}}
@@ -215,7 +215,7 @@ def upload_large_file(bucket, key, filepath):
   (row "Cost" "N/A" "Storage cost × all versions retained")
 )}}
 
-{{think "Versioning is not a backup strategy. It protects against application-level deletes and overwrites. It does not protect against bucket deletion or access key compromise (attacker can delete all versions)."
+{{think "Versioning is not a backup strategy — it protects against accidental application-level deletes and overwrites, but does not protect against bucket deletion or access key compromise (an attacker with sufficient permissions can delete all versions, including historical ones)."
   (whatIf "versioning is enabled and an attacker deletes all objects" "Attacker adds delete markers to all objects — easy to recover by removing the delete markers. But if attacker has s3:DeleteObjectVersion permission, they can permanently delete all versions. Use MFA Delete to require multi-factor authentication for version deletion.")
   (how "Object Lock prevents deletion entirely" "S3 Object Lock puts objects in WORM (write-once, read-many) mode. Compliance mode: nobody can delete, not even root. Governance mode: only privileged IAM users with s3:BypassGovernanceRetention can delete. Required for SEC 17a-4, FINRA, CFTC compliance.")
 }}
@@ -264,11 +264,11 @@ def upload_large_file(bucket, key, filepath):
   <li><strong>s3:ObjectCreated</strong> — fires on PUT, POST, COPY, multipart complete</li>
   <li><strong>s3:ObjectRemoved</strong> — fires on DELETE</li>
 </ul>
-Targets: <strong>Lambda</strong> (direct invoke), <strong>SNS</strong> (fan-out), <strong>SQS</strong> (queue for batch processing), <strong>EventBridge</strong> (complex routing).`}}
+Targets: <strong>Lambda</strong> (direct invoke), <strong>SNS</strong> (Simple Notification Service — AWS's pub/sub fan-out service), <strong>SQS</strong> (Simple Queue Service — AWS's managed message queue for batch processing), <strong>EventBridge</strong> (complex content-based routing).`}}
 
 {{diagram "fund-s3-events"}}
 
-{{think "S3 event notifications are at-least-once delivery. Design downstream processors to be idempotent — the same image may be processed twice."
+{{think "S3 event notifications are at-least-once delivery — meaning S3 guarantees every event is delivered but may deliver it more than once (e.g., during retries after a partial failure). Design downstream processors to be idempotent — the same image may be processed twice."
   (how "image processing pipeline works" "Upload triggers S3 event → SQS queue → Lambda workers: resize to thumbnail/medium/large, transcode video, run content moderation, extract metadata — all in parallel. Original S3 object is the source of truth; derived versions are idempotent re-computations.")
   (whatIf "Lambda is throttled during an upload burst" "SQS buffers events. Lambda scales to concurrency limit. Unprocessed events wait in SQS — no events lost. Set SQS visibility timeout > Lambda max processing time (300s) to prevent reprocessing mid-flight.")
 }}

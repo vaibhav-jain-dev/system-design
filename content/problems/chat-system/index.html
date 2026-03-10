@@ -20,10 +20,10 @@
   (row "Requirement" "Description" "Priority" "Drives")
   (row "1:1 messaging" "Real-time text messages between two users" "P0" "WebSocket, message routing, delivery receipts")
   (row "Group chat" "Up to 256 members per group, admin controls" "P0" "Fan-out strategy, group membership service")
-  (row "Delivery receipts" "Sent, delivered, read status indicators" "P0" "ACK protocol, receipt fan-out")
+  (row "Delivery receipts" "Sent, delivered, read status indicators" "P0" "ACK (Acknowledgment) protocol, receipt fan-out")
   (row "Offline delivery" "Queue messages for offline users, push notification" "P0" "Offline queue, APNs/FCM integration")
   (row "E2E encryption" "Signal Protocol — server never sees plaintext" "P0" "Key exchange, Double Ratchet, media encryption")
-  (row "Media sharing" "Images, video, documents up to 100MB" "P1" "S3, CDN, client-side encryption")
+  (row "Media sharing" "Images, video, documents up to 100MB" "P1" "S3, CDN (Content Delivery Network), client-side encryption")
   (row "Multi-device sync" "Same account on phone, tablet, desktop" "P1" "Per-device cursors, fan-out to all devices")
   (row "Presence" "Online/offline/last-seen indicators" "P2" "Redis, heartbeat, privacy settings")
 )}}
@@ -52,11 +52,11 @@
 
 {{caveat "E2E encryption eliminates server-side search, spam filtering, and content moderation. You must address this trade-off explicitly — interviewers will probe it."}}
 
-{{mustKnow "WebSocket is the only viable option for real-time bidirectional chat — long polling adds 1-5s latency, SSE is unidirectional" "E2E encryption means the server is a dumb pipe — no server-side search, no content moderation, no compliance indexing" "The 256-member group cap is a deliberate engineering constraint that bounds fan-out cost to 256 writes per message" "Dual-path delivery: WebSocket for online users, persistent offline queue + push notification for offline users"}}
+{{mustKnow "WebSocket is the only viable option for real-time bidirectional chat — long polling adds 1-5s latency, SSE (Server-Sent Events — a one-way push from server to client only) is unidirectional" "E2E encryption means the server is a dumb pipe — no server-side search, no content moderation, no compliance indexing" "The 256-member group cap is a deliberate engineering constraint that bounds fan-out cost to 256 writes per message" "Dual-path delivery: WebSocket for online users, persistent offline queue + push notification for offline users"}}
 
 {{phase 2 "Capacity Estimation" "3 min"}}
 
-{{say `500M DAU, each user sends about <strong>40 messages per day</strong> on average — here are the numbers that shape the architecture:
+{{say `<span class="hl">500M DAU</span> (Daily Active Users — the number of unique users who use the app in a given day), each user sends about <strong>40 messages per day</strong> on average — here are the numbers that shape the architecture:
 <ul>
   <li><span class="hl">230K msgs/sec</span> average, <span class="hl">700K msgs/sec</span> at peak (3× evening spike)</li>
   <li><span class="hl">200M concurrent WebSocket connections</span> at peak — the dominant scaling constraint</li>
@@ -130,7 +130,7 @@ Messages are sent over WebSocket for lowest latency; REST provides durability an
         <div class="api-quick-row">
           <span class="api-method GET">WS</span>
           <span class="api-quick-path"><span class="pq">frame.type = "typing"</span></span>
-          <span class="api-quick-comment"># Typing indicator (fire-and-forget, no ACK)</span>
+          <span class="api-quick-comment"># Typing indicator (fire-and-forget, no ACK/Acknowledgment needed)</span>
         </div>
       </div>
       <div class="api-quick-block">
@@ -172,7 +172,7 @@ Messages are sent over WebSocket for lowest latency; REST provides durability an
         <button class="api-copy-btn" data-path="/v1/ws/connect">Copy</button>
       </div>
       <div class="api-card-body">
-        <div class="api-card-note">Client generates a UUID before sending. On disconnect + retry, same UUID is resent — server deduplicates on client_msg_id. Single checkmark = server ACK'd; double checkmark = recipient delivered.</div>
+        <div class="api-card-note">Client generates a <strong>UUID</strong> (Universally Unique Identifier — a 128-bit ID that is practically impossible to duplicate) before sending. On disconnect + retry, same UUID is resent — server deduplicates on client_msg_id. Single checkmark = server ACK'd (Acknowledged); double checkmark = recipient delivered.</div>
         <div class="api-responses">
           <div class="api-tabs">
             <span class="api-tab s2 active" data-code="send">Send Message</span>
@@ -302,11 +302,11 @@ Messages are sent over WebSocket for lowest latency; REST provides durability an
   </div>
 </div>
 
-{{hint "why client-generated message ID?" "The client generates a UUID before sending. If the WebSocket drops during send, the client retries with the same ID. The server uses this ID for &lt;strong>deduplication&lt;/strong> — if it sees the same ID twice, it ACKs without storing again. Without this, a network hiccup causes duplicate messages."}}
+{{hint "why client-generated message ID?" "The client generates a <strong>UUID</strong> (Universally Unique Identifier — a 128-bit randomly generated ID) before sending. If the WebSocket drops during send, the client retries with the same ID. The server uses this ID for <strong>deduplication</strong> — if it sees the same ID twice, it sends an ACK (Acknowledgment) without storing again. Without this, a network hiccup causes duplicate messages."}}
 
 {{think "REST vs WebSocket for sending messages — WebSocket wins on latency but REST is simpler for reliability."
   (whyNot "REST-only for sending" "REST requires a new HTTP connection per message. At 700K msgs/sec, that's 700K TCP handshakes/sec. WebSocket reuses one persistent connection per user — orders of magnitude less overhead.")
-  (how "ACK protocol works" "Client sends message over WebSocket. Server writes to Kafka, gets offset. Server sends ACK with server-assigned message_id (Snowflake) back to sender. Client shows single checkmark. No ACK within 5 seconds → client retries over REST as fallback.")
+  (how "ACK protocol works" "Client sends message over WebSocket. Server writes to Kafka, gets offset. Server sends an ACK (Acknowledgment — a confirmation that the message was received and persisted) with server-assigned message_id (Snowflake) back to sender. Client shows single checkmark. No ACK within 5 seconds → client retries over REST as fallback.")
 }}
 
 {{triggerQs "Questions this section might trigger"
@@ -324,7 +324,7 @@ Messages are sent over WebSocket for lowest latency; REST provides durability an
 
 {{say `Four layers:
 <ul>
-  <li><strong>Connection layer</strong> — WebSocket servers behind NLB; each server holds up to <span class="hl">100K persistent connections</span></li>
+  <li><strong>Connection layer</strong> — WebSocket servers behind <strong>NLB</strong> (Network Load Balancer — a Layer 4 load balancer that forwards raw TCP connections without idle-timeout issues); each server holds up to <span class="hl">100K persistent connections</span></li>
   <li><strong>Routing layer</strong> — Chat Service + Kafka; stateless, handles message fan-out logic</li>
   <li><strong>Storage layer</strong> — DynamoDB for messages, S3 for media</li>
   <li><strong>Supporting services</strong> — Presence (Redis), Push (APNs/FCM), Groups</li>
@@ -332,9 +332,9 @@ Messages are sent over WebSocket for lowest latency; REST provides durability an
 
 {{diagram "cs-architecture"}}
 
-{{hint "why NLB not ALB?" `<span class='hl-blue'>NLB</span> operates at Layer 4 and passes TCP through directly — no idle timeout issues for long-lived connections:
+{{hint "why NLB not ALB?" `<span class='hl-blue'>NLB</span> (Network Load Balancer — Layer 4, routes raw TCP connections) operates at Layer 4 and passes TCP through directly — no idle timeout issues for long-lived connections:
 <ul>
-  <li><span class='hl-red'>ALB has a 4000-second idle timeout</span> — after which it silently drops the WebSocket connection</li>
+  <li><span class='hl-red'>ALB (Application Load Balancer — Layer 7, understands HTTP) has a 4000-second idle timeout</span> — after which it silently drops the WebSocket connection</li>
   <li>NLB supports millions of concurrent connections with no timeout</li>
   <li>For persistent connections, NLB is the only viable option</li>
 </ul>`}}
@@ -442,7 +442,7 @@ func (s *ChatService) DeliverMessage(ctx context.Context, msg *Message) {
 <ul>
   <li>Partition key: <strong>conversation_id</strong> — all messages in a conversation land on the same shard</li>
   <li>Sort key: <strong>message_id</strong> (Snowflake) — gives ordered messages per conversation with single-digit-ms reads</li>
-  <li>TTL on messages — ephemeral messages auto-delete without a background job</li>
+  <li><strong>TTL</strong> (Time-To-Live — a duration after which DynamoDB automatically deletes the record) on messages — ephemeral messages auto-delete without a background job</li>
 </ul>`}}
 
 {{diagram "cs-data-model"}}
@@ -496,7 +496,7 @@ response = dynamodb.query(
 )`}}
 
 {{collapseSection "DynamoDB Table Schema Details" `<ul>
-  <li><strong>messages table:</strong> PK=conversation_id, SK=message_id (Snowflake). PAY_PER_REQUEST billing avoids capacity planning. TTL on ephemeral messages</li>
+  <li><strong>messages table:</strong> PK=conversation_id, SK=message_id (Snowflake). PAY_PER_REQUEST billing avoids capacity planning. TTL (Time-To-Live) on ephemeral messages</li>
   <li><strong>conversations GSI:</strong> PK=user_id, SK=updated_at — powers the inbox view sorted by most recent activity</li>
   <li><strong>read_receipts table:</strong> PK=conversation_id#user_id — single GetItem for unread count per conversation per user</li>
   <li><strong>participants table:</strong> PK=conversation_id, SK=user_id — Query returns all members for fan-out lookup</li>
@@ -586,7 +586,7 @@ response = dynamodb.query(
 {{hint "why client-side encryption for media?" "If the server encrypts, it sees the plaintext media — breaking E2E. The client generates a random &lt;strong>AES-256 key&lt;/strong>, encrypts the file, uploads the ciphertext. The AES key is sent inside the E2E-encrypted message. &lt;span class='hl-red'>Server stores a blob it cannot decrypt.&lt;/span>"}}
 
 {{compare "Media Storage" (options
-  (best "S3 + CloudFront CDN" "Unlimited scale, 11 nines durability, CDN for low-latency global downloads. Cost: $0.023/GB storage + $0.085/GB transfer")
+  (best "S3 + CloudFront CDN" "Unlimited scale, 11 nines durability, CDN (Content Delivery Network — servers distributed globally to cache and serve content closer to users) for low-latency global downloads. Cost: $0.023/GB storage + $0.085/GB transfer")
   (alt "Dedicated file servers" "Full control but requires managing petabytes of storage, replication, and serving infrastructure. Only makes sense at WhatsApp's scale (they run their own Ceph clusters)")
   (nofit "DynamoDB for media" "400KB item size limit. A single image exceeds this. Binary blobs in DynamoDB waste expensive IOPS")
 )}}
@@ -655,7 +655,7 @@ response = dynamodb.query(
   (row "Kafka" "Partition by conversation_id" "10K partitions, 100 brokers")
   (row "DynamoDB" "On-demand, auto-partitioning" "1M+ WCU, 5M+ RCU")
   (row "Redis (session registry)" "Cluster mode, 20 shards" "200M keys, 1M ops/sec")
-  (row "Redis (presence)" "Cluster mode, 10 shards" "500M keys (all users), heartbeat TTL")
+  (row "Redis (presence)" "Cluster mode, 10 shards" "500M keys (all users), heartbeat TTL (Time-To-Live — key auto-expires if not refreshed)")
 )}}
 
 {{hint "connection draining during rolling deploys" `WebSocket servers hold long-lived connections — a naive deploy kills them all. The correct approach is <strong>graceful connection draining</strong>:
@@ -669,7 +669,7 @@ response = dynamodb.query(
 
 {{think "Multi-region is essential for a global chat service — users expect sub-200ms message delivery."
   (how "region-based consistent hashing for WebSocket servers" "Users are assigned to a WebSocket server using consistent hashing on user_id mod virtual_nodes. The hash ring has 5,000 real servers × 150 virtual nodes = 750K points. When a server is added (scale-out event), only 1/5000 of users need to move — ~40,000 connections reassigned vs 200M for random assignment. The session registry update is atomic: Redis HSET user_id → new_server_ip, TTL=5min.")
-  (how "multi-region message routing" "Each region has its own Kafka cluster and WebSocket fleet. If sender is in US-East and receiver is in EU-West, the message flows: sender → US-East Kafka → cross-region replicator → EU-West Kafka → EU-West Chat Service → receiver. Cross-region latency adds ~80ms (US-East to EU-West). Total delivery: ~150ms P99.")
+  (how "multi-region message routing" "Each region has its own Kafka cluster and WebSocket fleet. If sender is in US-East and receiver is in EU-West, the message flows: sender → US-East Kafka → cross-region replicator → EU-West Kafka → EU-West Chat Service → receiver. Cross-region latency adds ~80ms (US-East to EU-West). Total delivery: ~150ms P99 (99th percentile — the slowest 1% of requests).")
   (whatIf "an entire region goes down" "DNS failover (Route 53 health checks) redirects users to the nearest healthy region. The user's WebSocket reconnects to a server in the new region. The new server queries DynamoDB Global Tables (multi-region replicated) for missed messages. Recovery time: ~30 seconds for DNS propagation + ~2 seconds for WebSocket reconnect.")
   (whyNot "single region with CDN" "CDN helps for static content and media, but chat messages are dynamic and personalized. You cannot cache a real-time message stream. The only way to reduce latency for a user in Tokyo is to have servers in Tokyo.")
 }}
@@ -690,7 +690,7 @@ response = dynamodb.query(
   <li><span class='hl'>10,000 partitions</span> across <span class='hl'>100 brokers</span> = 100 partitions/broker; each broker handles ~7,000 msgs/sec at steady state</li>
   <li>Producers use <strong>async batching</strong> (<code>linger.ms=5</code>, <code>batch.size=64KB</code>) — at 700K msgs/sec, batching reduces broker round trips by <span class='hl'>~20x</span></li>
   <li>During a spike, Kafka consumers (Chat Service) fall behind — messages accumulate in partitions (consumer lag). Chat Service auto-scales horizontally: new pods claim idle partitions within <span class='hl'>30 seconds</span></li>
-  <li><span class='hl-red'>Back-pressure risk</span>: if Chat Service can't keep up and lag grows beyond <span class='hl'>60 seconds</span>, delivery SLA is breached — alert on consumer lag, not throughput</li>
+  <li><span class='hl-red'>Back-pressure risk</span>: if Chat Service can't keep up and lag grows beyond <span class='hl'>60 seconds</span>, the delivery <strong>SLA</strong> (Service Level Agreement — a contract guaranteeing message delivery within a time bound) is breached — alert on consumer lag, not throughput</li>
   <li><small>Kafka retention: 7 days. Even if consumers are down for 6 days, no messages are lost.</small></li>
 </ul>`
 }}

@@ -18,14 +18,14 @@
 
 {{table "Real-Time Transport Comparison" (rows
   (row "Mechanism" "Direction" "Protocol" "Latency" "Use Case")
-  (row "WebSocket" "Full-duplex" "WS / WSS" "1-5ms" "<a class=\"dqa-link\" href=\"/problem/chat-system\">Chat</a>, gaming, collaboration, live maps")
-  (row "SSE" "Server → Client only" "HTTP/1.1 or HTTP/2" "5-50ms" "Live feeds, dashboards, notifications")
+  (row "WebSocket" "Full-duplex" "WS / WSS (WebSocket Secure — WebSocket over TLS)" "1-5ms" "<a class=\"dqa-link\" href=\"/problem/chat-system\">Chat</a>, gaming, collaboration, live maps")
+  (row "SSE (Server-Sent Events)" "Server → Client only" "HTTP/1.1 or HTTP/2" "5-50ms" "Live feeds, dashboards, notifications")
   (row "Long Polling" "Server → Client (delayed)" "HTTP" "100-300ms per msg" "Legacy fallback, simple notifications")
   (row "HTTP Polling" "Client pulls" "HTTP" "Interval-based" "Batch status checks, not real-time")
-  (row "WebRTC" "Peer-to-peer" "DTLS/SRTP" "&lt;50ms" "Video/audio calls, P2P file transfer")
+  (row "WebRTC" "Peer-to-peer" "DTLS/SRTP (encrypted real-time media protocols)" "&lt;50ms" "Video/audio calls, P2P file transfer")
 )}}
 
-{{hint "when to choose SSE over WebSockets?" "SSE is simpler to implement, works over HTTP/2 (multiplexed, no connection limit issue), and requires no special server support. Choose SSE for unidirectional feeds. Choose WebSockets when the client needs to send data back — otherwise you're adding complexity without benefit."}}
+{{hint "when to choose SSE over WebSockets?" "<strong>SSE</strong> (Server-Sent Events — a standard browser API for receiving a stream of updates from the server over a single HTTP connection) is simpler to implement, works over HTTP/2 (multiplexed, no connection limit issue), and requires no special server support. Choose SSE for unidirectional feeds (server → client only). Choose WebSockets when the client also needs to send data back — otherwise you're adding complexity without benefit."}}
 
 {{triggerQs "Phase 1 Interview Questions"
   "What is the difference between WebSockets and HTTP?"
@@ -44,7 +44,7 @@
 
 {{say `<span class="hl-blue">WebSocket handshake</span> starts as an HTTP/1.1 request and upgrades in-place:
 <ul>
-  <li>Client sends <code>Upgrade: websocket</code> + <code>Sec-WebSocket-Key</code> header</li>
+  <li>Client sends <code>Upgrade: websocket</code> + <code>Sec-WebSocket-Key</code> header (a random base64-encoded nonce to confirm the server supports WebSocket)</li>
   <li>Server responds with <strong>101 Switching Protocols</strong> — from this point the connection speaks WebSocket frames, not HTTP</li>
   <li>The same TCP connection is reused — no new handshake, no port change</li>
   <li>Rejection (e.g., <span class="hl-red">400 Bad Request</span>) means the connection stays HTTP — client falls back to SSE or long polling</li>
@@ -79,7 +79,7 @@ Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`}}
   (row "Payload" "Variable" "Application data (text/binary)")
 )}}
 
-{{hint "why are client frames masked?" "Masking prevents a malicious client from sending crafted payloads that could be misinterpreted by intermediate proxies as HTTP responses (cache poisoning). Server→client frames are not masked — the server controls the connection."}}
+{{hint "why are client frames masked?" "Masking (XOR-ing the payload with a random 32-bit key) prevents a malicious client from sending crafted payloads that could be misinterpreted by intermediate proxies as HTTP responses — a <strong>cache poisoning</strong> attack. Server→client frames are not masked — the server controls the connection and is trusted."}}
 
 {{triggerQs "Phase 2 Interview Questions"
   "What happens if a WebSocket upgrade request is rejected?"
@@ -377,13 +377,13 @@ async function startLongPolling(userId, onMessage) {
 
 {{phase 7 "Security & Health" "3 min"}}
 
-{{say `<span class="hl-red">Always use WSS</span> — WebSocket over TLS — never plain WS:
+{{say `<span class="hl-red">Always use WSS</span> (WebSocket Secure — WebSocket over TLS, the encrypted version) — never plain WS:
 <ul>
-  <li>Plain WS is as insecure as HTTP — eavesdropping, injection, proxy interference</li>
-  <li><strong>Authentication at upgrade time:</strong> validate JWT before returning 101; once connected, trust the connection for its lifetime</li>
+  <li>Plain WS is as insecure as plain HTTP — eavesdropping, injection, proxy interference</li>
+  <li><strong>Authentication at upgrade time:</strong> validate <strong>JWT</strong> (JSON Web Token — a signed token proving the user's identity) before returning 101; once connected, trust the connection for its lifetime</li>
   <li>Pass JWT as a query parameter <small>(appears in server logs — lower security)</small> or in the <code>Sec-WebSocket-Protocol</code> subprotocol header</li>
-  <li>For long-lived connections (>15 min with a 15-min JWT TTL): implement a re-auth flow — server sends auth-challenge, client responds with refreshed token</li>
-  <li><span class="hl-red">Avoid cookie auth alone</span> — cookies are sent automatically on upgrade, making WebSocket vulnerable to CSRF</li>
+  <li>For long-lived connections (&gt;15 min with a 15-min JWT TTL): implement a re-auth flow — server sends auth-challenge, client responds with refreshed token</li>
+  <li><span class="hl-red">Avoid cookie auth alone</span> — cookies are sent automatically on upgrade, making WebSocket vulnerable to <strong>CSRF</strong> (Cross-Site Request Forgery — an attack that tricks a user's browser into making unintended authenticated requests)</li>
 </ul>`}}
 
 {{think "Authentication strategy: validate JWT at upgrade time, then trust the connection for its lifetime."
@@ -470,3 +470,25 @@ async function startLongPolling(userId, onMessage) {
 }}
 
 {{key "WebSockets solve the cross-server routing problem with Redis Pub/Sub — any server publishes to a user channel, and the server holding that user's connection delivers it. That's the architecture pattern interviewers want to hear."}}
+
+<div class="fund-resources" style="margin-top: 2rem; padding: 1.5rem; border: 1px solid var(--border); border-radius: 8px; background: var(--surface);">
+  <div style="font-weight: 600; margin-bottom: 1rem; color: var(--text-primary);">Further Learning — Indian YouTube Channels</div>
+  <ul style="list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.75rem;">
+    <li>
+      <a href="https://www.youtube.com/@ArpitBhayani" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">Arpit Bhayani — Asli Engineering</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">Real-time system design at scale — covers WebSocket architecture, Slack-style messaging, and connection management patterns. GitHub: <a href="https://github.com/arpitbbhayani/system-design-questions" class="dqa-link" target="_blank">system-design-questions</a>.</span>
+    </li>
+    <li>
+      <a href="https://www.youtube.com/@gkcs" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">Gaurav Sen</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">WhatsApp and chat system design including real-time delivery, WebSocket scaling, and fan-out patterns. Ex-Google engineer, InterviewReady.io founder.</span>
+    </li>
+    <li>
+      <a href="https://www.youtube.com/@ConceptandCoding" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">Concept && Coding — Shrayansh Jain</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">HLD series covering real-time communication design including WebSocket vs SSE vs long polling trade-offs. <a href="https://www.youtube.com/playlist?list=PL6W8uoQQ2c63W58rpNFDwdrBnq5G3EfT7" class="dqa-link" target="_blank">HLD Playlist →</a></span>
+    </li>
+    <li>
+      <a href="https://www.youtube.com/@sudocode" target="_blank" rel="noopener" class="dqa-link" style="font-weight: 600;">sudoCODE — Yogita Sharma</a>
+      <span style="color: var(--text-secondary); margin-left: 0.5rem;">Beginner-friendly explanations of real-time system design concepts including WebSocket protocol fundamentals and when to use each transport mechanism.</span>
+    </li>
+  </ul>
+</div>

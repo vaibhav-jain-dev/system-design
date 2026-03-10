@@ -13,7 +13,7 @@ Does that align?`}}
 {{diagram "tb-requirements"}}
 
 {{think "The hardest subproblem is seat-state consistency under burst traffic. At 100K concurrent users for 500 seats, seat state is contended at a ratio of 200:1. The design is essentially a distributed lock system with a payment window."
-  (whyNot "optimistic locking (check-then-act in Postgres)" "Under 100K concurrent users, the retry rate with optimistic locking becomes exponential. Most users end up retrying 5–10 times. Redis SET NX is a single atomic operation — O(1) with no retry storm.")
+  (whyNot "optimistic locking (check-then-act in Postgres)" "Under 100K concurrent users, the retry rate with optimistic locking becomes exponential. Most users end up retrying 5–10 times. <strong>Redis SET NX</strong> (SET if Not eXists — an atomic operation that sets a key only if it doesn't already exist; returns 1 if acquired, 0 if already taken) is a single atomic operation — O(1) with no retry storm.")
   (whatIf "Redis fails at the moment of seat lock" "During Redis failover (Sentinel promotes replica in &lt; 30s), new lock attempts fail with 503. In-flight locks that were already acquired are still valid if the data was replicated synchronously. We use Redlock across 3 Redis nodes for safety — lock requires majority quorum.")
 }}
 
@@ -23,7 +23,7 @@ Does that align?`}}
   (row "Requirement" "Target")
   (row "Double-booking prevention" "99.999% — strong invariant")
   (row "Seat lock duration" "10 minutes (payment window)")
-  (row "Seat map load time" "&lt; 500ms p99")
+  (row "Seat map load time" "&lt; 500ms p99 (99th percentile — 99% of users load in under 500ms)")
   (row "Booking flow end-to-end" "&lt; 2s excluding payment")
   (row "Concurrent users (rush)" "100K+ for popular show")
   (row "Availability" "99.99% (52 min downtime/year)")
@@ -32,7 +32,7 @@ Does that align?`}}
 
 {{triggerQs "Questions this section triggers"
   "What happens if a user locks seats but never pays?"
-  "The lock has a 10-minute TTL in Redis. On expiry, the key auto-deletes — no manual cleanup. Seats re-enter the available pool. The booking record stays in EXPIRED state in Postgres for audit. About 15% of locks expire naturally."
+  "The lock has a 10-minute <strong>TTL</strong> (Time-To-Live — how long a key persists before Redis automatically deletes it; set at creation time, no cleanup needed) in Redis. On expiry, the key auto-deletes — no manual cleanup. Seats re-enter the available pool. The booking record stays in EXPIRED state in Postgres for audit. About 15% of locks expire naturally."
   "Can you hold more seats than you pay for?"
   "Max 8 seats per booking request (enforced at API layer). Additionally, per-user session limit: 1 active lock per show at a time. These constraints prevent seat hoarding."
   "What about group bookings (10+ seats)?"
@@ -363,7 +363,7 @@ Payment flows through <strong>async webhooks</strong> — not synchronous calls 
 {{diagram "tb-architecture"}}
 
 {{compare "Database for Bookings" (options
-  (best "Postgres with SERIALIZABLE isolation" "ACID, foreign keys, complex queries for reports. Booking confirm uses SERIALIZABLE transaction to prevent any race condition on the booking record.")
+  (best "Postgres with SERIALIZABLE isolation" "<strong>ACID</strong> (Atomicity — all-or-nothing writes; Consistency — data stays valid; Isolation — concurrent writes don't interfere; Durability — committed data survives crashes), foreign keys, complex queries for reports. Booking confirm uses SERIALIZABLE transaction to prevent any race condition on the booking record.")
   (alt "DynamoDB with conditional writes" "Horizontal scale, auto-scaling capacity. But conditional write syntax is complex for multi-seat transactions. Serializable transactions require TransactWriteItems — 25 item limit per transaction.")
   (nofit "MongoDB" "Document model doesn't naturally fit relational seat → booking → payment → ticket hierarchy. Multi-document transactions have higher write amplification and no native advisory locks.")
 )}}
@@ -435,7 +435,7 @@ CREATE INDEX idx_bookings_show_active
   (row "Booking history" "Postgres read replicas" "User sees last 12 months of bookings. 3 replicas for read scalability.")
 )}}
 
-{{hint "seat_ids as UUID array" "Storing seat_ids as a Postgres array (UUID[]) avoids a join table for the common query 'which seats does this booking hold'. The downside: you can't index individual seat IDs within an array. For the availability query, we use the reverse lookup: show all bookings that contain this seat, which requires a GIN index on seat_ids."}}
+{{hint "seat_ids as UUID array" "Storing seat_ids as a Postgres array (<strong>UUID</strong>[] — UUID = Universally Unique Identifier, a randomly generated 128-bit ID) avoids a join table for the common query 'which seats does this booking hold'. The downside: you can't index individual seat IDs within an array. For the availability query, we use the reverse lookup: show all bookings that contain this seat, which requires a <strong>GIN</strong> (Generalized Inverted iNdex — a Postgres index type that can index array and JSON contents, enabling 'does this array contain value X?' queries) index on seat_ids."}}
 
 {{caveat "The partial index WHERE status IN ('locked', 'confirmed') is critical — without it, the seat availability query scans all historical bookings including millions of expired/cancelled rows, degrading from 10ms to 500ms+."}}
 
@@ -455,7 +455,7 @@ CREATE INDEX idx_bookings_show_active
 {{diagram "tb-rush-handling"}}
 
 {{compare "Rush Traffic Control" (options
-  (best "Virtual queue (SQS FIFO + position token)" "Fair FIFO ordering, user sees queue position, metered dequeue prevents service overload. Works even if all 100K users arrive in the same second.")
+  (best "Virtual queue (SQS FIFO + position token)" "Fair <strong>FIFO</strong> (First-In, First-Out — users who arrived earliest get served first) ordering, user sees queue position, metered dequeue prevents service overload. Works even if all 100K users arrive in the same second.")
   (alt "Rate limiting at API gateway (token bucket)" "Simple but unfair — fast refreshers get in, slow connections are blocked. No queue position feedback. Users experience silent drops.")
   (nofit "CAPTCHA-only" "Slows bot traffic but doesn't help with 100K legitimate users all clicking simultaneously. The fundamental problem is concurrent load, not bot traffic.")
 )}}
@@ -594,7 +594,7 @@ def handle_payment_webhook(request):
 
 {{phase 8 "Real-Time Seats" "4 min"}}
 
-{{say `Real-time seat map uses <strong>Redis Pub/Sub</strong> to fan out seat state changes:
+{{say `Real-time seat map uses <strong>Redis Pub/Sub</strong> (Publish/Subscribe — a messaging pattern where one publisher sends a message and all subscribers on that channel receive it immediately) to fan out seat state changes:
 <ul>
   <li>Every lock/release publishes to <code>seat:show:{show_id}</code> channel — sub-ms delivery</li>
   <li>All WebSocket-connected seat map sessions receive the update immediately</li>
@@ -687,7 +687,7 @@ Redis is sharded by <strong>show_id</strong> (hash tags) so one popular show doe
 
 {{say `QR codes generated <strong>asynchronously</strong> after payment confirmation:
 <ul>
-  <li>Token: <span class="hl-blue">HMAC-SHA256</span>(<code>booking_id + secret + show_date</code>) — unforgeable without the secret key</li>
+  <li>Token: <span class="hl-blue">HMAC-SHA256</span> (<strong>HMAC</strong> = Hash-based Message Authentication Code — a cryptographic signature that proves a message was created by someone who knows the secret key; SHA-256 is the hash function used)(<code>booking_id + secret + show_date</code>) — unforgeable without the secret key</li>
   <li>QR image: PNG stored in <strong>S3</strong>, delivered via <strong>CloudFront</strong> — static, immutable once generated</li>
   <li>Venue validation: <code>GET /tickets/validate?token=...</code> — the <strong>only endpoint</strong> that needs to be online at the venue</li>
 </ul>`}}
@@ -765,8 +765,8 @@ def validate_ticket(token_prefix: str, booking_id_suffix: str) -> dict:
 
 {{say `Bot scalpers try to buy all premium seats for resale — defense is layered:
 <ul>
-  <li><strong>WAF</strong> — rate limits at edge: <span class="hl">100 requests/min per IP</span> for booking endpoints</li>
-  <li><strong>reCAPTCHA v3</strong> — score &gt; 0.7 required for lock attempts on high-demand shows</li>
+  <li><strong>WAF</strong> (Web Application Firewall — a layer that inspects incoming HTTP requests and blocks known bot patterns, malicious IPs, and abusive traffic before they reach the application) — rate limits at edge: <span class="hl">100 requests/min per IP</span> for booking endpoints</li>
+  <li><strong>reCAPTCHA v3</strong> — score &gt; 0.7 required for lock attempts on high-demand shows <small>(reCAPTCHA runs invisibly in the background, scoring user behavior 0.0–1.0; a score below 0.7 suggests automated traffic)</small></li>
   <li><strong>Device fingerprinting</strong> — max 3 accounts per device for high-demand bookings</li>
   <li><strong>Business logic</strong> — max <span class="hl">6 tickets</span> per user per show; max 3 lock attempts per session per show</li>
 </ul>

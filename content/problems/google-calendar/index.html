@@ -4,9 +4,9 @@
 
 {{say `Clarifying scope:
 <ul>
-  <li><strong>In scope:</strong> event CRUD, recurring events with <span class="hl-blue">RFC 5545 RRULE</span>, calendar sharing with ACL, reminders and push notifications, multi-device sync</li>
+  <li><strong>In scope:</strong> event CRUD, recurring events with <span class="hl-blue">RFC 5545 RRULE</span> (the standard format for describing recurrence rules, e.g. "every Monday"), calendar sharing with <strong>ACL</strong> (Access Control List — a list specifying which users have which permissions), reminders and push notifications, multi-device sync</li>
   <li><strong>Out of scope:</strong> smart scheduling and AI suggestions — those are separate ML services</li>
-  <li><strong>Scale target:</strong> <span class="hl">500 million MAU</span>, <span class="hl">2 billion events per day</span></li>
+  <li><strong>Scale target:</strong> <span class="hl">500 million MAU</span> (Monthly Active Users — unique users who use the app within a month), <span class="hl">2 billion events per day</span></li>
 </ul>`}}
 
 {{diagram "gc-requirements"}}
@@ -16,7 +16,7 @@
   (row "P0" "Event CRUD (create, update, delete)" "Core product — nothing works without it")
   (row "P0" "Recurring events (RRULE RFC 5545)" "40%+ of all events are recurring")
   (row "P0" "Multi-device sync (&lt;5s lag)" "Users expect consistency across phone, desktop, web")
-  (row "P1" "Calendar sharing + ACL (owner/writer/reader)" "Collaboration is a primary use case")
+  (row "P1" "Calendar sharing + ACL — Access Control List (owner/writer/reader)" "Collaboration is a primary use case")
   (row "P1" "Reminders and push notifications" "Core engagement feature")
   (row "P1" "Free/busy queries for scheduling" "Required for invite acceptance flow")
   (row "P2" "Event search by title/attendee" "Nice to have, not blocking")
@@ -31,11 +31,11 @@
 
 {{hint "why 99.99% availability?" "Calendar is a daily-driver app. &lt;span class='hl-red'>99.9% = 8.7h downtime/year&lt;/span> — unacceptable for 500M users. &lt;span class='hl'>99.99% = 52 min/year&lt;/span>. Achieve via multi-AZ PostgreSQL with read replicas and Redis caching for the hot read path."}}
 
-{{hint "p99 latency target" "200ms p99 for event fetch covers the 'open calendar' interaction. 100ms for calendar view (list of events in a date range) is achievable with the right index — (calendar_id, start_utc) covering index hits the query directly without a heap fetch."}}
+{{hint "p99 latency target" "<strong>P99</strong> (99th percentile latency — the slowest 1% of requests) of 200ms for event fetch covers the 'open calendar' interaction. 100ms for calendar view (list of events in a date range) is achievable with the right index — (calendar_id, start_utc) covering index hits the query directly without a heap fetch."}}
 
 {{triggerQs "Requirement Clarification Questions"
   "How many concurrent users do you expect at peak?"
-  "Peak is roughly 10% of MAU simultaneously — 50M concurrent. At ~2B events/day distributed across 16 active hours, that's ~35K write RPS and ~350K read RPS. We design for 2x headroom."
+  "Peak is roughly 10% of MAU simultaneously — 50M concurrent. At ~2B events/day distributed across 16 active hours, that's ~35K write <strong>RPS</strong> (Requests Per Second) and ~350K read RPS. We design for 2x headroom."
   "Do users need offline support?"
   "Yes — mobile clients cache their event store locally (SQLite on iOS/Android). Sync protocol must support delta sync so re-opening the app doesn't re-download all 10K events."
   "What's the retention policy for deleted events?"
@@ -53,7 +53,7 @@
 {{say `Designing idempotent APIs — <strong>PUT for create and update, not POST</strong>:
 <ul>
   <li>Mobile clients on unreliable connections may retry the same request; idempotency prevents duplicate events</li>
-  <li>Client generates the <strong>UUID before sending</strong> — retry with the same UUID hits upsert logic, not a duplicate insert</li>
+  <li>Client generates the <strong>UUID</strong> (Universally Unique Identifier — a 128-bit ID) <strong>before sending</strong> — retry with the same UUID hits upsert logic, not a duplicate insert</li>
   <li>The sync API uses a <strong>delta token</strong> so clients only download changes since last sync — no full re-download on every open</li>
 </ul>`}}
 
@@ -589,7 +589,7 @@ def reminder_worker():
 
 {{think "Redis sorted set as delay queue vs a scheduled job table in PostgreSQL."
   (whyNot "cron job scanning PostgreSQL for due reminders" "Full table scan on events table every second at 2B events scale = catastrophic. Even with an index on fire_at, you'd be doing millions of indexed reads per second across the cluster. Redis ZPOPMIN is O(log N) and in-memory — sub-millisecond.")
-  (whatIf "Redis crashes between ZPOPMIN and push delivery" "At-most-once delivery. For notifications this is acceptable — a missed 10-minute reminder is annoying but not catastrophic. For at-least-once, write to a 'reminders:inflight' sorted set before delivery, remove on ACK from FCM/APNs. Worker reclaims inflight entries older than 5 minutes.")
+  (whatIf "Redis crashes between ZPOPMIN and push delivery" "At-most-once delivery. For notifications this is acceptable — a missed 10-minute reminder is annoying but not catastrophic. For at-least-once, write to a 'reminders:inflight' sorted set before delivery, remove on <strong>ACK</strong> (Acknowledgment — confirmation from FCM/APNs that the push was accepted) from FCM/APNs. Worker reclaims inflight entries older than 5 minutes.")
   (how "timezone-aware fire_at calculation" "Always compute fire_at in UTC: fire_at_utc = start_utc - timedelta(minutes=N). Never subtract minutes from a local time — DST transitions would produce incorrect fire times.")
 }}
 
@@ -791,7 +791,7 @@ def get_events_delta(calendar_id, sync_token=None, page_token=None):
 
 {{hint "Cache hit rate is the primary scaling metric" "If &lt;span class='hl'>95%&lt;/span> of calendar views are served from Redis, PostgreSQL handles only 5% of 460K RPS = &lt;span class='hl'>23K RPS&lt;/span> — well within 5 shards' capacity. Monitor cache hit rate per shard. If it drops below &lt;span class='hl-red'>90%&lt;/span>, increase Redis cluster memory or reduce TTL churn."}}
 
-{{hint "CDN for static calendar assets" "The calendar UI (JS, CSS, locale data) is static. Serve from CloudFront with 1-year cache headers. Reduces origin load for the ~350K static asset requests per second at peak."}}
+{{hint "CDN for static calendar assets" "The calendar UI (JS, CSS, locale data) is static. Serve from a <strong>CDN</strong> (Content Delivery Network — globally distributed servers that cache and serve static assets from the nearest location) like CloudFront with 1-year cache headers. Reduces origin load for the ~350K static asset requests per second at peak."}}
 
 {{mustKnow "Shard events table by user_id — keeps all user events on one shard for single-shard sync queries" "46K write RPS (peak), 460K read RPS (peak) — Redis absorbs 95% of reads, reducing PostgreSQL load to ~23K RPS across 5 shards" "2TB/day new event data — hot data (90 days) on SSD, cold data streams to S3 via time partitioning" "Celebrity problem for calendars: 10K-attendee all-hands = async write fanout via Kafka, not synchronous"}}
 
@@ -840,7 +840,7 @@ WHERE calendar_id IN (
 
 {{hint "freeBusyReader role" "&lt;strong>freeBusyReader&lt;/strong> can see only busy/free blocks — no titles, no attendees, no descriptions. Used for cross-organization scheduling where you want availability without exposing meeting content. Implemented by filtering event fields in the /freeBusy response based on the requester's ACL role — &lt;strong>the DB returns full rows; the serializer strips fields.&lt;/strong>"}}
 
-{{hint "ACL cache invalidation" "Cache per-user ACL in Redis with &lt;span class='hl'>TTL 5 minutes&lt;/span>: &lt;code>acl:{user_id} → set of {calendar_id:role}&lt;/code>. Invalidate on any calendar_acl write. 5-minute stale ACL is a product decision not a security flaw — &lt;span class='hl-red'>for strict security, TTL = 0 and always query the DB&lt;/span>."}}
+{{hint "ACL cache invalidation" "Cache per-user <strong>ACL</strong> (Access Control List — the set of permissions a user has across calendars) in Redis with <span class='hl'>TTL 5 minutes</span> (Time-To-Live — the cache entry auto-expires after 5 minutes): <code>acl:{user_id} → set of {calendar_id:role}</code>. Invalidate on any calendar_acl write. 5-minute stale ACL is a product decision not a security flaw — <span class='hl-red'>for strict security, TTL = 0 and always query the DB</span>."}}
 
 {{triggerQs "Sharing & Permissions Questions"
   "How do you implement 'view only the title, hide description and attendees' for reader role?"

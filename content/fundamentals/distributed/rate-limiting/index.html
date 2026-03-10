@@ -13,7 +13,7 @@
 
 {{think "Where in the stack should rate limiting live?"
   (whyNot "only at the database layer" "By the time the request reaches the DB, the full request cost (network, auth, parse) is already paid. You need to reject at the API layer or edge, before compute is wasted.")
-  (how "At the API gateway?" "Yes — API Gateway is the earliest you can act on HTTP semantics (headers, user_id, endpoint). CDN-level rate limiting (CloudFront, Cloudflare) is even earlier but only works for IP-based limits.")
+  (how "At the API gateway?" "Yes — the API gateway is the earliest you can act on HTTP semantics (headers, user_id, endpoint). CDN-level rate limiting (CloudFront, Cloudflare) is even earlier but only works for IP-based limits — it cannot see authenticated user IDs.")
   (whatIf "I rate limit at the app server instead of gateway" "Every app server instance has its own counter. If you have 10 instances, the effective limit is 10x what you intended. You need a shared store (<a class='dqa-link' href='/fund/storage/redis'>Redis</a>) to coordinate across instances.")
 }}
 
@@ -361,15 +361,15 @@ def is_allowed_distributed(r, user_id: str, limit: int, window_seconds: int) -> 
 {{table "Race Condition Analysis" (rows
   (row "Approach"           "Race Safe?"  "Latency"     "Why")
   (row "In-memory counter"  "No"          "~0ms"        "Multiple processes = split counters")
-  (row "Redis INCR/GET"     "No (TOCTOU)" "~1ms"        "Check then act = race window")
+  (row "Redis INCR/GET"     "No (TOCTOU — Time-Of-Check-To-Time-Of-Use: a race where another thread changes the value between your read and your write)" "~1ms" "Check then act = race window")
   (row "Redis Lua script"   "Yes"         "~1ms"        "Atomic: check and act in one step")
   (row "Redis MULTI/EXEC"   "Yes*"        "~2ms"        "*Retries on conflict under contention")
 )}}
 
 {{triggerQs "Distributed Rate Limiting Questions"
-  "Why is a naive Redis INCR+check not race-safe?" "Thread A reads count=99, Thread B reads count=99. Both see &lt; 100. Both increment to 100. Both allowed. You served 101 requests against a limit of 100. The gap between the read and the write is the race window. Lua eliminates that gap."
-  "How do you handle Redis cluster sharding with rate limiters?" "Use the same shard for all keys belonging to one user by using hash tags: {user_id}:rl:key. Redis cluster routes all keys with the same hash tag to the same shard, keeping the user's counters co-located."
-  "What is the latency cost of Redis-based rate limiting?" "One Lua script round trip: ~0.5-1ms in the same region. For APIs with 10ms SLA, that is 5-10% overhead. For 100ms SLA APIs, it is negligible. At sub-1ms SLA (HFT), skip Redis and use in-process counters with sticky routing."
+  "Why is a naive Redis INCR+check not race-safe?" "Thread A reads count=99, Thread B reads count=99. Both see &lt; 100. Both increment to 100. Both allowed. You served 101 requests against a limit of 100. The gap between the read and the write is the race window (TOCTOU — Time-Of-Check-To-Time-Of-Use). Lua eliminates that gap."
+  "How do you handle Redis cluster sharding with rate limiters?" "Use the same shard for all keys belonging to one user by using hash tags: <code>{user_id}:rl:key</code>. Redis Cluster routes all keys with the same hash tag to the same shard, keeping the user's counters co-located on one node — essential because Lua scripts cannot span shards."
+  "What is the latency cost of Redis-based rate limiting?" "One Lua script round trip: ~0.5-1ms in the same region. For APIs with 10ms SLA, that is 5-10% overhead. For 100ms SLA APIs, it is negligible. At sub-1ms SLA (<strong>HFT</strong> — High-Frequency Trading, where microseconds matter), skip Redis and use in-process counters with sticky routing."
 }}
 
 {{hint "Redis hash tags keep user counters on one shard" "Key pattern {user_id}:rl:sliding guarantees all rate limit keys for one user land on the same Redis cluster shard. Without hash tags, Lua scripts that touch multiple keys fail if keys are on different shards."}}
@@ -378,7 +378,7 @@ def is_allowed_distributed(r, user_id: str, limit: int, window_seconds: int) -> 
 
 {{mustKnow "Redis Lua scripts are atomic (single-threaded execution) — eliminates race conditions between check and act" "Use hash tags {user_id}:rl:key to keep all rate limit keys for one user on the same Redis shard" "Redis adds ~0.5-1ms per rate limit check — acceptable for 10ms+ SLA APIs, use in-process counters for sub-1ms SLAs"}}
 
-{{qa "Why Redis over DynamoDB for rate limiting?" "Sub-millisecond latency. Rate limit checks are on the hot path of every API request — adding 10ms (DynamoDB p50) is unacceptable. Redis Lua scripts execute in ~0.5ms. Also, Redis supports atomic multi-step operations natively; DynamoDB requires conditional writes with retries." "What about using DynamoDB with DAX?" "DAX reduces DynamoDB reads to ~1ms but writes still go to DynamoDB at ~10ms. Rate limiting is write-heavy (every request updates a counter). Redis handles 100K+ writes/second per node with consistent sub-ms latency."}}
+{{qa "Why Redis over DynamoDB for rate limiting?" "Sub-millisecond latency. Rate limit checks are on the hot path of every API request — adding 10ms (DynamoDB p50) is unacceptable. Redis Lua scripts execute in ~0.5ms. Also, Redis supports atomic multi-step operations natively; DynamoDB requires conditional writes with retries." "What about using DynamoDB with DAX?" "<strong>DAX</strong> (DynamoDB Accelerator — an in-memory cache for DynamoDB reads) reduces DynamoDB reads to ~1ms but writes still go to DynamoDB at ~10ms. Rate limiting is write-heavy (every request updates a counter). Redis handles 100K+ writes/second per node with consistent sub-ms latency."}}
 
 {{phase 6 "Strategy: Per User vs Per IP" "4 min"}}
 
@@ -396,7 +396,7 @@ def is_allowed_distributed(r, user_id: str, limit: int, window_seconds: int) -> 
 
 {{think "Which strategy layer is correct?"
   (how "Layer them" "Use multiple simultaneously: per-IP to stop bots before auth, per-user after auth for fairness, per-endpoint for expensive operations. Each layer rejects earlier with lower cost.")
-  (whyNot "per-IP only" "CGNAT (Carrier-Grade NAT) puts thousands of mobile users behind one IP. Blocking an IP during a DDoS also blocks legitimate users on the same mobile carrier. Per-IP limits must be generous enough for CGNAT or combined with per-user limits after authentication.")
+  (whyNot "per-IP only" "<strong>CGNAT</strong> (Carrier-Grade NAT — a technique ISPs use where thousands of mobile users share a single public IP address) means blocking one IP can block thousands of innocent users. Per-IP limits must be generous enough for CGNAT or combined with per-user limits after authentication.")
   (whatIf "user creates 1000 accounts to bypass per-user limits" "Layer fingerprinting (device ID, browser fingerprint) or rate limit account creation itself. This is the cat-and-mouse of abuse prevention — no perfect solution.")
 }}
 

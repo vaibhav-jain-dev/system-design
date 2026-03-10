@@ -33,7 +33,7 @@ Does that align?`}}
   "What if a driver is at the boundary between two city regions?"
   "We use overlapping geo cells — each region has a 500m buffer. A driver near a boundary is indexed in both cells. Matching service queries both cells and deduplicates by driver_id before scoring."
   "How do you handle drivers who don't have the app open?"
-  "Only drivers in 'available' status with a location update within the last 30 seconds are included in the matching pool. Redis TTL on driver location keys auto-expires stale entries at 30s."
+  "Only drivers in 'available' status with a location update within the last 30 seconds are included in the matching pool. Redis <strong>TTL</strong> (Time-To-Live — duration before a key auto-deletes; here used as a heartbeat mechanism) on driver location keys auto-expires stale entries at 30s."
   "Do you need to store every GPS location update?"
   "Hot data (last known position) lives in Redis GEO with 30s TTL. Append-only trip path is written to Cassandra for audit and ETA model training. We don't store inter-ride location pings."
 }}
@@ -47,7 +47,7 @@ Does that align?`}}
 {{say `Three API groups:
 <ul>
   <li><strong>Rider APIs</strong> — REST over HTTPS: request ride, poll status, cancel</li>
-  <li><strong>Driver APIs</strong> — <span class="hl-blue">WebSocket</span> (bidirectional): drivers push location AND receive ride offers — bidirectional traffic requires a persistent connection</li>
+  <li><strong>Driver APIs</strong> — <span class="hl-blue">WebSocket</span> (bidirectional persistent connection — unlike HTTP which opens a new connection per request, WebSocket keeps one connection open for both sending and receiving): drivers push location AND receive ride offers — bidirectional traffic requires a persistent connection</li>
   <li><strong>Internal APIs</strong> — service-to-service: trigger matching, geospatial query, ETA calculation</li>
 </ul>`}}
 
@@ -132,7 +132,7 @@ Does that align?`}}
               <tr><td><span class="rf">dest_lat</span><span class="rbadge req">required</span></td><td><span class="rt">float64</span></td><td class="rd">Destination latitude</td></tr>
               <tr><td><span class="rf">dest_lng</span><span class="rbadge req">required</span></td><td><span class="rt">float64</span></td><td class="rd">Destination longitude</td></tr>
               <tr><td><span class="rf">ride_type</span><span class="rbadge req">required</span></td><td><span class="rt">enum</span></td><td class="rd">"economy" | "comfort" | "xl"</td></tr>
-              <tr><td><span class="rf">X-Idempotency-Key</span><span class="rbadge req">header</span></td><td><span class="rt">UUID</span></td><td class="rd">Prevents duplicate bookings on retry; 60s TTL in Redis</td></tr>
+              <tr><td><span class="rf">X-Idempotency-Key</span><span class="rbadge req">header</span></td><td><span class="rt">UUID</span></td><td class="rd">UUID (Universally Unique Identifier — a randomly generated 128-bit ID) — prevents duplicate bookings on retry; 60s TTL in Redis</td></tr>
             </tbody>
           </table>
         </div>
@@ -477,7 +477,7 @@ def dispatch(ride_id, ranked_drivers):
 
 {{phase 7 "Surge Pricing" "4 min"}}
 
-{{say `Surge pricing per <span class="hl-blue">H3 hex cell</span> (resolution 8, ~<span class="hl">0.7 km²</span>), updated every <span class="hl">5 minutes</span>:
+{{say `Surge pricing per <span class="hl-blue">H3 hex cell</span> (<strong>H3</strong> = Uber's open-source hexagonal geospatial grid — divides the Earth into uniform hexagons for aggregating location data; resolution 8 = ~0.7 km² per cell), updated every <span class="hl">5 minutes</span>:
 <ul>
   <li>Multiplier = function of demand/supply ratio in the cell</li>
   <li>Hard cap at <span class="hl">3×</span> — uncapped surge creates PR disasters and regulatory risk</li>
@@ -532,7 +532,7 @@ def calculate_fare(base_fare, distance_km, duration_min, surge) -> int:
 <ul>
   <li>Driver GPS → WebSocket gateway → <strong>Redis GEO</strong> (geospatial index) + <strong>Redis Pub/Sub</strong> (fan-out)</li>
   <li>Tracking service subscribes to <code>ride:track:{ride_id}</code> channel and forwards updates to rider's WebSocket</li>
-  <li>ETA recalculated every <span class="hl">30 seconds</span> using current driver position + <span class="hl-blue">OSRM</span> routing engine</li>
+  <li><strong>ETA</strong> (Estimated Time of Arrival) recalculated every <span class="hl">30 seconds</span> using current driver position + <span class="hl-blue">OSRM</span> (Open Source Routing Machine — a fast road-network routing engine using pre-computed shortest paths on OpenStreetMap data) routing engine</li>
 </ul>`}}
 
 {{diagram "rh-tracking"}}
@@ -562,12 +562,12 @@ class TrackingService:
                 websocket.send(message["data"])  # Push to rider app`}}
 
 {{compare "ETA Engine" (options
-  (best "OSRM (Open Source Routing Machine)" "Sub-50ms routing, runs locally, no per-query cost, handles 100K queries/sec on c5.2xlarge. Pre-computed contraction hierarchies for fast path finding.")
+  (best "OSRM (Open Source Routing Machine — pre-computes optimal road paths offline so routing queries are sub-millisecond at serve time)" "Sub-50ms routing, runs locally, no per-query cost, handles 100K queries/sec on c5.2xlarge. Pre-computed contraction hierarchies for fast path finding.")
   (alt "Google Maps Directions API" "Accurate with real-time traffic but costs $0.005/request. At 1M ETA recalculations/day = $5K/day = $1.8M/year. Cost-prohibitive at scale.")
   (nofit "Straight-line Haversine distance" "Doesn't account for roads, traffic, one-ways. A 2km straight-line ride in Manhattan could be 6km by road. ETA error of 3x.")
 )}}
 
-{{hint "why Redis Pub/Sub for tracking fan-out" "When a driver updates their location, one WebSocket server needs to push it to the rider's WebSocket server (which may be on a different machine). Redis Pub/Sub is the message bus — any subscriber on the channel gets the update. Throughput: 1M concurrent rides × 1 update/4s = 250K publish ops/sec — well within Redis cluster capacity."}}
+{{hint "why Redis Pub/Sub for tracking fan-out" "When a driver updates their location, one WebSocket server needs to push it to the rider's WebSocket server (which may be on a different machine). <strong>Redis Pub/Sub</strong> (Publish/Subscribe — a messaging pattern where publishers send to a channel and all subscribers receive it in < 1ms) is the message bus. Throughput: 1M concurrent rides × 1 update/4s = 250K publish ops/sec — well within Redis cluster capacity."}}
 
 {{triggerQs "Tracking questions"
   "What if the rider's WebSocket connection drops mid-ride?"
@@ -649,7 +649,7 @@ CREATE TABLE drivers (
 
 {{say `Three independent scaling axes:
 <ul>
-  <li><strong>PostgreSQL</strong> — read replicas for ride history queries; shard by city_id beyond <span class="hl">~14K writes/sec</span></li>
+  <li><strong>PostgreSQL</strong> — read replicas for ride history queries; shard by city_id beyond <span class="hl">~14K writes/sec</span> <small>(writes per second)</small></li>
   <li><strong>Redis</strong> — cluster expansion: more city shards and GEO shards; each shard handles <span class="hl">~62.5K writes/sec</span></li>
   <li><strong>Matching + tracking workers</strong> — stateless, horizontal auto-scale; WebSocket gateway uses sticky sessions to avoid reconnect churn</li>
 </ul>`}}
@@ -670,7 +670,7 @@ CREATE TABLE drivers (
   (row "Postgres writes" "~14K/sec" "Ride state transitions, read replicas for history")
 )}}
 
-{{hint "WebSocket sticky sessions" "A rider's location stream is subscribed to a Redis Pub/Sub channel on a specific WebSocket server. If they hop to a different server on reconnect, the server re-subscribes — stateless recovery. But we still use sticky sessions (ALB cookie-based) to avoid the reconnect overhead for stable connections."}}
+{{hint "WebSocket sticky sessions" "A rider's location stream is subscribed to a Redis Pub/Sub channel on a specific WebSocket server. If they hop to a different server on reconnect, the server re-subscribes — stateless recovery. But we still use sticky sessions (<strong>ALB</strong> = Application Load Balancer; cookie-based sticky sessions route the same client to the same server) to avoid the reconnect overhead for stable connections."}}
 
 {{caveat "The dominant scaling bottleneck is Postgres writes to the rides table, not Redis. At 10x spike that's ~23K writes/sec — pre-provision with 50K IOPS and connection pooling via PgBouncer."}}
 

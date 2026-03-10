@@ -21,7 +21,7 @@
 
 {{triggerQs "Phase 1 interview triggers"
   "Do we need to support chronological AND algorithmic ranking?"
-  "Start with chronological for simplicity. Algorithmic ranking is a ranking layer on top — same underlying tweet storage. I'll design for both and add the ML ranking step at read time."
+  "Start with chronological for simplicity. Algorithmic ranking is a ranking layer on top — same underlying tweet storage. I'll design for both and add the <strong>ML</strong> (Machine Learning — a statistical model trained on historical engagement data to predict which tweets a user is likely to interact with) ranking step at read time."
   "How fresh does the feed need to be?"
   "Within 5-10 seconds for non-celebrity accounts. Celebrity tweets can lag up to 30 seconds due to the hybrid strategy. Users polling every 30s as fallback, SSE for real-time push."
 }}
@@ -32,7 +32,7 @@
 
 {{phase 2 "Capacity Estimation" "3 min"}}
 
-{{say "Let me run numbers quickly to validate the architecture. 500M registered users, 300M DAU. 500K tweets per minute — that's about 8,300 writes per second. Each tweet is roughly 200 bytes for text plus metadata. Tweet storage: 8,300 × 200 bytes = 1.6 MB/s, about 50 GB/day, 18 TB/year. Read traffic: 28B reads/day, roughly 325K reads per second at peak. Timeline delivery target: under 200ms P99."}}
+{{say "Let me run numbers quickly to validate the architecture. 500M registered users, 300M <strong>DAU</strong> (Daily Active Users). 500K tweets per minute — that's about 8,300 writes per second. Each tweet is roughly 200 bytes for text plus metadata. Tweet storage: 8,300 × 200 bytes = 1.6 MB/s, about 50 GB/day, 18 TB/year. Read traffic: 28B reads/day, roughly 325K reads per second at peak. Timeline delivery target: under 200ms <strong>P99</strong> (99th percentile latency — the threshold below which 99% of requests complete; the slowest 1% are above this line)."}}
 
 {{diagram "tf-architecture"}}
 
@@ -56,7 +56,7 @@
 
 {{phase 3 "API Design" "5 min"}}
 
-{{say "Three core API surfaces: tweet creation, home timeline fetch, and real-time delivery. I'll design REST for tweet CRUD and timeline reads, with SSE for push notifications of new tweets."}}
+{{say "Three core API surfaces: tweet creation, home timeline fetch, and real-time delivery. I'll design REST for tweet CRUD and timeline reads, with <strong>SSE</strong> (Server-Sent Events — a lightweight protocol for server-to-client push over HTTP; simpler than WebSocket because it's one-directional) for push notifications of new tweets."}}
 
 {{diagram "tf-api-design"}}
 
@@ -235,7 +235,7 @@
 
 {{hint "cursor-based pagination" "Use tweet_id (Snowflake, time-sortable) as cursor, not offset. Offset breaks when new tweets insert at page 0. tweet_id cursors are stable: ZRANGEBYSCORE user:{id}:timeline (−∞, cursor_id) LIMIT 20."}}
 
-{{hint "SSE over WebSocket for feed" "SSE is unidirectional server→client, stateless, auto-reconnects, works over HTTP/2 multiplexing. WebSocket is bidirectional — overkill for feed delivery. Use WebSocket only for DMs."}}
+{{hint "SSE over WebSocket for feed" "<strong>SSE</strong> (Server-Sent Events) is unidirectional server→client, stateless, auto-reconnects, works over HTTP/2 multiplexing. WebSocket is bidirectional — overkill for one-direction feed delivery. Use WebSocket only for DMs where the client also needs to send messages back."}}
 
 {{triggerQs "Phase 3 interview triggers"
   "How do you handle tweet media (images, video)?"
@@ -412,7 +412,7 @@ ZCARD user:12345:timeline`}}
 
 {{caveat "Cold-start timeline seeding is expensive: fetching tweets from 1000 followed accounts hits Cassandra hard. Always batch in groups of 100 and return the first page to the user before the full cache is populated — do not block the response on full seeding."}}
 
-{{collapseSection "Cold-Start Optimization Details" "Three strategies to reduce cold-start latency: (1) <strong>Lazy seeding</strong> — seed only the first 20 tweets immediately, background-fill the rest. (2) <strong>Preemptive seeding</strong> — a daily batch job re-seeds timelines for users who logged in within the last 7 days. (3) <strong>Tiered TTL</strong> — active users get 7-day TTL, weekly-active users get 3-day, others get 1-day. This reduces Redis memory by ~30% while keeping most timelines warm."}}
+{{collapseSection "Cold-Start Optimization Details" "Three strategies to reduce cold-start latency: (1) <strong>Lazy seeding</strong> — seed only the first 20 tweets immediately, background-fill the rest. (2) <strong>Preemptive seeding</strong> — a daily batch job re-seeds timelines for users who logged in within the last 7 days. (3) <strong>Tiered TTL</strong> (TTL = Time-To-Live — how long a Redis key persists before auto-deletion) — active users get 7-day TTL, weekly-active users get 3-day, others get 1-day. This reduces Redis memory by ~30% while keeping most timelines warm."}}
 
 {{mustKnow "Two read sub-cases: warm cache (Redis sorted set hit) and cold start (cache miss — reconstruct from Cassandra and seed)." "Celebrity merge at read time: fetch recent tweets from each celebrity followed via parallel Cassandra reads, sorted-merge with pre-computed timeline in O(N log K)." "ZREVRANGE for latest tweets, ZRANGEBYSCORE with cursor for pagination — both O(log N + M) where M is result size." "Always return first page immediately on cold start — do not block the user while seeding the full 800-tweet cache."}}
 
@@ -424,7 +424,7 @@ ZCARD user:12345:timeline`}}
 
 {{table "Cassandra: tweets table" (rows
   (row "Column" "Type" "Notes")
-  (row "user_id" "UUID (partition key)" "All tweets by a user on same partition")
+  (row "user_id" "UUID (partition key)" "UUID = Universally Unique Identifier — a 128-bit random ID; all tweets by a user are on the same Cassandra partition, enabling fast range reads")
   (row "tweet_id" "Snowflake ID (clustering key DESC)" "Time-sortable, uniquely identifies tweet")
   (row "text" "TEXT" "Max 280 chars")
   (row "media_ids" "LIST&lt;UUID>" "CDN object keys")
@@ -452,7 +452,7 @@ ZCARD user:12345:timeline`}}
 )}}
 
 {{think "Like counts are a classic eventual consistency trade-off."
-  (whyNot "increment like count in Cassandra on every like" "Cassandra counter columns use LWW (last-write-wins) conflict resolution. At high like rates (viral tweet: 10K likes/second), Cassandra counter increments cause write hotspots on the tweet partition. Redis INCR is O(1), atomic, and handles 100K ops/s per key trivially.")
+  (whyNot "increment like count in Cassandra on every like" "Cassandra counter columns use <strong>LWW</strong> (Last-Write-Wins — a conflict resolution strategy where the most recent write wins; simple but can silently drop concurrent updates) conflict resolution. At high like rates (viral tweet: 10K likes/second), Cassandra counter increments cause write hotspots on the tweet partition. Redis INCR is O(1), atomic, and handles 100K ops/s per key trivially.")
   (whatIf "Redis crashes and we lose 60 seconds of like counts" "We lose at most 60 seconds of increments. For a tweet with 10K likes/s, that's a potential 600K like count drift — about 6% for a tweet with 10M likes. Acceptable. Users don't notice. We can also use Redis AOF persistence to reduce this window to seconds.")
 }}
 
@@ -464,7 +464,7 @@ ZCARD user:12345:timeline`}}
 
 {{phase 8 "Celebrity Problem Deep Dive" "8 min"}}
 
-{{say "Let me detail the celebrity problem specifically. When Elon Musk posts a tweet with 150M followers, fanout-on-write would require 150M Redis ZADD operations. At 100K ops/s, that's 25 minutes — completely unacceptable. The hybrid approach routes celebrity tweets to fanout-on-read, but we need to make read-time merge fast."}}
+{{say "Let me detail the celebrity problem specifically. When Elon Musk posts a tweet with 150M followers, <span class='hl-blue'>fanout-on-write</span> (pushing the tweet ID to every follower's cached timeline at write time) would require 150M Redis ZADD operations. At 100K ops/s, that's 25 minutes — completely unacceptable. The hybrid approach routes celebrity tweets to fanout-on-read, but we need to make read-time merge fast."}}
 
 {{diagram "tf-celebrity-problem"}}
 
@@ -535,13 +535,13 @@ def merge_celebrity_tweets(precomputed_ids: list, user_id: str) -> list:
 
 {{phase 9 "Feed Ranking Algorithm" "5 min"}}
 
-{{say "Chronological is the default and simplest. For algorithmic ranking, we score each tweet in the candidate set using engagement signals and personalization features, then re-sort the 200-tweet candidate pool before slicing the top 20 for the response."}}
+{{say "Chronological is the default and simplest. For algorithmic ranking, we score each tweet in the candidate set using engagement signals and personalization features, then re-sort the 200-tweet candidate pool before slicing the top 20 for the response. The ranking step uses <strong>ANN</strong> (Approximate Nearest Neighbor — a fast vector search that finds similar items within a small error margin, much faster than exact nearest neighbor at scale) for content embedding similarity."}}
 
 {{diagram "tf-ranking-algorithm"}}
 
 {{think "Ranking is a re-ranking layer on top of the retrieval layer, not a replacement."
   (whyNot "rank at index time (pre-compute ranked positions)" "Relevance signals change: a tweet's engagement score at T+0 is different from T+24h. Pre-computing ranked positions would require re-ranking every tweet in every follower's timeline whenever any signal changes. That's write amplification of engagement events, not just tweets.")
-  (whatIf "the ranking model takes 50ms to score 200 tweets" "50ms is acceptable for algorithmic feed. Add it to the retrieval time: 10ms Redis + 5ms celebrity merge + 50ms ranking = 65ms. Well under 200ms P99. Optimize the model to run on a GPU inference server if latency becomes an issue — batch score the 200 candidates in a single forward pass.")
+  (whatIf "the ranking model takes 50ms to score 200 tweets" "50ms is acceptable for algorithmic feed. Add it to the retrieval time: 10ms Redis + 5ms celebrity merge + 50ms ranking = 65ms. Well under 200ms P99 (99th percentile). Optimize the model to run on a GPU inference server if latency becomes an issue — batch score the 200 candidates in a single forward pass.")
 }}
 
 {{table "Ranking Signals" (rows
@@ -781,7 +781,7 @@ def get_trending_hashtags(top_n: int = 50) -> list:
     <div class="dqa-sub-a">Six feature groups: <span class="dqa-key">recency</span> (exponential decay on tweet age), <span class="dqa-key">engagement velocity</span> (likes + retweets per hour since posting), <span class="dqa-key">author affinity</span> (how often this user has liked/replied to this author, tracked in <a class='dqa-link' href='/fund/storage/redis'>Redis</a> Hash), <span class="dqa-key">content signals</span> (media presence, tweet length, hashtag count), <span class="dqa-key">social proof</span> (how many of your other follows liked this tweet), and <span class="dqa-key">content embeddings</span> (cosine similarity between tweet embedding and user interest profile embedding). Author affinity and social proof are real-time features served from Redis; embeddings are updated daily via batch ML pipeline.</div>
     <div class="dqa-deep">
       <div class="dqa-deep-q">How do you train the model without introducing a feedback loop that amplifies already-popular content?</div>
-      <div class="dqa-deep-a">Use <span class="dqa-key">inverse propensity scoring (IPS)</span>: weight training examples inversely by the probability the tweet was shown. Tweets shown to 10M users get weight 1/10M; tweets shown to 1K users get weight 1/1K. This corrects the position bias where highly-ranked tweets get more engagement simply because they're shown more. Additionally, inject a 5% explore budget — show randomly sampled tweets regardless of score — to collect unbiased engagement data for model training.</div>
+      <div class="dqa-deep-a">Use <span class="dqa-key">IPS (Inverse Propensity Scoring)</span> — a technique that weights training examples inversely by the probability the tweet was shown, correcting for the bias that highly-ranked tweets get more engagement simply because they're shown more: Tweets shown to 10M users get weight 1/10M; tweets shown to 1K users get weight 1/1K. This corrects the position bias where highly-ranked tweets get more engagement simply because they're shown more. Additionally, inject a 5% explore budget — show randomly sampled tweets regardless of score — to collect unbiased engagement data for model training.</div>
     </div>
   </div>
   <div class="dqa-sub">

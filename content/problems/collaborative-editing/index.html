@@ -28,7 +28,7 @@
   (whatIf "network partition during concurrent editing" "Both users keep editing on their local copies. When the partition heals, the server reconciles operations using OT or CRDT. Neither user loses work — the merge algorithm produces a consistent result. This is the core promise of collaborative editing.")
 }}
 
-{{hint "OT vs CRDTs — the fundamental choice" "Operational Transformation (Google Docs approach): operations transformed at the server, requires a central authority, lower memory overhead. CRDTs (Conflict-free Replicated Data Types, Figma approach): operations commutative by design, works peer-to-peer, but higher memory overhead per character (~50-100 bytes vs ~1 byte for plain text). Google Docs uses OT; Apple Notes, Figma, and newer systems prefer CRDTs."}}
+{{hint "OT vs CRDTs — the fundamental choice" "<strong>OT</strong> (<span class='hl-blue'>Operational Transformation</span> — Google Docs approach): operations are transformed at the server to account for concurrent edits, requires a central authority, lower memory overhead. <strong>CRDTs</strong> (<span class='hl-blue'>Conflict-free Replicated Data Types</span> — Figma approach): a data structure whose operations are mathematically commutative, meaning any two operations produce the same result regardless of order; works peer-to-peer, but higher memory overhead per character (~50-100 bytes vs ~1 byte for plain text). Google Docs uses OT; Apple Notes, Figma, and newer systems prefer CRDTs."}}
 
 {{triggerQs "Requirements clarifications"
   "How many simultaneous users per document should we support?"
@@ -38,8 +38,8 @@
 }}
 
 {{mustKnow
-  "OT transforms concurrent operations to preserve consistency — two users editing the same position won't corrupt the document"
-  "CRDTs are commutative by design (no central server needed) but cost 50-100x more memory per character than OT"
+  "OT (Operational Transformation) transforms concurrent operations to preserve consistency — two users editing the same position won't corrupt the document"
+  "CRDTs (Conflict-free Replicated Data Types) are commutative by design (no central server needed) but cost 50-100x more memory per character than OT"
   "Google Docs uses OT (Jupiter protocol); Figma and Notion use CRDTs — know both approaches and their tradeoffs"
 }}
 
@@ -406,7 +406,7 @@ class OTServer:
 
 {{say `Presence is simpler than you might think — it's ephemeral state that doesn't need durability:
 <ul>
-  <li>Cursor position + user color stored in Redis with <span class="hl">30-second TTL</span></li>
+  <li>Cursor position + user color stored in Redis with <span class="hl">30-second TTL</span> (Time-To-Live — the key auto-expires if not refreshed within 30 seconds)</li>
   <li>Client sends heartbeat every 15 seconds; if TTL expires, user appears offline</li>
   <li>Cursor updates broadcast via WebSocket to all editors — never persisted to Postgres</li>
 </ul>`}}
@@ -449,7 +449,7 @@ def update_cursor(doc_id: str, user_id: str, position: int):
   <li>Worst case: 1000 offline ops × 500 server ops since disconnect = 500,000 transforms — bounded and fast</li>
 </ul>`}}
 
-{{hint "why IndexedDB for offline buffer?" "localStorage is synchronous and limited to 5 MB. IndexedDB is async, supports large storage, and survives browser crashes. Operations accumulated offline can be gigabytes of keystrokes. The IndexedDB store acts as a WAL: operations are written before sending to server. On ack, delete from IndexedDB. On crash, resend from IndexedDB."}}
+{{hint "why IndexedDB for offline buffer?" "localStorage is synchronous and limited to 5 MB. IndexedDB is async, supports large storage, and survives browser crashes. Operations accumulated offline can be gigabytes of keystrokes. The IndexedDB store acts as a <strong>WAL</strong> (Write-Ahead Log — a durability mechanism where changes are written to a log before being applied, so they can be replayed after a crash): operations are written before sending to server. On ack, delete from IndexedDB. On crash, resend from IndexedDB."}}
 
 {{mustKnow
   "Offline ops buffered in IndexedDB (async, large storage, crash-safe) — not localStorage (sync, 5MB limit)"

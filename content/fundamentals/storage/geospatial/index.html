@@ -159,12 +159,12 @@
 
 {{phase 5 "<a class='dqa-link' href='/fund/storage/redis'>Redis</a> GEO Commands" "6 min"}}
 
-{{say `<span class="hl-blue">Redis GEO</span> stores coordinates in a sorted set where the score is a <strong>52-bit <a class='dqa-link' href='/algo/geohash'>GeoHash</a></strong>:
+{{say `<span class="hl-blue">Redis GEO</span> stores coordinates in a sorted set where the score is a <strong>52-bit <a class='dqa-link' href='/algo/geohash'>GeoHash</a></strong> <small>(in other words: Redis internally converts lat/lng into a single integer and stores it as a sorted-set score, enabling range scans for proximity search)</small>:
 <ul>
   <li><code>GEOADD</code> is <span class="hl">O(log N)</span> — stores position as a float64 score in the underlying sorted set</li>
   <li><code>GEOSEARCH</code> finds nearest N members or all within a radius — handles the boundary problem internally by scanning multiple adjacent score ranges</li>
   <li>Precision: <span class="hl">~0.6 meter accuracy</span> — sufficient for ride-sharing (drivers matched within 2–5km), not centimeter-scale surveying</li>
-  <li><span class="hl-red">No per-member TTL</span> — manage stale driver removal externally via a parallel hash of timestamps + background job</li>
+  <li><span class="hl-red">No per-member TTL</span> (Time-To-Live) — manage stale driver removal externally via a parallel hash of timestamps + background job</li>
 </ul>`}}
 
 {{avoid "GEORADIUS is deprecated since Redis 6.2. Use GEOSEARCH instead. Also: Redis GEO uses a 52-bit geohash internally — accurate to about 0.6 meters. Do not claim it's GPS-exact. And GEO keys have no built-in TTL per member — use EXPIRE on the whole key or manage TTL externally."}}
@@ -242,7 +242,7 @@ if stale:
 
 {{say `<span class="hl-blue">PostGIS</span> is PostgreSQL's spatial extension — the right choice when you need durability, SQL joins, or historical queries:
 <ul>
-  <li>A GIST index on a <code>GEOGRAPHY(POINT)</code> column prunes candidates with a bounding-box filter, then applies exact distance — <span class="hl">~10ms</span> for a 5km radius on 1M rows</li>
+  <li>A <strong>GIST index</strong> (Generalized Search Tree — PostgreSQL's spatial index type that stores bounding boxes for efficient overlap and containment queries) on a <code>GEOGRAPHY(POINT)</code> column prunes candidates with a bounding-box filter, then applies exact distance — <span class="hl">~10ms</span> for a 5km radius on 1M rows</li>
   <li><span class="hl-red">10× slower than <a class='dqa-link' href='/fund/storage/redis'>Redis</a> GEO</span> (<span class="hl">0.5ms</span>) but durable — never loses data, supports full SQL</li>
   <li>Best as a <strong>write-through store</strong>: write locations to both PostGIS (durability) and Redis GEO (speed); reads go to Redis, fall back to PostGIS if Redis is unavailable</li>
   <li>Also the source of truth for billing, audit, and historical trip replay</li>
