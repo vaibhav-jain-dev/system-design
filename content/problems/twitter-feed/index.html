@@ -804,15 +804,25 @@ def get_trending_hashtags(top_n: int = 50) -> list:
 
 {{avoid "Cache stampede on viral tweets. When a hot tweet's cache key expires, thousands of requests hit Cassandra simultaneously. Fix: singleflight pattern (first request fetches, others wait for the same result) + probabilistic early expiration (refresh before TTL hits)."}}
 
+{{fundLink "networking/load-balancing" "Load Balancing"}}
+{{algoLink "consistent-hashing" "Consistent Hashing"}}
+
 {{table "Sharding Strategy" (rows
   (row "Data" "Shard Key" "Method" "Notes")
-  (row "User timelines (Redis)" "user_id mod N" "Consistent hashing" "128 virtual nodes per Redis shard to distribute evenly")
-  (row "Tweets (Cassandra)" "tweet_id range" "Range sharding" "tweet_id is Snowflake — time-ordered. New tweets all go to the latest range shard (hot write). Spread with a random shard prefix byte.")
-  (row "Follow graph (Cassandra)" "follower_id" "Hash sharding" "Lookup: 'who does user X follow?' is on one shard. All 1000 follows colocated.")
-  (row "Trending counters (Redis)" "hashtag mod N" "Hash sharding" "Hot hashtags like #WorldCup can overload one shard — use replica reads for trending queries")
-  (row "Search index (Elasticsearch)" "tweet_id" "Range sharding" "Each ES shard holds 50GB of tweet data. Automatic via ES routing.")
+  (row "User timelines (Redis)" "user_id" "Consistent hashing" "128 virtual nodes per shard for even distribution")
+  (row "Tweets (Cassandra)" "tweet_id range" "Range sharding" "Snowflake IDs are time-ordered — add a random prefix byte to spread writes")
+  (row "Follow graph (Cassandra)" "follower_id" "Hash sharding" "All follows for one user on one shard")
+  (row "Trending counters (Redis)" "hashtag" "Hash sharding" "Hot hashtags may overload one shard — use replica reads")
+  (row "Search index (ES)" "tweet_id" "Range sharding" "~50GB per shard, automatic via ES routing")
 )}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Cost Breakdown ($236K/month for 500M DAU)</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{table "Monthly AWS Cost Estimate (500M DAU)" (rows
   (row "Component" "Spec" "Monthly Cost")
   (row "Redis Cluster (timelines)" "40 × r6g.2xlarge (64GB), 3TB total" "~$57,600")
@@ -821,15 +831,17 @@ def get_trending_hashtags(top_n: int = 50) -> list:
   (row "Fanout Workers (ECS)" "200 tasks avg, c6g.2xlarge" "~$14,400")
   (row "Timeline Service (ECS)" "100 tasks avg, c6g.xlarge" "~$3,600")
   (row "Elasticsearch" "12 nodes, r6g.2xlarge (64GB)" "~$17,280")
-  (row "Ranking GPU Fleet (ECS)" "50 × g4dn.xlarge (T4 GPU)" "~$52,800")
-  (row "CDN + Media Storage (S3+CF)" "Flat rate for media" "~$15,000")
+  (row "Ranking GPU Fleet" "50 × g4dn.xlarge (T4 GPU)" "~$52,800")
+  (row "CDN + Media Storage" "S3 + CloudFront" "~$15,000")
   (row "Total infra" "" "~$236,000/month")
   (row "Per active user" "500M DAU" "~$0.00047/user/day")
 )}}
 
-{{think "At $236K/month for 500M DAU, infra is $0.014/user/month. Twitter's actual revenue per user is ~$20/year. Infra is &lt; 1% of revenue. The GPU ranking fleet is the second biggest cost at $52.8K — but if it drives 15% better engagement, it pays for itself easily."
-  (whyNot "GCP as alternative" "GCP Bigtable is a Cassandra alternative at ~$0.17/GB/month (vs $0.10 for i4i.4xlarge self-managed). GCP TPUs are cheaper than NVIDIA T4 for ML inference. At this scale, cloud provider negotiation typically yields 40% discounts on compute. GCP vs AWS is a business decision more than a technical one.")
+{{think "At $236K/month for 500M DAU, infra costs $0.014/user/month. Twitter's revenue is ~$20/user/year — infra is under 1% of revenue."
+  (whyNot "GCP instead of AWS" "GCP Bigtable is a Cassandra alternative, GCP TPUs are cheaper than NVIDIA T4 for inference. At this scale, cloud providers negotiate 40% discounts. It's a business decision more than a technical one.")
 }}
+  </div>
+</details>
 
 {{checklist "Fan-out strategy accounts for celebrity threshold (50K followers)" "Timeline capped at 800 tweets to bound Redis memory" "Celebrity merge uses parallel Cassandra reads with 50-celebrity cap" "Trending uses sliding window buckets (ZUNIONSTORE), not a single counter" "Snowflake IDs enable time-sortable cursor pagination" "Redis pipeline for fanout writes (not individual ZADD per follower)" "Like counts in Redis with periodic sync to Cassandra (eventual consistency)" "SSE for real-time push + 30s polling fallback" "Cold-start fallback: seed timeline from Cassandra on Redis miss" "Elasticsearch for full-text search, synced via Kafka under 5s lag"}}
 
@@ -841,12 +853,12 @@ def get_trending_hashtags(top_n: int = 50) -> list:
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 
-{{say "These questions challenge the core trade-offs: hybrid fan-out strategy for celebrities, feed ranking latency budgets, and cache invalidation at billion-user scale."}}
+{{say "Five deep questions covering the core trade-offs: celebrity fanout, timeline latency, cache invalidation, ranking, and spam prevention."}}
 
 {{deepQA "Critical Interview Questions" `
 <div class="dqa-item">
   <div class="dqa-q">Elon Musk posts a tweet with 150M followers — how do you deliver it to all followers without melting the system?</div>
-  <div class="dqa-a">Elon's account is in the <span class="dqa-key">celebrity set</span> (follower_count > 50K), so his tweet skips fanout entirely. The tweet is written to Cassandra and published to <a class='dqa-link' href='/fund/messaging/message-queues'>Kafka</a> in under 5ms. Fanout workers see the event and immediately discard it — no <a class='dqa-link' href='/fund/storage/redis'>Redis</a> writes. When any of his 150M followers next loads their home timeline, the <span class="dqa-key">read-time celebrity merge</span> fetches his last 50 tweets from Cassandra in parallel with the pre-computed timeline Redis fetch, merges by timestamp, and returns the result. Total additional latency for celebrity merge: ~2ms for the Cassandra read (warm OS cache) + O(50 log K) sort.</div>
+  <div class="dqa-a">Elon is in the <span class="dqa-key">celebrity set</span> (>50K followers), so his tweet skips fanout entirely. It's written to Cassandra and published to <a class='dqa-link' href='/fund/messaging/message-queues'>Kafka</a> in under 5ms — no <a class='dqa-link' href='/fund/storage/redis'>Redis</a> writes. When any follower loads their feed, the <span class="dqa-key">read-time celebrity merge</span> fetches his last 50 tweets from Cassandra in parallel, merges by timestamp, and returns. Extra latency: ~2ms.</div>
   <div class="dqa-sub">
     <div class="dqa-sub-q">How do you know at read time that a user follows Elon?</div>
     <div class="dqa-sub-a">The follow graph is stored in Cassandra (follower_id → followed_id). At timeline read time, the service fetches the user's full follow list, intersects with the <span class="dqa-key">celebrity_ids Redis Set</span> using SINTER, and gets the list of celebrity accounts to merge. SINTER is O(N × M) where N is follows count and M is celebrity set size — fast even for users with 5K follows.</div>

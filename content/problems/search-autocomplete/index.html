@@ -821,13 +821,13 @@ Each server needs enough RAM for the trie: <span class="hl">1.5 GB per language<
 {{hint "Elasticsearch fallback sizing" "Size the Elasticsearch cluster for 30K QPS (10% of total traffic) — 5 nodes with 16 vCPU each. Keep the autocomplete index warm with a background health-check job so it's ready when needed."}}
 
 {{triggerQs "Failure Mode Questions"
-  "How do you detect trie corruption vs a legitimate trie that just has different results?"
-  "Three sanity checks after rebuild: (1) lookup 'the' returns at least 5 suggestions, (2) top-10 for 'google' includes 'google.com' or 'google maps', (3) total node count is within 20% of previous rebuild. If any check fails, we abort the swap and page the on-call."
-  "What if personalization data (Redis) is unavailable — do you serve 503?"
-  "No. We degrade gracefully: if Redis is unreachable, we skip personalization and return global top-10. The user gets slightly less tailored suggestions but doesn't see an error. This is a UX tradeoff we've explicitly chosen — availability > personalization freshness."
+  "How do you detect trie corruption vs a legitimate trie with different results?"
+  "Three sanity checks after every rebuild: (1) 'the' returns at least 5 results, (2) 'google' includes 'google.com' or 'google maps', (3) total node count is within 20% of previous. If any fails, we abort the swap and alert on-call."
+  "What if Redis is down — do you return a 503 error?"
+  "No. If Redis is unreachable, we skip personalization and return the global top-10. The user gets slightly less tailored suggestions but sees no error. We always prioritize availability over personalization."
 }}
 
-{{caveat "A bug in the trending detector can inject garbage queries globally within 60 seconds. Always validate trending writes (query length, character set, count sanity bounds) and have a circuit breaker that skips bad writes."}}
+{{caveat "A bug in the trending detector can inject garbage queries globally within 60 seconds. Always validate trending writes before pushing to Redis — check query length, character set, and count bounds."}}
 
 {{collapseSection "Elasticsearch Fallback Sizing" `
 <ul>
@@ -841,15 +841,15 @@ Each server needs enough RAM for the trie: <span class="hl">1.5 GB per language<
 
 {{mustKnow "Graceful degradation order: Redis cache → in-memory trie → Elasticsearch fallback → empty []" "Never let autocomplete block search — always return something in under 200ms, even if stale or empty" "Circuit breaker on trending writes prevents garbage injection propagating globally" "Three sanity checks after trie rebuild: known-query verification, top-result stability, node count within 20% of previous"}}
 
-{{qa "What if the Kafka query log pipeline falls behind?" "Trie freshness degrades. A <span class=\"hl\">4-hour Kafka lag</span> means new trending queries take 4 hours to appear in the trie. This is a <strong>freshness SLO violation</strong>, not an availability failure — users still get suggestions, just not the most recent ones. Alert on consumer group lag <span class=\"hl\">&gt; 30 minutes</span>. The mitigation: increase <span class=\"hl-blue\">consumer group parallelism</span> to match partition count — 10 consumers per 10 partitions. If lag is structural (sustained throughput > consumer capacity), add partitions to the query-log topic and scale consumers to match." "How do you prevent Kafka lag from cascading into trie staleness permanently?" "The Flink job that processes the query log is stateless — it only needs to process the <em>current window</em> to compute new trie weights. If lag spikes during a traffic event, the job catches up by processing historical events in bulk (Flink's event-time processing handles out-of-order arrival). The trie is only swapped when a full rebuild completes — if the job crashes mid-rebuild, the previous snapshot remains live. Lag &gt; 2 hours triggers an auto-scaling event on the Flink cluster."}}
+{{qa "What if the Kafka pipeline falls behind?" "Trie freshness degrades — a 4-hour Kafka lag means new trending queries take 4 hours to appear. This is a <strong>freshness problem</strong>, not an availability problem — users still get suggestions, just not the newest ones. Alert on lag &gt; 30 minutes. Fix: add more consumers to match partition count." "Can Kafka lag permanently stale the trie?" "No. The Flink aggregation job only needs the current time window. When lag clears, it processes the backlog in bulk and rebuilds the trie. If the job crashes mid-rebuild, the previous trie keeps serving. Lag &gt; 2 hours triggers auto-scaling on the Flink cluster."}}
 
 {{phase 12 "Interview Deep-Dive Q&A" "10 min"}}
 
-{{say `Complete end-to-end flow — client to CDN to service to trie:
+{{say `The complete request flow, end to end:
 <ul>
-  <li>Client debounces at <strong>150ms</strong> → hits CDN (5ms if cached) → Redis (8ms) → trie (12ms) → personalization blend (2ms)</li>
+  <li>Client waits <strong>150ms</strong> after typing → CDN (5ms if cached) → Redis (8ms) → trie (12ms) → personalization (2ms)</li>
   <li>Total p99 on warm path: <span class="hl">~18ms</span></li>
-  <li>Total p99 on cold path (trie lookup): <span class="hl">~22ms</span></li>
+  <li>Total p99 on cold path: <span class="hl">~22ms</span></li>
 </ul>`}}
 
 {{diagram "sa-typeahead-flow"}}

@@ -922,32 +922,48 @@ response = dynamodb.query(
   <li><small>Group chats with 256 members: without batching, reading 50 messages triggers 50 × 255 = 12,750 individual receipt frames. With batching: 255 batch frames, one per group member who was online.</small></li>
 </ul>`}}
 
-{{think "Presence is a privacy-sensitive feature that affects the architecture."
-  (whatIf "a user disables last-seen" "We still track presence internally (needed for delivery routing — online users get WebSocket, offline get push). But we suppress the presence information in the API response for that user. The privacy setting is a read-time filter, not a write-time decision.")
-  (whatIf "a user manually sets their presence to 'do not disturb'" "DND is a separate presence state stored alongside the heartbeat TTL key: Redis HSET user:presence:{id} status 'dnd' online true. The WebSocket heartbeat still refreshes the TTL (so the user is 'online' internally for delivery routing), but the DND flag is returned to contacts querying presence. Typing indicators are suppressed — the client does not emit typing events when in DND. Incoming messages are still delivered but push notifications are silenced at the APNs/FCM layer.")
-  (how "presence fan-out is bounded" "When User A comes online, we need to notify User A's contacts who have the app open. But we do NOT proactively push presence to all contacts. Instead, when User B opens a chat with User A, User B's client subscribes to User A's presence channel. This is lazy subscription — only active conversations get real-time presence updates.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Presence Privacy & Fan-out</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "Presence is privacy-sensitive and affects the architecture."
+  (whatIf "a user disables last-seen" "We still track presence internally (needed for delivery routing). But we suppress it in the API response. Privacy settings are a read-time filter, not write-time.")
+  (whatIf "a user sets 'do not disturb'" "DND is stored alongside the heartbeat: Redis HSET user:presence:{id} status 'dnd' online true. Heartbeat still refreshes TTL (user is 'online' for routing), but DND flag is returned to contacts. Typing events suppressed, push notifications silenced.")
+  (how "presence fan-out is bounded" "We do NOT push presence to all contacts proactively. When User B opens a chat with User A, B subscribes to A's presence channel. Lazy subscription — only active conversations get real-time presence updates.")
 }}
+  </div>
+</details>
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Presence Heartbeat & Typing Indicator Math</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Presence Questions"
-  "How do you handle 200M concurrent presence heartbeats — 500M users each sending a heartbeat every 30 seconds?"
-  `<strong>Redis Cluster</strong> with TTL-based keys handles this volume without a heartbeat write storm:
+  "How do you handle 200M concurrent heartbeats?"
+  `<strong>Redis Cluster</strong> with TTL-based keys:
 <ul>
-  <li><span class='hl'>200M online users</span> × 1 heartbeat/30s = <span class='hl'>6.7M writes/sec</span> — distributed across <span class='hl'>10 Redis shards</span> = 670K writes/sec per shard (within Redis's <span class='hl'>~1M ops/sec</span> per node)</li>
-  <li>Each key: <code>user:presence:{user_id}</code> → TTL=60s. Heartbeat is a single <code>EXPIRE</code> command — no value update needed for binary online/offline</li>
-  <li>Presence read: <code>EXISTS user:presence:{user_id}</code> — O(1), sub-ms. No joins, no DB reads</li>
-  <li><span class='hl-red'>No DynamoDB writes for heartbeats</span> — at 6.7M writes/sec, DynamoDB would cost <span class='hl'>~$2M/month</span> in WCU alone</li>
-  <li><small>Redis memory: 200M keys × ~60 bytes per key = ~12GB across the cluster — comfortably fits in r7g.xlarge instances ($0.24/hr each)</small></li>
+  <li><span class='hl'>200M users</span> x 1 heartbeat/30s = <span class='hl'>6.7M writes/sec</span> across <span class='hl'>10 shards</span> = 670K/sec per shard (within Redis's ~1M ops/sec)</li>
+  <li>Each key: <code>user:presence:{user_id}</code> with TTL=60s. Heartbeat is a single <code>EXPIRE</code> command</li>
+  <li>Presence check: <code>EXISTS</code> — O(1), sub-ms</li>
+  <li><span class='hl-red'>No DynamoDB writes</span> — at 6.7M writes/sec, DynamoDB would cost <span class='hl'>~$2M/month</span></li>
 </ul>`
   "How do typing indicators work without overwhelming the server?"
-  `Typing indicators use <strong>fire-and-forget</strong> delivery via <a href="/fund/storage/redis">Redis pub/sub</a> with aggressive client-side throttling:
+  `<strong>Fire-and-forget</strong> via Redis pub/sub with client-side throttling:
 <ul>
-  <li>Client publishes a <code>TYPING</code> event to Redis channel <code>chat:{conversation_id}:typing</code> only <strong>once per 3 seconds</strong> while the user is actively typing — client throttles locally</li>
-  <li><span class='hl-red'>Never persisted</span> to Kafka or DynamoDB — typing events are ephemeral; losing them is acceptable</li>
-  <li>Recipient's WebSocket server subscribes to the conversation's typing channel. Event delivery: <span class='hl'>< 10ms</span> via Redis pub/sub</li>
-  <li>The typing indicator auto-dismisses after <span class='hl'>5 seconds</span> on the receiver's screen — if no follow-up TYPING event arrives, the indicator disappears (handles the case where the connection drops mid-typing)</li>
-  <li>For group chats: typing events are published to the group channel; all members' servers receive them. At 256 members, a busy group could see up to 256 concurrent typing events — <strong>UI coalesces</strong> to "Alice, Bob, and 3 others are typing"</li>
+  <li>Client publishes <code>TYPING</code> only <strong>once per 3 seconds</strong> while typing — throttled locally</li>
+  <li><span class='hl-red'>Never persisted</span> to Kafka or DynamoDB — ephemeral, losing them is fine</li>
+  <li>Delivery: <span class='hl'>< 10ms</span> via Redis pub/sub. Auto-dismisses after <span class='hl'>5 seconds</span> on receiver's screen</li>
+  <li>Group chats: UI coalesces to "Alice, Bob, and 3 others are typing"</li>
 </ul>`
 }}
+  </div>
+</details>
 
 {{checklist "WebSocket for real-time delivery, offline queue for reliability" "Kafka as durable message bus between services" "DynamoDB partitioned by conversation_id with Snowflake sort keys" "Fan-out-on-write for groups (bounded by 256 cap)" "Signal Protocol for E2E encryption — server is zero-knowledge" "Per-device sync cursors for multi-device" "Redis for session registry and presence (heartbeat TTL)" "NLB for WebSocket, ALB for REST API"}}
 
