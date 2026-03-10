@@ -662,4 +662,541 @@ var revisionSVGs = map[string]string{
   <rect x="200" y="798" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
   <text x="550" y="811" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: Hybrid fan-out (write for normal, read for celebrities) is THE differentiating answer</text>
 </svg>`,
+
+// ─────────────────────────────────────────────────────────────────────
+// CHAT SYSTEM
+// ─────────────────────────────────────────────────────────────────────
+"chat-system": `<svg viewBox="0 0 1100 760" xmlns="http://www.w3.org/2000/svg" font-family="Inter,system-ui,sans-serif">
+  <defs>
+    <marker id="cs-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa0a6"/></marker>
+    <marker id="cs-arr-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#34a853"/></marker>
+    <filter id="cs-sh"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.08"/></filter>
+  </defs>
+  <rect width="1100" height="760" rx="12" fill="#fafbfd"/>
+  <text x="550" y="32" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">Chat System (WhatsApp) — Architecture Decision Map</text>
+
+  <!-- ═══ MESSAGE DELIVERY PATH ═══ -->
+  <text x="550" y="60" text-anchor="middle" font-size="12" font-weight="600" fill="#4285f4" letter-spacing="1">MESSAGE DELIVERY: DUAL PATH (ONLINE + OFFLINE)</text>
+
+  <!-- Sender -->
+  <rect x="20" y="80" width="90" height="44" rx="6" fill="#f1f3f4" stroke="#dadce0" stroke-width="1" filter="url(#cs-sh)"/>
+  <text x="65" y="98" text-anchor="middle" font-size="10" font-weight="500" fill="#202124">Sender</text>
+  <text x="65" y="112" text-anchor="middle" font-size="8" fill="#5f6368">encrypts msg</text>
+
+  <line x1="110" y1="102" x2="145" y2="102" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#cs-arr)"/>
+  <text x="127" y="95" text-anchor="middle" font-size="7" fill="#5f6368">WS</text>
+
+  <!-- WS Server -->
+  <rect x="147" y="78" width="120" height="48" rx="6" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#cs-sh)"/>
+  <text x="207" y="97" text-anchor="middle" font-size="10" font-weight="600" fill="#1a73e8">WebSocket Srv</text>
+  <text x="207" y="110" text-anchor="middle" font-size="8" fill="#5f6368">NLB (not ALB!)</text>
+  <text x="207" y="120" text-anchor="middle" font-size="7" fill="#f9ab00">100K conn/node</text>
+
+  <line x1="267" y1="102" x2="302" y2="102" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#cs-arr)"/>
+
+  <!-- Chat Service -->
+  <rect x="304" y="78" width="120" height="48" rx="6" fill="#e6f4ea" stroke="#34a853" stroke-width="1.2" filter="url(#cs-sh)"/>
+  <text x="364" y="97" text-anchor="middle" font-size="10" font-weight="600" fill="#137333">Chat Service</text>
+  <text x="364" y="110" text-anchor="middle" font-size="8" fill="#5f6368">stateless routing</text>
+  <text x="364" y="120" text-anchor="middle" font-size="7" fill="#5f6368">Snowflake ID assign</text>
+
+  <line x1="424" y1="102" x2="459" y2="102" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#cs-arr)"/>
+  <text x="441" y="95" text-anchor="middle" font-size="7" fill="#5f6368">publish</text>
+
+  <!-- Kafka -->
+  <rect x="461" y="76" width="130" height="52" rx="6" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.2" filter="url(#cs-sh)"/>
+  <text x="526" y="96" text-anchor="middle" font-size="10" font-weight="600" fill="#7627bb">Kafka</text>
+  <text x="526" y="108" text-anchor="middle" font-size="8" fill="#5f6368">partition by conv_id</text>
+  <text x="526" y="120" text-anchor="middle" font-size="7" fill="#f9ab00">ordered, persistent</text>
+
+  <!-- ACK back to sender -->
+  <path d="M461,120 Q440,140 424,118" fill="none" stroke="#34a853" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="430" y="140" text-anchor="middle" font-size="7" fill="#34a853">ACK (single ✓)</text>
+
+  <!-- Online path -->
+  <line x1="591" y1="90" x2="640" y2="90" stroke="#34a853" stroke-width="1.5" marker-end="url(#cs-arr-g)"/>
+  <text x="615" y="83" text-anchor="middle" font-size="7" fill="#34a853">online</text>
+
+  <!-- Session Registry -->
+  <rect x="595" y="130" width="130" height="40" rx="6" fill="#e0f7fa" stroke="#00897b" stroke-width="1" filter="url(#cs-sh)"/>
+  <text x="660" y="148" text-anchor="middle" font-size="9" font-weight="600" fill="#00695c">Redis Session Reg</text>
+  <text x="660" y="162" text-anchor="middle" font-size="7" fill="#5f6368">user→server_id, TTL 5min</text>
+
+  <line x1="526" y1="128" x2="595" y2="148" stroke="#9aa0a6" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="555" y="135" font-size="7" fill="#5f6368">lookup</text>
+
+  <!-- Recipient WS -->
+  <rect x="642" y="72" width="130" height="44" rx="6" fill="#e6f4ea" stroke="#34a853" stroke-width="1.2" filter="url(#cs-sh)"/>
+  <text x="707" y="90" text-anchor="middle" font-size="10" font-weight="600" fill="#137333">Recipient WS</text>
+  <text x="707" y="103" text-anchor="middle" font-size="8" fill="#5f6368">gRPC push → WS</text>
+  <text x="707" y="112" text-anchor="middle" font-size="7" fill="#34a853">double ✓ on receipt</text>
+
+  <!-- Offline path -->
+  <line x1="591" y1="108" x2="640" y2="180" stroke="#ea4335" stroke-width="1.2" stroke-dasharray="4,3"/>
+  <text x="605" y="145" font-size="7" fill="#ea4335">offline</text>
+
+  <!-- Offline queue -->
+  <rect x="642" y="170" width="130" height="44" rx="6" fill="#f3e8fd" stroke="#9334e6" stroke-width="1" filter="url(#cs-sh)"/>
+  <text x="707" y="188" text-anchor="middle" font-size="9" font-weight="600" fill="#7627bb">DynamoDB Queue</text>
+  <text x="707" y="202" text-anchor="middle" font-size="8" fill="#5f6368">+ APNs/FCM push</text>
+
+  <!-- E2E Encryption badge -->
+  <rect x="830" y="76" width="240" height="60" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#cs-sh)"/>
+  <text x="950" y="96" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Signal Protocol (E2E)</text>
+  <text x="950" y="110" text-anchor="middle" font-size="9" fill="#202124">server = dumb pipe, never sees plaintext</text>
+  <text x="950" y="123" text-anchor="middle" font-size="8" fill="#5f6368">forward + future secrecy via Double Ratchet</text>
+  <text x="950" y="133" text-anchor="middle" font-size="8" fill="#ea4335">trade-off: no server search/moderation</text>
+
+  <!-- ═══ KEY DECISIONS ═══ -->
+  <line x1="20" y1="230" x2="1080" y2="230" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="255" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">KEY DECISIONS &amp; WHY</text>
+
+  <!-- NLB not ALB -->
+  <rect x="20" y="270" width="250" height="68" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#cs-sh)"/>
+  <text x="145" y="290" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">NLB (Layer 4) — chosen</text>
+  <text x="145" y="304" text-anchor="middle" font-size="9" fill="#202124">raw TCP passthrough, no timeout</text>
+  <text x="145" y="318" text-anchor="middle" font-size="9" fill="#202124">WebSockets live indefinitely</text>
+  <text x="145" y="330" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">sticky via consistent hashing</text>
+
+  <rect x="20" y="346" width="250" height="36" rx="6" fill="#fce8e6" stroke="#ea4335" stroke-width="1"/>
+  <text x="145" y="363" text-anchor="middle" font-size="9" fill="#c5221f" font-weight="600">✗ ALB: 4000s idle timeout kills WS silently</text>
+  <text x="145" y="376" text-anchor="middle" font-size="8" fill="#5f6368">ALB designed for HTTP request-response</text>
+
+  <!-- Kafka not RabbitMQ -->
+  <rect x="290" y="270" width="250" height="68" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#cs-sh)"/>
+  <text x="415" y="290" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Kafka — chosen</text>
+  <text x="415" y="304" text-anchor="middle" font-size="9" fill="#202124">ordered per partition, persistent</text>
+  <text x="415" y="318" text-anchor="middle" font-size="9" fill="#202124">multi-consumer: fanout, search, notif</text>
+  <text x="415" y="330" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">1M+ msgs/sec per cluster</text>
+
+  <rect x="290" y="346" width="250" height="36" rx="6" fill="#fce8e6" stroke="#ea4335" stroke-width="1"/>
+  <text x="415" y="363" text-anchor="middle" font-size="9" fill="#c5221f" font-weight="600">✗ RabbitMQ: per-msg ACK overhead at 700K/s</text>
+  <text x="415" y="376" text-anchor="middle" font-size="8" fill="#5f6368">✗ Redis Pub/Sub: fire-and-forget, msgs lost</text>
+
+  <!-- DynamoDB not Cassandra -->
+  <rect x="560" y="270" width="250" height="68" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#cs-sh)"/>
+  <text x="685" y="290" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">DynamoDB — chosen</text>
+  <text x="685" y="304" text-anchor="middle" font-size="9" fill="#202124">fully managed, on-demand scaling</text>
+  <text x="685" y="318" text-anchor="middle" font-size="9" fill="#202124">DynamoDB Streams for async processing</text>
+  <text x="685" y="330" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">20B writes/day without ops team</text>
+
+  <rect x="560" y="346" width="250" height="36" rx="6" fill="#fce8e6" stroke="#ea4335" stroke-width="1"/>
+  <text x="685" y="363" text-anchor="middle" font-size="9" fill="#c5221f" font-weight="600">✗ Cassandra: needs dedicated ops team</text>
+  <text x="685" y="376" text-anchor="middle" font-size="8" fill="#5f6368">at 20B writes/day, cluster mgmt is a job</text>
+
+  <!-- Group design -->
+  <rect x="830" y="270" width="250" height="68" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#cs-sh)"/>
+  <text x="955" y="290" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">Group: Fan-out-on-write</text>
+  <text x="955" y="304" text-anchor="middle" font-size="9" fill="#202124">256-member cap bounds cost</text>
+  <text x="955" y="318" text-anchor="middle" font-size="9" fill="#202124">256 WS pushes per message</text>
+  <text x="955" y="330" text-anchor="middle" font-size="8" fill="#5f6368">if 100K+ members → must switch to read</text>
+
+  <!-- ═══ SCALE NUMBERS ═══ -->
+  <line x1="20" y1="400" x2="1080" y2="400" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="425" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">SCALE ARCHITECTURE</text>
+
+  <!-- Connection management -->
+  <rect x="20" y="440" width="340" height="75" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2" filter="url(#cs-sh)"/>
+  <text x="190" y="460" text-anchor="middle" font-size="10" font-weight="700" fill="#e37400">200M Concurrent Connections</text>
+  <text x="190" y="475" text-anchor="middle" font-size="9" fill="#202124">40KB/conn × 200M = 8TB total memory</text>
+  <text x="190" y="488" text-anchor="middle" font-size="9" fill="#202124">~5,000 servers × 100K connections each</text>
+  <text x="190" y="501" text-anchor="middle" font-size="8" fill="#202124">consistent hashing: deploy moves only 1/N conns</text>
+  <text x="190" y="511" text-anchor="middle" font-size="8" fill="#5f6368">graceful drain: mark in Redis, wait 60s</text>
+
+  <!-- Presence system -->
+  <rect x="380" y="440" width="340" height="75" rx="8" fill="#e0f7fa" stroke="#00897b" stroke-width="1.2" filter="url(#cs-sh)"/>
+  <text x="550" y="460" text-anchor="middle" font-size="10" font-weight="700" fill="#00695c">Presence &amp; Typing (Ephemeral)</text>
+  <text x="550" y="475" text-anchor="middle" font-size="9" fill="#202124">presence: Redis TTL=60s, heartbeat q30s</text>
+  <text x="550" y="488" text-anchor="middle" font-size="9" fill="#202124">typing: Redis Pub/Sub, fire-and-forget</text>
+  <text x="550" y="501" text-anchor="middle" font-size="8" fill="#202124">NOT persisted to Kafka or DynamoDB</text>
+  <text x="550" y="511" text-anchor="middle" font-size="8" fill="#ea4335">DB-backed presence = 16M writes/sec → impossible</text>
+
+  <!-- Media handling -->
+  <rect x="740" y="440" width="340" height="75" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#cs-sh)"/>
+  <text x="910" y="460" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">Media: Client-Side Encryption</text>
+  <text x="910" y="475" text-anchor="middle" font-size="9" fill="#202124">client encrypts with random AES-256 key</text>
+  <text x="910" y="488" text-anchor="middle" font-size="9" fill="#202124">upload encrypted blob to S3 via presigned URL</text>
+  <text x="910" y="501" text-anchor="middle" font-size="8" fill="#202124">AES key sent inside E2E-encrypted message</text>
+  <text x="910" y="511" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">SHA-256 dedup on plaintext → 65% savings</text>
+
+  <!-- ═══ MULTI-REGION ═══ -->
+  <line x1="20" y1="535" x2="1080" y2="535" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="560" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">MULTI-REGION DELIVERY</text>
+
+  <rect x="20" y="575" width="340" height="55" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#cs-sh)"/>
+  <text x="190" y="595" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">Local Message (~50ms)</text>
+  <text x="190" y="610" text-anchor="middle" font-size="9" fill="#202124">full stack per region: WS + Chat + Kafka + DDB</text>
+  <text x="190" y="623" text-anchor="middle" font-size="8" fill="#5f6368">same-region delivery is always fast</text>
+
+  <line x1="360" y1="602" x2="400" y2="602" stroke="#4285f4" stroke-width="2" marker-end="url(#cs-arr)"/>
+
+  <rect x="402" y="575" width="340" height="55" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2" filter="url(#cs-sh)"/>
+  <text x="572" y="595" text-anchor="middle" font-size="10" font-weight="700" fill="#e37400">Cross-Region (150-200ms)</text>
+  <text x="572" y="610" text-anchor="middle" font-size="9" fill="#202124">Kafka MirrorMaker 2: 80-120ms replication</text>
+  <text x="572" y="623" text-anchor="middle" font-size="8" fill="#5f6368">DynamoDB Global Tables: ~1s lag</text>
+
+  <line x1="742" y1="602" x2="782" y2="602" stroke="#4285f4" stroke-width="2" marker-end="url(#cs-arr)"/>
+
+  <rect x="784" y="575" width="296" height="55" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.2" filter="url(#cs-sh)"/>
+  <text x="932" y="595" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Failover (~32s recovery)</text>
+  <text x="932" y="610" text-anchor="middle" font-size="9" fill="#202124">Route 53 DNS 30s + WS reconnect 2s</text>
+  <text x="932" y="623" text-anchor="middle" font-size="8" fill="#5f6368">gradual ramp: 10% → 100% over 5min</text>
+
+  <!-- ═══ KEY NUMBERS ═══ -->
+  <line x1="20" y1="650" x2="1080" y2="650" stroke="#e2e8f0" stroke-width="1"/>
+
+  <rect x="20" y="668" width="140" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="90" y="686" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">20B msgs/day</text>
+  <text x="90" y="700" text-anchor="middle" font-size="8" fill="#5f6368">230K avg, 700K peak</text>
+
+  <rect x="175" y="668" width="140" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="245" y="686" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">200M WS conns</text>
+  <text x="245" y="700" text-anchor="middle" font-size="8" fill="#5f6368">5,000 servers</text>
+
+  <rect x="330" y="668" width="140" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="400" y="686" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">40KB/conn</text>
+  <text x="400" y="700" text-anchor="middle" font-size="8" fill="#5f6368">8TB total memory</text>
+
+  <rect x="485" y="668" width="140" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="555" y="686" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">sub-100ms</text>
+  <text x="555" y="700" text-anchor="middle" font-size="8" fill="#5f6368">online delivery</text>
+
+  <rect x="640" y="668" width="140" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="710" y="686" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">256 max group</text>
+  <text x="710" y="700" text-anchor="middle" font-size="8" fill="#5f6368">bounds fan-out cost</text>
+
+  <rect x="795" y="668" width="140" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="865" y="686" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">1PB/day media</text>
+  <text x="865" y="700" text-anchor="middle" font-size="8" fill="#5f6368">~$700K/mo S3</text>
+
+  <rect x="950" y="668" width="130" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="1015" y="686" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">E2E encrypted</text>
+  <text x="1015" y="700" text-anchor="middle" font-size="8" fill="#5f6368">zero-knowledge</text>
+
+  <rect x="200" y="728" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
+  <text x="550" y="741" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: Separate connection layer from routing layer — a routing crash must not kill WebSocket connections</text>
+</svg>`,
+
+// ─────────────────────────────────────────────────────────────────────
+// TWITTER FEED
+// ─────────────────────────────────────────────────────────────────────
+"twitter-feed": `<svg viewBox="0 0 1100 720" xmlns="http://www.w3.org/2000/svg" font-family="Inter,system-ui,sans-serif">
+  <defs>
+    <marker id="tw-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa0a6"/></marker>
+    <filter id="tw-sh"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.08"/></filter>
+  </defs>
+  <rect width="1100" height="720" rx="12" fill="#fafbfd"/>
+  <text x="550" y="32" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">Twitter Feed — Architecture Decision Map</text>
+
+  <!-- ═══ HYBRID FAN-OUT ═══ -->
+  <text x="550" y="60" text-anchor="middle" font-size="12" font-weight="600" fill="#4285f4" letter-spacing="1">CORE: HYBRID FAN-OUT (50K FOLLOWER THRESHOLD)</text>
+
+  <!-- Write path -->
+  <rect x="20" y="80" width="330" height="90" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#tw-sh)"/>
+  <text x="185" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Fan-out-on-WRITE (normal, &lt;50K)</text>
+  <text x="185" y="115" text-anchor="middle" font-size="9" fill="#202124">tweet → Kafka → Fanout Service</text>
+  <text x="185" y="128" text-anchor="middle" font-size="9" fill="#202124">push tweet_id to each follower's Redis ZSET</text>
+  <text x="185" y="141" text-anchor="middle" font-size="8" fill="#5f6368">1 tweet × 50K followers = 50K ZADD ops</text>
+  <text x="185" y="154" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">feed read = single ZREVRANGE → sub-ms</text>
+  <text x="185" y="164" text-anchor="middle" font-size="8" fill="#34a853">40:1 read:write ratio favors pre-compute</text>
+
+  <!-- Threshold -->
+  <rect x="380" y="105" width="120" height="50" rx="20" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.5"/>
+  <text x="440" y="126" text-anchor="middle" font-size="10" font-weight="700" fill="#e37400">50K followers</text>
+  <text x="440" y="142" text-anchor="middle" font-size="9" fill="#5f6368">threshold</text>
+
+  <line x1="380" y1="130" x2="350" y2="130" stroke="#f9ab00" stroke-width="1.2"/>
+  <line x1="500" y1="130" x2="530" y2="130" stroke="#f9ab00" stroke-width="1.2"/>
+
+  <!-- Read path for celebrities -->
+  <rect x="532" y="80" width="330" height="90" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#tw-sh)"/>
+  <text x="697" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">Fan-out-on-READ (celebrities, &gt;50K)</text>
+  <text x="697" y="115" text-anchor="middle" font-size="9" fill="#202124">celebrity tweets stored in Cassandra only</text>
+  <text x="697" y="128" text-anchor="middle" font-size="9" fill="#202124">merged at read time with cached timeline</text>
+  <text x="697" y="141" text-anchor="middle" font-size="8" fill="#5f6368">parallel Cassandra queries for followed celebs</text>
+  <text x="697" y="154" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">adds ~15ms merge overhead per feed load</text>
+
+  <!-- Rejected -->
+  <rect x="890" y="80" width="190" height="90" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2"/>
+  <text x="985" y="100" text-anchor="middle" font-size="9" font-weight="600" fill="#c5221f">✗ Pure Write</text>
+  <text x="985" y="115" text-anchor="middle" font-size="8" fill="#5f6368">150M followers = 150M</text>
+  <text x="985" y="128" text-anchor="middle" font-size="8" fill="#5f6368">Redis writes per tweet</text>
+  <text x="985" y="141" text-anchor="middle" font-size="8" fill="#5f6368">= 25 min at 100K ops/s</text>
+  <text x="985" y="156" text-anchor="middle" font-size="9" font-weight="600" fill="#c5221f">✗ Pure Read</text>
+  <text x="985" y="168" text-anchor="middle" font-size="8" fill="#5f6368">3T DB reads/day</text>
+
+  <!-- ═══ TECHNOLOGY STACK ═══ -->
+  <line x1="20" y1="195" x2="1080" y2="195" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="220" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">TECHNOLOGY CHOICES</text>
+
+  <rect x="20" y="235" width="250" height="68" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#tw-sh)"/>
+  <text x="145" y="255" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Cassandra (chosen)</text>
+  <text x="145" y="270" text-anchor="middle" font-size="9" fill="#202124">LSM-tree: fast sequential writes</text>
+  <text x="145" y="283" text-anchor="middle" font-size="9" fill="#202124">Snowflake DESC clustering → newest first</text>
+  <text x="145" y="296" text-anchor="middle" font-size="8" fill="#5f6368">tweets are append-only, no joins needed</text>
+
+  <rect x="290" y="235" width="250" height="68" rx="8" fill="#e0f7fa" stroke="#00897b" stroke-width="1.2" filter="url(#tw-sh)"/>
+  <text x="415" y="255" text-anchor="middle" font-size="10" font-weight="700" fill="#00695c">Redis Sorted Sets</text>
+  <text x="415" y="270" text-anchor="middle" font-size="9" fill="#202124">timeline cache: 800 tweet IDs/user</text>
+  <text x="415" y="283" text-anchor="middle" font-size="9" fill="#202124">ZADD/ZREVRANGE O(log N)</text>
+  <text x="415" y="296" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">sub-ms reads for feed</text>
+
+  <rect x="560" y="235" width="250" height="68" rx="8" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.2" filter="url(#tw-sh)"/>
+  <text x="685" y="255" text-anchor="middle" font-size="10" font-weight="700" fill="#7627bb">Kafka (event bus)</text>
+  <text x="685" y="270" text-anchor="middle" font-size="9" fill="#202124">decouples tweet creation from fanout</text>
+  <text x="685" y="283" text-anchor="middle" font-size="9" fill="#202124">multi-consumer: fanout, search, notif</text>
+  <text x="685" y="296" text-anchor="middle" font-size="8" fill="#5f6368">tweet create returns &lt;5ms (async fanout)</text>
+
+  <rect x="830" y="235" width="250" height="68" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#tw-sh)"/>
+  <text x="955" y="255" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">SSE (not WebSocket)</text>
+  <text x="955" y="270" text-anchor="middle" font-size="9" fill="#202124">feed is unidirectional: server → client</text>
+  <text x="955" y="283" text-anchor="middle" font-size="9" fill="#202124">auto-reconnects, works over HTTP/2</text>
+  <text x="955" y="296" text-anchor="middle" font-size="8" fill="#5f6368">WS overkill; reserve WS for DMs</text>
+
+  <!-- ═══ LIKE COUNTERS ═══ -->
+  <line x1="20" y1="320" x2="1080" y2="320" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="345" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">LIKE COUNTER CHALLENGE</text>
+
+  <rect x="20" y="360" width="340" height="60" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2" filter="url(#tw-sh)"/>
+  <text x="190" y="380" text-anchor="middle" font-size="10" font-weight="700" fill="#c5221f">✗ Cassandra Counters</text>
+  <text x="190" y="395" text-anchor="middle" font-size="9" fill="#202124">LWW silently drops concurrent updates</text>
+  <text x="190" y="408" text-anchor="middle" font-size="9" fill="#202124">viral tweet at 10K likes/sec = write hotspot</text>
+
+  <line x1="360" y1="390" x2="400" y2="390" stroke="#34a853" stroke-width="1.5" marker-end="url(#tw-arr)"/>
+
+  <rect x="402" y="360" width="340" height="60" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#tw-sh)"/>
+  <text x="572" y="380" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Redis INCR (chosen)</text>
+  <text x="572" y="395" text-anchor="middle" font-size="9" fill="#202124">O(1) atomic, 100K ops/s per key</text>
+  <text x="572" y="408" text-anchor="middle" font-size="9" fill="#202124">async sync to Cassandra every 60s</text>
+
+  <rect x="760" y="360" width="320" height="60" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="920" y="380" text-anchor="middle" font-size="10" font-weight="700" fill="#e37400">Eventual Consistency Trade-off</text>
+  <text x="920" y="395" text-anchor="middle" font-size="9" fill="#202124">60s of lost counts = ~6% drift on 10M likes</text>
+  <text x="920" y="408" text-anchor="middle" font-size="8" fill="#5f6368">acceptable: users don't notice ±600K on 10M</text>
+
+  <!-- ═══ SERVICES ═══ -->
+  <line x1="20" y1="440" x2="1080" y2="440" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="465" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">SERVICE ARCHITECTURE (SEPARATE READ + WRITE)</text>
+
+  <rect x="20" y="480" width="165" height="55" rx="6" fill="#e6f4ea" stroke="#34a853" stroke-width="1" filter="url(#tw-sh)"/>
+  <text x="102" y="500" text-anchor="middle" font-size="9" font-weight="600" fill="#137333">Tweet Service</text>
+  <text x="102" y="513" text-anchor="middle" font-size="8" fill="#5f6368">write path: 8.3K/s</text>
+  <text x="102" y="526" text-anchor="middle" font-size="8" fill="#5f6368">Cassandra + Kafka</text>
+
+  <line x1="185" y1="507" x2="210" y2="507" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#tw-arr)"/>
+
+  <rect x="212" y="480" width="165" height="55" rx="6" fill="#f3e8fd" stroke="#9334e6" stroke-width="1" filter="url(#tw-sh)"/>
+  <text x="294" y="500" text-anchor="middle" font-size="9" font-weight="600" fill="#7627bb">Fanout Service</text>
+  <text x="294" y="513" text-anchor="middle" font-size="8" fill="#5f6368">Kafka consumer</text>
+  <text x="294" y="526" text-anchor="middle" font-size="8" fill="#5f6368">pushes to Redis ZSET</text>
+
+  <line x1="377" y1="507" x2="402" y2="507" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#tw-arr)"/>
+
+  <rect x="404" y="480" width="165" height="55" rx="6" fill="#e0f7fa" stroke="#00897b" stroke-width="1" filter="url(#tw-sh)"/>
+  <text x="486" y="500" text-anchor="middle" font-size="9" font-weight="600" fill="#00695c">Timeline Service</text>
+  <text x="486" y="513" text-anchor="middle" font-size="8" fill="#5f6368">read path: 325K/s</text>
+  <text x="486" y="526" text-anchor="middle" font-size="8" fill="#5f6368">Redis + celeb merge</text>
+
+  <rect x="594" y="480" width="165" height="55" rx="6" fill="#e8f0fe" stroke="#4285f4" stroke-width="1" filter="url(#tw-sh)"/>
+  <text x="676" y="500" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Search Service</text>
+  <text x="676" y="513" text-anchor="middle" font-size="8" fill="#5f6368">Elasticsearch</text>
+  <text x="676" y="526" text-anchor="middle" font-size="8" fill="#5f6368">&lt;5s indexing lag</text>
+
+  <rect x="784" y="480" width="165" height="55" rx="6" fill="#f1f3f4" stroke="#dadce0" stroke-width="1" filter="url(#tw-sh)"/>
+  <text x="866" y="500" text-anchor="middle" font-size="9" font-weight="600" fill="#5f6368">Notification Svc</text>
+  <text x="866" y="513" text-anchor="middle" font-size="8" fill="#5f6368">SQS consumer</text>
+  <text x="866" y="526" text-anchor="middle" font-size="8" fill="#5f6368">APNs/FCM push</text>
+
+  <!-- ═══ KEY NUMBERS ═══ -->
+  <line x1="20" y1="555" x2="1080" y2="555" stroke="#e2e8f0" stroke-width="1"/>
+
+  <rect x="20" y="575" width="145" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="92" y="593" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">300M DAU</text>
+  <text x="92" y="607" text-anchor="middle" font-size="8" fill="#5f6368">500M tweets/day</text>
+
+  <rect x="180" y="575" width="145" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="252" y="593" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">40:1 R:W</text>
+  <text x="252" y="607" text-anchor="middle" font-size="8" fill="#5f6368">325K read, 8.3K write</text>
+
+  <rect x="340" y="575" width="145" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="412" y="593" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">50K threshold</text>
+  <text x="412" y="607" text-anchor="middle" font-size="8" fill="#5f6368">fan-out split point</text>
+
+  <rect x="500" y="575" width="145" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="572" y="593" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">800 IDs/cache</text>
+  <text x="572" y="607" text-anchor="middle" font-size="8" fill="#5f6368">timeline cap in Redis</text>
+
+  <rect x="660" y="575" width="145" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="732" y="593" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">Snowflake cursors</text>
+  <text x="732" y="607" text-anchor="middle" font-size="8" fill="#5f6368">stable pagination</text>
+
+  <rect x="820" y="575" width="145" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="892" y="593" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">SSE not WS</text>
+  <text x="892" y="607" text-anchor="middle" font-size="8" fill="#5f6368">feed is one-way</text>
+
+  <rect x="200" y="635" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
+  <text x="550" y="648" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: Separate Tweet Service (write) from Timeline Service (read) — 40:1 asymmetry drives architecture</text>
+</svg>`,
+
+// ─────────────────────────────────────────────────────────────────────
+// FILE STORAGE
+// ─────────────────────────────────────────────────────────────────────
+"file-storage": `<svg viewBox="0 0 1100 720" xmlns="http://www.w3.org/2000/svg" font-family="Inter,system-ui,sans-serif">
+  <defs>
+    <marker id="fs-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa0a6"/></marker>
+    <filter id="fs-sh"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.08"/></filter>
+  </defs>
+  <rect width="1100" height="720" rx="12" fill="#fafbfd"/>
+  <text x="550" y="32" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">File Storage (Dropbox/GDrive) — Architecture Decision Map</text>
+
+  <!-- ═══ CORE ARCHITECTURE ═══ -->
+  <text x="550" y="60" text-anchor="middle" font-size="12" font-weight="600" fill="#4285f4" letter-spacing="1">CORE: SEPARATE METADATA FROM FILE BYTES</text>
+
+  <!-- Metadata path -->
+  <rect x="20" y="80" width="400" height="75" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.5" filter="url(#fs-sh)"/>
+  <text x="220" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">Postgres — Metadata</text>
+  <text x="220" y="115" text-anchor="middle" font-size="9" fill="#202124">files, folders, versions, permissions, sharing</text>
+  <text x="220" y="128" text-anchor="middle" font-size="9" fill="#202124">ACID transactions for consistency</text>
+  <text x="220" y="141" text-anchor="middle" font-size="8" fill="#5f6368">B-tree indexes on (user_id, parent_id, name)</text>
+  <text x="220" y="151" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">$0.10/GB SSD vs $0.023/GB S3</text>
+
+  <!-- File bytes path -->
+  <rect x="460" y="80" width="400" height="75" rx="8" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.5" filter="url(#fs-sh)"/>
+  <text x="660" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#7627bb">S3 — File Bytes (Content-Addressable)</text>
+  <text x="660" y="115" text-anchor="middle" font-size="9" fill="#202124">S3 key = SHA256 hash of content</text>
+  <text x="660" y="128" text-anchor="middle" font-size="9" fill="#202124">same content → same key → auto dedup</text>
+  <text x="660" y="141" text-anchor="middle" font-size="8" fill="#5f6368">Dropbox saved 80% storage with CAS</text>
+  <text x="660" y="151" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">11 nines durability</text>
+
+  <!-- Why separated -->
+  <rect x="880" y="80" width="200" height="75" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="980" y="98" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">Why separate?</text>
+  <text x="980" y="113" text-anchor="middle" font-size="8" fill="#202124">blobs in DB → backups huge</text>
+  <text x="980" y="126" text-anchor="middle" font-size="8" fill="#202124">slow index scans, 4x cost</text>
+  <text x="980" y="139" text-anchor="middle" font-size="8" fill="#202124">S3 built for blob storage</text>
+  <text x="980" y="151" text-anchor="middle" font-size="8" fill="#5f6368">50TB/day can't go through DB</text>
+
+  <!-- ═══ CHUNKED UPLOAD ═══ -->
+  <line x1="20" y1="175" x2="1080" y2="175" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="200" text-anchor="middle" font-size="12" font-weight="600" fill="#00897b" letter-spacing="1">CHUNKED UPLOAD (4MB CHUNKS)</text>
+
+  <rect x="20" y="215" width="90" height="40" rx="6" fill="#f1f3f4" stroke="#dadce0" stroke-width="1" filter="url(#fs-sh)"/>
+  <text x="65" y="239" text-anchor="middle" font-size="10" font-weight="500" fill="#202124">Client</text>
+
+  <line x1="110" y1="235" x2="145" y2="235" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#fs-arr)"/>
+  <text x="127" y="228" text-anchor="middle" font-size="7" fill="#5f6368">split</text>
+
+  <rect x="147" y="215" width="140" height="40" rx="6" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#fs-sh)"/>
+  <text x="217" y="232" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">4MB Chunks</text>
+  <text x="217" y="246" text-anchor="middle" font-size="8" fill="#5f6368">each has SHA256 hash</text>
+
+  <line x1="287" y1="235" x2="322" y2="235" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#fs-arr)"/>
+  <text x="304" y="228" text-anchor="middle" font-size="7" fill="#5f6368">check hash</text>
+
+  <rect x="324" y="213" width="140" height="44" rx="6" fill="#e6f4ea" stroke="#34a853" stroke-width="1.2" filter="url(#fs-sh)"/>
+  <text x="394" y="232" text-anchor="middle" font-size="9" font-weight="600" fill="#137333">Dedup Check</text>
+  <text x="394" y="246" text-anchor="middle" font-size="8" fill="#5f6368">hash exists? skip upload</text>
+  <text x="394" y="253" text-anchor="middle" font-size="7" fill="#34a853">0 bytes if match</text>
+
+  <line x1="464" y1="235" x2="499" y2="235" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#fs-arr)"/>
+  <text x="481" y="228" text-anchor="middle" font-size="7" fill="#5f6368">presigned</text>
+
+  <rect x="501" y="215" width="140" height="40" rx="6" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.2" filter="url(#fs-sh)"/>
+  <text x="571" y="232" text-anchor="middle" font-size="9" font-weight="600" fill="#7627bb">S3 Direct Upload</text>
+  <text x="571" y="246" text-anchor="middle" font-size="8" fill="#5f6368">bypasses API servers</text>
+
+  <line x1="641" y1="235" x2="676" y2="235" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#fs-arr)"/>
+
+  <rect x="678" y="215" width="120" height="40" rx="6" fill="#e0f7fa" stroke="#00897b" stroke-width="1.2" filter="url(#fs-sh)"/>
+  <text x="738" y="232" text-anchor="middle" font-size="9" font-weight="600" fill="#00695c">CloudFront</text>
+  <text x="738" y="246" text-anchor="middle" font-size="8" fill="#5f6368">versioned URL</text>
+
+  <!-- Why chunked -->
+  <rect x="830" y="210" width="250" height="50" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1"/>
+  <text x="955" y="228" text-anchor="middle" font-size="9" font-weight="600" fill="#e37400">Why chunked upload?</text>
+  <text x="955" y="242" text-anchor="middle" font-size="8" fill="#202124">5GB fail at 99% → retry only last chunk</text>
+  <text x="955" y="254" text-anchor="middle" font-size="8" fill="#202124">edit 1KB in 1GB → upload changed chunks only</text>
+
+  <!-- ═══ SYNC ENGINE ═══ -->
+  <line x1="20" y1="275" x2="1080" y2="275" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="300" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">SYNC ENGINE — CURSOR-BASED CHANGE FEED</text>
+
+  <rect x="20" y="315" width="320" height="70" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#fs-sh)"/>
+  <text x="180" y="335" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Sequence Numbers (chosen)</text>
+  <text x="180" y="350" text-anchor="middle" font-size="9" fill="#202124">BIGSERIAL in sync_events table</text>
+  <text x="180" y="363" text-anchor="middle" font-size="9" fill="#202124">unique, monotonic, deterministic</text>
+  <text x="180" y="376" text-anchor="middle" font-size="8" fill="#5f6368">like Kafka offsets — client stores last cursor</text>
+
+  <rect x="360" y="315" width="320" height="70" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2"/>
+  <text x="520" y="335" text-anchor="middle" font-size="10" font-weight="700" fill="#c5221f">✗ Timestamp-Based Sync</text>
+  <text x="520" y="350" text-anchor="middle" font-size="9" fill="#202124">two events can share a timestamp</text>
+  <text x="520" y="363" text-anchor="middle" font-size="9" fill="#202124">→ missed updates, gaps, clock skew</text>
+  <text x="520" y="376" text-anchor="middle" font-size="8" fill="#5f6368">fundamentally unreliable for sync</text>
+
+  <!-- Conflict resolution -->
+  <rect x="700" y="315" width="380" height="70" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#fs-sh)"/>
+  <text x="890" y="335" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">Conflict: Create Copy (not LWW)</text>
+  <text x="890" y="350" text-anchor="middle" font-size="9" fill="#202124">two devices edit same file offline → conflict copy</text>
+  <text x="890" y="363" text-anchor="middle" font-size="9" fill="#202124">✗ LWW: silently discards one user's changes</text>
+  <text x="890" y="376" text-anchor="middle" font-size="8" fill="#5f6368">auto-merge only works for structured data (Google Docs)</text>
+
+  <!-- ═══ MICROSERVICES ═══ -->
+  <line x1="20" y1="405" x2="1080" y2="405" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="430" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">5 MICROSERVICES (EACH SCALES INDEPENDENTLY)</text>
+
+  <rect x="20" y="445" width="190" height="55" rx="6" fill="#e8f0fe" stroke="#4285f4" stroke-width="1" filter="url(#fs-sh)"/>
+  <text x="115" y="465" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">API Service</text>
+  <text x="115" y="478" text-anchor="middle" font-size="8" fill="#5f6368">metadata, auth, presigned URLs</text>
+  <text x="115" y="491" text-anchor="middle" font-size="8" fill="#5f6368">CPU-light</text>
+
+  <rect x="230" y="445" width="190" height="55" rx="6" fill="#e6f4ea" stroke="#34a853" stroke-width="1" filter="url(#fs-sh)"/>
+  <text x="325" y="465" text-anchor="middle" font-size="9" font-weight="600" fill="#137333">Upload Service</text>
+  <text x="325" y="478" text-anchor="middle" font-size="8" fill="#5f6368">chunked sessions, assembly</text>
+  <text x="325" y="491" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">bandwidth-intensive</text>
+
+  <rect x="440" y="445" width="190" height="55" rx="6" fill="#f3e8fd" stroke="#9334e6" stroke-width="1" filter="url(#fs-sh)"/>
+  <text x="535" y="465" text-anchor="middle" font-size="9" font-weight="600" fill="#7627bb">Storage Service</text>
+  <text x="535" y="478" text-anchor="middle" font-size="8" fill="#5f6368">S3 wrapper, dedup, ref_count</text>
+  <text x="535" y="491" text-anchor="middle" font-size="8" fill="#5f6368">CAS logic</text>
+
+  <rect x="650" y="445" width="190" height="55" rx="6" fill="#e0f7fa" stroke="#00897b" stroke-width="1" filter="url(#fs-sh)"/>
+  <text x="745" y="465" text-anchor="middle" font-size="9" font-weight="600" fill="#00695c">Sync Service</text>
+  <text x="745" y="478" text-anchor="middle" font-size="8" fill="#5f6368">change feed, SSE/WS broadcast</text>
+  <text x="745" y="491" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">connection-intensive</text>
+
+  <rect x="860" y="445" width="190" height="55" rx="6" fill="#f1f3f4" stroke="#dadce0" stroke-width="1" filter="url(#fs-sh)"/>
+  <text x="955" y="465" text-anchor="middle" font-size="9" font-weight="600" fill="#5f6368">CDN (CloudFront)</text>
+  <text x="955" y="478" text-anchor="middle" font-size="8" fill="#5f6368">edge delivery</text>
+  <text x="955" y="491" text-anchor="middle" font-size="8" fill="#5f6368">hash in URL = immutable cache</text>
+
+  <!-- ═══ KEY NUMBERS ═══ -->
+  <line x1="20" y1="520" x2="1080" y2="520" stroke="#e2e8f0" stroke-width="1"/>
+
+  <rect x="20" y="540" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="95" y="558" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">50TB/day</text>
+  <text x="95" y="572" text-anchor="middle" font-size="8" fill="#5f6368">upload volume</text>
+
+  <rect x="185" y="540" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="260" y="558" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">4MB chunks</text>
+  <text x="260" y="572" text-anchor="middle" font-size="8" fill="#5f6368">resumable, dedup-able</text>
+
+  <rect x="350" y="540" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="425" y="558" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">80% dedup</text>
+  <text x="425" y="572" text-anchor="middle" font-size="8" fill="#5f6368">CAS saves storage</text>
+
+  <rect x="515" y="540" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="590" y="558" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">SHA256 keys</text>
+  <text x="590" y="572" text-anchor="middle" font-size="8" fill="#5f6368">content-addressable</text>
+
+  <rect x="680" y="540" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="755" y="558" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">seq cursors</text>
+  <text x="755" y="572" text-anchor="middle" font-size="8" fill="#5f6368">monotonic sync</text>
+
+  <rect x="845" y="540" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="920" y="558" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">conflict copy</text>
+  <text x="920" y="572" text-anchor="middle" font-size="8" fill="#5f6368">no silent data loss</text>
+
+  <rect x="200" y="600" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
+  <text x="550" y="613" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: Content-addressable storage + chunked upload enables dedup, resumability, and delta sync</text>
+</svg>`,
 }
