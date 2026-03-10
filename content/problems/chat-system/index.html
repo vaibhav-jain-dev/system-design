@@ -4,28 +4,28 @@
 
 {{say `Let me clarify the scope:
 <ul>
-  <li>Designing a <strong>real-time messaging system</strong> like WhatsApp — <strong>1-to-1 chat</strong>, <strong>group chat</strong> up to 256 members, end-to-end encryption, offline message queuing, and multi-device sync</li>
-  <li>Target scale: <span class="hl">2 billion</span> total users with <span class="hl">500 million</span> daily active</li>
-  <li>Mobile-first: battery and bandwidth constraints matter more than in a desktop app</li>
+  <li>Designing a <strong>real-time messaging system</strong> like WhatsApp — <strong>1-to-1 chat</strong>, <strong>group chat</strong> (up to 256 members), end-to-end encryption, offline message queuing, and multi-device sync</li>
+  <li>Target scale: <span class="hl">2 billion</span> total users, <span class="hl">500 million</span> daily active</li>
+  <li>Mobile-first — battery life and bandwidth matter more than on desktop</li>
 </ul>`}}
 
-{{hint "why WhatsApp over Slack?" `WhatsApp is a harder design for three reasons:
+{{hint "why WhatsApp over Slack?" `WhatsApp is harder to design for three reasons:
 <ul>
-  <li><strong>E2E encryption</strong> — server never sees plaintext; Slack stores everything server-side for search</li>
-  <li><strong>Scale</strong> — <span class='hl'>2B users</span> vs Slack's 30M, <span class='hl'>100B msgs/day</span> vs 1B</li>
-  <li><strong>Push model</strong> — WhatsApp pushes every message to all devices; Slack loads messages when you open a channel</li>
+  <li><strong>E2E encryption</strong> — the server never sees message content; Slack stores plaintext for search</li>
+  <li><strong>Scale</strong> — <span class='hl'>2B users</span> vs Slack's 30M</li>
+  <li><strong>Push model</strong> — WhatsApp pushes every message to all devices; Slack only loads messages when you open a channel</li>
 </ul>`}}
 
 {{table "Functional Requirements" (rows
   (row "Requirement" "Description" "Priority" "Drives")
   (row "1:1 messaging" "Real-time text messages between two users" "P0" "WebSocket, message routing, delivery receipts")
   (row "Group chat" "Up to 256 members per group, admin controls" "P0" "Fan-out strategy, group membership service")
-  (row "Delivery receipts" "Sent, delivered, read status indicators" "P0" "ACK (Acknowledgment) protocol, receipt fan-out")
-  (row "Offline delivery" "Queue messages for offline users, push notification" "P0" "Offline queue, APNs/FCM integration")
-  (row "E2E encryption" "Signal Protocol — server never sees plaintext" "P0" "Key exchange, Double Ratchet, media encryption")
-  (row "Media sharing" "Images, video, documents up to 100MB" "P1" "S3, CDN (Content Delivery Network), client-side encryption")
+  (row "Delivery receipts" "Sent, delivered, read indicators" "P0" "ACK protocol, receipt fan-out")
+  (row "Offline delivery" "Queue messages for offline users + push notification" "P0" "Offline queue, APNs/FCM")
+  (row "E2E encryption" "Signal Protocol — server never sees plaintext" "P0" "Key exchange, Double Ratchet")
+  (row "Media sharing" "Images, video, docs up to 100MB" "P1" "S3, CDN, client-side encryption")
   (row "Multi-device sync" "Same account on phone, tablet, desktop" "P1" "Per-device cursors, fan-out to all devices")
-  (row "Presence" "Online/offline/last-seen indicators" "P2" "Redis, heartbeat, privacy settings")
+  (row "Presence" "Online/offline/last-seen indicators" "P2" "Redis heartbeat, privacy settings")
 )}}
 
 {{hint "why limit groups to 256?" `<span class='hl'>256</span> is WhatsApp's real limit — it bounds fan-out cost:
@@ -37,30 +37,50 @@
 
 {{diagram "cs-requirements"}}
 
+<p>The core challenge: {{fundLink "networking/websockets" "WebSockets"}} give sub-100ms delivery, but connections drop. We need a dual path — WebSocket for online users, a persistent queue for offline ones.</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Dual-Path Architecture Reasoning</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{think "The core tension is real-time delivery vs reliability. WebSockets give sub-100ms delivery but connections drop. We need a dual-path architecture: WebSocket for online delivery, persistent queue for offline."
   (whyNot "long polling" "Adds 1-5 seconds latency per message. At 100B messages/day, that delay makes conversations feel broken. WebSocket is the only option for real-time chat.")
   (whatIf "WebSocket server crashes mid-conversation" "Client auto-reconnects to a different server. The new server checks the offline queue for any messages missed during the ~2 second reconnection window. Snowflake message IDs let the client say 'give me everything after msg_1042'.")
   (how "presence detection works" "Client sends heartbeat every 30 seconds over WebSocket. If 2 heartbeats are missed (60s), the Presence Service marks user offline. Last-seen timestamp updates on disconnect.")
 }}
+  </div>
+</details>
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Likely Interviewer Questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Questions this section might trigger"
   "How does this differ from designing Slack?"
-  "Three key differences: (1) E2E encryption — WhatsApp server never sees message content, Slack stores plaintext for search. (2) Scale — 2B users vs 30M, 100B msgs/day vs 1B. (3) Push model — WhatsApp pushes every message to all devices, Slack loads messages when you open a channel. Slack is simpler because no encryption and pull-based."
+  "Three key differences: (1) E2E encryption — WhatsApp server never sees message content, Slack stores plaintext for search. (2) Scale — 2B users vs 30M, 100B msgs/day vs 1B. (3) Push model — WhatsApp pushes every message to all devices, Slack only loads messages when you open a channel."
   "Why not use HTTP/2 server push instead of WebSockets?"
-  "HTTP/2 server push is unidirectional — server can push, but client must initiate new HTTP requests to send messages. WebSocket is bidirectional on a single TCP connection. Chat requires both directions constantly. HTTP/2 would need a separate POST for every outgoing message, adding connection overhead and latency."
+  "HTTP/2 server push is one-way only — server can push, but client still needs HTTP requests to send messages. WebSocket is bidirectional on a single TCP connection. Chat needs both directions constantly."
 }}
+  </div>
+</details>
 
 {{caveat "E2E encryption eliminates server-side search, spam filtering, and content moderation. You must address this trade-off explicitly — interviewers will probe it."}}
 
-{{mustKnow "WebSocket is the only viable option for real-time bidirectional chat — long polling adds 1-5s latency, SSE (Server-Sent Events — a one-way push from server to client only) is unidirectional" "E2E encryption means the server is a dumb pipe — no server-side search, no content moderation, no compliance indexing" "The 256-member group cap is a deliberate engineering constraint that bounds fan-out cost to 256 writes per message" "Dual-path delivery: WebSocket for online users, persistent offline queue + push notification for offline users"}}
+{{mustKnow "WebSocket is the only viable option for real-time bidirectional chat — long polling adds 1-5s latency, SSE is one-way only" "E2E encryption means the server is a dumb pipe — no server-side search, no content moderation" "The 256-member group cap bounds fan-out cost to 256 writes per message" "Dual-path delivery: WebSocket for online users, offline queue + push notification for offline users"}}
 
 {{phase 2 "Capacity Estimation" "3 min"}}
 
-{{say `<span class="hl">500M DAU</span> (Daily Active Users — the number of unique users who use the app in a given day), each user sends about <strong>40 messages per day</strong> on average — here are the numbers that shape the architecture:
+{{say `<span class="hl">500M DAU</span> (daily active users), each sending about <strong>40 messages/day</strong> on average:
 <ul>
-  <li><span class="hl">230K msgs/sec</span> average, <span class="hl">700K msgs/sec</span> at peak (3× evening spike)</li>
-  <li><span class="hl">200M concurrent WebSocket connections</span> at peak — the dominant scaling constraint</li>
-  <li><span class="hl">2 TB/day</span> text storage, <span class="hl">~1 PB/day</span> if 10% of messages carry media at 500KB avg</li>
+  <li><span class="hl">230K msgs/sec</span> average, <span class="hl">700K msgs/sec</span> at peak (3x evening spike)</li>
+  <li><span class="hl">200M concurrent WebSocket connections</span> at peak — this is the biggest scaling challenge</li>
+  <li><span class="hl">2 TB/day</span> text storage, <span class="hl">~1 PB/day</span> with media (10% of messages, ~500KB avg)</li>
 </ul>`}}
 
 {{table "Scale Estimates" (rows
@@ -74,21 +94,39 @@
   (row "Bandwidth" "700K msgs/sec × 100 bytes" "70 MB/sec (text only)")
 )}}
 
-{{hint "why 40 msgs/user?" "WhatsApp's reported number is ~65 messages/day for active users, but that includes inactive DAU who open the app but don't send. &lt;strong>40 is a conservative average.&lt;/strong> The peak matters more — New Year's Eve sees &lt;span class='hl'>10-20×&lt;/span> spikes."}}
+{{hint "why 40 msgs/user?" "WhatsApp reports ~65 messages/day for active users, but that includes people who open the app without sending. &lt;strong>40 is a conservative average.&lt;/strong> The peak matters more — New Year's Eve sees &lt;span class='hl'>10-20x&lt;/span> spikes."}}
 
-{{think "200M concurrent WebSocket connections is the real scaling challenge. Each connection consumes ~40KB of memory on the server."
-  (how "server count" "200M connections × 40KB = 8 TB total memory. At 64GB per server, that's 125,000 servers. With 100K connections per server and overhead, plan for ~5,000 WebSocket servers across all regions.")
-  (whatIf "a region goes down" "200M connections / 5 regions = 40M connections per region. Failing over 40M connections to remaining regions means each absorbs 10M extra. Servers need 30% headroom for this.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Server Count Math & Failure Scenarios</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "200M concurrent WebSocket connections is the real scaling challenge. Each connection uses ~40KB of memory."
+  (how "server count" "200M connections x 40KB = 8 TB total memory. At 64GB per server, that's ~5,000 WebSocket servers with 100K connections each.")
+  (whatIf "a region goes down" "200M connections / 5 regions = 40M per region. Failing over 40M connections means each remaining region absorbs 10M extra. Servers need 30% headroom for this.")
 }}
+  </div>
+</details>
 
-{{collapseSection "Detailed Capacity Math" `<ul>
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Detailed Capacity Math</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+<ul>
   <li><strong>WebSocket memory per connection:</strong> ~40KB (TLS state + read/write buffers + session metadata). 100K connections × 40KB = 4GB per server, leaving 60GB for OS + application on a 64GB instance</li>
   <li><strong>Kafka throughput:</strong> 700K msgs/sec × 100 bytes avg = 70MB/sec. A single Kafka broker handles ~200MB/sec writes. 100 brokers provides 20× headroom for spikes</li>
   <li><strong>DynamoDB WCU:</strong> 20B msgs/day = 231K writes/sec average. On-demand can burst to 2× provisioned. At $1.25 per million WCU, steady state costs ~$25K/month for message writes alone</li>
-  <li><strong>Redis session registry:</strong> 200M keys × 60 bytes = 12GB. 20 shards at 600MB each — trivially small for Redis instances with 16GB+ RAM</li>
-</ul>`}}
+  <li><strong>Redis session registry:</strong> 200M keys x 60 bytes = 12GB. 20 shards at 600MB each — small for Redis instances with 16GB+ RAM</li>
+</ul>
+  </div>
+</details>
 
-{{mustKnow "200M concurrent WebSocket connections is the dominant scaling constraint — drives server count, memory budget, and deploy strategy" "700K msgs/sec at peak requires Kafka-level throughput — no traditional message queue handles this" "Each WebSocket connection consumes ~40KB of server memory — this determines 100K connections/server and ~5,000 servers total"}}
+{{mustKnow "200M concurrent WebSocket connections is the biggest scaling challenge — drives server count and memory budget" "700K msgs/sec at peak needs Kafka-level throughput — traditional message queues can't handle this" "Each WebSocket connection uses ~40KB of server memory — that means 100K connections/server and ~5,000 servers total"}}
 
 {{phase 3 "API Design" "5 min"}}
 
@@ -97,7 +135,7 @@
   <li><strong>WebSocket</strong> for real-time events — messages, receipts, typing, presence</li>
   <li><strong>REST</strong> for CRUD — history, group management, media upload</li>
 </ul>
-Messages are sent over WebSocket for lowest latency; REST provides durability and idempotent retries.`}}
+Messages go over WebSocket for lowest latency. REST handles durability and retries.`}}
 
 {{diagram "cs-api-design"}}
 
@@ -302,48 +340,79 @@ Messages are sent over WebSocket for lowest latency; REST provides durability an
   </div>
 </div>
 
-{{hint "why client-generated message ID?" "The client generates a <strong>UUID</strong> (Universally Unique Identifier — a 128-bit randomly generated ID) before sending. If the WebSocket drops during send, the client retries with the same ID. The server uses this ID for <strong>deduplication</strong> — if it sees the same ID twice, it sends an ACK (Acknowledgment) without storing again. Without this, a network hiccup causes duplicate messages."}}
+{{hint "why client-generated message ID?" "The client creates a <strong>UUID</strong> before sending. If the WebSocket drops mid-send, the client retries with the same UUID. The server uses it for <strong>deduplication</strong> — if it sees the same ID twice, it ACKs without storing again. Without this, a network hiccup creates duplicate messages."}}
 
-{{think "REST vs WebSocket for sending messages — WebSocket wins on latency but REST is simpler for reliability."
-  (whyNot "REST-only for sending" "REST requires a new HTTP connection per message. At 700K msgs/sec, that's 700K TCP handshakes/sec. WebSocket reuses one persistent connection per user — orders of magnitude less overhead.")
-  (how "ACK protocol works" "Client sends message over WebSocket. Server writes to Kafka, gets offset. Server sends an ACK (Acknowledgment — a confirmation that the message was received and persisted) with server-assigned message_id (Snowflake) back to sender. Client shows single checkmark. No ACK within 5 seconds → client retries over REST as fallback.")
+<p>Each message gets a {{algoLink "snowflake-id" "Snowflake ID"}} for global ordering, and {{fundLink "messaging/message-queues" "Kafka"}} partitions by conversation_id to keep messages in order.</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">REST vs WebSocket Trade-offs</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "REST vs WebSocket for sending — WebSocket wins on latency but REST is simpler for reliability."
+  (whyNot "REST-only for sending" "REST needs a new HTTP connection per message. At 700K msgs/sec, that's 700K TCP handshakes/sec. WebSocket reuses one persistent connection per user — far less overhead.")
+  (how "ACK protocol works" "Client sends message over WebSocket. Server writes to Kafka, gets offset. Server sends ACK with a server-assigned Snowflake ID back to sender. Client shows single checkmark. No ACK in 5 seconds → client retries over REST as fallback.")
 }}
+  </div>
+</details>
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Ordering & Lost Message Questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Questions this section might trigger"
   "How do you handle message ordering?"
-  "Snowflake IDs provide total ordering. Each message gets a Snowflake ID (timestamp + machine + sequence) at the Chat Server. Within a conversation, messages are sorted by Snowflake ID. Kafka partitions by conversation_id, so messages within a conversation are ordered in the partition. Cross-conversation ordering doesn't matter — users only see one conversation at a time."
+  "Snowflake IDs provide total ordering. Each message gets a Snowflake ID (timestamp + machine + sequence) at the Chat Server. Within a conversation, messages are sorted by this ID. Kafka partitions by conversation_id, so messages in a conversation stay ordered. Cross-conversation ordering doesn't matter — users only see one conversation at a time."
   "What happens if a WebSocket message is lost?"
-  "The client maintains a local sequence number per conversation. On reconnect, it sends its last known message_id. The server queries DynamoDB for messages > that ID and streams them back. This handles both server crashes and client disconnects."
+  "The client tracks its last known message_id per conversation. On reconnect, it sends that ID. The server queries DynamoDB for messages after that ID and streams them back."
 }}
+  </div>
+</details>
 
-{{caveat "The WebSocket API and REST API must share the same authentication token. If you design them with separate auth flows, the interviewer will flag it as a security gap — a stolen WS token could be replayed on REST endpoints and vice versa."}}
+{{caveat "The WebSocket and REST APIs must share the same auth token. Separate auth flows create a security gap — a stolen WS token could be replayed on REST endpoints."}}
 
-{{mustKnow "Two-layer API: WebSocket for real-time events (messages, typing, receipts), REST for CRUD (history, groups, media upload)" "Client-generated UUID enables deduplication on retry — without it, a network hiccup causes duplicate messages" "ACK protocol: single checkmark = server received (Kafka write), double checkmark = recipient delivered — these are different events" "REST fallback if WebSocket ACK not received within 5 seconds — idempotent retry using the same client_msg_id"}}
+{{mustKnow "Two-layer API: WebSocket for real-time events, REST for CRUD" "Client-generated UUID enables deduplication on retry — without it, network hiccups cause duplicates" "Single checkmark = server received (Kafka write), double checkmark = recipient delivered — different events" "REST fallback if no WebSocket ACK within 5 seconds — idempotent retry using the same client_msg_id"}}
 
 {{phase 4 "Core Architecture" "8 min"}}
 
 {{say `Four layers:
 <ul>
-  <li><strong>Connection layer</strong> — WebSocket servers behind <strong>NLB</strong> (Network Load Balancer — a Layer 4 load balancer that forwards raw TCP connections without idle-timeout issues); each server holds up to <span class="hl">100K persistent connections</span></li>
-  <li><strong>Routing layer</strong> — Chat Service + Kafka; stateless, handles message fan-out logic</li>
+  <li><strong>Connection layer</strong> — WebSocket servers behind an NLB (Network Load Balancer, Layer 4); each server holds up to <span class="hl">100K persistent connections</span></li>
+  <li><strong>Routing layer</strong> — Chat Service + Kafka; stateless, handles message fan-out</li>
   <li><strong>Storage layer</strong> — DynamoDB for messages, S3 for media</li>
   <li><strong>Supporting services</strong> — Presence (Redis), Push (APNs/FCM), Groups</li>
 </ul>`}}
 
+<p>The connection layer uses {{fundLink "networking/load-balancing" "Load Balancing"}} with an NLB, while the routing layer relies on {{fundLink "messaging/message-queues" "Kafka"}} for durable message passing. {{fundLink "storage/redis" "Redis"}} powers the session registry and presence tracking.</p>
+
 {{diagram "cs-architecture"}}
 
-{{hint "why NLB not ALB?" `<span class='hl-blue'>NLB</span> (Network Load Balancer — Layer 4, routes raw TCP connections) operates at Layer 4 and passes TCP through directly — no idle timeout issues for long-lived connections:
+{{hint "why NLB not ALB?" `NLB (Layer 4) passes raw TCP through — no idle timeout for long-lived connections:
 <ul>
-  <li><span class='hl-red'>ALB (Application Load Balancer — Layer 7, understands HTTP) has a 4000-second idle timeout</span> — after which it silently drops the WebSocket connection</li>
+  <li><span class='hl-red'>ALB (Layer 7) has a 4000-second idle timeout</span> — it silently drops WebSocket connections after that</li>
   <li>NLB supports millions of concurrent connections with no timeout</li>
   <li>For persistent connections, NLB is the only viable option</li>
 </ul>`}}
 
-{{think "The critical insight is separating connection management from message routing. WebSocket servers handle connections; Chat Service handles routing logic."
-  (whyNot "monolithic server that handles both" "If the routing logic crashes (bug in group fan-out), it takes down all WebSocket connections on that server. Separating them means a Chat Service crash doesn't drop any connections — the WebSocket server just routes to a healthy Chat Service instance.")
-  (whatIf "Kafka is unavailable for 30 seconds" "WebSocket servers buffer messages in memory (bounded queue, 1000 messages max). If Kafka recovers within 30s, messages flush from buffer. If not, client gets a temporary error and retries. Messages are not lost because the client hasn't received an ACK yet.")
-  (how "session registry works" "When a user connects to WebSocket Server A, the server writes user_id → server_A to Redis (TTL 5 min, refreshed by heartbeat). When a message arrives for that user, Chat Service looks up the target server in Redis and routes the message there via internal gRPC.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Why Separate Connection from Routing</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "The key insight: separate connection management from message routing. WebSocket servers handle connections; Chat Service handles routing."
+  (whyNot "monolithic server that handles both" "If routing logic crashes (bug in group fan-out), it kills all WebSocket connections on that server. Separating them means a Chat Service crash doesn't drop any connections.")
+  (whatIf "Kafka is unavailable for 30 seconds" "WebSocket servers buffer messages in memory (max 1000 messages). If Kafka recovers in time, messages flush. If not, clients get an error and retry. No messages are lost because no ACK was sent yet.")
+  (how "session registry works" "When a user connects to WebSocket Server A, the server writes user_id -> server_A to Redis (TTL 5 min, refreshed by heartbeat). When a message arrives for that user, Chat Service looks up the target server in Redis and routes there via gRPC.")
 }}
+  </div>
+</details>
 
 {{compare "Message Bus" (options
   (best "Kafka" "Ordered per partition, persistent, exactly-once semantics, handles 1M+ msgs/sec per cluster")
@@ -351,32 +420,50 @@ Messages are sent over WebSocket for lowest latency; REST provides durability an
   (nofit "RabbitMQ" "Per-message ACK overhead at 700K msgs/sec is too high. Designed for task queues, not event streaming")
 )}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Architecture Questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Questions about core architecture"
-  "Why WebSockets over HTTP long polling or Server-Sent Events?"
-  "WebSockets provide full-duplex communication — both client and server can push messages at any time without polling. HTTP long polling requires a new connection for each server push, adding overhead. Server-Sent Events are one-way (server to client only) — the client still needs HTTP requests to send messages. For a chat system with bidirectional real-time messaging, WebSockets are the only viable option."
-  "How do you handle WebSocket connection drops and reconnection?"
-  "Three mechanisms: 1) Client-side heartbeat — ping every 30 seconds; if no pong within 5 seconds, reconnect. 2) Server-side cleanup — if no heartbeat for 60 seconds, remove the session from Redis and close the socket. 3) On reconnection, the client sends the last received message_id. The server queries DynamoDB for all messages after that ID and delivers them in order. Messages are never lost because they are persisted before ACK is sent."
+  "Why WebSockets over long polling or Server-Sent Events?"
+  "WebSockets are full-duplex — both sides can push messages anytime. Long polling needs a new connection for each server push. SSE is one-way (server to client only). For bidirectional real-time messaging, WebSockets are the only viable option."
+  "How do you handle WebSocket connection drops?"
+  "Three mechanisms: (1) Client pings every 30s; no pong in 5s triggers reconnect. (2) Server removes session from Redis after 60s of no heartbeat. (3) On reconnect, client sends its last message_id; server queries DynamoDB for everything after that and streams it back."
 }}
+  </div>
+</details>
 
-{{caveat "NLB is mandatory for WebSocket connections — ALB has a 4000-second idle timeout that silently drops long-lived connections. This is a common mistake in interviews."}}
+{{caveat "NLB is mandatory for WebSocket connections — ALB silently drops long-lived connections after its idle timeout. Common interview mistake."}}
 
-{{goodToKnow "Session registry in Redis uses TTL=5min refreshed by heartbeat — if a WebSocket server crashes, stale entries auto-expire without requiring explicit cleanup" "Kafka buffering in WebSocket servers (bounded 1000-message queue) provides 30 seconds of resilience against Kafka outages without message loss"}}
+{{goodToKnow "Session registry in Redis uses TTL=5min refreshed by heartbeat — if a server crashes, stale entries auto-expire" "Kafka buffering in WebSocket servers (max 1000 messages) gives ~30 seconds of resilience against Kafka outages"}}
 
-{{mustKnow "Separate connection management (WebSocket servers) from message routing (Chat Service) — a routing bug should not drop connections" "Session registry pattern: user_id to server_id mapping in Redis enables O(1) message routing to the correct WebSocket server" "Kafka as the message bus provides durability between services — messages are persisted before delivery is attempted" "NLB for WebSocket (Layer 4, no idle timeout), ALB for REST API (Layer 7, HTTP routing)"}}
+{{mustKnow "Separate connection management (WebSocket servers) from message routing (Chat Service) — a routing bug should not drop connections" "Session registry: user_id -> server_id in Redis enables O(1) message routing" "Kafka provides durability between services — messages are persisted before delivery" "NLB for WebSocket (Layer 4, no idle timeout), ALB for REST API (Layer 7)"}}
 
 {{phase 5 "Message Delivery Flow" "8 min"}}
 
-{{say `Full lifecycle of a message — from sender tapping Send to receiver seeing it appear:
+{{say `Full lifecycle of a message — from tapping Send to it appearing on the other end:
 <ul>
-  <li><strong>Online path:</strong> sender → WebSocket server → Chat Service → Kafka → consumer → recipient's WebSocket server → recipient</li>
-  <li><strong>Offline path:</strong> same up to consumer → offline queue (DynamoDB) + APNs/FCM push notification</li>
-  <li><strong>Sync on reconnect:</strong> client sends last known message_id cursor; server streams everything after it</li>
+  <li><strong>Online path:</strong> sender -> WebSocket server -> Chat Service -> Kafka -> consumer -> recipient's WebSocket server -> recipient</li>
+  <li><strong>Offline path:</strong> same up to consumer -> offline queue (DynamoDB) + push notification (APNs/FCM)</li>
+  <li><strong>Sync on reconnect:</strong> client sends its last message_id; server streams everything after it</li>
 </ul>`}}
 
 {{diagram "cs-message-flow"}}
 
-{{hint "why Kafka between Chat Server and delivery?" "&lt;strong>Direct routing&lt;/strong> (Chat Server → WebSocket Server) is faster but unreliable — if the target WebSocket server is restarting, the message is lost. Kafka provides durability: the message is &lt;strong>persisted before any delivery attempt&lt;/strong>. Consumers can retry delivery independently."}}
+<p>Messages are assigned a {{algoLink "snowflake-id" "Snowflake ID"}} for ordering, then published to {{fundLink "messaging/message-queues" "Kafka"}} partitioned by conversation_id. The consumer delivers to {{fundLink "storage/dynamodb" "DynamoDB"}} and the recipient's WebSocket server.</p>
 
+{{hint "why Kafka between Chat Server and delivery?" "Direct routing (Chat Server -> WebSocket Server) is faster but unreliable — if the target server is restarting, the message is lost. Kafka provides durability: the message is &lt;strong>persisted before any delivery attempt&lt;/strong>. Consumers retry independently."}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Message Delivery Code</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{code "go" `// Message delivery pipeline (simplified)
 func (s *ChatService) HandleMessage(ctx context.Context, msg *Message) error {
     // 1. Assign Snowflake ID for global ordering
@@ -412,29 +499,33 @@ func (s *ChatService) DeliverMessage(ctx context.Context, msg *Message) {
         }
     }
 }`}}
+  </div>
+</details>
 
 {{think "The ACK happens after Kafka write, not after delivery. This is intentional."
-  (whyNot "ACK after recipient receives" "The recipient might be offline. The sender would wait indefinitely for an ACK. WhatsApp's single checkmark means 'server received it' — it does not mean the recipient has it. Double checkmark means delivered to recipient's device.")
-  (how "exactly-once delivery" "Kafka gives at-least-once. The client deduplicates using message_id (Snowflake). If a consumer crashes and reprocesses a Kafka offset, the duplicate message has the same ID — the client ignores it. Server-side dedup is optional but helps: DynamoDB conditional write on message_id.")
+  (whyNot "ACK after recipient receives" "The recipient might be offline — the sender would wait forever. Single checkmark means 'server got it', not 'recipient got it'. Double checkmark means delivered to recipient's device.")
+  (how "exactly-once delivery" "Kafka gives at-least-once. The client deduplicates using message_id (Snowflake). If a consumer crashes and reprocesses a Kafka offset, the duplicate has the same ID — the client ignores it.")
 }}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Message Loss & Ordering Questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Questions this section might trigger"
   "How do you guarantee no message loss?"
-  "Four-layer guarantee: (1) Client retries until ACK received. (2) Kafka persists with replication factor 3 — survives 2 broker failures. (3) Kafka consumer commits offset only after successful delivery or offline queue write. (4) Offline queue in DynamoDB with TTL — messages persist until the user comes online and syncs."
+  "Four layers: (1) Client retries until ACK received. (2) Kafka replication factor 3 — survives 2 broker failures. (3) Consumer commits offset only after successful delivery or offline queue write. (4) Offline queue in DynamoDB persists until user syncs."
   "What about message ordering in group chats?"
-  "Kafka partition by conversation_id ensures all messages in a group are in the same partition — totally ordered. The consumer processes them sequentially. Each message gets a monotonically increasing Snowflake ID. Clients render messages sorted by Snowflake ID. Even if two messages arrive out of order over WebSocket, the client reorders by ID."
+  "Kafka partitions by conversation_id, so all messages in a group land in the same partition — totally ordered. Each message gets a Snowflake ID. Even if messages arrive out of order over WebSocket, the client reorders by ID."
 }}
+  </div>
+</details>
 
-{{caveat "ACK happens after Kafka write, NOT after recipient delivery. If you say 'ACK after delivery' the interviewer will ask what happens when the recipient is offline — you will have no answer."}}
+{{caveat "ACK happens after Kafka write, NOT after recipient delivery. If you say 'ACK after delivery', the interviewer will ask what happens when the recipient is offline."}}
 
-{{collapseSection "Message Delivery Code Walkthrough" `<ul>
-  <li><strong>Line 3-4:</strong> Snowflake ID assignment happens at the Chat Service, not the client — the server controls ordering</li>
-  <li><strong>Line 6-8:</strong> Kafka publish is the durability boundary — if this fails, no ACK is sent, and the client retries with the same UUID</li>
-  <li><strong>Line 11:</strong> ACK to sender triggers single checkmark — this is the sender's confirmation that the message is persisted</li>
-  <li><strong>Lines 15-23:</strong> Delivery is async via Kafka consumer — fan-out to online/offline recipients is independent of the sender's flow</li>
-</ul>`}}
-
-{{mustKnow "Four-layer message guarantee: client retry until ACK, Kafka replication factor 3, consumer commits only after delivery/queue, offline queue in DynamoDB" "ACK after Kafka write (not after delivery) — single checkmark means server persisted, double checkmark means recipient received" "Kafka partitions by conversation_id — all messages in a conversation are totally ordered within a single partition" "Client-side dedup using Snowflake message_id handles at-least-once Kafka delivery semantics"}}
+{{mustKnow "Four-layer message guarantee: client retry, Kafka replication factor 3, consumer commits only after delivery/queue, offline queue in DynamoDB" "ACK after Kafka write (not delivery) — single checkmark = server persisted, double checkmark = recipient received" "Kafka partitions by conversation_id — messages in a conversation are totally ordered" "Client-side dedup using Snowflake message_id handles Kafka's at-least-once delivery"}}
 
 {{phase 6 "Data Model & Storage" "8 min"}}
 
@@ -442,17 +533,19 @@ func (s *ChatService) DeliverMessage(ctx context.Context, msg *Message) {
 <ul>
   <li>Partition key: <strong>conversation_id</strong> — all messages in a conversation land on the same shard</li>
   <li>Sort key: <strong>message_id</strong> (Snowflake) — gives ordered messages per conversation with single-digit-ms reads</li>
-  <li><strong>TTL</strong> (Time-To-Live — a duration after which DynamoDB automatically deletes the record) on messages — ephemeral messages auto-delete without a background job</li>
+  <li><strong>TTL</strong> (time-to-live) on messages — ephemeral messages auto-delete without a cleanup job</li>
 </ul>`}}
+
+<p>{{fundLink "storage/dynamodb" "DynamoDB"}} handles the write-heavy workload (20B msgs/day). Messages are ordered by {{algoLink "snowflake-id" "Snowflake ID"}} within each conversation.</p>
 
 {{diagram "cs-data-model"}}
 
-{{hint "why DynamoDB over Cassandra?" `Both handle write-heavy workloads at scale. DynamoDB wins here because:
+{{hint "why DynamoDB over Cassandra?" `Both handle write-heavy workloads. DynamoDB wins here because:
 <ul>
-  <li><strong>Managed</strong> — no operational overhead for <span class='hl'>20B writes/day</span></li>
+  <li><strong>Fully managed</strong> — no ops overhead for <span class='hl'>20B writes/day</span></li>
   <li><strong>On-demand capacity</strong> — auto-scales without pre-provisioning</li>
-  <li><strong>DynamoDB Streams</strong> — feeds into Lambda for async processing</li>
-  <li><span class='hl-red'>Cassandra requires a dedicated ops team</span> at this scale</li>
+  <li><strong>DynamoDB Streams</strong> — feeds Lambda for async processing</li>
+  <li><span class='hl-red'>Cassandra needs a dedicated ops team</span> at this scale</li>
 </ul>`}}
 
 {{table "DynamoDB Access Patterns" (rows
@@ -464,11 +557,18 @@ func (s *ChatService) DeliverMessage(ctx context.Context, msg *Message) {
   (row "Group members" "conversation_id" "user_id (SK)" "Query on participants table")
 )}}
 
-{{think "Storing encrypted messages means we cannot search server-side. This is a deliberate trade-off."
-  (whyNot "server-side search like Slack" "E2E encryption means the server only sees ciphertext. You cannot build a search index over encrypted data. WhatsApp solves this by searching locally on the device — the client decrypts and indexes messages in a local SQLite database.")
-  (whatIf "a conversation has 1 million messages" "DynamoDB handles this fine — conversation_id is the partition key, messages are sorted by Snowflake ID. Fetching the latest 50 messages is a single range query. Older messages are fetched on scroll with cursor-based pagination. Hot partitions are unlikely because even the most active group chats produce only thousands of messages per day.")
+{{think "Storing encrypted messages means no server-side search. This is a deliberate trade-off."
+  (whyNot "server-side search like Slack" "E2E encryption means the server only sees ciphertext. You can't build a search index over encrypted data. WhatsApp searches locally on the device — the client decrypts and indexes in a local SQLite database.")
+  (whatIf "a conversation has 1 million messages" "DynamoDB handles this fine — conversation_id is the partition key, messages sorted by Snowflake ID. Fetching the latest 50 is a single range query. Older messages load on scroll with cursor pagination.")
 }}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">DynamoDB Schema & Query Code</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{code "python" `# DynamoDB table schemas (Terraform)
 messages_table = {
     "TableName": "messages",
@@ -494,26 +594,37 @@ response = dynamodb.query(
     Limit=50,
     ScanIndexForward=False,  # newest first
 )`}}
+  </div>
+</details>
 
-{{collapseSection "DynamoDB Table Schema Details" `<ul>
-  <li><strong>messages table:</strong> PK=conversation_id, SK=message_id (Snowflake). PAY_PER_REQUEST billing avoids capacity planning. TTL (Time-To-Live) on ephemeral messages</li>
-  <li><strong>conversations GSI:</strong> PK=user_id, SK=updated_at — powers the inbox view sorted by most recent activity</li>
-  <li><strong>read_receipts table:</strong> PK=conversation_id#user_id — single GetItem for unread count per conversation per user</li>
-  <li><strong>participants table:</strong> PK=conversation_id, SK=user_id — Query returns all members for fan-out lookup</li>
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">All Table Schemas</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+<ul>
+  <li><strong>messages table:</strong> PK=conversation_id, SK=message_id (Snowflake). PAY_PER_REQUEST billing. TTL on ephemeral messages</li>
+  <li><strong>conversations GSI:</strong> PK=user_id, SK=updated_at — powers the inbox sorted by recent activity</li>
+  <li><strong>read_receipts table:</strong> PK=conversation_id#user_id — single GetItem for unread count</li>
+  <li><strong>participants table:</strong> PK=conversation_id, SK=user_id — returns all members for fan-out</li>
   <li><strong>users table:</strong> PK=user_id — profile data, device tokens for push notifications</li>
-</ul>`}}
+</ul>
+  </div>
+</details>
 
-{{caveat "E2E encryption means no server-side search index. If the interviewer asks about search, the answer is client-side only — local SQLite on the device decrypts and indexes messages. Do not suggest Elasticsearch or any server-side search."}}
+{{caveat "E2E encryption means no server-side search. If asked about search, the answer is client-side only — local SQLite decrypts and indexes messages. Never suggest Elasticsearch."}}
 
-{{mustKnow "DynamoDB with conversation_id as partition key and Snowflake message_id as sort key — gives ordered messages per conversation in single-digit ms" "GSI on user_id + updated_at powers the inbox view (most recent conversations first)" "No server-side search is possible with E2E encryption — search is client-side only using local SQLite" "On-demand DynamoDB capacity handles 20B writes/day without pre-provisioning — auto-scales with no operational overhead"}}
+{{mustKnow "DynamoDB with conversation_id as partition key and Snowflake message_id as sort key — ordered messages in single-digit ms" "GSI on user_id + updated_at powers the inbox view (most recent conversations first)" "No server-side search with E2E encryption — search is client-side only using local SQLite" "On-demand DynamoDB handles 20B writes/day without pre-provisioning"}}
 
 {{phase 7 "Group Chat & Fan-out" "5 min"}}
 
 {{say `Group chat uses <strong>fan-out-on-write</strong>:
 <ul>
-  <li>When a message is sent to a group, look up all members and deliver to each individually</li>
-  <li>The <span class="hl">256-member cap</span> makes this bounded — <strong>256 WebSocket pushes</strong> per message is manageable</li>
-  <li>Partial failures are independent — if delivery fails for 3 members, the other 253 are unaffected</li>
+  <li>When a message is sent to a group, look up all members and deliver to each one</li>
+  <li>The <span class="hl">256-member cap</span> bounds this — <strong>256 WebSocket pushes</strong> per message is manageable</li>
+  <li>Partial failures are independent — if 3 members fail, the other 253 are unaffected</li>
 </ul>`}}
 
 {{diagram "cs-group-chat"}}
@@ -524,61 +635,79 @@ response = dynamodb.query(
   <li>If groups could have <span class='hl-red'>100K members</span> (like Slack channels), fan-out-on-write would be too expensive → switch to fan-out-on-read</li>
 </ul>`}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Partial Failures & Unread Counts</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{think "Group message delivery must handle partial failures gracefully."
-  (whatIf "delivery fails for 3 out of 256 members" "Those 3 members get queued in the offline queue. The other 253 already received the message. We do NOT retry the entire fan-out — each member's delivery is independent. The offline queue picks up the 3 failures, and those members get the message when they reconnect.")
-  (how "unread counts work for groups" "Each member has a read_receipts entry per conversation. When a new message arrives, we increment unread_count for all members except the sender. When a member opens the chat, their client sends a read ACK, and we reset their unread_count. This is 256 atomic increments per message — DynamoDB handles this easily.")
+  (whatIf "delivery fails for 3 out of 256 members" "Those 3 go into the offline queue. The other 253 already got the message. We don't retry the whole fan-out — each member's delivery is independent.")
+  (how "unread counts work for groups" "Each member has a read_receipts entry per conversation. New message = increment unread_count for all members except sender. When a member opens the chat, their client sends a read ACK, resetting the count. 256 atomic increments per message — DynamoDB handles this easily.")
 }}
 
 {{triggerQs "Questions this section might trigger"
   "How do read receipts work in group chats?"
-  "In 1:1, read receipts are simple: sender sees blue checkmarks when the recipient reads. In groups, WhatsApp shows 'read by 15 of 20' when you tap the message. Each member sends a read ACK independently. We store per-member read status but only show aggregate counts in the UI to avoid N×M receipt fan-out. The key optimization: batch read ACKs — send one ACK with last_read_message_id rather than per-message receipts."
+  "In 1:1 it's simple: blue checkmarks when recipient reads. In groups, WhatsApp shows 'read by 15 of 20'. Each member sends a read ACK independently. We store per-member read status but only show aggregate counts to avoid NxM receipt fan-out. Key optimization: batch ACKs — one ACK with last_read_message_id instead of per-message receipts."
 }}
+  </div>
+</details>
 
-{{caveat "Fan-out-on-write only works because of the 256-member cap. If the interviewer changes the constraint to 100K members per group, you must switch to fan-out-on-read. State this trade-off explicitly."}}
+{{caveat "Fan-out-on-write only works because of the 256-member cap. If the interviewer changes it to 100K members, you must switch to fan-out-on-read. State this trade-off."}}
 
-{{mustKnow "Fan-out-on-write for groups: 256 WebSocket pushes per message — bounded and manageable" "Fan-out-on-read is the alternative for large groups (10K+ members) — each member queries on open instead of receiving pushes" "Partial failure handling: each member's delivery is independent — 3 failures out of 256 only affect those 3 members" "Group read receipts use aggregate counts in UI to avoid N×M receipt fan-out explosion"}}
+{{mustKnow "Fan-out-on-write for groups: 256 pushes per message — bounded and manageable" "Fan-out-on-read for large groups (10K+ members) — each member queries on open" "Each member's delivery is independent — 3 failures out of 256 only affect those 3" "Group read receipts use aggregate counts to avoid NxM fan-out explosion"}}
 
 {{phase 8 "End-to-End Encryption" "5 min"}}
 
 {{say `Using the <strong>Signal Protocol</strong> for E2E encryption:
 <ul>
-  <li>The server acts as a <strong>dumb pipe</strong> — it routes encrypted bytes without ever seeing plaintext</li>
-  <li><span class="hl-blue">Forward secrecy</span>: a compromised key cannot decrypt past messages</li>
-  <li><span class="hl-blue">Future secrecy</span>: a compromised key is healed on the next ratchet step</li>
-  <li>This is the key differentiator from Slack or Discord, both of which store plaintext server-side</li>
+  <li>The server is a <strong>dumb pipe</strong> — it routes encrypted bytes without seeing plaintext</li>
+  <li><span class="hl-blue">Forward secrecy</span> — a compromised key can't decrypt past messages</li>
+  <li><span class="hl-blue">Future secrecy</span> — a compromised key is healed on the next ratchet step</li>
+  <li>This is the key difference from Slack or Discord, which store plaintext server-side</li>
 </ul>`}}
 
 {{diagram "cs-e2e-encryption"}}
 
 {{hint "why Signal Protocol?" "&lt;span class='hl-blue'>Signal Protocol&lt;/span> is battle-tested by WhatsApp (&lt;span class='hl'>2B users&lt;/span>), Signal, and Facebook Messenger. It provides forward secrecy and future secrecy out of the box. &lt;span class='hl-red'>Rolling your own crypto is the fastest way to a security breach.&lt;/span>"}}
 
-{{think "E2E encryption introduces unique engineering challenges that affect every layer of the system."
-  (whyNot "TLS-only encryption" "TLS encrypts in transit but the server sees plaintext. A compromised server, a rogue employee, or a government subpoena can access all messages. E2E means even WhatsApp's own engineers cannot read messages.")
-  (how "group E2E works" "Each group message is encrypted N times — once per member using their individual session key. The sender has a pairwise Signal session with each member. Sending to a 256-member group means 256 encrypt operations on the client. This is why group size is capped — 10K encryptions per message would drain the phone battery.")
-  (whatIf "a user reinstalls the app and loses their keys" "The user generates new identity keys. All contacts see a 'security code changed' warning. New sessions are established via X3DH key exchange. Old messages stored on the device are gone — the server has only ciphertext encrypted with the old keys.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">E2E Engineering Challenges</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "E2E encryption creates engineering challenges at every layer."
+  (whyNot "TLS-only encryption" "TLS encrypts in transit but the server sees plaintext. A compromised server, a rogue employee, or a subpoena can access all messages. E2E means even WhatsApp engineers can't read messages.")
+  (how "group E2E works" "Each group message is encrypted N times — once per member with their session key. Sending to a 256-member group means 256 encrypt operations on the client. This is why group size is capped — 10K encryptions per message would drain the battery.")
+  (whatIf "a user reinstalls the app and loses their keys" "The user generates new keys. Contacts see a 'security code changed' warning. Old messages on the device are gone — the server has only ciphertext encrypted with the old keys.")
 }}
 
 {{triggerQs "Questions about encryption"
-  "Can the server search through E2E encrypted messages for compliance or spam detection?"
-  "No — that is the fundamental trade-off of E2E encryption. The server sees only ciphertext and cannot index, search, or moderate message content. Spam detection must happen client-side: the receiving client can flag suspicious messages. For compliance (regulatory message retention), clients can optionally forward decrypted messages to a compliance vault — but this is a deliberate opt-in, not a server capability."
-  "How does E2E encryption work with message backup (iCloud, Google Drive)?"
-  "Messages are backed up in their encrypted form with an additional backup encryption key. WhatsApp lets users create a backup password or use a 64-digit encryption key. Without this backup key, the cloud backup is unreadable — even by Apple or Google. If the user forgets the backup password, all backed-up messages are permanently lost."
+  "Can the server search encrypted messages for compliance or spam?"
+  "No — that's the fundamental trade-off. The server only sees ciphertext. Spam detection must happen client-side. For compliance, clients can optionally forward decrypted messages to a compliance vault — but that's a deliberate opt-in."
+  "How does E2E work with cloud backup (iCloud, Google Drive)?"
+  "Messages are backed up encrypted with a separate backup key. WhatsApp lets users set a backup password or use a 64-digit key. Without it, the backup is unreadable — even by Apple or Google."
 }}
+  </div>
+</details>
 
-{{caveat "Never suggest 'rolling your own crypto' in an interview. Signal Protocol is battle-tested by 2B+ users. The interviewer expects you to name it specifically and explain forward secrecy and future secrecy."}}
+{{caveat "Never suggest 'rolling your own crypto' in an interview. Signal Protocol is battle-tested by 2B+ users. Name it specifically and explain forward secrecy."}}
 
-{{goodToKnow "Group E2E means N encrypt operations per message (one per member) — this is why group size is capped at 256, not a server limitation but a client battery/CPU constraint" "Key reinstallation after app reinstall triggers a 'security code changed' warning to all contacts — this is a feature, not a bug"}}
+{{goodToKnow "Group E2E means N encrypt operations per message (one per member) — group size is capped at 256 due to client battery/CPU, not server limits" "Key reinstallation after app reinstall triggers 'security code changed' to all contacts — this is a feature, not a bug"}}
 
-{{mustKnow "Signal Protocol provides forward secrecy (compromised key cannot decrypt past messages) and future secrecy (key is healed on next ratchet step)" "Server is zero-knowledge — routes encrypted bytes without ever seeing plaintext. This eliminates server-side search, spam filtering, and compliance indexing" "Group E2E: sender encrypts message N times with each member's pairwise session key — the 256-member cap bounds this cost" "No server-side content moderation is possible — spam detection must happen client-side"}}
+{{mustKnow "Signal Protocol provides forward secrecy (can't decrypt past messages) and future secrecy (key heals on next ratchet)" "Server is zero-knowledge — routes encrypted bytes, never sees plaintext. No server-side search, spam filtering, or compliance" "Group E2E: sender encrypts N times with each member's session key — 256-member cap bounds this cost" "Spam detection must happen client-side — server can't see message content"}}
 
 {{phase 9 "Media Sharing" "5 min"}}
 
-{{say `Media messages follow a separate upload pipeline:
+{{say `Media messages follow a separate pipeline:
 <ul>
   <li>Client encrypts the file locally with a random <strong>AES-256 key</strong></li>
-  <li>Uploads the ciphertext to S3 via the media service</li>
-  <li>Sends the S3 URL and encryption key <em>inside</em> the E2E-encrypted message</li>
-  <li>The server stores a blob it cannot decrypt — E2E guarantee extends to media</li>
+  <li>Uploads the encrypted file to S3 via the media service</li>
+  <li>Sends the S3 URL + encryption key <em>inside</em> the E2E-encrypted message</li>
+  <li>The server stores a blob it can't decrypt — E2E extends to media</li>
 </ul>`}}
 
 {{diagram "cs-media-sharing"}}
@@ -586,9 +715,9 @@ response = dynamodb.query(
 {{hint "why client-side encryption for media?" "If the server encrypts, it sees the plaintext media — breaking E2E. The client generates a random &lt;strong>AES-256 key&lt;/strong>, encrypts the file, uploads the ciphertext. The AES key is sent inside the E2E-encrypted message. &lt;span class='hl-red'>Server stores a blob it cannot decrypt.&lt;/span>"}}
 
 {{compare "Media Storage" (options
-  (best "S3 + CloudFront CDN" "Unlimited scale, 11 nines durability, CDN (Content Delivery Network — servers distributed globally to cache and serve content closer to users) for low-latency global downloads. Cost: $0.023/GB storage + $0.085/GB transfer")
-  (alt "Dedicated file servers" "Full control but requires managing petabytes of storage, replication, and serving infrastructure. Only makes sense at WhatsApp's scale (they run their own Ceph clusters)")
-  (nofit "DynamoDB for media" "400KB item size limit. A single image exceeds this. Binary blobs in DynamoDB waste expensive IOPS")
+  (best "S3 + CloudFront CDN" "Unlimited scale, 11 nines durability, CDN for low-latency global downloads. ~$0.023/GB storage + $0.085/GB transfer")
+  (alt "Dedicated file servers" "Full control but you must manage petabytes of storage and replication. Only makes sense at WhatsApp's scale")
+  (nofit "DynamoDB for media" "400KB item size limit — a single image exceeds this. Binary blobs waste expensive IOPS")
 )}}
 
 {{hint "media deduplication via content hash" `Before uploading, the client computes a <strong>SHA-256 hash</strong> of the plaintext file. The media service checks if S3 already has this hash (stored as an S3 object tag). If it does, we skip the upload and reuse the existing URL — only the E2E-encrypted message (containing the AES key) differs per recipient:
@@ -599,50 +728,76 @@ response = dynamodb.query(
   <li><small>WhatsApp reports ~65% dedup rate on forwarded images in groups</small></li>
 </ul>`}}
 
-{{think "Media thumbnails create a latency challenge — you want the thumbnail to appear instantly in the chat."
-  (how "thumbnail pipeline" "S3 event triggers Lambda on upload. Lambda generates a small (200×200) blurred thumbnail. The thumbnail is stored unencrypted because it's already a degraded preview. The message includes both the full media_url (encrypted) and thumbnail_url (unencrypted). Receiver sees the thumbnail immediately, downloads and decrypts the full media on tap.")
-  (whatIf "the media upload fails halfway" "S3 multipart upload handles this — the client uploads in 5MB chunks. If the connection drops, it resumes from the last successful chunk. The message is only sent after the upload completes. If the upload is abandoned, S3 lifecycle rules clean up incomplete multipart uploads after 24 hours.")
-  (how "CDN delivery of encrypted media" "CloudFront sits in front of S3. The receiver's client fetches the ciphertext blob from the nearest CloudFront edge node — typically <span class='hl'>< 20ms</span> vs ~80ms from S3 origin. CloudFront caches the encrypted blob (it's content-addressed by SHA-256 key and never changes). The client decrypts locally. CDN sees only opaque encrypted bytes — E2E guarantee holds even with CDN caching.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Thumbnails, Resumable Upload & CDN Delivery</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "Media thumbnails need to appear instantly in the chat."
+  (how "thumbnail pipeline" "S3 event triggers Lambda on upload. Lambda generates a 200x200 blurred thumbnail. The message includes both media_url (encrypted) and thumbnail_url (unencrypted preview). Receiver sees thumbnail immediately, downloads and decrypts full media on tap.")
+  (whatIf "media upload fails halfway" "S3 multipart upload handles this — client uploads in 5MB chunks. If the connection drops, it resumes from the last chunk. Message is only sent after upload completes. Abandoned uploads are cleaned up by S3 lifecycle rules after 24 hours.")
+  (how "CDN delivery of encrypted media" "CloudFront sits in front of S3. Receiver fetches the encrypted blob from the nearest edge node — typically <span class='hl'>< 20ms</span> vs ~80ms from S3 origin. CloudFront caches the encrypted blob. Client decrypts locally. CDN sees only opaque bytes — E2E holds even with caching.")
 }}
+  </div>
+</details>
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Media Security & Large File Questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Media Questions"
-  "How do you prevent a user from accessing another user's media file if they have the S3 URL?"
-  `<strong>Presigned S3 URLs</strong> with a short TTL are the primary defense — the media service issues a URL valid for only <span class='hl'>15 minutes</span>. Beyond the URL:
+  "How do you prevent unauthorized access to media files?"
+  `<strong>Presigned S3 URLs</strong> with a short TTL — valid for only <span class='hl'>15 minutes</span>:
 <ul>
-  <li>The S3 bucket is <span class='hl-red'>completely private</span> — no public access; all requests go through the media service for authorization</li>
-  <li>Even if a URL leaks, the ciphertext is useless without the <strong>AES-256 decryption key</strong>, which only lives inside the E2E-encrypted message</li>
-  <li>S3 Object Lock prevents deletion of media that may be referenced by multiple messages (forwarded content)</li>
-  <li><small>For compliance markets, server-side encryption (SSE-S3) is layered on top — orthogonal to E2E</small></li>
+  <li>S3 bucket is <span class='hl-red'>completely private</span> — all requests go through the media service</li>
+  <li>Even if a URL leaks, the ciphertext is useless without the <strong>AES-256 key</strong> inside the E2E-encrypted message</li>
 </ul>`
-  "How do you handle very large video files — a user sends a 500MB 4K video?"
-  `<strong>Multipart upload</strong> for files > 5MB and <strong>server-side transcoding</strong> before delivery:
+  "How do you handle large video files (e.g., 500MB 4K)?"
+  `<strong>Multipart upload</strong> for files > 5MB + <strong>server-side transcoding</strong>:
 <ul>
-  <li>Client splits the file into <span class='hl'>5MB chunks</span> and uploads in parallel — a <span class='hl'>500MB</span> video uploads in ~10 parallel streams</li>
-  <li>After upload, a transcoding Lambda converts to H.264 at <strong>360p / 720p / 1080p</strong> — receiver auto-selects based on network conditions</li>
-  <li>The original 4K ciphertext is stored; transcoded versions are re-encrypted with the same AES key — <span class='hl-red'>client must accept that thumbnails and transcoded previews are server-visible</span> (trade-off for streaming UX)</li>
-  <li>Cost: <small>AWS Elemental MediaConvert, ~$0.015/min of video processed</small></li>
+  <li>Client splits into <span class='hl'>5MB chunks</span> and uploads in parallel</li>
+  <li>Transcoding Lambda converts to 360p / 720p / 1080p — receiver picks quality based on network</li>
+  <li><span class='hl-red'>Trade-off</span>: transcoded previews are server-visible (can't E2E-encrypt transcoded versions without client help)</li>
 </ul>`
 }}
+  </div>
+</details>
 
-{{collapseSection "Media Cost Breakdown" `<ul>
-  <li><strong>S3 storage:</strong> 1 PB/day × $0.023/GB = ~$23K/day = ~$700K/month. With S3 Intelligent-Tiering, media older than 30 days moves to infrequent access ($0.0125/GB) — ~40% savings</li>
-  <li><strong>CloudFront transfer:</strong> At $0.085/GB for first 10TB, media-heavy usage could reach $500K-1M/month. Reserved capacity pricing brings this down 30-40%</li>
-  <li><strong>Deduplication savings:</strong> ~65% dedup rate on forwarded images reduces effective storage by 2.8× — critical at PB scale</li>
-  <li><strong>Lambda thumbnails:</strong> ~$0.20 per 1M invocations × 2B media messages/day = ~$400/day — negligible compared to storage and transfer</li>
-</ul>`}}
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Media Cost Breakdown</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+<ul>
+  <li><strong>S3 storage:</strong> 1 PB/day x $0.023/GB = ~$23K/day = ~$700K/month. S3 Intelligent-Tiering saves ~40% on older media</li>
+  <li><strong>CloudFront transfer:</strong> $0.085/GB for first 10TB. Media-heavy usage: $500K-1M/month. Reserved pricing saves 30-40%</li>
+  <li><strong>Dedup savings:</strong> ~65% dedup on forwarded images reduces storage by 2.8x</li>
+  <li><strong>Lambda thumbnails:</strong> ~$400/day for 2B media messages — negligible vs storage costs</li>
+</ul>
+  </div>
+</details>
 
-{{caveat "Media deduplication must happen BEFORE encryption — encrypted blobs differ even for identical files because of random IVs. If you suggest dedup after encryption, the interviewer will catch the mistake."}}
+{{caveat "Media dedup must happen BEFORE encryption — encrypted blobs differ even for identical files due to random IVs. Interviewers will catch this mistake."}}
 
-{{mustKnow "Client encrypts media locally with AES-256, uploads ciphertext to S3, sends URL + key inside E2E-encrypted message — server never sees plaintext media" "Presigned S3 URLs with short TTL (15 min) prevent unauthorized access — even if URL leaks, ciphertext is useless without the AES key" "Content-addressed dedup via SHA-256 hash saves ~65% storage on forwarded media — hash computed on plaintext before encryption" "Media never flows through the chat server — direct client-to-S3 upload via presigned URL keeps the chat path lean"}}
+{{mustKnow "Client encrypts media locally with AES-256, uploads to S3, sends URL + key inside E2E message — server never sees plaintext" "Presigned S3 URLs (15 min TTL) prevent unauthorized access — even if URL leaks, ciphertext needs the AES key" "SHA-256 dedup saves ~65% storage on forwarded media — hash computed on plaintext before encryption" "Media never flows through the chat server — direct client-to-S3 upload keeps the chat path lean"}}
 
 {{phase 10 "Scaling & Reliability" "8 min"}}
 
-{{say `Three main scaling challenges:
+{{say `Three scaling challenges:
 <ul>
-  <li><span class="hl">200M concurrent WebSocket connections</span> — <span class="hl">~5,000 servers</span> at 100K connections each</li>
-  <li><span class="hl">700K messages/sec</span> at peak — Kafka absorbs bursts, stateless Chat Service scales horizontally</li>
-  <li><strong>Multi-region deployment</strong> — sub-200ms delivery globally requires regional infrastructure</li>
+  <li><span class="hl">200M concurrent WebSocket connections</span> — <span class="hl">~5,000 servers</span> at 100K each</li>
+  <li><span class="hl">700K msgs/sec</span> peak — Kafka absorbs bursts, stateless Chat Service scales horizontally</li>
+  <li><strong>Multi-region deployment</strong> — sub-200ms delivery globally needs regional infrastructure</li>
 </ul>`}}
+
+<p>{{algoLink "consistent-hashing" "Consistent hashing"}} assigns users to WebSocket servers so that adding or removing a server only moves <span class="hl">1/N</span> connections. {{fundLink "storage/redis" "Redis"}} stores the session registry, and {{fundLink "storage/dynamodb" "DynamoDB"}} Global Tables handle multi-region replication.</p>
 
 {{diagram "cs-scaling"}}
 

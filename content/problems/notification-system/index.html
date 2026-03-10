@@ -12,6 +12,8 @@
 
 {{diagram "notif-requirements"}}
 
+<p>Core infrastructure: {{fundLink "messaging/message-queues" "message queues"}} (Kafka) for async fan-out, {{fundLink "storage/redis" "Redis"}} for rate limiting and dedup, {{fundLink "storage/dynamodb" "DynamoDB"}} for notification logs and preferences.</p>
+
 {{table "Functional Requirements" (rows
   (row "Requirement"          "Description"                                       "Priority"  "Drives")
   (row "Push notifications"   "FCM (Android), APNs (iOS) delivery"               "P0"        "Device token management, provider API")
@@ -26,17 +28,35 @@
 
 {{hint "why at-least-once instead of exactly-once?" "Exactly-once delivery across push networks is impossible — you can't prevent FCM from delivering twice during retries. Instead: send with at-least-once semantics (retry on failure), deduplicate at the receiver side using notification_id. FCM has built-in 14-day dedup window. APNs collapses duplicate push identifiers. This is the industry standard."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Sync vs Async Delivery</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{think "The most important design decision upfront: should the notification system be synchronous (caller waits for delivery confirmation) or asynchronous (caller fires and forgets, system handles delivery)? Synchronous blocks the triggering action — if you're posting on Instagram, the post can't complete until 10M notification deliveries are confirmed. Async is the only viable design."
   (whyNot "synchronous delivery in the request path" "An Instagram post to 10M followers would take 10M × 1ms FCM API call = 2.7 hours synchronously. Even parallel: 10M calls at 10K concurrent = 1000 batches × 100ms each = 100 seconds. Unacceptable. The triggering action (post) must complete in <500ms.")
   (whatIf "Kafka is down when a notification event arrives" "Triggering services write to a local outbox table (transactional outbox pattern). A background poller reads the outbox and writes to Kafka when available. Notifications may be delayed but not lost — the outbox table persists across service restarts.")
 }}
+  </div>
+</details>
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Scope Clarifications</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Scope clarifications"
   "How do you handle different notification priorities?"
   "Use separate Kafka topics: high_priority (OTP, payment alerts), medium_priority (likes, comments), low_priority (marketing). Consumers poll high_priority first — if empty, check medium, then low. This ensures OTP always gets through even during a notification storm from marketing campaigns."
   "Do you differentiate between transactional and marketing notifications?"
   "Critical distinction. Transactional (OTP, purchase confirmation, password reset): never rate-limited, always delivered, user cannot opt out via the channel. Marketing: rate-limited (3/day max), respect quiet hours, user can opt out. CAN-SPAM requires a physical mailing address and one-click unsubscribe in every marketing email."
 }}
+  </div>
+</details>
 
 {{caveat "Transactional notifications (OTP, payment) must NEVER be rate-limited or subject to opt-out — blocking an OTP delivery because of a rate limit is a critical bug that can lock users out of their accounts."}}
 
@@ -137,6 +157,8 @@
 
 {{diagram "notif-data-model"}}
 
+<p>{{fundLink "storage/dynamodb" "DynamoDB"}} handles the append-heavy notification log and user preferences, while {{fundLink "storage/redis" "Redis"}} manages ephemeral state like rate limit counters and dedup cache.</p>
+
 {{table "Storage Technology Choices" (rows
   (row "Data"               "Storage"       "Why")
   (row "Notification log"   "DynamoDB"      "Append-only, high write throughput, TTL for auto-cleanup")
@@ -164,19 +186,37 @@
 
 {{diagram "notif-priority-queue"}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Kafka Partitioning & Priority Semantics</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{think "Partition by user_id for ordering, not by notification_id. This ensures: if user_id=123 gets 5 notifications triggered at the same time, they're all processed by the same consumer in the order they were produced. Without user-id partitioning, notifications for the same user could arrive out of order — a 'you have a new follower' arriving after 'like on your post' from the same event sequence."
   (whyNot "one global Kafka topic for all notifications" "At 10M notifications/minute = 167K/sec, one topic requires hundreds of partitions to handle throughput. Priority becomes impossible — you can't poll high-priority messages first from a single topic without complex consumer group coordination. Separate topics give clean priority semantics.")
   (how "separate topics give priority semantics" "Three topics: high, medium, low. Consumer loop: while(true) { msg = poll(high_topic, timeout=0ms); if(!msg) msg = poll(medium_topic, timeout=0ms); if(!msg) msg = poll(low_topic, timeout=100ms); process(msg); } High-priority messages are always processed first. Marketing messages accumulate in low-priority topic during a spike but drain when high priority is quiet.")
 }}
+  </div>
+</details>
 
 {{hint "Kafka retention for notification replay" "Set Kafka retention to 7 days for all notification topics. This allows: (1) replaying failed notifications after a delivery system outage, (2) auditing which notifications were sent, (3) backfilling mobile apps that were offline. 10M notifications/day × 100 bytes avg × 7 days = 7GB retention — negligible cost."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Kafka Design Questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Kafka design questions"
   "Why Kafka instead of SQS for notifications?"
   "Kafka: 7-day replay, multiple consumer groups (each channel has its own consumer group reading the same topic), ordered delivery per partition, high throughput (millions/sec). SQS: simpler operational model, managed, scales automatically, better for isolated queues. For notification systems: Kafka's replay capability and multi-consumer-group support are worth the operational overhead at scale. SQS is fine for smaller systems."
   "How do you handle Kafka consumer lag during a viral event?"
   "Auto-scale consumers based on consumer lag metric. High lag → scale out more consumer pods. AWS MSK (Managed Kafka) integrates with ECS/Kubernetes horizontal autoscaling based on Kafka consumer lag. Also: high-priority topics have dedicated consumers that don't starve — marketing consumers scale separately from transactional consumers."
 }}
+  </div>
+</details>
 
 {{caveat "Partition by user_id (the recipient), not by notification_id or event_id. Wrong partition key breaks per-user notification ordering — a user could see 'Alice commented on your post' before 'Alice liked your post' from the same event."}}
 
@@ -186,10 +226,21 @@
 
 {{diagram "notif-architecture"}}
 
+<p>Each external provider (FCM, APNs, SendGrid) is protected by a {{fundLink "distributed/circuit-breaker" "circuit breaker"}}. Templates are cached in {{fundLink "storage/redis" "Redis"}} to avoid {{fundLink "storage/dynamodb" "DynamoDB"}} reads on every send. A {{fundLink "networking/load-balancing" "load balancer"}} distributes traffic across consumer pods.</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Critical Path & Provider Failures</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{think "The critical path: triggering service → Kafka (durable) → consumer batch → FCM/APNs/SendGrid API → delivery receipt → update status in DB. The system must handle FCM being slow (200ms per batch), APNs batching restrictions (no true batch, just parallel single sends), and SendGrid rate limits (100 emails/sec on starter plan, 1500/sec on Pro)."
   (whatIf "FCM API is down for 30 minutes" "Circuit breaker opens. Kafka consumer stops calling FCM but keeps polling. Messages accumulate in Kafka. When FCM recovers, circuit half-opens → test call → if success, circuit closes → consumer catches up with accumulated messages. Users get notifications ~30 minutes late. Monitoring alerts immediately.")
   (how "template rendering works at scale" "Templates stored in DynamoDB. Template: 'Hi {{name}}, your order {{order_id}} is ready!' At render time: fetch template from DynamoDB (or Redis cache), interpolate variables, render as push title/body + email HTML. Cache templates in Redis with 1h TTL — templates change rarely. Localization: template has locale_code field, render with user's locale.")
 }}
+  </div>
+</details>
 
 {{diagram "notif-push-flow"}}
 
@@ -201,16 +252,34 @@
 
 {{diagram "notif-fan-out"}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Celebrity Fan-Out Problem</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{think "The celebrity fan-out problem for notifications: an influencer with 10M followers posts → 10M notifications triggered. The fan-out table is pre-built (subscribers are stored by influencer_id). Consumer reads influencer_id from event → queries subscribers table → gets 10M user_ids → batches into 10K-user chunks → enqueues each chunk as a Kafka message. This keeps the triggering event lightweight; actual fan-out happens in the consumer."
   (whyNot "querying subscribers inline in the triggering service" "If Instagram post service queries 10M subscribers synchronously, the post endpoint takes 10+ seconds. Async: post service writes one event to Kafka (user_id=influencer, event=new_post). Fan-out consumer reads event, queries subscribers in batches of 10K, enqueues notification batches. Post endpoint returns in <100ms.")
 }}
+  </div>
+</details>
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Fan-Out Design Questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Fan-out design"
   "How do you handle a celebrity with 100M followers without overwhelming Kafka?"
   "Batch the fan-out: don't produce 100M individual Kafka messages. Instead: fan-out consumer reads subscriber IDs in batches of 10K → produces one Kafka message per batch of 10K user_ids → delivery consumer reads batch → sends 10K push notifications. 100M followers = 10K Kafka messages (batch of 10K each) = manageable throughput."
   "How long does it take to deliver to all 10M followers?"
   "FCM allows 1000 device tokens per multicast request. 10M users × 1 push each = 10K FCM requests. At 100 concurrent consumers × 100ms per FCM batch = 10K / (100 × 10/sec) = 10 seconds for all 10M followers. With more consumers: horizontally scalable to under 5 seconds."
 }}
+  </div>
+</details>
 
 {{mustKnow "Two-stage async fan-out: triggering service writes ONE event to Kafka, fan-out consumer expands to N user batches" "Batch fan-out into 10K-user chunks — never produce one Kafka message per recipient" "For mega-celebrities (100M+ followers), consider fan-out-on-read hybrid where clients pull on app open" "10M push notifications can be delivered in ~10 seconds with 100 concurrent FCM consumers using multicast batches"}}
 

@@ -12,6 +12,8 @@
 
 {{diagram "idgen-requirements"}}
 
+<p>This design is modeled on the {{algoLink "snowflake-id" "Snowflake ID"}} algorithm — a 64-bit, time-ordered ID scheme requiring no coordination after startup.</p>
+
 {{table "Functional Requirements" (rows
   (row "Requirement"         "Description"                                          "Priority"  "Drives")
   (row "Unique IDs"          "No two servers generate same ID, ever"               "P0"        "Bit partitioning, worker ID assignment")
@@ -24,18 +26,36 @@
 
 {{hint "why 64-bit specifically?" "64-bit fits in a SQL BIGINT, JSON number (safe integer up to 2^53), and most programming language native integers. <strong>UUID</strong> (Universally Unique Identifier — a 128-bit randomly generated ID) is 128-bit — twice the storage, not sortable by time, breaks JSON number safety. Snowflake gives you time-ordering + uniqueness in the same space as a regular integer."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">ID Space Partitioning & Time Ordering</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{think "The core insight: uniqueness across servers can be achieved without coordination by partitioning the ID space. Each server 'owns' a slice of the ID space defined by its worker ID — it can never generate an ID in another server's slice."
   (whyNot "database auto-increment" "Single DB is a bottleneck — at 1M IDs/sec you'd need a DB that can handle 1M writes/sec just for ID generation. Also a <strong>SPOF</strong> (Single Point of Failure — if this one component fails, the entire system stops working): DB goes down, nothing can create records.")
   (whatIf "two servers get the same worker ID" "IDs collide — same timestamp + same worker ID + same sequence = identical ID. This is the critical failure mode. Worker ID assignment must be exclusive. ZooKeeper ephemeral nodes solve this cleanly.")
   (how "time ordering works" "The 41 timestamp bits are the most significant bits in the 64-bit layout. So sorting 64-bit IDs numerically gives roughly time-ordered results. Two IDs created in the same millisecond are ordered by sequence number — still deterministic.")
 }}
+  </div>
+</details>
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Requirements Clarifications</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Requirements clarifications"
   "Why not use UUIDs?"
   "UUID v4 (Universally Unique Identifier — a 128-bit randomly generated ID) is 128-bit (double storage), random (not time-ordered), and breaks JSON number safety (JavaScript MAX_SAFE_INTEGER is 2^53). Snowflake IDs fit in BIGINT, sort by time, and work natively in all systems. The only UUID advantage is no worker ID coordination — but that's solvable."
   "Does time-ordering need to be guaranteed or approximate?"
   "Approximate is fine. Snowflake guarantees IDs generated later have higher values within the same worker. Across workers and datacenters, IDs generated within the same millisecond may have any relative order. For strict ordering, you'd need a centralized sequencer — much higher latency."
 }}
+  </div>
+</details>
 
 {{mustKnow "Snowflake IDs are 64-bit, time-ordered, and require no coordination after startup — unlike UUIDs (128-bit, random) or DB auto-increment (single bottleneck)" "The ID space is partitioned by worker ID — each server owns a unique slice, eliminating the need for distributed consensus on every ID" "Custom epoch maximizes usable timestamp range — 41 bits = 69.7 years from your chosen start date" "1M+ IDs/sec across the fleet with zero network calls per ID generation"}}
 
@@ -115,10 +135,19 @@
 
 {{diagram "idgen-bit-layout"}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Bit Allocation Trade-offs</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{think "The bit allocation reflects business priorities: timestamp gets the most bits (41) because time-ordering is the primary value proposition. Sequence gets the next most (12) because per-node throughput matters. Datacenter and worker get 5 each — 32 DCs × 32 workers = 1024 nodes is more than enough for any real deployment."
   (whyNot "more sequence bits for higher throughput" "More sequence bits = fewer timestamp bits = shorter lifespan. 40-bit timestamp = 34 years from 2023 epoch → would expire in 2057. 41 bits gives 69.7 years. You can always add more nodes (more worker IDs) to scale horizontally — better than sacrificing timestamp range.")
   (how "custom epoch works" "Twitter's epoch is Jan 1, 2010 00:00:00 UTC in milliseconds. The 41-bit timestamp stores (current_time_ms - epoch_ms). This means the counter doesn't overflow until 2079 for Twitter's epoch. Setting your own epoch maximizes the usable window for your service.")
 }}
+  </div>
+</details>
 
 {{table "Bit Field Summary" (rows
   (row "Field"       "Bits"  "Max Value"    "Meaning")
@@ -131,12 +160,21 @@
 
 {{hint "how to compute max IDs per second" "One worker: 4096/ms = 4,096,000/sec. All 1024 workers: 4096 × 1024 = 4,194,304,000/sec ≈ 4.2 billion IDs/sec theoretical maximum. In practice, network and CPU bound well below this. Single worker at 4M/sec is already more than enough for most services."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Bit Layout Questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Bit layout questions"
   "What happens when the 41-bit timestamp overflows in 69 years?"
   "You'll need to either increase the epoch offset (by changing the reference date) or migrate to a larger ID type. Most services plan an epoch refresh: set a new epoch closer to the overflow date, reset the system, and update all consumers. 69 years is long enough to never be your problem — the service will have been rewritten multiple times."
   "Can you adjust the bit split for different needs?"
   "Yes — it's a design parameter. For fewer datacenters but more workers per DC: use 3 DC bits + 7 worker bits = 8 DCs × 128 workers. For higher per-node throughput: use 10 sequence bits + 3 worker bits = 1024 IDs/ms per node × 8 nodes. The total must stay at 22 bits (63 bits - 41 timestamp)."
 }}
+  </div>
+</details>
 
 {{caveat "The sign bit must always be 0 — if you accidentally set it, the ID becomes negative in signed integer representations (Java long, SQL BIGINT), breaking sorting and comparisons."}}
 
@@ -154,6 +192,13 @@
 
 {{diagram "idgen-generation-algorithm"}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Snowflake Generator Implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{code "python" `import time
 import threading
 
@@ -201,19 +246,39 @@ class SnowflakeGenerator:
         while ts <= last_ts:
             ts = self._current_ms()
         return ts`}}
+  </div>
+</details>
 
 {{hint "why a threading lock per generator instance?" "The sequence counter is shared state — two threads incrementing it concurrently could produce the same sequence value (race condition). The lock ensures only one thread increments the sequence at a time. But: one lock per generator instance, not one global lock. Each worker node runs its own generator, so locks don't contend across nodes."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Sequence Mask & Overflow Handling</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{think "The sequence mask <code>&amp; 0xFFF</code> is critical — without it, the sequence could exceed 12 bits and corrupt the timestamp bits. 0xFFF = 0b111111111111 = 4095. When sequence overflows 4095, masking gives 0 and the next millisecond wait kicks in."
   (whatIf "the service receives 5000 requests in a single millisecond" "Sequence overflows at 4096. The generator waits for the next millisecond via busy-wait (_wait_next_ms). This adds at most 1ms latency — acceptable. The caller sees slightly increased <strong>P99</strong> (99th percentile) latency during extreme bursts but no errors. You can also pre-allocate blocks to avoid this.")
 }}
+  </div>
+</details>
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Algorithm Deep-Dives</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Algorithm deep-dives"
   "What's the time complexity of Snowflake ID generation?"
   "O(1) — fixed number of operations regardless of history or ID count. A lock acquisition, one timestamp read, one conditional branch, three bit shifts, two OR operations. On modern hardware: sub-microsecond, so throughput is bound by the lock contention, not the algorithm."
   "Why busy-wait for the next millisecond instead of Thread.sleep(1)?"
   "Thread.sleep(1) often oversleeps by 10-15ms due to OS scheduler resolution, especially under load. Busy-wait (spin until current_ms > last_ms) guarantees we advance exactly one millisecond. The spin loop is brief — at most 1ms — and only activates when sequence overflows, which is rare."
 }}
+  </div>
+</details>
 
 {{mustKnow "Generation is O(1) — one lock, one timestamp read, three bit shifts, two ORs; sub-microsecond on modern hardware" "Sequence mask (& 0xFFF) prevents overflow into timestamp bits — without it, sequence > 4095 corrupts the ID" "When sequence exhausts (4096 IDs in 1ms), busy-wait for next millisecond — Thread.sleep(1) oversleeps by 10-15ms due to OS scheduler" "Clock backward detection (current_ts < last_ts) is mandatory — generating IDs with a past timestamp breaks time ordering"}}
 
@@ -229,21 +294,39 @@ class SnowflakeGenerator:
 
 {{diagram "idgen-architecture"}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Service vs Embedded Library</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{think "The most important architectural decision: service vs. embedded library. A service adds ~0.5ms network latency per ID. An embedded library generates IDs in <1μs but requires distributing worker IDs to each process. For services that generate IDs at extreme rates (payment systems, event logging), embed the library. For general-purpose use, the service is simpler."
   (whyNot "ZooKeeper for per-ID coordination (not just startup)" "ZooKeeper gives <1ms operations but at 1M IDs/sec that's still 1M ZK operations/sec — ZK can't handle that. ZK is only used once at startup to claim a worker ID. After that, no coordination needed.")
   (whatIf "ZooKeeper is down when a service starts" "New service instances can't claim a worker ID and fail to start. Running instances keep their worker IDs and continue generating IDs normally. This is an acceptable failure mode — rolling deploys are blocked until ZK recovers, but existing capacity is unaffected.")
 }}
+  </div>
+</details>
 
 {{diagram "idgen-worker-id-assignment"}}
 
 {{hint "ZooKeeper ephemeral nodes for worker ID" "Ephemeral nodes in ZooKeeper automatically delete when the session ends (server crashes or gracefully shuts down). This means a crashed server's worker ID is automatically reclaimed. The new server that starts gets a new worker ID — no manual cleanup needed. ZK guarantees at most one node holds each worker ID path at any time."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Architecture Decisions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Architecture decisions"
   "Can clients call the ID service synchronously on every write?"
   "Yes — 0.5ms per ID call is acceptable if writes are infrequent. But for high-throughput services (event logging, order systems), embed the Snowflake generator in each service to avoid the network round-trip. Most teams start with the service and migrate hot paths to embedded generation."
   "What's the failure domain of one ID service node?"
   "Each node is independent. If node A goes down, clients route to nodes B and C — no data loss, no coordination needed. The only state each node holds is its worker_id and current sequence — both are recovered on restart (worker_id re-claimed from ZK, sequence resets to 0, which is safe because a new millisecond has passed)."
 }}
+  </div>
+</details>
 
 {{goodToKnow "For Kubernetes-native deployments, StatefulSet pod ordinals (pod-0, pod-1, ...) can replace ZooKeeper entirely for worker ID assignment — simpler, deterministic, and survives restarts."}}
 
@@ -277,10 +360,19 @@ class SnowflakeGenerator:
 
 {{diagram "idgen-multi-dc"}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Cross-DC Clock Skew & ZooKeeper</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{think "Clock skew between datacenters is the key concern. Two servers in different DCs with 100ms of clock drift will generate IDs where DC2's 'later' IDs appear before DC1's 'earlier' IDs when sorted. NTP keeps clocks within 5ms typically. For strict ordering across DCs, you'd need Google Spanner's TrueTime API — which provides bounded clock uncertainty."
   (whyNot "one global ZooKeeper cluster for worker IDs" "Cross-DC ZooKeeper writes have 50-200ms latency (speed of light + network). At startup, this is acceptable — you only claim a worker ID once. But if you needed ZK for every ID generation, cross-DC latency would kill throughput.")
   (whatIf "two datacenters have the same datacenter_id due to a configuration error" "IDs can collide — this is the critical failure mode for multi-DC. Mitigation: automate datacenter ID assignment via your orchestration system (Terraform, Kubernetes labels). Never set it manually. Validate on startup: if datacenter_id conflicts detected → abort.")
 }}
+  </div>
+</details>
 
 {{caveat "Duplicate datacenter_id across DCs is the most dangerous misconfiguration — IDs will collide silently. Automate DC ID assignment via Terraform/K8s labels and validate on startup; never set manually."}}
 
@@ -299,19 +391,37 @@ class SnowflakeGenerator:
 
 {{diagram "idgen-failure-modes"}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Backward Clock Scenarios</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{think "The backward clock scenario is subtle: if the clock moves back by even 1ms, the generator might produce an ID with timestamp T when it previously produced IDs with timestamp T+1. Those IDs would have a lower value but be generated later — breaking time ordering. The safe solution is to refuse to generate IDs until the clock catches up."
   (whyNot "simply use the last_timestamp when clock goes back" "Reusing the last_timestamp sounds safe, but if clock goes back 100ms and you keep generating at last_timestamp, your sequence counter could generate 4096 × 100 = 409,600 IDs all with the same timestamp portion — still unique, but could confuse systems that use timestamp to estimate when an ID was created.")
   (whatIf "the clock goes back by 5 seconds due to VM migration" "The generator throws an exception and refuses to generate IDs for 5 seconds until the clock catches up. Better to fail fast than produce out-of-order IDs. Alert on this — 5 seconds of clock skew indicates a configuration problem that needs fixing.")
 }}
+  </div>
+</details>
 
 {{hint "use a monotonic clock, not wall clock" "System.nanoTime() in Java, time.monotonic() in Python give monotonic clocks that never go backward (even during NTP adjustment). But these are relative to process start, not Unix epoch. Use: epoch_ms = start_epoch_ms + (monotonic_ns() - start_ns) / 1_000_000. This gives wall-clock-anchored time that never goes backward within a process."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Failure Handling Questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Failure handling"
   "How do you detect duplicate worker IDs in production?"
   "At ID generation time, each ID encodes its worker ID. Parse worker IDs from generated IDs and alert if two live servers produce IDs with the same worker ID bits. Better: write the worker ID to a service registry on startup and validate no conflicts before accepting traffic. ZooKeeper ephemeral nodes prevent this structurally."
   "What's the maximum acceptable clock skew before problems occur?"
   "Within a single DC: 5ms is the practical limit. Beyond 5ms, IDs from different workers start appearing out of order when sorted by ID. Across DCs: ordering across DCs is approximate anyway, so 100ms is acceptable. Monitor NTP offset with an alert at >1ms drift."
 }}
+  </div>
+</details>
 
 {{mustKnow "Three failure modes: clock backward (refuse IDs until caught up), sequence exhaustion (wait for next ms), worker crash (re-claim worker ID from ZK)" "Use monotonic clock anchored to wall time — eliminates backward clock issue entirely within a process" "Forward clock jumps are safe for uniqueness but cause IDs to appear as if created in the future — alert on jumps >5s" "Maximum acceptable clock skew: <5ms intra-DC (affects sort order), <100ms cross-DC (approximate ordering anyway)"}}
 
@@ -469,7 +579,7 @@ class SnowflakeGenerator:
           </div>
         </div>
         <div class="alt-card-body">
-          <div class="alt-how"><strong>How they solve it:</strong> Payment IDs are base62-encoded Snowflake IDs with an entity-type prefix — <code>pay_Abc123XYZ</code> for payments, <code>ord_</code> for orders, <code>sub_</code> for subscriptions. The prefix is prepended before encoding and stripped before decoding.</div>
+          <div class="alt-how"><strong>How they solve it:</strong> Payment IDs are {{algoLink "base62-encoding" "Base62"}}-encoded {{algoLink "snowflake-id" "Snowflake IDs"}} with an entity-type prefix — <code>pay_Abc123XYZ</code> for payments, <code>ord_</code> for orders, <code>sub_</code> for subscriptions. The prefix is prepended before encoding and stripped before decoding.</div>
           <div class="alt-stack-row">
             <span class="alt-stack-label">Stack:</span>
             <span class="alt-tech">Snowflake ID</span>
@@ -488,7 +598,7 @@ class SnowflakeGenerator:
           </div>
         </div>
         <div class="alt-card-body">
-          <div class="alt-how"><strong>How they solve it:</strong> Transaction IDs embed a region code and timestamp — e.g., South India transactions start with <code>IN-S-</code>. The region prefix is baked into the ID at generation time based on the originating service's region tag.</div>
+          <div class="alt-how"><strong>How they solve it:</strong> Transaction IDs embed a region code and timestamp — e.g., South India transactions start with <code>IN-S-</code>. The region prefix is baked into the ID at generation time based on the originating service's region tag, and doubles as the {{fundLink "storage/dynamodb" "DynamoDB"}} partition key prefix.</div>
           <div class="alt-stack-row">
             <span class="alt-stack-label">Stack:</span>
             <span class="alt-tech">Region-prefixed Snowflake</span>

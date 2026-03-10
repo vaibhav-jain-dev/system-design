@@ -1,4 +1,4 @@
-{{stageNav "Requirements & Problem Scope" 1 "API Design" 2 "Double-Entry Ledger Design" 3 "Payment Processing Flow" 4 "High-Level Architecture" 5 "Idempotency & Exactly-Once Semantics" 6 "Distributed Transactions (Saga Pattern)" 7 "Fraud Detection" 8 "Security & PCI DSS" 9 "Failure Handling & Recovery" 10 "Monitoring & SLAs" 11 "Interview Deep-Dive Q&A" 12}}
+{{stageNav "Requirements & Problem Scope" 1 "API Design" 2 "Double-Entry Ledger" 3 "Payment Processing Flow" 4 "High-Level Architecture" 5 "Idempotency (No Double Charges)" 6 "Saga Pattern (Distributed Transactions)" 7 "Fraud Detection" 8 "Security & PCI DSS" 9 "Failure Handling & Recovery" 10 "Monitoring & SLAs" 11 "Interview Deep-Dive Q&A" 12}}
 
 {{phase 1 "Requirements & Problem Scope" "5 min"}}
 
@@ -13,23 +13,41 @@
 
 {{diagram "pay-requirements"}}
 
-{{think "The single most important design decision is idempotency — not sharding, not caching. A payment system that occasionally double-charges is worthless. Every other optimization is secondary."
-  (whyNot "eventual consistency for payments" "Payments need strong consistency — a user's account balance cannot be stale. If you read a stale balance and approve a payment that overdraws the account, you've created a real financial liability.")
-  (whatIf "we skip idempotency keys and rely on client retries being rare" "Network timeouts are common — mobile clients retry on every TCP timeout. At 1000 TPS with 1% timeout rate, you get 10 duplicate attempts per second. Without idempotency keys, some become double charges.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Why idempotency matters more than anything else</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "The #1 design decision is idempotency — not sharding, not caching. A payment system that double-charges customers is broken. Everything else is secondary."
+  (whyNot "eventual consistency for payments" "Payments need strong consistency. If you read a stale balance and approve a payment that overdraws the account, you've created real financial liability.")
+  (whatIf "we skip idempotency keys and rely on client retries being rare" "Network timeouts are common — mobile apps retry on every timeout. At 1000 TPS with 1% timeout rate, that's 10 duplicate attempts/second. Without idempotency keys, some become double charges.")
 }}
+  </div>
+</details>
 
-{{hint "why 99.999% and not 99.9%?" "Stripe's actual <strong>SLA</strong> (Service Level Agreement — a contract defining uptime and performance guarantees) is 99.9999%. Even at 99.999% (5 minutes/year), a 5-minute outage during Black Friday can cost millions. Multi-region active-active is the only way to achieve this — no planned maintenance windows."}}
+{{hint "why 99.999% and not 99.9%?" "Stripe's actual SLA is 99.9999%. Even at 99.999% (5 min/year), a 5-minute outage during Black Friday can cost millions. You need multi-region active-active — no maintenance windows allowed."}}
 
 {{hint "Stripe's actual scale" "Stripe processes <strong>400M+ transactions/year</strong>, which sounds large but averages only ~<span class='hl'>13 TPS</span>. The challenge is the peak: Black Friday spikes to <span class='hl'>1,000 TPS</span> — 77× the average. Design for the peak, not the mean."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Likely interviewer questions for Phase 1</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Phase 1 interview triggers"
   "Should we support multiple currencies?"
-  "Yes — store all amounts as integers in the smallest unit (cents for USD, pence for GBP). Never use floats for money. Convert at display time only. Exchange rates come from an external FX service, updated every minute."
+  "Yes — store amounts as integers in the smallest unit (cents for USD, pence for GBP). Never use floats. Convert at display time only."
   "Do we need to support partial refunds?"
-  "Yes. A refund creates a new transaction linked to the original — it doesn't mutate the original transaction. The ledger is append-only."
-  "What happens if the payment processor (Visa/Mastercard) is down?"
-  "Fail fast with a clear error to the merchant. We cannot queue payments and retry later — the authorization window is time-limited (typically 7 days but card data cannot be stored). Merchant must retry from their side."
+  "Yes. A refund creates a new ledger entry linked to the original — it never mutates the original. The ledger is append-only."
+  "What happens if Visa/Mastercard is down?"
+  "Fail fast with a clear error. You can't queue payments and retry later — authorization windows are time-limited (7 days). The merchant retries from their side."
 }}
+  </div>
+</details>
 
 {{mustKnow "Idempotency is the single most critical requirement — never charge a customer twice, even on retries" "Scale target is ~13 TPS average but 1,000 TPS peak (Black Friday) — design for the peak" "99.999% availability = 5.26 minutes downtime per year — requires multi-region active-active" "Never use floats for money — store amounts as integer cents (IEEE 754 rounding causes real financial discrepancies)"}}
 
@@ -232,26 +250,35 @@
   </div><!-- /detailed -->
 </div>
 
-{{think "The API must be async — charging a card involves network calls to Visa/Mastercard which take 200-800ms. Returning 201 immediately with 'pending' and letting the client poll is the right design."
-  (whyNot "synchronous 200 response after capture" "The bank network call can take up to 800ms. Holding an HTTP connection for 800ms at 1000 TPS = 800 concurrent connections minimum. More importantly, network timeouts cause clients to retry, creating duplicate charge risk.")
-  (whatIf "client never polls the status endpoint" "Webhooks as backup: POST to merchant's webhook URL when status changes to succeeded/failed. Retry the webhook with exponential backoff for up to 72 hours.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Why the API must be async</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "Charging a card means calling Visa/Mastercard, which takes 200-800ms. Return 201 immediately with 'pending' and let the client poll — don't hold the connection open."
+  (whyNot "synchronous response after capture" "Bank calls take up to 800ms. At 1000 TPS that's 800 connections held open. Timeouts cause retries, which risk double charges.")
+  (whatIf "client never polls the status endpoint" "Send webhooks as backup: POST to the merchant's URL when status changes. Retry with exponential backoff for up to 72 hours.")
 }}
+  </div>
+</details>
 
-{{hint "why integer amounts?" "Floating-point representation of 0.1 in IEEE 754 is 0.100000000000000005551... Summing 1000 payments of $0.10 gives $100.00000000000000555... — a real financial discrepancy. Store <span class='hl-red'>never floats</span>, always integer cents."}}
+{{hint "why integer amounts?" "Floating-point math is broken for money. 0.1 + 0.2 = 0.30000000000000004 in most languages. Sum 1000 payments of $0.10 and you get $100.00000000000000555 — a real accounting error. <span class='hl-red'>Never use floats</span> for money. Always use integer cents."}}
 
-{{caveat "Returning 201 with 'pending' status means the client must poll or listen for webhooks. If you return a synchronous 200 after capture, you hold HTTP connections for 200-800ms per request — at 1000 TPS that's 800 concurrent connections minimum, and timeouts cause duplicate charge risk."}}
+{{caveat "Returning 201 with 'pending' means the client must poll or use webhooks. A synchronous response would hold connections for 200-800ms each — at 1000 TPS that's 800 open connections, and timeouts cause double-charge risk."}}
 
 {{mustKnow "Every write endpoint requires an Idempotency-Key header — format is {client_id}:{uuid}" "POST /payments returns 201 with status 'pending' immediately — capture is async via Kafka" "Refunds create new ledger entries — the original transaction is never mutated (append-only ledger)" "Amount field is always integer in smallest currency unit (cents) — ISO 4217 currency codes"}}
 
-{{phase 3 "Double-Entry Ledger Design" "10 min"}}
+{{phase 3 "Double-Entry Ledger" "10 min"}}
 
-{{say `Every transaction in our system follows double-entry bookkeeping — the same principle that has governed accounting for 700 years:
+{{say `Every transaction follows double-entry bookkeeping — the same rule that's governed accounting for 700 years:
 <ul>
-  <li>Every payment = exactly <strong>two ledger entries</strong>: a debit and a credit</li>
-  <li>The invariant: <span class="hl">Sum(all ledger entries) = 0 always</span> — this is checkable in SQL at any time</li>
-  <li>The ledger is <strong>append-only</strong> — no UPDATE, no DELETE. Corrections are new entries</li>
-  <li><strong>PostgreSQL</strong> with <span class="hl-blue">SERIALIZABLE isolation</span> — the only isolation level that prevents phantom reads in concurrent balance checks</li>
-  <li>Row-level locking order: always lock <span class="hl">lower account_id first</span> — prevents deadlocks deterministically</li>
+  <li>Every payment creates exactly <strong>two ledger entries</strong>: a debit and a credit</li>
+  <li>Core rule: <span class="hl">SUM(all entries) = 0, always</span> — you can check this with a single SQL query</li>
+  <li>The ledger is <strong>append-only</strong> — no UPDATE, no DELETE. Corrections are new entries that reverse old ones</li>
+  <li><strong>PostgreSQL</strong> with <span class="hl-blue">SERIALIZABLE isolation</span> — prevents two payments from reading the same balance and both spending it</li>
+  <li>Always lock accounts in <span class="hl">ascending account_id order</span> — prevents deadlocks</li>
 </ul>`}}
 
 {{diagram "pay-double-entry-ledger"}}
@@ -268,45 +295,74 @@
   (row "idempotency_key" "TEXT UNIQUE" "Prevents duplicate entry on retry")
 )}}
 
-{{think "Why not just use a single 'transactions' table with a single row per payment?"
-  (whyNot "single-row transaction table" "A single row can't represent money moving between multiple accounts — a payment from customer to merchant involves at least 3 accounts (customer, merchant, Stripe fee). Double-entry naturally handles N-account transfers.")
-  (how "check constraint for balance" "Add CHECK (balance >= 0) on the accounts table. Combined with SERIALIZABLE isolation, this prevents overdrafts at the database level — no application-level race conditions.")
-  (whatIf "we use READ COMMITTED instead of SERIALIZABLE" "Two concurrent payments reading the same balance could both see $100, both approve $80 charges, and both succeed — leaving the account at -$60. SERIALIZABLE detects this and aborts one transaction.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Why double-entry instead of a simple transactions table?</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "Why not just use a single 'transactions' table with one row per payment?"
+  (whyNot "single-row transaction table" "One row can't represent money moving between multiple accounts. A payment touches at least 3 accounts (customer, merchant, fee). Double-entry handles N-account transfers naturally.")
+  (how "prevent overdrafts at the DB level" "Add CHECK (balance >= 0) on the accounts table. Combined with SERIALIZABLE isolation, the database itself prevents overdrafts — no application-level race conditions needed.")
+  (whatIf "we use READ COMMITTED instead of SERIALIZABLE" "Two concurrent payments could both read a $100 balance, both approve $80 charges, and both commit — leaving the account at -$60. SERIALIZABLE detects this conflict and aborts one.")
 }}
+  </div>
+</details>
 
-{{hint "locking order prevents deadlock" "Payment A locks account 100 then 200. Payment B locks account 200 then 100. That's a deadlock. Solution: always acquire locks in ascending account_id order. Both transactions try 100 first — one waits, one proceeds. Zero deadlocks."}}
+{{hint "locking order prevents deadlock" "Payment A locks account 100 then 200. Payment B locks 200 then 100 — deadlock. Fix: always lock in ascending account_id order. Both try 100 first — one waits, one proceeds. Zero deadlocks."}}
 
 {{hint "balance_after is a running total" "<code>balance_after</code> is a denormalized snapshot written at insert time. You can reconstruct any account's balance history without summing all prior entries — critical for audit logs and reconciliation speed."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Likely interviewer questions for Phase 3</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Phase 3 interview triggers"
   "How do you verify the ledger is balanced?"
-  "SELECT SUM(amount) FROM ledger_entries — result must be exactly 0. Run this as a daily automated check and alert on any deviation. For a system processing millions of transactions, even a 1-cent discrepancy indicates a bug."
+  "SELECT SUM(amount) FROM ledger_entries — must be exactly 0. Run this daily and alert on any deviation. Even a 1-cent discrepancy means there's a bug."
   "How do you handle currency conversion in the ledger?"
-  "Every entry stores amount in a single canonical currency (USD cents). The FX conversion happens before ledger write — the converted amount and exchange rate are stored in the transaction metadata. Never store two currencies in the same ledger entry."
+  "Store all amounts in one canonical currency (USD cents). Convert before writing to the ledger. Store the exchange rate in transaction metadata. Never mix currencies in one ledger entry."
   "Can you reconstruct the balance from ledger_entries alone?"
-  "Yes — SELECT SUM(amount) FROM ledger_entries WHERE account_id = X gives the current balance. The denormalized balance_after column is for audit speed. The authoritative balance is always the SUM query."
+  "Yes — SELECT SUM(amount) WHERE account_id = X. The balance_after column is a shortcut for speed; the SUM query is the source of truth."
 }}
+  </div>
+</details>
 
-{{mustKnow "Double-entry bookkeeping: every payment = exactly two ledger entries (debit + credit), SUM(all entries) must always = 0" "PostgreSQL with SERIALIZABLE isolation — the only level that prevents phantom reads in concurrent balance checks" "Lock accounts in ascending account_id order to prevent deadlocks deterministically" "Ledger is append-only — no UPDATE, no DELETE; corrections are new entries"}}
+{{mustKnow "Double-entry: every payment = two entries (debit + credit), SUM = 0 always" "PostgreSQL SERIALIZABLE isolation prevents two payments from spending the same balance" "Lock accounts in ascending account_id order to prevent deadlocks" "Ledger is append-only — corrections are new entries, never UPDATEs"}}
 
 {{phase 4 "Payment Processing Flow" "10 min"}}
 
-{{say `A successful card payment goes through four stages. I'll walk through each:
+{{say `A card payment goes through four stages:
 <ul>
-  <li><strong>Authorization</strong> — verify card is valid, funds available; bank places a hold (does not move money yet)</li>
-  <li><strong>Reserve</strong> — internal ledger marks funds as reserved; reduces available balance</li>
-  <li><strong>Capture</strong> — trigger actual money movement; bank releases hold and transfers funds</li>
-  <li><strong>Settlement</strong> — async batch process: funds move from bank network to merchant account (T+1)</li>
-  <li>Each step is a separate Kafka message — failures at any step trigger compensating transactions</li>
+  <li><strong>Authorization</strong> — bank checks the card is valid and funds are available, then places a hold (money doesn't move yet)</li>
+  <li><strong>Reserve</strong> — our ledger marks the funds as reserved, reducing the customer's available balance</li>
+  <li><strong>Capture</strong> — triggers actual money movement; bank releases the hold and transfers funds</li>
+  <li><strong>Settlement</strong> — async batch process: funds move from bank network to merchant account (next business day)</li>
+  <li>Each step is a separate Kafka message — if any step fails, compensating transactions undo prior steps</li>
 </ul>`}}
 
 {{diagram "pay-payment-flow"}}
 
-{{think "Authorization and capture are separate for a reason — this is not a premature optimization."
-  (whyNot "single authorize+capture call" "Hotels, car rentals, and subscription services need to authorize for an estimated amount, then capture the exact amount later. Separating them is a fundamental requirement of card networks, not a design choice.")
-  (whatIf "authorization expires before capture" "Visa auth holds expire in 7 days, Mastercard in 30. Build a job that scans for authorized-but-not-captured payments older than 6 days and sends an alert. The merchant must recapture or the auth is void.")
-  (how "settlement via Kafka" "After capture, publish to Kafka settlement topic. A consumer batches these into a single <strong>ACH</strong> (Automated Clearing House — the US banking network used for electronic fund transfers)/wire transfer to the acquiring bank at end-of-day. One wire transfer covers thousands of individual captures — far cheaper than per-transaction wire fees.")
+<p>Each step communicates via {{fundLink "messaging/message-queues" "Kafka (message queue)"}}, which gives us durability and retry guarantees between steps.</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Why authorization and capture are separate steps</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "Authorization and capture are separate by design — this is a card network requirement, not a premature optimization."
+  (whyNot "single authorize+capture call" "Hotels and subscriptions need to authorize an estimated amount, then capture the exact amount later. Card networks require this separation.")
+  (whatIf "authorization expires before capture" "Visa holds expire in 7 days, Mastercard in 30. Build a sweeper job that alerts on authorized-but-not-captured payments older than 6 days.")
+  (how "settlement via Kafka" "After capture, publish to Kafka settlement topic. A consumer batches thousands of captures into a single ACH wire transfer at end-of-day — one wire at ~$0.25 vs $0.25 per transaction.")
 }}
+  </div>
+</details>
 
 {{hint "why batch settlement?" "Card networks charge per-wire fees. Batching 10,000 captures into one settlement message costs ~$0.25 total vs $2,500 at $0.25/wire. Settlement is always async — merchants accept T+1 as standard in the industry."}}
 
@@ -314,164 +370,252 @@
 
 {{diagram "pay-settlement"}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Likely interviewer questions for Phase 4</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Phase 4 interview triggers"
   "What happens if capture fails after authorization succeeds?"
-  "The Saga (Saga pattern — a sequence of local transactions where each step commits independently; on failure, compensating transactions undo prior steps in reverse order) compensating transaction fires a reversal/void against the authorization. This releases the hold. The customer sees no charge. If the void also fails, a human operations ticket is created — this edge case requires manual intervention."
+  "The Saga fires a compensating void against the authorization, releasing the hold. Customer sees no charge. If the void also fails, it escalates to a human ops ticket."
   "How does T+1 settlement affect the merchant's cash flow?"
-  "Merchants see 'pending' balance during the 24-48h settlement window. Stripe's Instant Payouts feature lets merchants pay a fee (1.5%) to access funds immediately — essentially a short-term loan against the settlement receivable."
+  "Merchants see 'pending' balance for 24-48h. Stripe offers Instant Payouts (1.5% fee) to access funds immediately — basically a short-term loan against pending settlement."
 }}
+  </div>
+</details>
 
 {{goodToKnow "Visa authorization holds expire in 7 days, Mastercard in 30 days. Build a sweeper job to alert on authorized-but-not-captured payments older than 6 days before the auth becomes void."}}
 
-{{mustKnow "Four stages: Authorization (hold) → Reserve (ledger) → Capture (money moves) → Settlement (T+1 batch)" "Authorization and capture are separate because hotels/subscriptions need to authorize an estimated amount, then capture exact amount later" "Settlement is batched — 10,000 captures in one ACH/wire transfer costs ~$0.25 vs $2,500 at $0.25/wire" "If capture fails after auth succeeds, the Saga fires a compensating void to release the hold"}}
+{{mustKnow "Four stages: Authorization (hold) → Reserve (ledger) → Capture (money moves) → Settlement (T+1 batch)" "Auth and capture are separate — hotels/subscriptions authorize an estimate, capture the exact amount later" "Settlement is batched — 10K captures in one wire costs ~$0.25 vs $2,500 individually" "If capture fails after auth, the Saga fires a compensating void to release the hold"}}
 
 {{phase 5 "High-Level Architecture" "8 min"}}
 
-{{say `Five service layers, each horizontally scalable:
+{{say `Five service layers, each scales independently:
 <ul>
-  <li><strong>API Gateway</strong> — TLS termination, auth, rate limiting (1000 req/s per merchant), idempotency key check</li>
-  <li><strong>Payment Service</strong> — orchestrates the saga, writes to ledger, publishes to Kafka</li>
-  <li><strong>Ledger Service</strong> — owns the PostgreSQL ledger DB; exposes balance query APIs</li>
-  <li><strong>Fraud Service</strong> — ML scoring in <span class="hl">&lt;100ms</span>; called synchronously before authorization</li>
-  <li><strong>Settlement Service</strong> — Kafka consumer; batches captures, sends to acquiring bank via SFTP/API</li>
+  <li><strong>API Gateway</strong> — TLS, auth, rate limiting (1000 req/s per merchant), idempotency check</li>
+  <li><strong>Payment Service</strong> — orchestrates the Saga, writes to ledger, publishes to Kafka</li>
+  <li><strong>Ledger Service</strong> — owns the PostgreSQL ledger; exposes balance APIs</li>
+  <li><strong>Fraud Service</strong> — ML scoring in <span class="hl">&lt;100ms</span>, called before every authorization</li>
+  <li><strong>Settlement Service</strong> — Kafka consumer that batches captures and sends to the acquiring bank</li>
 </ul>`}}
 
 {{diagram "pay-architecture"}}
 
-{{think "Why PostgreSQL for the ledger instead of a distributed database like DynamoDB or Cassandra?"
-  (whyNot "DynamoDB for ledger" "DynamoDB is eventually consistent by default. SERIALIZABLE transactions require the DynamoDB Transactions API, which is limited to 25 items and 4MB per transaction. Payment ledgers need arbitrary-size ACID transactions across accounts.")
-  (whyNot "Cassandra for ledger" "Cassandra doesn't support multi-row ACID transactions natively. Lightweight Transactions (LWT) are limited to single-partition and have O(n) performance under contention. The double-entry invariant requires true multi-row atomicity.")
-  (how "PostgreSQL scales for payments" "Stripe's PostgreSQL handles tens of thousands of TPS with connection pooling (PgBouncer), read replicas for balance queries, and partitioning by account_id for hot accounts. 1000 TPS peak is well within PostgreSQL's range on modern hardware.")
+<p>The API Gateway uses {{fundLink "networking/load-balancing" "load balancing"}} to distribute requests across Payment Service instances. We chose PostgreSQL over {{fundLink "storage/dynamodb" "DynamoDB"}} for the ledger because payments need true multi-row ACID transactions.</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Why PostgreSQL instead of DynamoDB or Cassandra?</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "Why PostgreSQL for the ledger instead of a distributed database?"
+  (whyNot "DynamoDB for ledger" "DynamoDB is eventually consistent by default. Its Transactions API is limited to 25 items and 4MB. Payment ledgers need arbitrary-size ACID transactions across accounts.")
+  (whyNot "Cassandra for ledger" "Cassandra has no multi-row ACID transactions. Lightweight Transactions are single-partition only and slow under contention. Double-entry requires true multi-row atomicity.")
+  (how "PostgreSQL scales for payments" "Stripe runs PostgreSQL at tens of thousands of TPS using PgBouncer (connection pooling), read replicas, and partitioning by account_id. 1000 TPS peak is well within range.")
 }}
+  </div>
+</details>
 
-{{hint "connection pooling is critical" "PostgreSQL has a max_connections limit (~300-500). At 1000 TPS with 50ms avg transaction time, you need at least 50 concurrent connections. PgBouncer pools connections at the transport layer — application sees 1000 connections, PostgreSQL sees 50. Without pooling, the server falls over."}}
+{{hint "connection pooling is critical" "PostgreSQL has ~300-500 max connections. At 1000 TPS with 50ms per transaction, you need 50 concurrent connections. PgBouncer sits in front — the app sees 1000 connections, PostgreSQL sees 50. Without it, the server falls over."}}
 
-{{hint "read replicas for balance queries" "GET /v1/balance can tolerate 1-2 seconds of replication lag — the merchant dashboard doesn't need real-time precision. Route read queries to replicas, write queries to primary. This cuts primary load by ~60% in practice."}}
+{{hint "read replicas for balance queries" "GET /v1/balance can tolerate 1-2s of replication lag. Route reads to replicas, writes to primary — cuts primary load by ~60%."}}
 
-{{mustKnow "PostgreSQL for the ledger — DynamoDB lacks arbitrary-size ACID transactions, Cassandra lacks multi-row atomicity" "PgBouncer for connection pooling — without it, 1000 TPS exceeds PostgreSQL's max_connections limit" "Five service layers: API Gateway, Payment Service, Ledger Service, Fraud Service, Settlement Service"}}
+{{mustKnow "PostgreSQL for the ledger — DynamoDB and Cassandra lack the multi-row ACID transactions payments require" "PgBouncer for connection pooling — without it, 1000 TPS exceeds PostgreSQL's connection limit" "Five services: API Gateway, Payment, Ledger, Fraud, Settlement — each scales independently"}}
 
-{{phase 6 "Idempotency & Exactly-Once Semantics" "8 min"}}
+{{phase 6 "Idempotency (No Double Charges)" "8 min"}}
 
-{{say `Idempotency is the most important property of a payment system. Here's how it works end-to-end:
+{{say `Idempotency is the most important property of a payment system — it prevents double charges on retries:
 <ul>
-  <li>Client sends <code>Idempotency-Key: {client_id}:{uuid}</code> on every write request (<strong>UUID</strong> = Universally Unique Identifier — a randomly generated 128-bit ID with negligible collision probability)</li>
-  <li>API Gateway checks <span class="hl-blue">Redis SET NX</span> with <span class="hl">24h <abbr title="Time-To-Live — duration before the key expires and is automatically removed">TTL</abbr></span> — if key exists, return cached response immediately</li>
-  <li>If key is new, process normally and store the response in Redis before returning to client</li>
-  <li>Second attempt with same key: Redis hit → return cached 201, <span class="hl-red">zero ledger writes</span></li>
-  <li>The 24h window covers all realistic retry scenarios — mobile clients don't retry after 24h</li>
+  <li>Client sends <code>Idempotency-Key: {client_id}:{uuid}</code> on every write request</li>
+  <li>API Gateway checks <span class="hl-blue">Redis SET NX</span> with <span class="hl">24h TTL</span> — if the key already exists, return the cached response immediately</li>
+  <li>If the key is new, process the payment normally and cache the response in Redis</li>
+  <li>On retry (same key): Redis hit → return cached 201, <span class="hl-red">zero ledger writes</span> — no double charge</li>
+  <li>24h covers all realistic retry windows — no mobile client retries after a day</li>
 </ul>`}}
 
 {{diagram "pay-idempotency"}}
 
-{{think "The idempotency check must happen before any side effects — not after. The order matters."
-  (whyNot "check idempotency key after authorization" "If authorization succeeds but the response is lost in a network timeout, the client retries. At the retry, you check the idempotency key and find it missing (because you hadn't stored it yet). You authorize again. Double charge.")
-  (how "atomic SET NX + response cache" "Use a Lua script: SET NX the key with value 'processing'. If 0 (key existed), return cached response. If 1 (new key), proceed, then SET the key value to the serialized response JSON with EX 86400. The two operations are not atomic — but the 'processing' sentinel prevents races.")
-  (whatIf "Redis goes down during payment processing" "Fall through to the database: the ledger has a UNIQUE constraint on idempotency_key in the transactions table. If Redis misses, the DB write will catch duplicates. Slower (a DB round trip instead of Redis), but still correct.")
+<p>We use {{fundLink "storage/redis" "Redis"}} for the idempotency store because SET NX is atomic and sub-millisecond. The check must happen <strong>before</strong> any side effects.</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">How idempotency works under the hood</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "The idempotency check must happen before any side effects — the order matters."
+  (whyNot "check idempotency after authorization" "If auth succeeds but the response is lost, the client retries. The key isn't stored yet, so you authorize again. Double charge.")
+  (how "SET NX + response cache" "SET NX the key with value 'processing'. If the key already existed, return the cached response. If new, process payment, then store the full response with 24h TTL. The 'processing' sentinel prevents races.")
+  (whatIf "Redis goes down during payment" "Fall through to the database — the ledger has a UNIQUE constraint on idempotency_key. Slower (DB round trip instead of Redis), but still correct.")
 }}
+  </div>
+</details>
 
-{{hint "why UUID per request, not client-generated?" "Clients must generate a fresh UUID for each distinct intent. Reusing a UUID for a different payment amount is a bug — we'd return the cached response from the first payment. Document this clearly: same key = same outcome, always."}}
+{{hint "why UUID per request, not client-generated?" "Clients must generate a fresh UUID for each distinct payment. Reusing a UUID for a different amount returns the cached response from the first payment. Same key = same outcome, always."}}
 
-{{hint "24h TTL is not arbitrary" "Card authorizations expire in 7 days, but practical retry windows are under 24h for all major payment SDKs. 24h balances memory cost: at 1000 TPS peak × 86400 seconds × ~200 bytes/key = ~17GB max RAM. Feasible on a Redis cluster with r6g.2xlarge nodes."}}
+{{hint "24h TTL is not arbitrary" "All major payment SDKs retry within 24h. Memory cost: 1000 TPS × 86400s × ~200 bytes/key = ~17GB max. Fits in a single Redis cluster node."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Likely interviewer questions for Phase 6</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Phase 6 interview triggers"
-  "What if the client sends the same idempotency key with a different amount?"
-  "Return 422 Unprocessable Entity with error 'idempotency_key_reuse'. Include the original request fingerprint (hash of original request body) in Redis alongside the response. If the new request body hash differs, reject — same key must always have same intent."
-  "How do you handle the response being too large to cache in Redis?"
-  "Cap response size at 4KB — strip verbose fields before caching. If the actual response exceeds 4KB, cache a summary with a pointer to the authoritative DB record. The GET /payments/{id} endpoint always reads from the DB as the source of truth."
+  "What if the client sends the same key with a different amount?"
+  "Return 422 with error 'idempotency_key_reuse'. Store a hash of the original request body alongside the response. If the new hash differs, reject. Same key = same intent, always."
+  "What if the cached response is too large for Redis?"
+  "Cap at 4KB — strip verbose fields. For larger responses, cache a summary with a pointer to the DB record. GET /payments/{id} always reads from the DB as source of truth."
 }}
+  </div>
+</details>
 
-{{mustKnow "Redis SET NX with 24h TTL for idempotency check — must happen before any side effects" "Sentinel value 'processing' stored first via SET NX; replaced with full response on completion" "If Redis is down, PostgreSQL UNIQUE(idempotency_key) constraint is the secondary guard" "Same idempotency key with different request body → 422 rejection (compare request body hashes)"}}
+{{mustKnow "Redis SET NX with 24h TTL — idempotency check must happen before any side effects" "'processing' sentinel stored first; replaced with full response on completion" "If Redis is down, PostgreSQL UNIQUE(idempotency_key) is the backup guard" "Same key + different request body → 422 rejection (compare body hashes)"}}
 
-{{phase 7 "Distributed Transactions (Saga Pattern)" "8 min"}}
+{{phase 7 "Saga Pattern (Distributed Transactions)" "8 min"}}
 
-{{say `I'll use the <strong>Saga pattern</strong> instead of two-phase commit. Here's why and how:
+{{say `I'll use the <strong>Saga pattern</strong> instead of two-phase commit (2PC):
 <ul>
-  <li><span class="hl-red">Why not <strong>2PC</strong> (Two-Phase Commit — a protocol where all participants must agree to either commit or rollback a transaction together):</span> bank APIs (Visa, Mastercard) don't support a prepare/commit protocol — they're external services you don't control</li>
-  <li><span class="hl-blue">Saga</span>: a sequence of local transactions, each publishing an event. On failure, compensating transactions undo prior steps in reverse order</li>
-  <li>Steps: <strong>Authorize → Reserve Funds → Capture → Settle</strong></li>
-  <li>Failure at Capture? Compensate: <strong>Release Reserve → Void Authorization</strong></li>
-  <li>Each compensating transaction must be <span class="hl">idempotent</span> — it may be retried multiple times</li>
+  <li><span class="hl-red">Why not 2PC:</span> bank APIs (Visa, Mastercard) don't support prepare/commit — they're external services you can't control</li>
+  <li><span class="hl-blue">Saga</span>: a chain of local transactions. Each step commits on its own. If a step fails, compensating transactions undo prior steps in reverse</li>
+  <li>Steps: <strong>Authorize → Reserve → Capture → Settle</strong></li>
+  <li>If Capture fails: <strong>Release Reserve → Void Authorization</strong></li>
+  <li>Every compensating transaction must be <span class="hl">idempotent</span> — the orchestrator retries on failure</li>
 </ul>`}}
 
 {{diagram "pay-saga-pattern"}}
 
-{{think "Choreography-based vs orchestration-based Saga — this distinction matters for payment systems."
-  (whyNot "choreography (event-driven Saga)" "Each service reacts to events from other services. For payments, debugging a failed Saga means tracing events across 4+ services with no single source of truth for which step we're on. Operational nightmare at 1000 TPS.")
-  (how "orchestration-based Saga" "A central Payment Orchestrator service owns the state machine. It explicitly calls each step and handles failures. The state machine state is stored in PostgreSQL — if the orchestrator crashes, it recovers by reading state on restart. Single place to debug.")
-  (whatIf "compensating transaction also fails" "Retry with exponential backoff: 1s, 2s, 4s, 8s... up to 1 hour. After 1 hour, move to a dead-letter queue and create an ops ticket. A human resolves it by manually issuing a refund or void. These should be <1 per 100K transactions.")
+<p>See {{fundLink "distributed/saga-pattern" "Saga Pattern"}} for the full theory. The key insight: unlike 2PC, Sagas work with any external API that has a compensating action (void, refund).</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Orchestration vs choreography Sagas</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "Choreography vs orchestration — this choice matters for payment systems."
+  (whyNot "choreography (event-driven Saga)" "Each service reacts to events. Debugging a failed payment means tracing events across 4+ services with no single source of truth. Operational nightmare at 1000 TPS.")
+  (how "orchestration-based Saga" "A central orchestrator owns the state machine. It calls each step and handles failures. State is stored in PostgreSQL — crash recovery reads state on restart. One place to debug.")
+  (whatIf "compensating transaction also fails" "Retry with exponential backoff up to 1 hour. After that, dead-letter queue + ops ticket. A human resolves it manually. Should be <1 per 100K transactions.")
 }}
+  </div>
+</details>
 
-{{hint "why Saga instead of 2PC?" "Two-phase commit requires all participants to implement the prepare/commit protocol. External bank APIs are black boxes — they expose <code>authorize</code> and <code>void</code>, not <code>prepare</code> and <code>commit</code>. Saga works with any external API that has a compensating action. See <a href='/fund/distributed/saga-pattern' hx-get='/fund/distributed/saga-pattern' hx-target='#detail' hx-push-url='true'>Saga Pattern</a> for the full theory."}}
+{{hint "why Saga instead of 2PC?" "Bank APIs are black boxes — they expose <code>authorize</code> and <code>void</code>, not <code>prepare</code> and <code>commit</code>. Saga works with any API that has a compensating action."}}
 
-{{hint "2PC coordinator SPOF" "In 2PC, if the coordinator crashes after sending 'prepare' but before sending 'commit', all participants are blocked waiting for a decision — indefinitely. Saga avoids this: each local transaction commits immediately, and compensation is a new transaction."}}
+{{hint "2PC coordinator is a single point of failure" "If the 2PC coordinator crashes after sending 'prepare' but before 'commit', all participants block indefinitely. Saga avoids this — each step commits immediately."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Likely interviewer questions for Phase 7</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Phase 7 interview triggers"
   "What is a compensating transaction and why must it be idempotent?"
-  "A compensating transaction undoes the effect of a prior step — void undoes authorize, release-reserve undoes reserve. It must be idempotent because the orchestrator retries on failure. Calling void twice must produce the same result as calling it once. Banks are generally idempotent for void/refund on the same transaction ID."
-  "How do you handle a Saga that is stuck mid-flight during a deployment?"
-  "The orchestrator persists state in PostgreSQL with the current step and status. On restart, it queries for all payments in 'processing' state older than 30 seconds and resumes from the last completed step. Restart safety is a first-class design requirement."
+  "It undoes a prior step — void undoes authorize, release-reserve undoes reserve. It must be idempotent because the orchestrator retries on failure. Calling void twice = same result as once."
+  "How do you handle a Saga stuck mid-flight during a deployment?"
+  "The orchestrator stores state in PostgreSQL. On restart, it queries for payments in 'processing' state >30s old and resumes from the last completed step."
 }}
+  </div>
+</details>
 
-{{caveat "2PC is fundamentally incompatible with external bank APIs — they expose authorize/void, not prepare/commit. Saying '2PC' in a payment system interview is a red flag. Always say Saga pattern."}}
+{{caveat "Saying '2PC' in a payment system interview is a red flag. Bank APIs don't support prepare/commit. Always say Saga pattern."}}
 
-{{mustKnow "Saga pattern over 2PC — bank APIs are external black boxes that don't support prepare/commit protocol" "Orchestration-based Saga (not choreography) — central orchestrator owns the state machine in PostgreSQL" "Compensating transactions must be idempotent — the orchestrator retries on failure" "If compensating transaction fails after retries, dead-letter queue + human ops ticket (<1 per 100K transactions)"}}
+{{mustKnow "Saga over 2PC — bank APIs don't support prepare/commit" "Use orchestration (not choreography) — one central service owns the state machine" "Compensating transactions must be idempotent — the orchestrator retries on failure" "Failed compensations → dead-letter queue + ops ticket (<1 per 100K transactions)"}}
 
 {{phase 8 "Fraud Detection" "5 min"}}
 
-{{say `Fraud detection runs synchronously before authorization — every payment scores before a card is charged:
+{{say `Fraud detection runs before every authorization — every payment gets a risk score before charging:
 <ul>
-  <li><strong>Feature extraction</strong>: amount, merchant_category, location delta, velocity (transactions in last hour), device fingerprint</li>
-  <li><strong>ML model</strong> (<span class="hl-blue">XGBoost</span>): outputs score <span class="hl">0–100</span> in <strong>&lt;50ms</strong></li>
-  <li>Score &lt;30: <span class="hl">approve immediately</span></li>
-  <li>Score 30–70: trigger <span class="hl-blue">3D Secure</span> (OTP to customer's phone)</li>
-  <li>Score &gt;70: <span class="hl-red">decline</span>, no authorization sent to bank</li>
-  <li>Real-time feature store in <strong>Redis</strong> — velocity counters updated on every transaction</li>
+  <li><strong>Features</strong>: amount, merchant category, location, velocity (transactions/hour), device fingerprint</li>
+  <li><strong>ML model</strong> (XGBoost): returns a score <span class="hl">0-100</span> in <strong>&lt;50ms</strong></li>
+  <li>Score &lt;30: <span class="hl">approve</span></li>
+  <li>Score 30-70: trigger <span class="hl-blue">3D Secure</span> (send OTP to customer's phone)</li>
+  <li>Score &gt;70: <span class="hl-red">decline</span> — don't even call the bank</li>
+  <li>Velocity counters live in <strong>Redis</strong> — updated on every transaction</li>
 </ul>`}}
 
 {{diagram "pay-fraud-detection"}}
 
-{{think "The fraud model must run in <100ms total — that's the budget before users notice payment latency."
-  (whyNot "batch fraud scoring (run nightly)" "Fraud is detected after the money has moved. A fraudster can make 100 transactions in the 24h window before the batch catches them. Real-time scoring catches the 3rd suspicious transaction, not the 101st.")
-  (how "velocity features in Redis" "INCR a Redis key per user per hour: velocity:user_id:YYYYMMDDHH. Expire after 2 hours. INCR is O(1) and atomic. At 1000 TPS, velocity updates add ~0.1ms per payment — negligible.")
-  (whatIf "fraud model is down" "Fail open: approve payments with a conservative threshold (equivalent to score 50 → require 3DS). Do not fail closed — declining all payments because fraud detection is down would cost more than the fraud itself.")
+<p>Velocity counters use {{fundLink "storage/redis" "Redis"}} INCR — O(1) and atomic. At 1000 TPS, velocity updates add ~0.1ms per payment.</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Why real-time scoring, and what if the model is down?</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "The fraud model must run in <100ms — that's the budget before users notice latency."
+  (whyNot "batch fraud scoring (run nightly)" "Fraud gets detected after the money moved. A fraudster makes 100 transactions before the batch catches them. Real-time scoring catches the 3rd suspicious one.")
+  (how "velocity features in Redis" "INCR a key per user per hour: velocity:user_id:YYYYMMDDHH. Expire after 2 hours. At 1000 TPS, adds ~0.1ms per payment.")
+  (whatIf "fraud model is down" "Fail open: approve with a conservative threshold (require 3DS for everything). Don't fail closed — declining all payments costs more than the fraud.")
 }}
+  </div>
+</details>
 
-{{hint "3D Secure shifts liability" "3D Secure (Visa Secure/Mastercard ID Check) is more than UX — it's a <strong>liability shift</strong>. If a customer completes 3DS and later disputes the charge, the card network (not the merchant) bears the chargeback liability. This is why 3DS for medium-risk transactions is worth the friction."}}
+{{hint "3D Secure shifts liability" "3D Secure isn't just UX — it's a <strong>liability shift</strong>. If a customer completes 3DS and later disputes the charge, the card network (not the merchant) pays the chargeback. That's why 3DS for medium-risk transactions is worth the friction."}}
 
-{{hint "feature store latency budget" "Total fraud decision budget: <span class='hl'>100ms</span>. Breakdown: feature fetch from Redis 2ms, model inference 30ms, decision logic 1ms, total ~33ms. Remaining 67ms is buffer for Redis latency spikes. Never call a synchronous ML inference service that takes >50ms."}}
+{{hint "feature store latency budget" "Total budget: <span class='hl'>100ms</span>. Breakdown: Redis fetch 2ms + model inference 30ms + decision 1ms = ~33ms. The remaining 67ms is buffer for latency spikes."}}
 
-{{mustKnow "Fraud scoring runs synchronously before authorization — every payment scores in <50ms (XGBoost)" "Score <30: approve, 30-70: trigger 3D Secure (OTP), >70: decline immediately" "If fraud model is down, fail open (not closed) — declining all payments costs more than the fraud" "3D Secure shifts chargeback liability from merchant to card network"}}
+{{mustKnow "Every payment gets a fraud score in <50ms before authorization" "Score <30: approve, 30-70: 3D Secure (OTP), >70: decline" "If fraud model is down, fail open — declining all payments costs more than the fraud" "3D Secure shifts chargeback liability from merchant to card network"}}
 
 {{phase 9 "Security & PCI DSS" "5 min"}}
 
-{{say `<strong>PCI-DSS</strong> (Payment Card Industry Data Security Standard — the security standard that governs how payment card data must be handled, stored, and transmitted) defines what we can and cannot store:
+{{say `<strong>PCI DSS</strong> (Payment Card Industry Data Security Standard) defines what we can and cannot store:
 <ul>
-  <li><span class="hl-red">NEVER store CVV/CVV2</span> — illegal under PCI DSS, even encrypted. Delete from memory after authorization</li>
-  <li><span class="hl-red">Never store raw card numbers</span> after initial tokenization</li>
-  <li><strong>Tokenization</strong>: real card number → opaque token via <span class="hl-blue">HSM</span> (Hardware Security Module)</li>
-  <li>Merchants store the token. The real card number lives only inside the HSM — hardware-isolated, not software</li>
-  <li><strong>TLS 1.2+</strong> required for all card data in transit. TLS 1.0/1.1 are explicitly prohibited</li>
-  <li>Annual PCI audit required; quarterly vulnerability scans</li>
+  <li><span class="hl-red">NEVER store CVV</span> — illegal even encrypted. Delete from memory after authorization</li>
+  <li><span class="hl-red">Never store raw card numbers</span> — replace with tokens immediately</li>
+  <li><strong>Tokenization</strong>: real card → opaque token via an <span class="hl-blue">HSM</span> (Hardware Security Module — dedicated hardware that stores keys and never exports them)</li>
+  <li>Merchants store tokens only. The real card number lives inside the HSM — hardware-isolated, impossible to extract</li>
+  <li><strong>TLS 1.2+</strong> required for all card data in transit</li>
 </ul>`}}
 
 {{diagram "pay-pci-dss"}}
 
-{{think "Why HSM instead of application-level encryption with AES-256?"
-  (whyNot "software AES-256 encryption for card numbers" "The encryption key must be stored somewhere — in a config file, environment variable, or secrets manager. A compromised server leaks both the encrypted data and the key. An HSM is hardware that will not export the key under any circumstances — even Stripe engineers cannot extract it.")
-  (how "tokenization flow" "Customer submits card in browser → JS tokenization library sends card directly to payment processor's servers (never touches merchant servers) → processor returns a token → merchant stores token → for subsequent charges, merchant sends token → processor looks up real card in HSM.")
-  (whatIf "HSM fails" "HSMs are clustered in active-active pairs with automatic failover. Hardware failure rate is ~0.1% per year. All tokenized data also has encrypted backups in a separate HSM cluster in a different region. Card number lookup RTO is <5 seconds.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Why HSM instead of software encryption?</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "Why HSM instead of application-level AES-256?"
+  (whyNot "software encryption for card numbers" "The key must live somewhere — config file, env var, secrets manager. A compromised server leaks both the encrypted data and the key. An HSM is hardware that will never export the key — even Stripe engineers can't extract it.")
+  (how "tokenization flow" "Customer enters card in browser → JS sends card directly to Stripe's servers (never touches merchant) → Stripe HSM stores card, returns token → merchant stores only the token.")
+  (whatIf "HSM fails" "HSMs run in active-active pairs with auto failover. Hardware failure rate is ~0.1%/year. Encrypted backups in a separate region. Recovery time <5 seconds.")
 }}
+  </div>
+</details>
 
-{{hint "PCI scope reduction" "The biggest PCI DSS win is reducing scope — if merchant servers never touch raw card data (because JS sends it directly to the processor), the merchant's PCI audit scope drops from SAQ D (hardest, 300+ controls) to SAQ A (simplest, 22 controls). This is why Stripe.js exists."}}
+{{hint "PCI scope reduction" "If merchant servers never touch raw card data (JS sends it directly to the processor), the audit scope drops from SAQ D (300+ controls) to SAQ A (22 controls). This is why Stripe.js exists."}}
 
-{{hint "CVV is never stored — by design" "CVV is used only for card-not-present authorization. After authorization, it must be purged from all systems. If you need to charge a card again (subscription), you cannot re-use the CVV — that's intentional. The token is sufficient for subsequent charges because the card was already verified once."}}
+{{hint "CVV is never stored — by design" "CVV is only for the first authorization. After that, it's purged from all systems. For repeat charges (subscriptions), the token is enough — the card was already verified."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Likely interviewer questions for Phase 9</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Phase 9 interview triggers"
-  "What is PCI DSS Level 1 and why does it matter?"
-  "PCI Level 1 applies to any entity processing more than 6M card transactions per year. Requirements include annual on-site audit by a QSA (Qualified Security Assessor), quarterly network scans, and penetration testing. Non-compliance results in fines of $5K–$100K/month and potential loss of card processing rights."
+  "What is PCI DSS Level 1?"
+  "Applies to anyone processing >6M card transactions/year. Requires annual on-site audit, quarterly network scans, and pen testing. Non-compliance = $5K-$100K/month in fines and potential loss of processing rights."
   "How does tokenization protect against a database breach?"
-  "A stolen database contains only tokens — meaningless without the HSM that maps tokens to real cards. The HSM is air-gapped hardware: it will process lookup requests but will not export its internal mapping table. Even a full database dump gives the attacker nothing usable."
+  "A stolen database contains only tokens — useless without the HSM. The HSM processes lookups but never exports its mapping table. A full database dump gives the attacker nothing."
 }}
+  </div>
+</details>
 
 {{caveat "Never store CVV/CVV2 — it is illegal under PCI DSS, even encrypted. This is a hard rule that interviewers will test. CVV is purged from memory immediately after authorization."}}
 

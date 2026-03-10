@@ -24,34 +24,36 @@
   (row "Out of scope" "Spell-check, semantic, NLU" "")
 )}}
 
-{{think "The key design tension is latency vs freshness. A pre-computed trie with top-K cached at every node gives O(1) lookup, but trie rebuilds lag by hours. Contrast with real-time Elasticsearch which is fresh but adds 20-40ms."
-  (whyNot "Elasticsearch for primary path" "Even at p50 Elasticsearch adds 15-20ms. At 290K QPS with network overhead, p99 blows past 100ms on cache miss. We use it only as fallback.")
-  (whatIf "viral query spikes — a celebrity tweet" "The 5-minute hot path update catches queries with >10K hits in a 5-min window and pushes them to Redis directly, bypassing the hourly rebuild.")
+{{think "The core tradeoff is speed vs freshness. A pre-built trie with the top results stored at every node gives instant lookups — but the trie is only rebuilt every hour, so new trending queries take time to appear."
+  (whyNot "Elasticsearch as the primary lookup" "Elasticsearch adds 15-20ms per query. At 290K QPS, that blows past our 100ms p99 target. We only use it as a fallback when the trie misses.")
+  (whatIf "a viral query spikes suddenly" "A separate 5-minute hot-path job detects bursts (>10K hits in 5 min) and pushes them straight to Redis, bypassing the hourly rebuild.")
 }}
 
-{{hint "fail-fast vs degrade" "Autocomplete is non-critical. If trie service is down, degrade to empty suggestions rather than blocking the search box. Users can still search — they just lose autocomplete."}}
+{{hint "fail-fast vs degrade" "Autocomplete is not essential to search. If the trie service is down, return empty suggestions instead of blocking the search box. Users can still type and search manually."}}
 
 {{triggerQs "Requirements Questions"
   "How do you define 'top 10' — top globally or top for this user?"
-  "Globally by default, blended with personal history. The global ranking uses a weighted score across popularity and recency. Personal blending shifts the score up to 30% based on that user's query history."
-  "What's the update latency requirement for new trending queries?"
-  "Hourly for the main trie rebuild. The hot-path updater catches viral queries in under 5 minutes by watching for query bursts in the Kafka stream and pushing directly to Redis."
+  "Globally by default, blended with the user's personal history. Global ranking uses popularity + recency. Personal blending can shift scores by up to 30%."
+  "What's the update latency for new trending queries?"
+  "The main trie rebuilds every hour. A separate hot-path job catches viral queries in under 5 minutes by watching Kafka for query bursts and pushing results straight to Redis."
   "Do we support prefix search across all languages?"
-  "We maintain separate tries per language code (en, es, zh, etc.). The client sends Accept-Language or the user's stored preference. This keeps trie sizes manageable — a single global trie would need Unicode normalization for every prefix."
+  "Yes — we keep a separate trie per language (en, es, zh, etc.). The client sends the language code. A single global trie would be too large and need expensive Unicode normalization on every prefix."
 }}
 
-{{caveat "Autocomplete is non-critical infrastructure. Never let it block the search box — if the service is down, degrade to empty suggestions. Users can always type and submit manually."}}
+{{caveat "Autocomplete is not critical infrastructure. Never let it block the search box — if the service is down, return empty suggestions. Users can always type and search manually."}}
 
 {{mustKnow "Sub-100ms p99 latency is the defining constraint — every design decision flows from this" "5B queries/day = 58K avg QPS, 290K peak — CDN caching is non-negotiable" "Autocomplete is a read-heavy, latency-sensitive, availability-first system — degrade gracefully, never block search" "Separate tries per language — a single global trie is too large and requires expensive Unicode normalization"}}
 
 {{phase 2 "API Design" "4 min"}}
 
-{{say `The autocomplete API is a read-heavy <strong>GET endpoint</strong> — cacheability is non-negotiable:
+{{say `The autocomplete API is a read-heavy <strong>GET endpoint</strong> — caching is essential:
 <ul>
-  <li>Every keystroke fires a request → <strong>CDN + reverse-proxy caching</strong> on the prefix+language combination is essential</li>
-  <li>Client debounces at <span class="hl">150ms</span> — reduces QPS by ~60% vs firing on every keypress</li>
-  <li>Write side is <strong>fire-and-forget</strong>: final submitted query is logged asynchronously to Kafka</li>
+  <li>Every keystroke fires a request, so we cache responses at the <strong>CDN</strong> by prefix + language</li>
+  <li>Client waits <span class="hl">150ms</span> between keystrokes before sending — cuts QPS by ~60%</li>
+  <li>Write side is <strong>fire-and-forget</strong>: the final submitted query is logged to Kafka in the background</li>
 </ul>`}}
+
+<p>The read path goes through {{fundLink "networking/cdn" "CDN"}} caching, so GET (not POST) is required — POST responses cannot be cached.</p>
 
 {{diagram "sa-api-design"}}
 
@@ -169,21 +171,21 @@
   </div>
 </div>
 
-{{think "Why GET and not POST for autocomplete? GET is idempotent and cacheable — the same prefix+lang always returns the same global top-10 (personalization is additive, blended client-side or at the service layer). POST cannot be cached by CDN or browser."
-  (whyNot "POST for autocomplete" "POST responses are never cached by CDN. At 290K QPS, without CDN caching of popular prefixes we'd need 5x more service capacity.")
-  (how "uid in GET request" "We include uid as a query param so personalization can be applied at the service layer. The uid is authenticated via the session token — the autocomplete service validates it but never logs it in raw query logs.")
+{{think "Why GET instead of POST? GET responses are cacheable by CDN and browser. The same prefix + language always returns the same global top-10. Personalization is blended at the service layer on top of the cached result."
+  (whyNot "POST for autocomplete" "POST responses are never cached by CDN. At 290K QPS, skipping CDN cache would require 5x more origin servers.")
+  (how "uid in GET request" "uid is a query param for personalization at the service layer. It's validated via session token but never logged in raw query logs.")
 }}
 
-{{hint "debounce on the client" "The client debounces keystrokes at 150ms. This reduces QPS by ~60% compared to firing on every keypress. At 290K peak QPS, without debounce we'd be looking at 700K QPS."}}
+{{hint "debounce on the client" "The client waits 150ms after the user stops typing before sending a request. This cuts QPS by ~60%. Without debounce, peak QPS would be ~700K instead of 290K."}}
 
 {{triggerQs "API Design Questions"
   "Why include latency_ms in the response?"
-  "It lets the client distinguish cache hits from cold lookups. If latency exceeds 80ms the client can show a spinner instead of a flash of stale content. It also feeds our p99 SLO dashboard without requiring distributed tracing on every request."
+  "It tells the client whether this was a fast cache hit or a slow lookup. If latency is high, the client shows a spinner. It also feeds our latency dashboard without needing distributed tracing on every request."
   "How do you prevent prefix enumeration attacks?"
-  "Rate limit by IP at the CDN layer: 200 requests per minute per IP. The uid is validated via JWT — an invalid uid gets global suggestions, not an error, so we don't leak whether a uid exists."
+  "Rate limit by IP at the CDN: 200 requests/min per IP. Invalid uid values just get global suggestions (not an error), so attackers can't probe whether a user ID exists."
 }}
 
-{{caveat "Using POST for autocomplete is a common mistake. POST responses are not CDN-cacheable — at 290K QPS you would need 5x more origin capacity. Always use GET for idempotent, cacheable read paths."}}
+{{caveat "Using POST for autocomplete is a common mistake. POST responses cannot be cached by CDN — at 290K QPS you'd need 5x more servers. Always use GET for read-only, cacheable endpoints."}}
 
 {{goodToKnow "Client debounce at 150ms cuts QPS by ~60% — mention this proactively to show you think about client-server cost holistically" "Including latency_ms in the response enables the client to show spinners vs instant results and feeds SLO dashboards without distributed tracing"}}
 
@@ -191,14 +193,24 @@
 
 {{phase 3 "Trie Structure" "6 min"}}
 
-{{say `The trie is the core data structure:
+{{say `The trie is the heart of the design:
 <ul>
-  <li>Every node stores its children and — critically — the <strong>top-K suggestions pre-computed</strong> at that prefix</li>
-  <li>Lookup is <span class="hl-blue">O(prefix_length)</span> navigation + <strong>O(1) result return</strong> — no subtree traversal needed</li>
-  <li>Storage: <span class="hl">~1.5 GB RAM</span> for the English trie — fits in L3 cache on a memory-optimized instance</li>
+  <li>Each node stores its children <strong>and</strong> the <strong>top 10 suggestions already computed</strong> for that prefix</li>
+  <li>Lookup: walk the trie character by character, then return the stored list — no need to search the subtree</li>
+  <li>The English trie fits in <span class="hl">~1.5 GB RAM</span> — small enough for a single server</li>
 </ul>`}}
 
+<p>A {{algoLink "trie" "Trie"}} is a tree where each node represents one character of a prefix. By pre-storing results at every node, we turn lookup into a simple walk down the tree.</p>
+
 {{diagram "sa-trie-structure"}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Trie Implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `class TrieNode:
     def __init__(self):
@@ -239,6 +251,9 @@ class Trie:
         node.top_k.append(s)
         node.top_k = sorted(node.top_k, key=lambda x: -x.score)[:k]`}}
 
+  </div>
+</details>
+
 {{table "Storage Estimate" (rows
   (row "Component" "Size" "Calculation")
   (row "Prefix nodes" "~3M" "avg 6-char queries, 26^1+...+26^6 ≈ 3M unique prefixes")
@@ -249,49 +264,66 @@ class Trie:
 )}}
 
 {{compare "Autocomplete Lookup" (options
-  (best "In-memory Trie with top-K at nodes" "O(prefix_len) traversal + O(1) result. 1.5GB RAM per language. 1-5ms lookup.")
-  (alt "Redis Sorted Sets per prefix" "ZREVRANGE is O(log N + K). Simpler ops, but 5-10ms per lookup. At 290K QPS, Redis becomes bottleneck.")
-  (nofit "Elasticsearch prefix query" "15-25ms per query. Fine for fallback, not for hot path at 290K QPS.")
+  (best "In-memory Trie with top-K at nodes" "Walk the prefix, return cached results. 1.5GB RAM. 1-5ms lookup.")
+  (alt "Redis Sorted Sets per prefix" "Simpler to operate, but 5-10ms per lookup. At 290K QPS, Redis becomes a bottleneck.")
+  (nofit "Elasticsearch prefix query" "15-25ms per query. OK as a fallback, too slow for the hot path.")
 )}}
 
-{{think "Why store top-K at every prefix node instead of traversing at query time?"
-  (whyNot "traversal at query time" "A DFS subtree traversal for prefix 'a' touches millions of nodes. Even with pruning, 5-10ms — 10x worse than pre-cached top-K.")
-  (how "top-K maintenance during build" "During the hourly rebuild, we process queries sorted by score descending and maintain a bounded list at each node using a min-heap of size K. Insert is O(K log K) per query per prefix character.")
+{{think "Why store top-K at every node instead of searching the subtree at query time?"
+  (whyNot "subtree traversal at query time" "Searching all nodes under prefix 'a' would touch millions of entries. Even with pruning, that's 5-10ms — 10x slower than returning a pre-stored list.")
+  (how "top-K is maintained during build" "During the hourly rebuild, we insert queries sorted by score and keep only the top 10 at each node. This costs extra time during build but makes lookups instant.")
 }}
 
-{{hint "why not a hash map?" "A hash map of prefix → top-K would work but uses 2-3x more memory due to key storage overhead. The trie shares prefix structure — the path to a node IS the prefix."}}
+{{hint "why not a hash map?" "A hash map of prefix → top-K would work but uses 2-3x more memory because every key stores the full prefix string. In a trie, the path to a node IS the prefix — no duplicate storage."}}
 
 {{triggerQs "Trie Structure Questions"
   "What happens if a query is longer than your trie depth?"
-  "We cap trie depth at 20 characters. Queries beyond that are truncated for indexing. In practice, 99.9% of autocomplete prefixes are under 15 chars — users rarely type full long queries before selecting."
+  "We cap trie depth at 20 characters — anything beyond that is truncated. In practice, 99.9% of autocomplete prefixes are under 15 chars because users select a suggestion before typing the full query."
   "How do you handle Unicode and non-Latin characters?"
-  "We normalize to Unicode NFC form and build per-language tries. For Chinese (zh), we index on pinyin AND character sequences. The trie node children map uses full Unicode code points as keys, not just ASCII — the 26-child assumption is only for estimation."
+  "Each language gets its own trie. We normalize text to Unicode NFC form. For Chinese, we index both pinyin and character sequences. Trie nodes use full Unicode code points as keys, not just 26 ASCII letters."
 }}
 
-{{collapseSection "Storage Estimation Math" `
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Storage Estimation Math</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 <ul>
-  <li>Average query length: 6 characters → unique prefix paths up to depth 6</li>
-  <li>26^1 + 26^2 + ... + 26^6 ≈ 3M unique prefix nodes (English, ASCII-only estimate)</li>
-  <li>Each node stores top-10 suggestions × 50 bytes = 500 bytes per node</li>
-  <li>3M nodes × 500 bytes = <strong>1.5 GB</strong> for the English trie</li>
-  <li>Non-Latin tries (zh, ja) are smaller due to fewer unique prefixes but larger character sets</li>
+  <li>Average query length: 6 characters, so unique prefix paths go up to depth 6</li>
+  <li>26^1 + 26^2 + ... + 26^6 = ~3M unique prefix nodes (English, ASCII-only estimate)</li>
+  <li>Each node stores 10 suggestions x 50 bytes = 500 bytes per node</li>
+  <li>3M nodes x 500 bytes = <strong>1.5 GB</strong> for the English trie</li>
+  <li>Non-Latin tries (zh, ja) are smaller — fewer unique prefixes but larger character sets</li>
 </ul>
-`}}
+  </div>
+</details>
 
-{{caveat "Never traverse the subtree at query time to find top-K results. A DFS for prefix 'a' touches millions of nodes and takes 5-10ms. Pre-computing top-K at each node during build gives O(1) result return."}}
+{{caveat "Never search the subtree at query time. For a short prefix like 'a', that means scanning millions of nodes (5-10ms). Pre-computing top-K at each node during the build step gives instant results."}}
 
 {{mustKnow "Pre-compute top-K at every trie node — this is THE core insight; lookup is O(prefix_length) + O(1) result" "Trie shares prefix structure, using 2-3x less memory than an equivalent flat hash map of prefix → top-K" "~1.5 GB RAM for the English trie — fits in L3 cache on memory-optimized instances" "Trie depth capped at 20 chars — 99.9% of autocomplete prefixes are under 15 characters"}}
 
 {{phase 4 "Architecture" "6 min"}}
 
-{{say `Three-layer request path:
+{{say `Three layers handle requests, each faster than the next:
 <ul>
-  <li><strong>CDN</strong> (CloudFront) — caches top-prefix GET responses; <span class="hl">~90%</span> of requests never reach origin</li>
-  <li><strong>Redis L1 cache</strong> — top <span class="hl">10K</span> most-queried prefixes, <span class="hl">60s TTL</span>; ~8ms on hit</li>
-  <li><strong>In-memory trie</strong> — <span class="hl">1.5 GB</span> per language, rebuilt hourly from aggregated query counts; ~12ms on lookup</li>
+  <li><strong>CDN</strong> — caches popular prefix responses at the edge; <span class="hl">~90%</span> of requests never reach our servers</li>
+  <li><strong>Redis cache</strong> — stores the top <span class="hl">10K</span> prefixes with a <span class="hl">60s TTL</span>; ~8ms on hit</li>
+  <li><strong>In-memory trie</strong> — <span class="hl">1.5 GB</span> per language, rebuilt every hour; ~12ms on lookup</li>
 </ul>`}}
 
+<p>The {{fundLink "networking/cdn" "CDN"}} layer is the biggest win. {{fundLink "storage/redis" "Redis"}} catches the remaining popular prefixes. The trie handles everything else.</p>
+
 {{diagram "sa-architecture"}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Request Handler Implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `# Autocomplete service request handler
 class AutocompleteHandler:
@@ -321,18 +353,21 @@ class AutocompleteHandler:
 
         return suggestions[:10]`}}
 
-{{think "Should we have one trie per language or one trie for all languages?"
-  (whyNot "single combined trie" "A combined trie for en+es+zh+... would be 8-10GB. It can't be kept hot in CPU cache. Per-language tries are 300MB-1.5GB each, fit in L3 cache, and allow independent update schedules.")
-  (whatIf "a language trie server crashes" "We have 50 replicas per language. Load balancer detects failure via health check in &lt;10s and stops routing. The remaining 49 replicas absorb the load — each handles ~6K QPS, headroom is ~30%.")
+  </div>
+</details>
+
+{{think "One trie per language, or one big trie for all languages?"
+  (whyNot "single combined trie" "A combined trie for all languages would be 8-10GB — too large to keep hot in CPU cache. Per-language tries are 300MB-1.5GB each, fit in memory, and can be updated independently.")
+  (whatIf "a trie server crashes" "With 50 replicas, the load balancer detects the failure in ~10s and routes around it. The remaining 49 replicas absorb the extra traffic with ~30% headroom.")
 }}
 
-{{hint "CDN for autocomplete" "CloudFront caches GET /autocomplete?q=new+y&lang=en for 60 seconds. The top 10K prefixes represent ~90% of traffic. This cuts origin QPS from 290K to ~29K."}}
+{{hint "CDN for autocomplete" "CloudFront caches GET responses by prefix + language for 60 seconds. The top 10K prefixes cover ~90% of traffic, cutting origin QPS from 290K to ~29K."}}
 
 {{triggerQs "Architecture Questions"
   "How many trie service replicas do you need?"
-  "290K peak QPS. CDN absorbs 90%, leaving 29K QPS to origin. Each trie service handles ~6K QPS (benchmarked at 1.5GB RAM, 4-core). So we need 5 replicas with 2x headroom = 10 replicas per language. For 3 major language tries running on the same fleet: 30 replicas total."
-  "What's the read path latency breakdown?"
-  "CDN hit: 5ms. Redis hit: 8ms (2ms network + 6ms serialization). Trie lookup: 12ms (in-memory, L3 cache). Elasticsearch fallback: 40-60ms. Total p99 on trie path including personalization blend: 18-22ms."
+  "290K peak QPS, CDN absorbs 90%, leaving 29K to origin. Each trie server handles ~6K QPS. That's 5 replicas minimum, doubled for headroom = 10 per language. For 3 languages on a shared fleet: ~30 replicas total."
+  "What's the latency breakdown per layer?"
+  "CDN hit: 5ms. Redis hit: 8ms. Trie lookup: 12ms. Elasticsearch fallback: 40-60ms. Total p99 on the trie path with personalization: 18-22ms."
 }}
 
 {{goodToKnow "Per-language tries allow independent update schedules — English trie can rebuild hourly while smaller language tries rebuild every 4 hours" "Elasticsearch is sized for 30K QPS fallback traffic only — not primary path capacity"}}
@@ -341,14 +376,22 @@ class AutocompleteHandler:
 
 {{phase 5 "Data Collection" "5 min"}}
 
-{{say `Two query signal sources:
+{{say `Two sources of data tell us what people are searching for:
 <ul>
-  <li><strong>Submitted queries</strong> — user hits Search; the stronger signal; counts toward trie scores</li>
-  <li><strong>Autocomplete clicks</strong> — user selected a suggestion; secondary signal for ranking calibration</li>
+  <li><strong>Submitted queries</strong> — the user hit Search; this is the strong signal for ranking</li>
+  <li><strong>Suggestion clicks</strong> — the user picked one of our suggestions; a weaker but useful signal</li>
 </ul>
-Batch-log to Kafka → <strong>aggregate hourly</strong> (Flink/Spark) → feed the trie rebuild job. Privacy: uid is daily-salted SHA-256 before logging.`}}
+Both are logged to Kafka, aggregated every hour, and fed into the trie rebuild. For privacy, user IDs are hashed before logging.`}}
 
 {{diagram "sa-data-collection"}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Data Collection Pipeline Code</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `# Query log event (published to Kafka topic: query-logs)
 {
@@ -378,21 +421,24 @@ def rebuild_trie(hourly_counts, historical_counts):
     new_trie.build(merged)
     return new_trie`}}
 
-{{think "Privacy: we must not log raw user IDs or PII (Personally Identifiable Information — any data that can identify a specific person) in query logs, but we need uid for personalization."
-  (whyNot "logging raw uid" "GDPR (General Data Protection Regulation) Article 25 requires privacy by design. A raw uid + query combination is PII. Data breach would expose user search history.")
-  (how "daily salted hash" "uid_hash = SHA256(uid + date_salt). The salt rotates daily, making it impossible to link records across days. Personalization data lives separately in the user's Redis hash with explicit TTL.")
+  </div>
+</details>
+
+{{think "We need user IDs for personalization, but logging raw user IDs alongside queries is a privacy risk."
+  (whyNot "logging raw uid" "A raw uid + query pair is personally identifiable data. A data breach would expose every user's search history. GDPR requires privacy by design.")
+  (how "daily salted hash" "We hash the uid with a salt that changes every day: SHA256(uid + date_salt). This means you can't link a user's queries across different days. Personalization data is stored separately in Redis with a TTL.")
 }}
 
-{{hint "min frequency filter" "We drop queries with fewer than 10 submissions per hour. This eliminates ~99% of long-tail one-off queries, reducing trie size from 100M nodes to ~3M, and filters PII (unique queries like 'my ssn is 123')."}}
+{{hint "min frequency filter" "We drop queries with fewer than 10 submissions per hour. This removes ~99% of one-off queries, shrinks the trie from 100M to ~3M nodes, and filters out accidental PII (like someone typing 'my ssn is 123')."}}
 
 {{triggerQs "Data Collection Questions"
-  "How do you handle the hot path for trending queries?"
-  "A separate Flink job watches 5-minute windows. Any query crossing 10K hits in 5 minutes is flagged as trending. The job writes directly to Redis with a 60-minute TTL, bypassing the hourly rebuild. Trie servers read trending scores from Redis and blend them into suggestions."
+  "How do you handle trending queries that appear between hourly rebuilds?"
+  "A separate Flink job watches 5-minute windows. If a query gets 10K+ hits in 5 minutes, it's flagged as trending and pushed straight to Redis (60-min TTL). The trie service checks Redis on every request and blends trending results in."
   "What's your Kafka partition strategy?"
-  "Partition by lang+geo (e.g., 'en-US'). This ensures all English-US queries go to the same consumer group partition, making hourly aggregation a local reduce with no shuffle. We use 50 partitions per topic — handles 300K events/second at 10KB average batch."
+  "Partition by language + region (e.g., 'en-US'). All queries for a given language go to the same partition, so hourly aggregation is a simple local count — no expensive cross-partition shuffle. 50 partitions handles 300K events/sec."
 }}
 
-{{caveat "Never log raw user IDs with query text — this is PII under GDPR. Use a daily-salted SHA-256 hash of the uid so records cannot be linked across days."}}
+{{caveat "Never log raw user IDs alongside query text — that combination is personal data under GDPR. Use a daily-salted hash so records can't be linked across days."}}
 
 {{collapseSection "Hot Path Trending Detection Details" `
 <ul>
@@ -408,14 +454,22 @@ def rebuild_trie(hourly_counts, historical_counts):
 
 {{phase 6 "Ranking Algorithm" "5 min"}}
 
-{{say `Ranking score is a weighted blend of three signals:
+{{say `Each suggestion gets a score from three signals:
 <ul>
-  <li><span class="hl">70%</span> <strong>global popularity</strong> — log-scaled historical submission count; ensures broadly useful suggestions</li>
-  <li><span class="hl">20%</span> <strong>recency boost</strong> — exponential decay from peak day; surfaces trending topics</li>
-  <li><span class="hl">10%</span> <strong>personalization</strong> — meaningful but capped; prevents filter-bubble effect</li>
+  <li><span class="hl">70%</span> <strong>global popularity</strong> — how many people search for this query (log-scaled so mega-popular queries don't dominate)</li>
+  <li><span class="hl">20%</span> <strong>recency boost</strong> — recent trending queries score higher, then fade over ~7 days</li>
+  <li><span class="hl">10%</span> <strong>personalization</strong> — a small boost for queries this specific user has searched before</li>
 </ul>`}}
 
 {{diagram "sa-ranking-algorithm"}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Ranking Score Implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `# Ranking score formula
 def compute_score(
@@ -446,18 +500,21 @@ def compute_score(
 # user_affinity = 0.6  (searched 3 of last 10 queries)
 # score = 0.7×1.0 + 0.2×0.82 + 0.1×0.6 = 0.764`}}
 
-{{think "Why use log scale for popularity rather than raw count?"
-  (whyNot "raw count normalization" "A query with 50M hits vs 1M hits shouldn't be 50x 'better'. The marginal value of additional popularity decreases. Log scale compresses the long tail — a 10M count query and a 50M count query are both 'very popular'.")
-  (whatIf "a new trending query has zero historical count" "The hot-path updater detects the burst, assigns a synthetic base_count equal to 1-hour submissions × 24 to estimate daily volume, and injects it directly into Redis. The trie picks it up on next poll (60s TTL).")
+  </div>
+</details>
+
+{{think "Why log scale instead of raw counts for popularity?"
+  (whyNot "raw count normalization" "A query with 50M searches isn't 50x better than one with 1M. Both are very popular. Log scale compresses this range so top queries don't dominate every prefix.")
+  (whatIf "a brand-new trending query has zero history" "The hot-path job detects the burst and estimates daily volume from the 1-hour spike (count x 24). It injects a synthetic score into Redis so the query appears in suggestions within minutes.")
 }}
 
-{{hint "language-aware scoring" "Query counts are stored per language. 'El tiempo' in Spanish has a separate count from 'the time' in English. This prevents cross-language popularity bleeding."}}
+{{hint "language-aware scoring" "Query counts are stored per language. 'El tiempo' in Spanish has a separate count from 'the time' in English — they never bleed into each other's rankings."}}
 
 {{triggerQs "Ranking Questions"
-  "How do you prevent gaming — e.g., bots submitting fake queries?"
-  "Three layers: rate limiting at CDN (200 req/min per IP), uid validation at the log endpoint (only authenticated sessions are counted), and a frequency anomaly detector in the aggregation job that flags query counts 5-sigma above historical baseline for manual review."
-  "How do you handle seasonality — 'valentines day gifts' spikes every February?"
-  "We store a per-query seasonal baseline: the average count for that query in the same calendar week across prior years. The recency boost formula uses days_since_seasonal_baseline instead of absolute days. This means 'valentines day gifts' naturally resurfaces each year."
+  "How do you prevent bots from gaming the rankings?"
+  "Three layers: rate limiting at CDN (200 req/min per IP), only authenticated sessions count toward ranking, and an anomaly detector in the aggregation job flags counts that are 5x above normal for manual review."
+  "How do you handle seasonal queries like 'valentines day gifts'?"
+  "We track a per-query seasonal baseline — the average count for that query during the same week in prior years. The recency boost uses days since the seasonal baseline, so 'valentines day gifts' naturally resurfaces every February."
 }}
 
 {{goodToKnow "Log-scale popularity prevents mega-queries from dominating — 10M and 50M count queries are both just 'very popular'" "Seasonal baseline tracking resurfaces recurring queries (e.g., 'valentines day gifts') without manual intervention"}}
@@ -466,14 +523,23 @@ def compute_score(
 
 {{phase 7 "Trie Updates" "5 min"}}
 
-{{say `Updating a live trie is dangerous — <span class="hl-red">never mutate shared data while serving 290K QPS</span>:
+{{say `<span class="hl-red">Never edit a trie while it's serving live traffic</span> — that would corrupt results. Instead, use a <strong>blue/green swap</strong>:
 <ul>
-  <li>Use a <strong>blue/green pattern</strong>: build new trie in a background thread, verify sanity checks, then atomically swap the pointer</li>
-  <li>Traffic sees either old or new trie — <strong>never a partial state</strong></li>
-  <li>Old trie is reference-counted and freed ~5 seconds after swap, once in-flight requests complete</li>
+  <li>Build a completely new trie in a background thread</li>
+  <li>Run sanity checks on the new trie (do common prefixes still return good results?)</li>
+  <li>Swap the pointer atomically — requests instantly see the new trie</li>
+  <li>The old trie is freed after in-flight requests finish (~5 seconds)</li>
 </ul>`}}
 
 {{diagram "sa-trie-update"}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Blue/Green Swap Implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `# Blue/green trie swap (runs every hour in background thread)
 class TrieManager:
@@ -508,26 +574,31 @@ class TrieManager:
 # kubectl rollout: 5 replicas updated at a time, 30s between batches
 # Max unavailable: 0 (always 50 replicas serving)`}}
 
-{{think "Do we rebuild the full trie every hour or do incremental updates?"
-  (whyNot "incremental trie updates" "Incremental updates to a shared trie require fine-grained locking or a CRDT structure. Either adds 20-40% latency overhead on the read path. Full rebuild in 60s on a background goroutine is simpler and correctness is easier to verify.")
-  (whatIf "rebuild job fails mid-way" "The current trie keeps serving. The rebuild is in an isolated goroutine — a panic is caught, logged, and the next hourly job is scheduled. We alert on 2 consecutive failures and fall back to the previous snapshot stored in S3.")
+  </div>
+</details>
+
+{{think "Full rebuild every hour, or incremental updates?"
+  (whyNot "incremental updates" "Incremental changes to a live trie need complex locking, which slows down every read by 20-40%. A full rebuild in a background thread takes 60s and is much simpler to get right.")
+  (whatIf "the rebuild job crashes mid-way" "The current trie keeps serving unchanged. The crash is logged, the next hourly rebuild is scheduled, and after 2 consecutive failures we alert on-call and fall back to the last good snapshot from S3.")
 }}
 
-{{hint "memory pressure during rebuild" "During the 60s rebuild window, memory briefly holds both old and new trie — 3GB peak for a 1.5GB trie. Ensure nodes have at least 4GB RAM. The old trie is freed within 5s of the swap."}}
+{{hint "memory during rebuild" "During the 60-second rebuild, both old and new trie exist in memory — 3GB peak for a 1.5GB trie. Make sure servers have at least 4GB RAM. The old trie is freed within 5 seconds of the swap."}}
 
-{{caveat "Never mutate a trie that is actively serving traffic. Concurrent readers seeing a partially-updated trie will return corrupted or incomplete results. Always use blue/green swap with an atomic pointer assignment."}}
+{{caveat "Never edit a trie that's serving live traffic. Readers seeing a half-updated trie get corrupted results. Always build a new trie separately and swap the pointer atomically."}}
 
 {{mustKnow "Blue/green pattern: build new trie in background, sanity check, then atomic pointer swap — never partial state" "Full rebuild every hour is simpler and safer than incremental updates (which need fine-grained locking)" "Memory peaks at 2x trie size during rebuild (old + new) — size instances accordingly" "Sanity checks before swap: verify top queries for common prefixes, node count within 20% of previous"}}
 
 {{phase 8 "Data Model" "4 min"}}
 
-{{say `Three data stores:
+{{say `Three data stores, each for a different purpose:
 <ul>
-  <li><strong>Kafka</strong> — raw query logs, <span class="hl">7-day retention</span>, ~5TB/day; feeds aggregation pipeline</li>
-  <li><strong>Redshift / BigQuery</strong> — aggregated counts, 5-year retention; source of truth for trie rebuild</li>
-  <li><strong>Redis</strong> — user personalization history (90-day TTL) + trending queries (60-min TTL)</li>
+  <li><strong>Kafka</strong> — raw query logs, kept for <span class="hl">7 days</span> (~5TB/day); feeds the aggregation pipeline</li>
+  <li><strong>Redshift / BigQuery</strong> — aggregated query counts, kept for 5 years; the source of truth for trie rebuilds</li>
+  <li><strong>Redis</strong> — user history (90-day TTL) and trending queries (60-min TTL); fast lookups for personalization</li>
 </ul>
-The trie lives entirely in <strong>service memory</strong> — rebuilt from aggregated counts on startup. Cold start: <span class="hl">~90 seconds</span> to download + deserialize from S3 snapshot.`}}
+The trie itself lives entirely in <strong>server memory</strong>. On startup, a server downloads the latest trie snapshot from S3 — takes about <span class="hl">90 seconds</span>.`}}
+
+<p>{{fundLink "storage/redis" "Redis"}} handles the real-time data (personalization + trending), while the data warehouse stores long-term counts for trie rebuilds.</p>
 
 {{diagram "sa-data-model"}}
 
@@ -539,6 +610,14 @@ The trie lives entirely in <strong>service memory</strong> — rebuilt from aggr
   (row "Trending queries (hot path)" "Redis Sorted Set" "60 min TTL" "~1MB for top 10K trending")
   (row "Trie snapshots" "S3 (serialized)" "30 days" "~500MB compressed per language")
 )}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Data Model Schema</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "sql" `-- query_counts table (Redshift/BigQuery — offline analytics)
 CREATE TABLE query_counts (
@@ -554,12 +633,15 @@ CREATE TABLE query_counts (
 -- WHERE lang='en' AND hour_bucket >= NOW() - INTERVAL '30 days'
 -- GROUP BY query ORDER BY SUM(count) DESC LIMIT 1000000`}}
 
-{{think "Why not store trie in a database and query it on demand?"
-  (whyNot "database-backed trie lookup" "Any database hop adds 5-15ms network latency. At 290K QPS that's 290K × 15ms = 4.35M ms of added latency budget per second. The whole point of the in-memory trie is zero network hops on the hot path.")
-  (how "trie persistence" "Serialize the trie to Protocol Buffers, gzip it (~500MB for English), upload to S3. On service restart, download from S3 (takes 90s) and deserialize. This is the cold start path — production restarts are rolling so most replicas stay warm.")
+  </div>
+</details>
+
+{{think "Why not store the trie in a database instead of memory?"
+  (whyNot "database-backed trie lookup" "Every database call adds 5-15ms of network latency. At 290K QPS, that adds up fast. The entire point of the in-memory trie is zero network hops on the hot path.")
+  (how "trie persistence" "We serialize the trie to a compressed file (~500MB) and upload to S3. On restart, a server downloads it (~90s). In production, restarts are rolling so most servers stay warm.")
 }}
 
-{{hint "Redis Hash for user history" "We store uid → {query: click_count} as a Redis Hash. HGETALL takes &lt;1ms for 100-entry hashes. We cap at 100 queries with a background LRU eviction job running every 15 minutes."}}
+{{hint "Redis Hash for user history" "Each user's search history is stored as a Redis Hash: uid → {query: click_count}. Reading the full hash takes under 1ms for 100 entries. We cap at 100 queries per user with a background cleanup job."}}
 
 {{collapseSection "Trie Serialization and Cold Start" `
 <ul>
@@ -575,14 +657,22 @@ CREATE TABLE query_counts (
 
 {{phase 9 "Personalization" "4 min"}}
 
-{{say `Personalization <strong>blends</strong> user query history into the global top-10 — it doesn't replace global results:
+{{say `Personalization <strong>blends</strong> the user's search history into the global top-10 — it never replaces global results:
 <ul>
-  <li>A query the user typed recently gets a <span class="hl">0.3 boost multiplier</span> on the global score</li>
-  <li>Personal-only queries (not in global top-10) are added with a <span class="hl">0.3 × affinity</span> score cap</li>
-  <li>Blending is <strong>ephemeral</strong> — computed at query time, never stored; prevents filter-bubble feedback loops</li>
+  <li>If the user has searched for something before, that suggestion gets a <span class="hl">30% score boost</span></li>
+  <li>Queries from the user's history that aren't in the global top-10 can be added with a capped score</li>
+  <li>The blended results are computed on the fly and <strong>never stored</strong> — this prevents filter-bubble effects</li>
 </ul>`}}
 
 {{diagram "sa-personalization"}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Personalization Blending Code</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `# Personalization blend at query time
 def blend_personal(
@@ -623,12 +713,15 @@ def blend_personal(
 
     return sorted(blended, key=lambda x: -x.score)[:10]`}}
 
+  </div>
+</details>
+
 {{think "Should personalization happen at the CDN or at the service?"
-  (whyNot "personalization at CDN" "CDN caches are keyed by URL. Adding uid to the cache key defeats the purpose — we'd get a unique cache entry per user × prefix. At 100M users × 1K popular prefixes = 100B cache entries. Not viable.")
-  (how "CDN + service split" "CDN caches global top-10 (no uid in key). Service fetches from CDN, then blends personalization in &lt;2ms using the user's Redis hash. Total: 5ms CDN + 8ms Redis = 13ms vs 8ms without personalization. Acceptable overhead.")
+  (whyNot "personalization at CDN" "CDN caches by URL. If we add uid to the cache key, every user gets their own cache entry: 100M users x 1K prefixes = 100B entries. That makes the CDN useless.")
+  (how "CDN + service split" "CDN caches global top-10 (no uid in key). The service then blends personalization from Redis in under 2ms. Total: 5ms CDN + 8ms Redis = 13ms. Acceptable overhead.")
 }}
 
-{{hint "privacy: never log personal blend results" "The personalized suggestions shown to a user are computed ephemerally and never stored. We only store the user's query history (what they submitted), not what suggestions we showed them — avoids filter bubble feedback loops."}}
+{{hint "privacy: never log blended results" "We only store what the user submitted, not what suggestions we showed them. The blended results are computed on the fly and discarded — this prevents a feedback loop where the system keeps recommending the same things."}}
 
 {{triggerQs "Personalization Questions"
   "What if a user searches from two devices — do histories merge?"

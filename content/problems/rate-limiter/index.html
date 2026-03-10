@@ -91,6 +91,8 @@
 
 {{phase 2 "Capacity Estimation" "3 min"}}
 
+<p>The throughput target determines which storage backend works. At our scale, only {{fundLink "storage/redis" "Redis"}} delivers sub-millisecond latency — {{fundLink "storage/dynamodb" "DynamoDB"}} is eliminated before we even compare features.</p>
+
 {{say `Throughput math first — it drives the storage and topology choice:
 <ul>
   <li><strong>&lt;1K req/s</strong>: In-process counters (HashMap) work fine — no external store needed. Single server, no distribution problem yet.</li>
@@ -371,6 +373,8 @@ Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</
 
 {{phase 4 "Algorithm Deep Dive" "10 min"}}
 
+<p>Four algorithms: {{algoLink "token-bucket" "Token Bucket"}}, Sliding Window Counter, Fixed Window, and Sliding Window Log. Each trades off accuracy, memory, and burst tolerance differently.</p>
+
 {{say "Four algorithms to compare — each trades off accuracy, memory usage, and burst tolerance differently:"}}
 
 {{diagram "rl-algorithm-comparison"}}
@@ -378,6 +382,14 @@ Without Lua = <strong>3 round trips × 0.1ms = <span class='hl'>0.3ms overhead</
 {{diagram "rl-token-bucket"}}
 
 {{hint "why Lua for token bucket?" "Token bucket requires a &lt;span class='hl-blue'>read-modify-write&lt;/span> sequence: read current tokens → calculate refill → check if allowed → write new count. Without &lt;span class='hl-blue'>atomicity&lt;/span>, two concurrent requests both read token count = 1, both see 'allowed', both decrement — &lt;span class='hl-red'>2 requests get through when only 1 token remained&lt;/span>. Lua runs the entire sequence as a single atomic operation on Redis — no other command can interleave."}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Token Bucket Implementation (Python + Redis Lua)</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `import time
 import redis
@@ -433,6 +445,9 @@ class TokenBucket:
         }
 `}}
 
+  </div>
+</details>
+
 {{key "Token Bucket allows bursts up to the bucket capacity while enforcing an average rate. This is ideal for APIs where occasional bursts are acceptable but sustained abuse is not."}}
 
 {{diagram "rl-sliding-window"}}
@@ -443,6 +458,14 @@ class TokenBucket:
   <li>Weight the previous window by how much of it overlaps the current window: <code>prev_count × (1 - elapsed/window)</code></li>
   <li>Error is typically <span class='hl'>&lt; 1%</span> for real-world (non-perfectly-periodic) traffic patterns</li>
 </ul>`}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Sliding Window Counter Implementation (Python + Redis Lua)</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `import time
 import redis
@@ -501,6 +524,9 @@ class SlidingWindowCounter:
             "limit": limit
         }
 `}}
+
+  </div>
+</details>
 
 {{diagram "rl-fixed-window-burst"}}
 
@@ -561,6 +587,8 @@ class SlidingWindowCounter:
 
 {{phase 5 "Architecture (Hop-by-Hop)" "8 min"}}
 
+<p>Rate limiting enforcement spans three tiers, from the edge ({{fundLink "networking/load-balancing" "Load Balancing"}} layer) down to in-process middleware. A {{fundLink "distributed/circuit-breaker" "Circuit Breaker"}} handles Redis failure at each tier.</p>
+
 {{say `Three placement tiers — each trades latency for flexibility:
 <ul>
   <li><strong>API Gateway / edge</strong> — coarsest limits, lowest latency; catches DDoS before it reaches your fleet</li>
@@ -579,6 +607,14 @@ Production systems use all three: <strong>gateway</strong> for coarse DDoS prote
 {{diagram "rl-architecture"}}
 
 {{diagram "rl-hop-by-hop"}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Rate Limit Middleware Implementation (FastAPI)</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -620,6 +656,9 @@ async def rate_limit_middleware(request: Request, call_next):
 
     return response
 `}}
+
+  </div>
+</details>
 
 {{think "Placement of the rate limiter affects both latency overhead and control granularity. The closer to the edge, the lower the blast radius but the less context you have about the request."
   (whyNot "rate limit only at the API gateway" "Gateway-only rate limiting lacks context about account state — it cannot distinguish a free-tier user from an enterprise user making the same request. It also cannot enforce per-endpoint limits that differ based on business logic. Gateway catches DDoS; application code enforces business rules.")
@@ -670,6 +709,8 @@ async def rate_limit_middleware(request: Request, call_next):
 
 {{phase 6 "Distributed Rate Limiting" "8 min"}}
 
+<p>Distributed counting across a Redis Cluster requires {{algoLink "consistent-hashing" "Consistent Hashing"}} (via hash tags) to co-locate keys on the same shard for Lua atomicity.</p>
+
 {{say `The hard problem is distributed counting — accurate limits across multiple app servers, Redis nodes, and regions:
 <ul>
   <li><strong>Multiple app servers + single Redis</strong> — easy; Lua scripts guarantee atomicity on the shared store</li>
@@ -682,6 +723,14 @@ async def rate_limit_middleware(request: Request, call_next):
 {{hint "why is multi-region the hardest sub-problem?" "Single-region is easy — all app servers share one Redis cluster; Lua atomicity handles concurrent writes. Multi-region breaks this: a synchronous cross-region Redis read adds &lt;span class='hl'>50–150ms&lt;/span> depending on geography. At &lt;strong>500K req/s&lt;/strong>, that's an extra &lt;span class='hl'>25,000–75,000 seconds&lt;/span> of latency per second fleet-wide — a complete non-starter on the hot path."}}
 
 {{diagram "rl-multi-region"}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Atomic Sliding Window Lua Script (Sorted Set variant)</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `# Redis Lua script for atomic sliding window counter
 # Executed as single atomic operation - no race conditions
@@ -713,6 +762,9 @@ redis.call('PEXPIRE', key, window * 1000)
 return {1, limit - count - 1, 0}
 """
 `}}
+
+  </div>
+</details>
 
 {{think "Multi-region rate limiting forces a trade-off between accuracy and latency — you cannot have both."
   (whyNot "global Redis with cross-region sync" "A synchronous read to a primary Redis in us-east-1 from a request in ap-southeast-1 adds 150-200ms per check. At 500K req/sec, that is 75,000 seconds of added latency per second across the fleet. This is a non-starter for any real-time API.")
@@ -831,6 +883,14 @@ At our stated <span class='hl'>500K req/s</span>, configuration optimized for ra
 
 {{diagram "rl-elasticache-topology"}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">ElastiCache Redis Configuration (Rate Limiting Optimized)</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+
 {{code "text" `# ElastiCache Redis Configuration for Rate Limiting
 
 # Instance: cache.r6g.large (2 vCPU, 13 GB memory)
@@ -856,6 +916,9 @@ activedefrag: yes                 # Defragment memory proactively
 # 13 GB per node x 3 shards = 39 GB total (7.8x headroom)
 # 100K ops/sec per node x 3 shards = 300K ops/sec
 `}}
+
+  </div>
+</details>
 
 {{think "Redis configuration for rate limiting is fundamentally different from Redis used as a cache or as a primary data store. The key insight: rate limit counters are ephemeral by design."
   (whyNot "enable AOF persistence for durability" "Rate limit counters reset every window duration (typically 60s). If Redis restarts, counters rebuild naturally from incoming requests within one window. AOF adds disk I/O on every write — at 500K writes/sec, that is 500K fsyncs/sec, adding 1-5ms latency. You gain nothing because the data is already ephemeral.")

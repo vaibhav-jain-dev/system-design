@@ -23,18 +23,18 @@
   (row "Sharing & permissions"    "View, comment, edit access levels"         "P2")
 )}}
 
-{{think "The core challenge: two users type at position 50 simultaneously. User A inserts 'hello' → position 50 shifts to 55. User B's operation says 'insert at 50' — but now position 50 is in the middle of 'hello'. Without transformation, the document gets corrupted. Operational Transformation solves this by adjusting operation positions as they arrive."
-  (whyNot "last-write-wins for concurrent edits" "LWW discards changes silently. If User A and User B both edit simultaneously and A's change wins, B's entire edit is lost — and B sees no indication of it. For a word processor, this is catastrophic. Users expect collaborative editing to merge, not overwrite.")
-  (whatIf "network partition during concurrent editing" "Both users keep editing on their local copies. When the partition heals, the server reconciles operations using OT or CRDT. Neither user loses work — the merge algorithm produces a consistent result. This is the core promise of collaborative editing.")
+{{think "The core challenge: two users type at position 50 at the same time. User A inserts 'hello' — position 50 shifts to 55. User B's edit still says 'insert at 50', which is now wrong. Without correction, the document gets corrupted. OT fixes this by adjusting positions as edits arrive."
+  (whyNot "last-write-wins for concurrent edits" "LWW silently discards one user's changes. If A and B both edit at the same time and A wins, B's edit is gone with no warning. For a word processor, this is unacceptable — users expect merging, not overwriting.")
+  (whatIf "network partition during concurrent editing" "Both users keep editing locally. When the connection comes back, the server merges operations using OT or CRDT. Neither user loses work.")
 }}
 
-{{hint "OT vs CRDTs — the fundamental choice" "<strong>OT</strong> (<span class='hl-blue'>Operational Transformation</span> — Google Docs approach): operations are transformed at the server to account for concurrent edits, requires a central authority, lower memory overhead. <strong>CRDTs</strong> (<span class='hl-blue'>Conflict-free Replicated Data Types</span> — Figma approach): a data structure whose operations are mathematically commutative, meaning any two operations produce the same result regardless of order; works peer-to-peer, but higher memory overhead per character (~50-100 bytes vs ~1 byte for plain text). Google Docs uses OT; Apple Notes, Figma, and newer systems prefer CRDTs."}}
+{{hint "OT vs CRDTs — the fundamental choice" "<strong>OT</strong> (Operational Transformation — Google Docs): server adjusts positions of concurrent edits, needs a central server, low memory. <strong>CRDTs</strong> (Conflict-free Replicated Data Types — Figma): edits are commutative (order doesn't matter), works peer-to-peer, but uses <span class='hl'>50-100x more memory</span> per character. Google Docs uses OT; Figma and newer systems prefer CRDTs."}}
 
 {{triggerQs "Requirements clarifications"
   "How many simultaneous users per document should we support?"
-  "Design for 100 active editors. At 100 users each generating 5 keystrokes/second, that's 500 operations/second per document. The OT server must transform each operation against all concurrent operations — O(N²) in the worst case. For 100 users, that's 10,000 transform operations/second per document — feasible on a single server with in-memory state."
+  "Design for 100 active editors. At 100 users × 5 keystrokes/sec = 500 ops/sec per document. OT transforms each op against concurrent ones — O(N²) worst case. For 100 users: 10,000 transforms/sec, feasible on a single server with in-memory state."
   "Do we need to support rich text (bold, images) or just plain text?"
-  "Start with rich text (like Google Docs) — it's more realistic. Rich text operations include insert, delete, retain, and attribute changes (bold, italic, heading). The OT algorithm must handle all operation types. Plain text is simpler but rarely the final requirement in interviews."
+  "Start with rich text (like Google Docs). Rich text ops include insert, delete, retain, and attribute changes (bold, italic). The OT algorithm handles all types. Plain text is simpler but rarely the final ask in interviews."
 }}
 
 {{mustKnow
@@ -166,7 +166,9 @@
   </div>
 </div>
 
-{{hint "why WebSocket over HTTP long-polling?" "Long-polling: client sends request → server holds it until data available → client immediately sends next request. Creates N concurrent HTTP requests for N clients. WebSocket: one persistent TCP connection per client. At 100 clients × 5 ops/sec = 500 messages/sec, WebSocket handles this with 1 connection per client vs 500 HTTP requests/sec. Also: WebSocket has lower latency (no HTTP headers per message)."}}
+<p>Real-time ops flow over {{fundLink "networking/websockets" "WebSockets"}} — one persistent connection per client instead of repeated HTTP requests.</p>
+
+{{hint "why WebSocket over HTTP long-polling?" "Long-polling: client sends request, server holds it until data is ready, client immediately sends another. Creates N concurrent HTTP requests for N clients. WebSocket: one persistent TCP connection per client. At 100 clients × 5 ops/sec = 500 messages/sec, WebSocket uses 1 connection per client vs 500 HTTP requests/sec. Lower latency too (no HTTP headers per message)."}}
 
 {{caveat "The revision field in every WebSocket message is essential — without it, the server cannot determine which concurrent operations to transform against. A missing or stale revision causes silent document corruption or forces a full resync."}}
 
@@ -186,6 +188,14 @@
 </ul>`}}
 
 {{diagram "collab-data-model"}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Full SQL Schema</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "sql" `-- Documents table (minimal metadata)
 CREATE TABLE documents (
@@ -235,10 +245,24 @@ CREATE TABLE active_sessions (
     PRIMARY KEY (doc_id, user_id)
 );`}}
 
-{{think "The revision number is the key concurrency primitive. Each operation has a unique (doc_id, revision) pair. When two users submit operations concurrently, both claim the same revision. The server serializes them: first one wins that revision, second gets the next revision with its ops transformed. The UNIQUE constraint enforces exactly-once revision assignment."
-  (whyNot "store document as a single JSON blob, update in-place" "Concurrent updates to a single JSON blob require row-level locking — only one user can write at a time. At 100 simultaneous editors, 99 are always waiting. Also: no history, no ability to undo specific operations. The append-only operation log is the foundation of both collaboration and history.")
-  (how "snapshot compaction works" "Every 1000 operations (or every 10 minutes of activity), replay all operations since last snapshot → save the result as a new snapshot. New clients load the snapshot + operations since snapshot (at most ~1000 ops) instead of potentially millions of historical operations. Snapshots are stored in S3 for large documents.")
+  </div>
+</details>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Revision Numbers & Snapshot Compaction</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+
+{{think "The revision number is the key concurrency tool. Each operation gets a unique (doc_id, revision) pair. When two users submit at the same time, both claim the same revision. The server picks one as the winner, transforms the other, and assigns it the next revision."
+  (whyNot "store document as a single JSON blob, update in-place" "A single JSON blob needs row-level locking — only one user can write at a time. With 100 editors, 99 are always waiting. Also: no history, no undo. The append-only operation log is the foundation of both collaboration and version history.")
+  (how "snapshot compaction works" "Every 1000 ops (or every 10 minutes), replay all ops since last snapshot and save a new snapshot. New clients load snapshot + recent ops (~1000 max) instead of replaying millions of historical ops.")
 }}
+
+  </div>
+</details>
 
 {{mustKnow
   "Operation log is append-only and immutable — the single source of truth for all edits"
@@ -256,6 +280,14 @@ CREATE TABLE active_sessions (
 </ul>`}}
 
 {{diagram "collab-ot-algorithm"}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">OT Transform Implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `# Operational Transformation core implementation
 # Operations are lists of: retain(n), insert(str), delete(n)
@@ -276,13 +308,13 @@ def transform(op1: list, op2: list) -> tuple[list, list]:
         op_b = op2[i2] if i2 < len(op2) else None
 
         if op_a and op_a.get('insert'):
-            # Insert in op1 → shift op2's position by len(insert)
+            # Insert in op1 — shift op2's position by len(insert)
             op1_prime.append(op_a)
             op2_prime.append({'retain': len(op_a['insert'])})
             i1 += 1
 
         elif op_b and op_b.get('insert'):
-            # Insert in op2 → shift op1's position by len(insert)
+            # Insert in op2 — shift op1's position by len(insert)
             op2_prime.append(op_b)
             op1_prime.append({'retain': len(op_b['insert'])})
             i2 += 1
@@ -292,7 +324,6 @@ def transform(op1: list, op2: list) -> tuple[list, list]:
             min_len = min(op_a['retain'], op_b['retain'])
             op1_prime.append({'retain': min_len})
             op2_prime.append({'retain': min_len})
-            # Adjust remaining lengths
             op1[i1] = {'retain': op_a['retain'] - min_len} if op_a['retain'] > min_len else None
             op2[i2] = {'retain': op_b['retain'] - min_len} if op_b['retain'] > min_len else None
             if op1[i1] is None: i1 += 1
@@ -322,7 +353,10 @@ class OTServer:
             self.broadcast(doc_id, transformed_op, new_revision, exclude_user=client_op['user_id'])
             return new_revision`}}
 
-{{hint "why one lock per document?" "OT requires strict serialization: operations applied in a specific order, each transforming against all prior ops. If two operations were applied concurrently without coordination, you'd need to transform them against each other after the fact — complex and error-prone. One lock per document ensures operations arrive in a total order. At 100 editors × 5 ops/sec = 500 ops/sec per document, the lock is held for microseconds — no contention."}}
+  </div>
+</details>
+
+{{hint "why one lock per document?" "OT needs strict ordering: each op transforms against all prior ops. Without a lock, two ops could be applied at the same time and you'd need to reconcile them after the fact — error-prone. One lock per document gives you a total order. At 500 ops/sec per document, the lock is held for microseconds — no real contention."}}
 
 {{diagram "collab-crdt-comparison"}}
 
@@ -332,12 +366,23 @@ class OTServer:
   (nofit "Last-Write-Wins" "Simple but loses concurrent edits silently — unacceptable for collaborative editing")
 )}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">OT Complexity & Edge Cases</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+
 {{triggerQs "OT deep-dives"
   "What's the complexity of OT transformation?"
-  "O(N) where N is the number of concurrent operations since the client's revision. At 100 users × 5 ops/sec, the server might transform against 50-500 pending ops. Each transformation is O(L) where L is document length — typically O(1) for small ops. Total: O(N×L) per operation. At worst case (100 users all submitting simultaneously), this is 100 transforms, each O(document_size) — still sub-millisecond for typical documents."
+  "O(N) where N = concurrent ops since the client's revision. At 100 users × 5 ops/sec, the server transforms against 50-500 pending ops. Each transform is O(L) where L = document length. Worst case (100 users submitting at once): 100 transforms — still sub-millisecond for typical documents."
   "What happens if two users delete the same text simultaneously?"
-  "OT handles this: if User A deletes characters 5-10 and User B also deletes characters 5-10, after transformation, User B's operation becomes a no-op (those characters are already gone). The document remains consistent — neither gets an error, the result is that the text is deleted once."
+  "OT handles this: if A and B both delete characters 5-10, after transformation B's op becomes a no-op (those characters are already gone). The document stays consistent — text is deleted once, no error."
 }}
+
+  </div>
+</details>
 
 {{mustKnow
   "OT transform function takes two concurrent ops and returns transformed versions — both application orders produce the same final state"
@@ -346,7 +391,7 @@ class OTServer:
   "Simultaneous deletes of the same text become no-ops after transformation — no error, no data loss"
 }}
 
-{{caveat "OT's 'intention preservation' is imperfect: if User A appends to a word and User B deletes that word, OT preserves position but not semantic intent. Google Docs addresses this with the Jupiter protocol that tracks character identity, not just position."}}
+{{caveat "OT's 'intention preservation' is imperfect: if User A appends to a word and User B deletes that word, OT preserves position but not meaning. Google Docs handles this with the Jupiter protocol, which tracks character identity, not just position."}}
 
 {{phase 5 "High-Level Architecture" "10 min"}}
 
@@ -360,12 +405,25 @@ class OTServer:
 
 {{diagram "collab-architecture"}}
 
-{{think "The architecture is fundamentally different from stateless REST APIs. The OT server for a document must be one specific node (or at most a primary with replicas). Document routing: consistent hashing assigns doc_id → OT server node. All WebSocket connections for that document route to that node. When a node fails, its documents are reassigned to other nodes (with a brief reconciliation from the operation log)."
-  (whyNot "stateless OT — any server can handle any operation" "Stateless OT requires loading the full operation history on every request and re-transforming from scratch. For a document with 100,000 operations, this is 100,000 transformations per new op. The stateful approach keeps the current document state and pending op queue in memory — transformations are against the small set of unacknowledged ops only.")
-  (whatIf "the OT server for a document crashes with 10 unsaved operations" "Operations are written to Postgres (durable) before broadcasting. On failover, the new OT server for this document loads the last snapshot + all ops from Postgres to reconstruct state. The 10 ops in memory that weren't flushed — those users will resend them on reconnect (clients buffer unacknowledged ops). The operation log is append-only: worst case, duplicate ops are detected by (doc_id, client_id) and deduplicated.")
+<p>Document routing uses {{algoLink "consistent-hashing" "Consistent Hashing"}} to assign each doc_id to a specific OT server node. Storage uses Postgres for the operation log, {{fundLink "storage/redis" "Redis"}} for presence data, and S3 for large snapshots.</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Stateful Architecture & Failover</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+
+{{think "This architecture is fundamentally different from stateless REST APIs. The OT server for a document must be one specific node. Consistent hashing assigns doc_id to an OT server. All WebSocket connections for that document route to that node. When a node fails, its documents are reassigned (with a brief reconciliation from the operation log)."
+  (whyNot "stateless OT — any server can handle any operation" "Stateless OT means loading the full operation history on every request and re-transforming from scratch. For a document with 100K operations, that's 100K transformations per new op. The stateful approach keeps current state in memory — transforms only against the small set of unacknowledged ops.")
+  (whatIf "the OT server crashes with 10 unsaved operations" "Operations are written to Postgres before broadcasting. On failover, the new OT server loads the last snapshot + all ops from Postgres. The 10 in-memory ops that weren't flushed — clients resend them on reconnect (they buffer unacknowledged ops). Duplicates are detected by (doc_id, client_id).")
 }}
 
-{{hint "connection gateway separation" "The connection gateway (WebSocket → OT server message routing) is separate from the OT server. This allows WebSocket connections to survive OT server restarts — the connection stays up, and the gateway just updates its routing table to point to the new OT server. Users experience a brief hiccup (operations queued during failover) not a full disconnect."}}
+  </div>
+</details>
+
+{{hint "connection gateway separation" "The connection gateway (WebSocket routing) is separate from the OT server. This lets WebSocket connections survive OT server restarts — the gateway just updates its routing table. Users see a brief hiccup (ops queued during failover), not a full disconnect."}}
 
 {{mustKnow
   "Each document has exactly ONE OT server at any time — consistent hashing assigns doc_id to a specific node"
@@ -373,7 +431,7 @@ class OTServer:
   "Connection gateway is separate from OT server — WebSocket connections survive OT server restarts"
 }}
 
-{{goodToKnow "Clients buffer unacknowledged operations locally. On OT server crash, the new server reconstructs state from Postgres (snapshot + op log), and clients resend buffered ops on reconnect. Deduplication via (doc_id, client_id) prevents double-application."}}
+{{goodToKnow "Clients buffer unacknowledged ops locally. On OT server crash, the new server rebuilds state from Postgres (snapshot + op log), and clients resend buffered ops on reconnect. Dedup via (doc_id, client_id) prevents double-application."}}
 
 {{phase 6 "Conflict Resolution at Scale" "8 min"}}
 
@@ -411,6 +469,16 @@ class OTServer:
   <li>Cursor updates broadcast via WebSocket to all editors — never persisted to Postgres</li>
 </ul>`}}
 
+<p>Cursor positions and presence are stored in {{fundLink "storage/redis" "Redis"}} with a short TTL — this data is ephemeral and never needs to survive a restart.</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Presence Implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+
 {{code "python" `# Presence: store in Redis, not Postgres — ephemeral by design
 def update_cursor(doc_id: str, user_id: str, position: int):
     key = f"presence:{doc_id}:{user_id}"
@@ -429,7 +497,10 @@ def update_cursor(doc_id: str, user_id: str, position: int):
         'color': get_user_color(user_id)
     }))`}}
 
-{{hint "cursor position transformation" "When another user inserts text before your cursor, your cursor appears to jump. The client adjusts cursor positions locally: when a remote insert arrives at position P with length L, all cursors at position >P shift right by L. This is the same transformation logic as OT — applied to cursor positions. No server round-trip needed for cursor adjustment."}}
+  </div>
+</details>
+
+{{hint "cursor position transformation" "When another user inserts text before your cursor, your cursor shifts right. The client handles this locally: remote insert at position P with length L shifts all cursors at position > P right by L. Same OT logic, applied to cursor positions. No server round-trip needed."}}
 
 {{mustKnow
   "Presence is ephemeral — stored in Redis with 30-second TTL, never persisted to Postgres"
@@ -449,7 +520,7 @@ def update_cursor(doc_id: str, user_id: str, position: int):
   <li>Worst case: 1000 offline ops × 500 server ops since disconnect = 500,000 transforms — bounded and fast</li>
 </ul>`}}
 
-{{hint "why IndexedDB for offline buffer?" "localStorage is synchronous and limited to 5 MB. IndexedDB is async, supports large storage, and survives browser crashes. Operations accumulated offline can be gigabytes of keystrokes. The IndexedDB store acts as a <strong>WAL</strong> (Write-Ahead Log — a durability mechanism where changes are written to a log before being applied, so they can be replayed after a crash): operations are written before sending to server. On ack, delete from IndexedDB. On crash, resend from IndexedDB."}}
+{{hint "why IndexedDB for offline buffer?" "localStorage is synchronous and capped at 5 MB. IndexedDB is async, handles large storage, and survives browser crashes. It acts as a local <strong>WAL</strong> (Write-Ahead Log): ops are written before sending to server. On ack, delete from IndexedDB. On crash, resend from IndexedDB."}}
 
 {{mustKnow
   "Offline ops buffered in IndexedDB (async, large storage, crash-safe) — not localStorage (sync, 5MB limit)"
@@ -457,7 +528,7 @@ def update_cursor(doc_id: str, user_id: str, position: int):
   "Worst-case transform cost on reconnect: O(offline_ops x server_ops) — bounded and typically sub-second"
 }}
 
-{{caveat "If the user's revision falls before the oldest retained operation in the log (30+ days offline), incremental OT merge is impossible. The server falls back to sending a full snapshot and presenting offline edits as a conflict copy requiring manual merge."}}
+{{caveat "If the user was offline for 30+ days and their revision is older than the oldest retained operation, incremental OT merge is impossible. The server sends a full snapshot and presents offline edits as a conflict copy requiring manual merge."}}
 
 {{phase 9 "Access Control & Sharing" "5 min"}}
 
@@ -471,7 +542,7 @@ def update_cursor(doc_id: str, user_id: str, position: int):
   <li><strong>Viewer:</strong> read-only, can see presence but not cursor positions</li>
 </ul>`}}
 
-{{hint "suggestions mode vs direct editing" "Commenter permission enables 'suggesting' not 'editing' — operations are marked as suggestions, not applied directly. The owner/editor accepts or rejects suggestions. Implementation: suggestion ops are stored with status='suggested' in the operation log. When accepted: status becomes 'applied'. When rejected: status becomes 'rejected' and the inverse op is applied. This requires no changes to the OT algorithm — just a flag on each op."}}
+{{hint "suggestions mode vs direct editing" "Commenters use 'suggesting' mode — ops are stored with status='suggested', not applied directly. Editors accept or reject. Accepted: status becomes 'applied'. Rejected: inverse op is applied. No changes to the OT algorithm needed — just a flag on each op."}}
 
 {{mustKnow
   "Four permission levels: owner, editor, commenter, viewer — same model as Google Docs"
@@ -496,7 +567,7 @@ def update_cursor(doc_id: str, user_id: str, position: int):
   (row "Archive"       ">1 year"            "S3 Glacier, daily snapshots only")
 )}}
 
-{{hint "named version snapshots" "Named versions bypass the retention policy — they're never GC'd. A user who names a version 'Published draft v1' can restore it 5 years later. Implementation: named_versions table with doc_id + revision + snapshot_content. The snapshot is materialized at naming time and stored durably (S3), independent of the operation log retention."}}
+{{hint "named version snapshots" "Named versions bypass the retention policy — never garbage collected. A snapshot is saved at naming time and stored in S3, independent of the operation log. Users can restore 'Published draft v1' even years later."}}
 
 {{mustKnow
   "Version history is free — replay the append-only operation log to reconstruct any past state"
@@ -504,7 +575,7 @@ def update_cursor(doc_id: str, user_id: str, position: int):
   "Named versions are never garbage collected — the snapshot is materialized and stored durably at naming time"
 }}
 
-{{goodToKnow "Named version snapshots are stored independently in S3, decoupled from the operation log retention policy. This means a user can restore 'Published draft v1' even 5 years later, regardless of whether the fine-grained operation history has been GC'd."}}
+{{goodToKnow "Named version snapshots live in S3, decoupled from the operation log retention. A user can restore a named version years later, even if the fine-grained op history has been garbage collected."}}
 
 {{phase 11 "Scaling & Performance" "5 min"}}
 

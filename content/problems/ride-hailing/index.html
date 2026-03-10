@@ -12,12 +12,12 @@ Does that align?`}}
 
 {{diagram "rh-requirements"}}
 
-{{think "The two hardest subproblems are (1) geospatial driver lookup under real-time mutation load, and (2) keeping dispatch stateless so any service instance can handle any ride without coordination. Everything else — payments, ratings, surge math — is interesting but not novel."
-  (whyNot "building a custom spatial index" "Redis GEO is backed by sorted sets with geohash encoding. O(log N) inserts and O(N) radius queries. Production-proven at Uber/Grab scale. Roll your own only if you need polygon queries, not radius.")
-  (whatIf "1M drivers go online simultaneously at 7am" "Each driver sends a GEOADD + status update. Redis handles 1M writes in ~10 seconds across a cluster. The spike is absorbed because each write is independent and O(log N).")
+{{think "Two hard subproblems: (1) finding nearby drivers from millions of moving locations, and (2) keeping the matching service stateless so any server can handle any ride. Everything else (payments, ratings, surge) is standard."
+  (whyNot "building a custom spatial index" "Redis GEO uses sorted sets with geohash encoding — O(log N) inserts and radius queries out of the box. Battle-tested at Uber/Grab scale. Only build custom if you need polygon queries.")
+  (whatIf "1M drivers go online at once (morning rush)" "Each driver sends one GEOADD + status update. Redis handles 1M writes in ~10s across a cluster — each write is independent and O(log N), so they don't block each other.")
 }}
 
-{{hint "scope the hard problems" "Matching latency and live tracking are the two unique challenges — everything else (payments, ratings) is commodity. State your focus explicitly so the interviewer knows you know where the hard problems are."}}
+{{hint "scope the hard problems" "Matching and live tracking are the two unique challenges. Payments and ratings are standard. Tell the interviewer upfront where the hard problems are."}}
 
 {{table "Requirements Summary" (rows
   (row "Requirement" "Target")
@@ -33,9 +33,9 @@ Does that align?`}}
   "What if a driver is at the boundary between two city regions?"
   "We use overlapping geo cells — each region has a 500m buffer. A driver near a boundary is indexed in both cells. Matching service queries both cells and deduplicates by driver_id before scoring."
   "How do you handle drivers who don't have the app open?"
-  "Only drivers in 'available' status with a location update within the last 30 seconds are included in the matching pool. Redis <strong>TTL</strong> (Time-To-Live — duration before a key auto-deletes; here used as a heartbeat mechanism) on driver location keys auto-expires stale entries at 30s."
+  "Only drivers marked 'available' with a location update in the last 30 seconds are in the matching pool. We set a <strong>TTL</strong> (auto-expiry timer) of 30s on each driver's location key in Redis — if they stop sending updates, the key disappears and they drop out automatically."
   "Do you need to store every GPS location update?"
-  "Hot data (last known position) lives in Redis GEO with 30s TTL. Append-only trip path is written to Cassandra for audit and ETA model training. We don't store inter-ride location pings."
+  "Last known position lives in Redis GEO with 30s TTL (hot data). The full trip path is appended to Cassandra for audit and ETA model training. We don't store location pings between rides."
 }}
 
 {{caveat "Don't scope too broadly — scheduled rides, driver onboarding, and payment processing are each full system design problems. Explicitly exclude them or the interviewer will expect you to cover them."}}
@@ -47,11 +47,13 @@ Does that align?`}}
 {{say `Three API groups:
 <ul>
   <li><strong>Rider APIs</strong> — REST over HTTPS: request ride, poll status, cancel</li>
-  <li><strong>Driver APIs</strong> — <span class="hl-blue">WebSocket</span> (bidirectional persistent connection — unlike HTTP which opens a new connection per request, WebSocket keeps one connection open for both sending and receiving): drivers push location AND receive ride offers — bidirectional traffic requires a persistent connection</li>
+  <li><strong>Driver APIs</strong> — <span class="hl-blue">WebSocket</span> (a persistent two-way connection — unlike HTTP where the client must ask each time, WebSocket lets both sides send data anytime): drivers push GPS AND receive ride offers over one connection</li>
   <li><strong>Internal APIs</strong> — service-to-service: trigger matching, geospatial query, ETA calculation</li>
 </ul>`}}
 
 {{diagram "rh-api-design"}}
+
+<p>Drivers connect via {{fundLink "networking/websockets" "WebSocket"}} for real-time bidirectional communication.</p>
 
 <div class="api-doc">
   <div class="api-view-tabs">
@@ -234,12 +236,12 @@ Does that align?`}}
   </div>
 </div>
 
-{{think "WebSocket vs HTTP polling for driver location: drivers send 250 bytes every 4 seconds. HTTP polling means 125K TCP handshakes/sec across 500K active drivers. WebSocket persistent connections pay the handshake cost once and amortize it over hours."
-  (whyNot "SSE for driver connections" "SSE is unidirectional server→client. Drivers need to both push location AND receive offers. WebSocket is the correct abstraction for bidirectional low-latency communication.")
-  (whatIf "driver's WebSocket disconnects mid-ride" "Driver app auto-reconnects with exponential backoff (1s, 2s, 4s). Server side, ride is in 'in_progress' state — no action needed on disconnect. Location gap is handled by map-matching interpolation.")
+{{think "Why WebSocket? Drivers send 250 bytes every 4 seconds. With HTTP, that means 125K new TCP connections/sec across 500K drivers. WebSocket opens one connection and reuses it for hours."
+  (whyNot "SSE (Server-Sent Events)" "SSE only sends data from server to client. Drivers need to both push GPS and receive offers — that requires two-way communication, which is exactly what WebSocket does.")
+  (whatIf "driver's WebSocket disconnects mid-ride" "App auto-reconnects with backoff (1s, 2s, 4s). The ride stays in 'in_progress' on the server — no action needed. The short GPS gap is filled in by snapping to the road network.")
 }}
 
-{{hint "why WebSocket not REST for drivers" "Drivers push 1 location update every 4 seconds. REST would require a new TCP connection each time — 125K connections/sec at 500K drivers. WebSocket amortizes the handshake. Also needed for server-push of ride offers."}}
+{{hint "why WebSocket not REST for drivers" "Drivers push GPS every 4 seconds. REST = a new TCP connection each time = 125K connections/sec at 500K drivers. WebSocket reuses one connection. Plus the server needs to push ride offers back — REST can't do that."}}
 
 {{triggerQs "API design questions"
   "How do you handle idempotent ride requests?"
@@ -256,14 +258,24 @@ Does that align?`}}
 
 {{phase 3 "Ride Flow" "5 min"}}
 
-{{say `Six ride states — every transition is an atomic write to PostgreSQL + a Kafka event:
+{{say `Six ride states — each transition writes to PostgreSQL and publishes a Kafka event atomically:
 <ul>
   <li><strong>REQUESTED → MATCHED → ARRIVING → IN_PROGRESS → COMPLETED</strong> (happy path)</li>
-  <li><strong>CANCELLED</strong> accessible from REQUESTED or MATCHED (before pickup)</li>
-  <li>Dispatch loop is <strong>intentionally stateless</strong> — any matching service instance can handle any ride; all state lives in PostgreSQL + Redis</li>
+  <li><strong>CANCELLED</strong> — can happen from REQUESTED or MATCHED (before pickup only)</li>
+  <li>The matching loop is <strong>stateless</strong> — any server can handle any ride because all state lives in PostgreSQL + Redis, not in memory</li>
 </ul>`}}
 
 {{diagram "rh-ride-flow"}}
+
+<p>State changes fan out via {{fundLink "messaging/message-queues" "message queues"}} (Kafka) to billing, ratings, and analytics consumers.</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Matching Service Implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `# Matching service — stateless, can run N replicas
 class RideMatchingService:
@@ -293,10 +305,13 @@ class RideMatchingService:
             return True
         return False`}}
 
-{{think "Why is the dispatch loop stateless? If matching service instance A crashes after offering a driver but before recording acceptance, instance B must be able to pick up the ride. This only works if all state is in Postgres + Redis, not in-memory."
-  (whyNot "in-process state machine for matching" "If the process crashes mid-offer, the ride is stuck. Kafka consumer groups with at-least-once delivery + idempotent state transitions mean any instance can resume from the last committed state.")
-  (whatIf "driver accepts but Postgres write fails" "The offer is considered rejected. Postgres is the source of truth. Kafka event is only published after a successful DB write. Driver is re-offered on the next matching attempt.")
+{{think "Why stateless matching? If server A crashes after offering a driver but before recording the acceptance, server B must be able to pick up the ride. This only works if all state lives in Postgres + Redis — nothing in memory."
+  (whyNot "keeping ride state in memory" "If the process crashes mid-offer, the ride is stuck forever. With Kafka consumer groups + idempotent DB writes, any server can resume from the last saved state.")
+  (whatIf "driver accepts but the Postgres write fails" "The offer is treated as rejected. Postgres is the source of truth — we only publish the Kafka event after the DB write succeeds. The driver gets re-offered on the next attempt.")
 }}
+
+  </div>
+</details>
 
 {{hint "why 15s driver timeout" "15 seconds balances driver attention (they're on the road) against rider frustration. Uber uses 12–15s. After timeout, the system moves to the next ranked driver. No penalty to driver for the first rejection."}}
 
@@ -319,18 +334,20 @@ class RideMatchingService:
 
 {{diagram "rh-architecture"}}
 
+<p>The tracking plane uses {{fundLink "storage/redis" "Redis"}} GEO for driver positions, with {{fundLink "networking/load-balancing" "load balancing"}} across stateless API and matching workers.</p>
+
 {{compare "Location Store" (options
-  (best "Redis GEO" "O(log N) GEOADD, O(N log N) GEORADIUS, 30s TTL auto-expires stale drivers. Proven at Grab/Lyft scale.")
-  (alt "Postgres PostGIS" "Full ACID, complex polygon queries — but too slow for 1M writes/min of driver location updates.")
-  (nofit "Cassandra with lat/lng columns" "Excellent write throughput but no spatial index. Would require full table scan for radius query — disaster at 5M drivers.")
+  (best "Redis GEO" "Fast inserts (O(log N)), built-in radius search, auto-expires stale drivers via TTL. Proven at Grab/Lyft scale.")
+  (alt "Postgres PostGIS" "Full ACID and polygon queries — but can't keep up with 1M+ location writes/min.")
+  (nofit "Cassandra with lat/lng columns" "Great write speed but no spatial index — finding nearby drivers would scan the entire table.")
 )}}
 
-{{think "City-based sharding is the right granularity. A ride never crosses city boundaries (well, airport rides might — handle with 'metro area' as the shard key). Sharding by city means each shard has its own Redis GEO, Postgres, and matching workers. Total failure of one city doesn't affect others."
-  (whyNot "global single Redis cluster" "A single cluster for 5M drivers means 1.25M GEO writes/sec globally. Redis single-threaded per shard. Even with clustering, hot cities (Mumbai, NYC) would overwhelm one shard.")
-  (how "region assignment works" "Ride request includes pickup coordinates. API gateway calls City Service (a fast lookup table, city_polygon → city_id). All subsequent operations route to that city's shard.")
+{{think "Shard by city — a ride never crosses city boundaries (airport rides use 'metro area' as the shard). Each city gets its own Redis, Postgres, and matching workers. If one city goes down, others are unaffected."
+  (whyNot "one global Redis cluster" "5M drivers = 1.25M writes/sec globally. Redis is single-threaded per shard. Hot cities like Mumbai or NYC would overwhelm a single shard even with clustering.")
+  (how "region assignment" "Ride request includes pickup coordinates. API gateway looks up the city (a fast polygon→city_id table). All later operations route to that city's shard.")
 }}
 
-{{hint "why Kafka for ride events" "Ride state changes (matched, started, completed) need to trigger multiple downstream consumers: billing, ratings, analytics, driver earnings, fraud detection. Kafka decouples producers from consumers. Each consumer group reads at its own pace."}}
+{{hint "why Kafka for ride events" "Each ride state change (matched, started, completed) triggers billing, ratings, analytics, and fraud detection. Kafka lets each consumer read at its own pace without slowing down the ride service."}}
 
 {{triggerQs "Architecture questions"
   "How do you handle a ride from city A to city B (cross-city)?"
@@ -353,6 +370,16 @@ class RideMatchingService:
 </ul>`}}
 
 {{diagram "rh-geospatial"}}
+
+<p>Driver positions are stored using {{fundLink "storage/geospatial" "geospatial indexing"}} in Redis, with locations encoded as {{algoLink "geohash" "geohashes"}} for efficient radius queries.</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Redis GEO Implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `import redis
 
@@ -385,19 +412,33 @@ def find_nearby_drivers(city_id: str, pickup_lat: float, pickup_lng: float, radi
     active = [r for r in results if redis.exists(f"driver:loc:{r[0]}")]
     return active  # [(driver_id, dist_km, (lng, lat)), ...]`}}
 
-{{think "Redis GEO uses 52-bit geohash precision, giving ~0.6m accuracy. That's precise enough for city-scale matching. The distance calculation for sorting uses the Haversine formula internally — O(N log N) for N results."
-  (whyNot "querying the full city set without radius filter" "A city has up to 200K available drivers at peak. GEORADIUS with 5km radius returns 10–100 drivers. Full city scan returns 200K — 2000x more data to transfer and score.")
-  (whatIf "Redis GEO cluster shard splits hot city" "Shard by sub-region (city quadrant). Each quadrant has its own Redis GEO key. Radius query near quadrant boundary queries two shards and merges results. Extra RTT is ~1ms — acceptable.")
+{{think "Redis GEO uses 52-bit geohash — ~0.6m accuracy. More than enough for matching (we don't need centimeter precision to find a driver 200m away)."
+  (whyNot "querying all drivers in the city without a radius filter" "A city can have 200K available drivers. GEORADIUS with 5km returns 10–100 results. Scanning all 200K would transfer and score 2000x more data.")
+  (whatIf "a hot city overloads one Redis shard" "Split by sub-region (city quadrant). Each quadrant gets its own GEO key. Queries near boundaries hit two shards and merge — adds ~1ms, which is fine.")
 }}
 
-{{hint "why TTL on driver location key" "GEOADD doesn't expire individual members. We use a separate key driver:loc:{id} with 30s TTL as a heartbeat. If a driver's app crashes without explicitly going offline, their location entry is stale. We filter out drivers whose heartbeat key is gone before returning candidates."}}
+  </div>
+</details>
+
+{{hint "why TTL on driver location key" "GEOADD can't expire individual members. So we keep a separate key per driver with a 30s TTL as a heartbeat. If the driver's app crashes, the key expires and they're filtered out of candidate results automatically."}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Geospatial Follow-up Questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{triggerQs "Geospatial questions"
   "What's the difference between geohash and H3 for this use case?"
-  "Redis GEO uses geohash internally for sorted set encoding — we get this for free. H3 (Uber's hexagonal grid) is better for analytics and surge pricing zone computation because hexagonal cells have uniform area and equal neighbor distances. Use Redis GEO for driver lookup, H3 for surge zone aggregation."
+  "Redis GEO uses geohash internally — we get radius search for free. H3 (Uber's hexagonal grid) is better for analytics and surge zones because hexagons have uniform area. Use Redis GEO for driver lookup, H3 for surge aggregation."
   "How do you handle 5M concurrent drivers updating location every 4 seconds?"
-  "5M / 4 = 1.25M GEOADD writes/sec globally. With 10 city shards, that's 125K writes/sec per shard. A Redis instance handles 200K+ writes/sec for simple commands. Plus 6 replicas per shard absorbs read load. Redis cluster mode with 20 shards is the scaling lever."
+  "5M / 4 = 1.25M writes/sec globally. Split across 20 city shards = 62.5K writes/sec each. Redis handles 200K+ writes/sec per instance, so each shard is well under capacity."
 }}
+
+  </div>
+</details>
 
 {{goodToKnow "Redis GEO uses 52-bit geohash internally — ~0.6m precision, more than sufficient for driver matching" "GEORADIUS uses Haversine formula for distance sorting, accurate to 0.3% at city scale"}}
 
@@ -412,9 +453,19 @@ def find_nearby_drivers(city_id: str, pickup_lat: float, pickup_lng: float, radi
   <li><span class="hl">20%</span> acceptance rate — penalizes drivers who cherry-pick rides</li>
   <li><span class="hl">20%</span> ETA — actual pickup time, not just straight-line distance</li>
 </ul>
-Goal is a <strong>good match in under 2 seconds</strong> — not the globally optimal match. Greedy with local optimization is correct.`}}
+Goal: a <strong>good match in under 2 seconds</strong> — not the mathematically perfect match. Fast and good enough beats slow and optimal.`}}
 
 {{diagram "rh-matching-algorithm"}}
+
+<p>Driver locks use {{fundLink "storage/redis" "Redis"}} SET NX (atomic "set if not exists") to prevent two workers from offering the same driver simultaneously.</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Scoring Function Implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `from dataclasses import dataclass
 
@@ -449,18 +500,21 @@ def dispatch(ride_id, ranked_drivers):
             return driver.driver_id          # Matched!
     return None                              # Expand radius or notify no drivers`}}
 
+  </div>
+</details>
+
 {{compare "Matching Strategy" (options
-  (best "Greedy weighted scoring" "Sub-100ms decision, horizontally scalable, no coordination between matching workers. 95th percentile match in &lt; 4 seconds.")
-  (alt "Hungarian algorithm (global optimal)" "Finds mathematically optimal assignment but requires global view of all open rides + all available drivers. O(N³) — infeasible at 1K concurrent rides per city.")
-  (nofit "First driver who responds" "Ignores quality signals. A driver with 3.2 rating and 20% acceptance rate getting matched over a 4.8-rated driver 100m further away is bad UX.")
+  (best "Greedy weighted scoring" "Decides in &lt; 100ms, scales horizontally, no coordination needed between workers. 95th percentile match in &lt; 4 seconds.")
+  (alt "Hungarian algorithm (global optimal)" "Finds the perfect assignment but needs a global view of all rides + all drivers. O(N^3) — way too slow at 1K concurrent rides.")
+  (nofit "First available driver" "Ignores quality. A 3.2-rated driver with 20% acceptance rate would beat a 4.8-rated driver 100m further away — terrible UX.")
 )}}
 
-{{think "Why sequential offers (not parallel broadcast)? If we send offers to the top 5 drivers simultaneously, multiple might accept. Only one can get the ride — we'd have to cancel 4 driver acceptances, which damages driver trust and acceptance rates."
-  (whyNot "parallel broadcast to all candidates" "Drivers who accepted but were outcompeted will have their acceptance counted against them in future scoring. Also creates a thundering-herd of acceptances for popular pickup zones.")
-  (whatIf "all top 5 drivers reject in a high-demand area" "Expand radius to 10km and re-run matching. If still no match after 3 radius expansions, trigger surge pricing to attract more drivers to the zone.")
+{{think "Why send offers one at a time, not to all 5 drivers at once? If multiple drivers accept, we'd have to cancel all but one — that damages driver trust and tanks their acceptance rates."
+  (whyNot "parallel broadcast to all candidates" "Drivers who accepted but lost would feel cheated. It also creates a thundering herd of acceptances in popular pickup zones.")
+  (whatIf "all top 5 drivers reject" "Expand the search radius to 10km and re-run matching. After 3 expansions with no match, trigger surge pricing to attract more drivers to the area.")
 }}
 
-{{hint "why acceptance rate in scoring" "A driver with 80% acceptance rate takes ~1.25 offers to accept. A driver with 20% takes 5 offers. At scale, low-acceptance drivers waste 4x the offer slots, slowing matching for all riders. Scoring acceptance rate incentivizes drivers to be selective about going online, not online-then-rejecting."}}
+{{hint "why acceptance rate in scoring" "A driver with 80% acceptance takes ~1.25 offers to match. One with 20% takes 5 offers — wasting 4x the offer slots and slowing matching for everyone. Including acceptance rate in the score pushes drivers to only go online when they actually want to drive."}}
 
 {{triggerQs "Matching algorithm questions"
   "How do you prevent the same driver from being offered the same ride twice?"
@@ -477,7 +531,7 @@ def dispatch(ride_id, ranked_drivers):
 
 {{phase 7 "Surge Pricing" "4 min"}}
 
-{{say `Surge pricing per <span class="hl-blue">H3 hex cell</span> (<strong>H3</strong> = Uber's open-source hexagonal geospatial grid — divides the Earth into uniform hexagons for aggregating location data; resolution 8 = ~0.7 km² per cell), updated every <span class="hl">5 minutes</span>:
+{{say `Surge pricing per <span class="hl-blue">H3 hex cell</span> (<strong>H3</strong> = Uber's hexagonal grid that divides the map into uniform hexagons; resolution 8 = ~0.7 km² per cell), updated every <span class="hl">5 minutes</span>:
 <ul>
   <li>Multiplier = function of demand/supply ratio in the cell</li>
   <li>Hard cap at <span class="hl">3×</span> — uncapped surge creates PR disasters and regulatory risk</li>
@@ -486,6 +540,14 @@ def dispatch(ride_id, ranked_drivers):
 </ul>`}}
 
 {{diagram "rh-surge-pricing"}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Surge Calculator Implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `# Surge calculator — runs every 5 minutes per city cell
 def compute_surge_multiplier(cell_id: str, window_minutes=5) -> float:
@@ -513,10 +575,13 @@ def calculate_fare(base_fare, distance_km, duration_min, surge) -> int:
     fare = base_fare + (distance_km * 15) + (duration_min * 2)
     return int(fare * surge * 100)  # store as cents`}}
 
-{{think "Why H3 cells for surge instead of city-level? A city can have rain in one district and sunshine in another. H3 resolution 8 cells (~0.7 km²) capture micro-supply-demand imbalances. City-level surge would miss the airport queue vs downtown."
-  (whyNot "real-time per-request surge calculation" "Computing demand/supply ratio for every ride request at 1K rides/sec would require 1K Redis reads/sec just for surge. Pre-computing and caching per-cell for 5-minute windows costs 1 write per cell per 5 minutes.")
-  (whatIf "surge exceeds 3x in a cell" "We publish a driver notification: 'High demand in Airport Zone, 3x earnings.' Drivers self-dispatch to the zone. Supply increases, ratio drops, surge decreases. This is the feedback loop — surge is both a demand dampener and a supply attractor.")
+{{think "Why per-cell, not city-wide? One district can have rain while another is sunny. H3 cells (~0.7 km^2) capture local imbalances. City-level surge would miss the airport queue vs downtown."
+  (whyNot "computing surge per-request in real time" "At 1K rides/sec, that's 1K Redis reads just for surge. Pre-computing per cell every 5 minutes costs 1 write per cell — orders of magnitude cheaper.")
+  (whatIf "surge hits the 3x cap in a cell" "We notify nearby drivers: 'High demand in Airport Zone, 3x earnings.' Drivers move to the zone, supply goes up, ratio drops, surge decreases. It's a self-correcting feedback loop.")
 }}
+
+  </div>
+</details>
 
 {{hint "why show surge upfront" "Riders who see the surge multiplier before confirming have a chance to wait or take transit. Hidden surge creates chargeback disputes. Transparent pricing is also a legal requirement in several markets (NYC, EU)."}}
 
@@ -532,10 +597,20 @@ def calculate_fare(base_fare, distance_km, duration_min, surge) -> int:
 <ul>
   <li>Driver GPS → WebSocket gateway → <strong>Redis GEO</strong> (geospatial index) + <strong>Redis Pub/Sub</strong> (fan-out)</li>
   <li>Tracking service subscribes to <code>ride:track:{ride_id}</code> channel and forwards updates to rider's WebSocket</li>
-  <li><strong>ETA</strong> (Estimated Time of Arrival) recalculated every <span class="hl">30 seconds</span> using current driver position + <span class="hl-blue">OSRM</span> (Open Source Routing Machine — a fast road-network routing engine using pre-computed shortest paths on OpenStreetMap data) routing engine</li>
+  <li><strong>ETA</strong> recalculated every <span class="hl">30 seconds</span> using current driver position + <span class="hl-blue">OSRM</span> (Open Source Routing Machine — a fast road-routing engine that pre-computes shortest paths on OpenStreetMap data)</li>
 </ul>`}}
 
 {{diagram "rh-tracking"}}
+
+<p>Location updates flow through {{fundLink "networking/websockets" "WebSocket"}} connections and fan out via {{fundLink "storage/redis" "Redis"}} Pub/Sub to the rider's app.</p>
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Tracking Service Implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "python" `# Tracking service — subscribes to driver location events
 class TrackingService:
@@ -561,13 +636,16 @@ class TrackingService:
             if message["type"] == "message":
                 websocket.send(message["data"])  # Push to rider app`}}
 
+  </div>
+</details>
+
 {{compare "ETA Engine" (options
-  (best "OSRM (Open Source Routing Machine — pre-computes optimal road paths offline so routing queries are sub-millisecond at serve time)" "Sub-50ms routing, runs locally, no per-query cost, handles 100K queries/sec on c5.2xlarge. Pre-computed contraction hierarchies for fast path finding.")
-  (alt "Google Maps Directions API" "Accurate with real-time traffic but costs $0.005/request. At 1M ETA recalculations/day = $5K/day = $1.8M/year. Cost-prohibitive at scale.")
-  (nofit "Straight-line Haversine distance" "Doesn't account for roads, traffic, one-ways. A 2km straight-line ride in Manhattan could be 6km by road. ETA error of 3x.")
+  (best "OSRM (self-hosted)" "Sub-50ms routing, no per-query cost, 100K queries/sec per instance. Pre-computes shortest paths offline so queries are instant.")
+  (alt "Google Maps Directions API" "Accurate with live traffic but $0.005/request. At 1M ETAs/day = $5K/day = $1.8M/year. Too expensive at scale.")
+  (nofit "Straight-line distance" "Ignores roads, traffic, one-ways. A 2km straight line in Manhattan = 6km by road. ETA off by 3x.")
 )}}
 
-{{hint "why Redis Pub/Sub for tracking fan-out" "When a driver updates their location, one WebSocket server needs to push it to the rider's WebSocket server (which may be on a different machine). <strong>Redis Pub/Sub</strong> (Publish/Subscribe — a messaging pattern where publishers send to a channel and all subscribers receive it in < 1ms) is the message bus. Throughput: 1M concurrent rides × 1 update/4s = 250K publish ops/sec — well within Redis cluster capacity."}}
+{{hint "why Redis Pub/Sub for tracking" "The driver's WebSocket server and the rider's WebSocket server may be on different machines. Redis Pub/Sub bridges them — publish a location update to a channel and all subscribers get it in &lt; 1ms. At 1M rides with 1 update/4s = 250K publishes/sec, well within Redis capacity."}}
 
 {{triggerQs "Tracking questions"
   "What if the rider's WebSocket connection drops mid-ride?"
@@ -576,7 +654,7 @@ class TrackingService:
   "OSRM uses pre-computed road graphs without live traffic. We layer real-time traffic data from HERE or TomTom APIs (batch updated every 5 minutes). ETA accuracy is ±2 minutes for short rides, ±5 minutes for 30+ minute rides."
 }}
 
-{{caveat "Redis Pub/Sub is fire-and-forget with no persistence. If the broker crashes, all subscriptions are lost. This is acceptable for location tracking (next update in 4s) but never use Pub/Sub for ride state changes — those go through Kafka."}}
+{{caveat "Redis Pub/Sub has no persistence — if the broker crashes, subscriptions are lost. That's fine for location (next update in 4s) but never use Pub/Sub for ride state changes — those must go through Kafka."}}
 
 {{mustKnow "Driver GPS -> WebSocket gateway -> Redis GEO + Redis Pub/Sub -> rider's WebSocket" "OSRM for ETA: sub-50ms, no per-query cost, 100K queries/sec — Google Maps API costs $1.8M/year at scale" "Redis Pub/Sub for real-time fan-out (< 1ms), Kafka for durable event log (10-50ms)"}}
 
@@ -584,12 +662,20 @@ class TrackingService:
 
 {{say `Three storage tiers:
 <ul>
-  <li><strong>PostgreSQL</strong> — rides, bookings, users; strongly consistent, relational; source of truth for state machine</li>
-  <li><strong>Redis</strong> — hot operational state: driver locations (<span class="hl-blue">GEO</span>), distributed locks (<span class="hl-blue">SET NX</span>), active ride mapping (<span class="hl-blue">HASH</span>)</li>
-  <li><strong>Cassandra</strong> — GPS location history per trip: write-heavy time-series, append-only, <span class="hl">~1.25M writes/sec</span> absorbed without MVCC overhead</li>
+  <li><strong>PostgreSQL</strong> — rides, users, bookings. Source of truth for the ride state machine. Strongly consistent.</li>
+  <li><strong>Redis</strong> — hot operational data: driver locations (GEO), driver locks (SET NX), active ride lookups (HASH)</li>
+  <li><strong>Cassandra</strong> — GPS trail per trip: append-only time-series, handles <span class="hl">~1.25M writes/sec</span> without breaking a sweat</li>
 </ul>`}}
 
 {{diagram "rh-data-model"}}
+
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">PostgreSQL Schema</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 
 {{code "sql" `-- Postgres: rides table (primary, write-critical)
 CREATE TABLE rides (
@@ -631,6 +717,9 @@ CREATE TABLE drivers (
     status      VARCHAR(20) DEFAULT 'OFFLINE'  -- OFFLINE, AVAILABLE, BUSY
 );`}}
 
+  </div>
+</details>
+
 {{table "Storage Tier Decision" (rows
   (row "Data" "Store" "Why")
   (row "Driver current location" "Redis GEO + TTL 30s" "1.25M writes/sec, sub-ms queries")
@@ -656,9 +745,11 @@ CREATE TABLE drivers (
 
 {{diagram "rh-scaling"}}
 
-{{think "The 1.25M driver location writes/sec is the dominant scaling challenge. Redis handles this because GEO commands are O(log N) on a sorted set and Redis is single-threaded per core — no lock contention. With 20 city shards at 62.5K writes/sec each, this is comfortably within Redis's 200K writes/sec single-instance limit."
-  (whyNot "writing driver locations to Postgres" "Even with PostGIS, Postgres can't sustain 1.25M GEO upserts/sec. Connection pooling overhead alone would require thousands of connections. This is why Redis is the only viable choice.")
-  (whatIf "a city Redis shard fails" "Sentinel-based failover: Redis replica becomes primary in &lt; 30 seconds. During those 30 seconds, new ride matching is degraded (no GEO queries). In-flight rides continue — they're tracked via Kafka events, not Redis lookups. Acceptable SLO degradation.")
+<p>{{fundLink "networking/load-balancing" "Load balancing"}} distributes traffic across stateless workers, while {{fundLink "distributed/consistent-hashing" "consistent hashing"}} routes city shards to specific Redis clusters.</p>
+
+{{think "1.25M driver location writes/sec is the biggest scaling challenge. Redis handles it because GEO commands are O(log N) and Redis is single-threaded — no lock contention. 20 city shards at 62.5K writes/sec each stays well under Redis's 200K/sec limit."
+  (whyNot "writing locations to Postgres" "Postgres can't sustain 1.25M GEO upserts/sec even with PostGIS. Connection pooling alone would need thousands of connections. Redis is the only option here.")
+  (whatIf "a city's Redis shard goes down" "Redis Sentinel promotes a replica in &lt; 30 seconds. During that window, new matching is degraded (no GEO queries), but in-flight rides continue via Kafka events. Acceptable tradeoff.")
 }}
 
 {{table "Throughput Targets at Peak" (rows
@@ -670,7 +761,7 @@ CREATE TABLE drivers (
   (row "Postgres writes" "~14K/sec" "Ride state transitions, read replicas for history")
 )}}
 
-{{hint "WebSocket sticky sessions" "A rider's location stream is subscribed to a Redis Pub/Sub channel on a specific WebSocket server. If they hop to a different server on reconnect, the server re-subscribes — stateless recovery. But we still use sticky sessions (<strong>ALB</strong> = Application Load Balancer; cookie-based sticky sessions route the same client to the same server) to avoid the reconnect overhead for stable connections."}}
+{{hint "WebSocket sticky sessions" "Each rider's location stream is subscribed to Redis Pub/Sub on a specific WebSocket server. If they reconnect to a different server, it just re-subscribes — stateless recovery. We use ALB sticky sessions (cookie-based routing to the same server) to avoid unnecessary reconnect overhead."}}
 
 {{caveat "The dominant scaling bottleneck is Postgres writes to the rides table, not Redis. At 10x spike that's ~23K writes/sec — pre-provision with 50K IOPS and connection pooling via PgBouncer."}}
 
@@ -687,9 +778,11 @@ CREATE TABLE drivers (
 
 {{diagram "rh-failure-modes"}}
 
-{{think "The most dangerous failure is a double-charge: ride completes, payment webhook fires twice (network retry), user gets charged twice. Idempotency key on payment + database-level unique constraint on payment_id prevents this."
-  (whyNot "relying on payment gateway deduplication alone" "Payment gateways deduplicate within their window (typically 24h) but it's not guaranteed. Our own idempotency layer is the safety net. Two-layer deduplication is standard practice.")
-  (whatIf "driver goes offline mid-ride for 60 seconds" "After 60s of no GPS updates, we flag the ride as 'tracking_degraded'. Ops team is alerted. Rider sees last known location. If offline > 5 minutes, ops contacts driver. Fare calculation uses last known GPS data + estimated distance based on time elapsed.")
+<p>A {{fundLink "distributed/circuit-breaker" "circuit breaker"}} on the payment gateway prevents cascading failures when the payment service is down.</p>
+
+{{think "The scariest failure: double-charge. Ride completes, payment webhook fires twice (network retry), user pays twice. Fix: idempotency key on payment + unique constraint on payment_id in the database."
+  (whyNot "relying only on the payment gateway's dedup" "Gateways deduplicate within their window (usually 24h) but it's not guaranteed. Our own idempotency layer is the safety net. Two layers of protection is standard.")
+  (whatIf "driver goes offline mid-ride for 60 seconds" "After 60s with no GPS, we flag the ride as 'tracking_degraded' and alert ops. Rider sees last known position. If offline > 5 minutes, ops contacts the driver. Fare uses last known GPS + estimated distance from time elapsed.")
 }}
 
 {{table "Failure Scenarios" (rows

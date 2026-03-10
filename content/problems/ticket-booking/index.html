@@ -12,34 +12,45 @@ Does that align?`}}
 
 {{diagram "tb-requirements"}}
 
-{{think "The hardest subproblem is seat-state consistency under burst traffic. At 100K concurrent users for 500 seats, seat state is contended at a ratio of 200:1. The design is essentially a distributed lock system with a payment window."
-  (whyNot "optimistic locking (check-then-act in Postgres)" "Under 100K concurrent users, the retry rate with optimistic locking becomes exponential. Most users end up retrying 5–10 times. <strong>Redis SET NX</strong> (SET if Not eXists — an atomic operation that sets a key only if it doesn't already exist; returns 1 if acquired, 0 if already taken) is a single atomic operation — O(1) with no retry storm.")
-  (whatIf "Redis fails at the moment of seat lock" "During Redis failover (Sentinel promotes replica in &lt; 30s), new lock attempts fail with 503. In-flight locks that were already acquired are still valid if the data was replicated synchronously. We use Redlock across 3 Redis nodes for safety — lock requires majority quorum.")
-}}
+<p>The core challenge is preventing double-booking when <span class="hl">200 users compete for each seat</span> (100K users / 500 seats). We solve this with {{fundLink "storage/redis" "Redis"}} as a fast distributed lock.</p>
 
-{{hint "why seat locking is the core problem" "Payments take 2–5 seconds. During that window, the seat must be exclusively reserved. Without a lock, two users can both pass the 'is available?' check, pay, and both get the seat — a double-booking. The lock is the only mechanism that serializes access without a queue."}}
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Why Redis locks instead of database locks?</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "The design is essentially a distributed lock with a payment window. 100K users for 500 seats = 200:1 contention ratio."
+  (whyNot "optimistic locking in Postgres (check-then-act)" "At 100K concurrent users, retries grow exponentially — most users retry 5-10 times. Redis <strong>SET NX</strong> (set-if-not-exists) is a single atomic operation: O(1) with no retry storm.")
+  (whatIf "Redis fails during seat lock" "Sentinel promotes a replica in under 30 seconds. New lock attempts return 503 during failover. We use Redlock across 3 Redis nodes — a lock needs majority (2/3) to be valid.")
+}}
+  </div>
+</details>
+
+{{hint "why seat locking is the core problem" "Payments take 2-5 seconds. During that window, the seat must be exclusively reserved. Without a lock, two users can both see the seat as available, both pay, and both get the seat — a double-booking."}}
 
 {{table "Requirements Summary" (rows
   (row "Requirement" "Target")
-  (row "Double-booking prevention" "99.999% — strong invariant")
-  (row "Seat lock duration" "10 minutes (payment window)")
-  (row "Seat map load time" "&lt; 500ms p99 (99th percentile — 99% of users load in under 500ms)")
-  (row "Booking flow end-to-end" "&lt; 2s excluding payment")
-  (row "Concurrent users (rush)" "100K+ for popular show")
-  (row "Availability" "99.99% (52 min downtime/year)")
-  (row "Consistency" "Strong for seat locks, eventual for seat map views")
+  (row "Double-booking prevention" "99.999% — hard invariant")
+  (row "Seat lock duration" "10 minutes (covers payment time)")
+  (row "Seat map load time" "&lt; 500ms for 99% of users")
+  (row "Booking flow end-to-end" "&lt; 2s (not counting payment)")
+  (row "Concurrent users (rush)" "100K+ for popular shows")
+  (row "Availability" "99.99% (about 52 min downtime/year)")
+  (row "Consistency" "Strong for seat locks, eventual for seat map display")
 )}}
 
 {{triggerQs "Questions this section triggers"
   "What happens if a user locks seats but never pays?"
-  "The lock has a 10-minute <strong>TTL</strong> (Time-To-Live — how long a key persists before Redis automatically deletes it; set at creation time, no cleanup needed) in Redis. On expiry, the key auto-deletes — no manual cleanup. Seats re-enter the available pool. The booking record stays in EXPIRED state in Postgres for audit. About 15% of locks expire naturally."
+  "The lock has a <strong>10-minute TTL</strong> (time-to-live) in Redis. When it expires, Redis auto-deletes the key — no cleanup needed. The seats become available again. About 15% of locks expire this way."
   "Can you hold more seats than you pay for?"
-  "Max 8 seats per booking request (enforced at API layer). Additionally, per-user session limit: 1 active lock per show at a time. These constraints prevent seat hoarding."
+  "Max 8 seats per booking, enforced at the API layer. Plus, each user can only have 1 active lock per show at a time."
   "What about group bookings (10+ seats)?"
-  "Group bookings go through a separate async flow with higher lock timeout (30 minutes) and manual confirmation. They're queued through a separate path, not the real-time lock flow, to avoid starving individual users."
+  "Groups use a separate async flow with a longer lock timeout (30 min) and manual confirmation. This avoids starving individual users."
 }}
 
-{{caveat "Do not conflate availability of the seat map (eventually consistent, 5s stale is fine) with availability of the lock (must be strongly consistent). Interviewers test whether you understand this distinction."}}
+{{caveat "The seat map display can be 5 seconds stale (eventually consistent). But the seat lock must be strongly consistent — never stale. Interviewers test whether you see this distinction."}}
 
 {{mustKnow "The core problem is a distributed lock with a payment window — 100K users contending for 500 seats at a 200:1 ratio" "Redis SET NX is the serialization point — atomic, O(1), no retry storm unlike Postgres SERIALIZABLE" "Seat lock TTL of 10 minutes covers 99th percentile payment completion; auto-expiry means zero manual cleanup" "Two consistency models: strong for locks (Redis SET NX), eventual for seat map display (Redis cache + Pub/Sub)"}}
 
@@ -247,14 +258,23 @@ Booking APIs are the most sensitive — they interact with seat locks and paymen
   </div>
 </div>
 
-{{think "Why is idempotency key required on POST /bookings/lock? Network failures are common at scale. Without idempotency, a retry after a timeout creates two lock records for the same seats. With an idempotency key, the second request returns the original lock_token — the user doesn't double-lock."
-  (whyNot "making lock idempotent via seat_ids deduplication" "Two requests with different idempotency keys but same seat_ids are legitimately different requests (e.g., user opened two browser tabs). Idempotency key ties to the client's intent, not the resource.")
-  (whatIf "idempotency key collides across users (UUID4 collision)" "UUID4 has 2^122 possible values. Probability of collision across 1 billion requests is &lt; 10^-10. We scope idempotency keys per user_id anyway, making collision impossible in practice.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Why is the Idempotency-Key required?</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "Network failures are common. Without an idempotency key, a retry after a timeout creates two lock records for the same seats. With one, the second request returns the original lock_token."
+  (whyNot "deduplicating by seat_ids instead" "Two requests with different idempotency keys but the same seat_ids are legitimate (e.g., user opened two tabs). The key represents the client's intent, not the resource.")
+  (whatIf "UUID4 idempotency keys collide across users" "UUID4 has 2^122 possible values — collision probability across 1 billion requests is under 10^-10. We also scope keys per user_id, making collision effectively impossible.")
 }}
+  </div>
+</details>
 
-{{hint "why split lock and confirm into two calls" "Payment is handled by the gateway and takes 2–5 seconds. During that time, the seat must stay locked. If we did lock+confirm atomically, we'd hold a database transaction for 5 seconds — blocking all other operations on those seat rows. Two-phase: lock (Redis, instant), pay (gateway, 2–5s), confirm (DB write, &lt; 100ms)."}}
+{{hint "why split lock and confirm into two calls" "Payment takes 2-5 seconds. If we combined lock+confirm into one call, we'd hold a database transaction open for 5 seconds, blocking all other operations on those seats. Two-phase approach: lock (Redis, instant) then pay (gateway, 2-5s) then confirm (DB write, under 100ms)."}}
 
-{{caveat "Idempotency-Key is not optional — without it, a network timeout + retry creates duplicate locks. Interviewers will probe whether you handle retry semantics correctly on mutating endpoints."}}
+{{caveat "Idempotency-Key is not optional — without it, a network timeout + retry creates duplicate locks. Expect interviewers to ask about retry handling on mutating endpoints."}}
 
 {{collapseSection "Detailed API Response Headers" `
 <ul>
@@ -269,16 +289,23 @@ Booking APIs are the most sensitive — they interact with seat locks and paymen
 
 {{phase 3 "Seat Locking" "6 min"}}
 
-{{say `Seat locking uses <span class="hl-blue">Redis SET NX EX</span> — set if not exists with expiry:
+{{say `Seat locking uses <span class="hl-blue">Redis SET NX EX</span> — "set if not exists, with expiry":
 <ul>
   <li><strong>Key:</strong> <code>lock:show:{show_id}:seat:{seat_id}</code></li>
-  <li><strong>Value:</strong> <code>{lock_token}:{user_id}</code> — lock and owner in one key</li>
-  <li><strong>TTL:</strong> <span class="hl">600 seconds</span> (10-minute payment window) — expiry is automatic, no cleanup needed</li>
-  <li><span class="hl-blue">SET NX</span> is atomic: two concurrent attempts on the same key → one gets 1 (acquired), one gets 0 (rejected); <strong>no race condition possible</strong></li>
+  <li><strong>Value:</strong> <code>{lock_token}:{user_id}</code> — identifies both the lock and its owner</li>
+  <li><strong>TTL:</strong> <span class="hl">600 seconds</span> (10 minutes for payment) — expires automatically, no cleanup code needed</li>
+  <li><span class="hl-blue">SET NX</span> is atomic: if two users try the same seat at once, one gets it, the other is rejected — <strong>no race condition</strong></li>
 </ul>`}}
 
 {{diagram "tb-seat-locking"}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Seat locking implementation (Python)</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{code "python" `import redis
 import uuid
 import time
@@ -314,7 +341,7 @@ def lock_seats(show_id: str, seat_ids: list[str], user_id: str) -> dict | None:
     }
 
 def release_lock(show_id: str, seat_ids: list[str], lock_token: str):
-    # Lua script for atomic check-and-delete (prevents releasing another user's lock)
+    # Lua script: atomically check lock owner, then delete
     lua = """
     local key = KEYS[1]
     local token = ARGV[1]
@@ -328,29 +355,42 @@ def release_lock(show_id: str, seat_ids: list[str], lock_token: str):
         key = f"lock:show:{show_id}:seat:{seat_id}"
         r.eval(lua, 1, key, lock_token)`}}
 
-{{think "Why use a Lua script for release? We need to atomically check-then-delete. Without Lua, two operations: GET (check value) + DEL (delete if match). Between GET and DEL, another process could acquire the lock — we'd then delete their lock, not ours. Lua scripts run atomically on Redis server."
-  (whyNot "just calling DEL without checking the value" "If User A's lock expires and User B acquires it, then User A's delayed DELETE fires — we delete User B's valid lock. This creates a phantom available seat that could be double-booked.")
-  (whatIf "we need to lock 10 seats atomically (all-or-nothing)" "Loop SET NX for each seat. If any fails, rollback all previously acquired locks using the Lua check-and-delete. This is a multi-key transaction without MULTI/EXEC (which can't span keys on different Redis cluster slots). Atomic at the business level, not at the Redis protocol level.")
+{{think "Why a Lua script for release? We need to check the lock value and delete in one atomic step. Without Lua, another process could grab the lock between our GET and DEL — and we'd delete their lock by mistake."
+  (whyNot "just calling DEL without checking the value" "If User A's lock expires and User B takes the seat, then User A's delayed DELETE fires — it deletes User B's valid lock. That creates a phantom available seat and a potential double-booking.")
+  (whatIf "we need to lock 10 seats atomically (all-or-nothing)" "Loop SET NX for each seat. If any fails, rollback all previously acquired locks using the Lua check-and-delete. This gives us business-level atomicity without MULTI/EXEC (which can't span Redis cluster slots).")
 }}
+  </div>
+</details>
 
-{{hint "why 10-minute TTL not shorter" "Typical payment flows: enter card details (30s) + 3D Secure OTP (60s) + gateway processing (5s) + network round trips. 2 minutes is too tight. 10 minutes covers 99th percentile of payment completion. Expiry acts as a safety valve — no lock cleanup needed."}}
+{{hint "why 10-minute TTL not shorter" "A typical payment: enter card details (30s) + 3D Secure OTP (60s) + gateway processing (5s). Two minutes would be too tight. 10 minutes covers 99% of payment completions, and the automatic expiry means no cleanup code is needed."}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Seat locking interview questions</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{triggerQs "Seat locking questions"
   "What if Redis is unavailable during lock acquisition?"
-  "We use Redlock protocol across 3 independent Redis nodes. Lock requires majority (2/3). If one node fails, locks still work. If two fail, we fall back to Postgres advisory locks (slower: ~50ms vs 1ms, but ACID). We return 503 only if all three Redis nodes are down simultaneously."
-  "Can you explain why Redlock is needed here?"
-  "Single-Redis SET NX fails silently on Redis failover: master accepts the lock, crashes, replica promoted without the write (async replication lag), another client sets the same lock on the new master. Redlock requires N/2+1 masters to acknowledge — safe against single-node failures."
-  "How do you handle partial failures — locking seat A successfully but seat B fails?"
-  "All-or-nothing: if any seat fails to lock, we rollback all successful locks in the same request using the Lua check-and-delete script. Return 409. User sees which seat was unavailable and can choose alternatives."
+  "We use Redlock across 3 independent Redis nodes. A lock needs majority (2 of 3). If one node fails, locks still work. If two fail, fall back to Postgres advisory locks (slower at ~50ms vs 1ms, but still correct). Return 503 only if all three are down."
+  "Why is Redlock needed — isn't one Redis node enough?"
+  "With a single Redis node, if the master accepts a lock then crashes, the replica gets promoted without that write (async replication). Another user could then lock the same seat on the new master. Redlock requires N/2+1 nodes to agree, protecting against this."
+  "How do you handle partial failures — seat A locks but seat B fails?"
+  "All-or-nothing: if any seat fails, rollback all successful locks using the Lua check-and-delete script. Return 409 with the unavailable seat IDs so the user can pick alternatives."
 }}
+  </div>
+</details>
 
-{{caveat "The Lua check-and-delete script for lock release is not optional — a raw DEL without value checking can delete another user's valid lock after TTL expiry, causing a phantom available seat and potential double-booking."}}
+{{caveat "Never release a lock with a plain DEL — always use the Lua check-and-delete script. A raw DEL can accidentally delete another user's valid lock after TTL expiry, creating a phantom available seat."}}
 
 {{goodToKnow "Redlock across 3 independent Redis nodes provides safety against single-node failure during async replication — single-node SET NX can silently lose a lock on failover" "For Redis Cluster with hash tags, all seat locks for one show land on one shard — enabling atomic multi-seat operations but creating a hot-shard risk for viral events"}}
 
 {{mustKnow "SET NX EX is the atomic lock primitive — set-if-not-exists with TTL, O(1), no race condition possible" "Lock release must use Lua script for atomic check-and-delete: verify the lock value matches before deleting" "Multi-seat locking is all-or-nothing: if any seat fails, rollback all previously acquired locks in the same request" "Lock value encodes lock_token:user_id — the token proves ownership; prevents one user from releasing another's lock"}}
 
 {{phase 4 "Architecture" "6 min"}}
+
+<p>The architecture uses {{fundLink "networking/load-balancing" "load balancing"}} across three tiers, with {{fundLink "storage/redis" "Redis"}} handling the hot path for seat locks.</p>
 
 {{say `Three tiers:
 <ul>
@@ -363,23 +403,32 @@ Payment flows through <strong>async webhooks</strong> — not synchronous calls 
 {{diagram "tb-architecture"}}
 
 {{compare "Database for Bookings" (options
-  (best "Postgres with SERIALIZABLE isolation" "<strong>ACID</strong> (Atomicity — all-or-nothing writes; Consistency — data stays valid; Isolation — concurrent writes don't interfere; Durability — committed data survives crashes), foreign keys, complex queries for reports. Booking confirm uses SERIALIZABLE transaction to prevent any race condition on the booking record.")
-  (alt "DynamoDB with conditional writes" "Horizontal scale, auto-scaling capacity. But conditional write syntax is complex for multi-seat transactions. Serializable transactions require TransactWriteItems — 25 item limit per transaction.")
-  (nofit "MongoDB" "Document model doesn't naturally fit relational seat → booking → payment → ticket hierarchy. Multi-document transactions have higher write amplification and no native advisory locks.")
+  (best "Postgres with SERIALIZABLE isolation" "Full ACID guarantees, foreign keys, and reporting queries. Booking confirm runs in a SERIALIZABLE transaction — prevents any race condition on the booking record.")
+  (alt "DynamoDB with conditional writes" "Scales horizontally and auto-scales capacity. But multi-seat transactions are awkward — TransactWriteItems has a 25-item limit.")
+  (nofit "MongoDB" "Document model doesn't fit the relational seat/booking/payment/ticket hierarchy well. Multi-document transactions have higher write overhead.")
 )}}
 
-{{think "Why keep payment async (webhook) instead of synchronous? Synchronous payment: Booking Service calls Stripe API, waits 2–5 seconds, then writes to Postgres. The lock is held for 5 seconds. During a rush with 500 concurrent checkouts, that's 500 × 5s = 2500 connection-seconds of held state. Async webhook: lock is held, payment gateway handles processing independently, webhook fires on outcome. Our service is free to handle other requests."
-  (whyNot "polling for payment status (GET /payment/{id} every second)" "Polling creates 500 requests/second per concurrent checkout just for status checks. Gateway rate limits kick in. Webhooks are push-based — no wasted requests.")
-  (whatIf "webhook is delayed by 10 minutes (gateway backlog)" "Lock expires at 10 minutes. If webhook arrives after lock expiry, we check if the seat was re-locked. If yes, auto-refund via gateway API. If no, complete the booking (rare race — seat was available again). Both outcomes are safe.")
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Why async webhooks instead of synchronous payment?</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{think "Synchronous payment: the Booking Service calls Stripe, waits 2-5 seconds, then writes to Postgres. During a rush with 500 concurrent checkouts, that is 500 x 5s = 2,500 connection-seconds of held state. With async webhooks, the gateway processes independently and pushes the result back."
+  (whyNot "polling for payment status every second" "500 concurrent checkouts x 1 poll/sec = 500 requests/sec just for status checks. Gateway rate limits kick in fast. Webhooks are push-based — zero wasted requests.")
+  (whatIf "webhook is delayed by 10+ minutes" "The seat lock expires at 10 minutes. If the webhook arrives late, we check if the seat was re-locked. If yes, auto-refund. If no, complete the booking. Both outcomes are safe.")
 }}
+  </div>
+</details>
 
-{{hint "why CDN for show listings" "Show listings change infrequently (new showtimes added hours before, not seconds). CloudFront serves cached responses at edge for 99% of browse traffic. Origin load = near zero. For 500M users browsing shows, CDN is the difference between $200/month and $20,000/month in data transfer costs."}}
+{{hint "why CDN for show listings" "Show listings change infrequently — new showtimes are added hours ahead, not seconds. CloudFront serves cached responses at the edge for 99% of browse traffic. For 500M users browsing, CDN cuts data transfer costs from ~$20K/month to ~$200/month."}}
 
 {{triggerQs "Architecture questions"
-  "How does Booking Service know if a seat lock is still valid before confirming?"
-  "On POST /bookings/confirm, Booking Service does GET lock:show:{id}:seat:{seat_id} and checks the value starts with the lock_token from the request. If the key is expired (TTL elapsed) or the value doesn't match (different token), return 409 — lock expired or stolen. Only proceed if all seat locks are verified valid."
-  "What's the read vs write split strategy?"
-  "Reads: Show browsing → CloudFront CDN → Postgres read replicas (3 replicas). Seat map → Redis cache with 5s TTL + WebSocket invalidation. Writes: Seat locks → Redis Cluster. Booking confirm → Postgres primary (only path needing primary). This routing concentrates primary writes to &lt; 600/sec under normal load."
+  "How does Booking Service verify a seat lock is still valid?"
+  "On /bookings/confirm, it reads each lock key from Redis and checks the value starts with the lock_token from the request. If the key expired or the value doesn't match, return 409. Only proceed if all seat locks check out."
+  "What's the read vs write split?"
+  "Reads: show browsing goes through CDN, seat map through Redis cache (5s TTL) + WebSocket updates, and queries hit Postgres read replicas. Writes: seat locks go to Redis Cluster, booking confirms go to Postgres primary. This keeps primary writes under 600/sec."
 }}
 
 {{collapseSection "CDN Cost Analysis" `
@@ -404,8 +453,15 @@ Payment flows through <strong>async webhooks</strong> — not synchronous calls 
 
 {{diagram "tb-data-model"}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Seat availability SQL query + index</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{code "sql" `-- Key query: get seat availability for a show
--- This runs on every seat map load — must be fast
+-- Runs on every seat map load — must be fast
 SELECT s.id, s.row, s.number, s.category, s.price_cents,
        CASE
            WHEN b.status = 'confirmed' THEN 'booked'
@@ -421,10 +477,12 @@ LEFT JOIN bookings b ON (
 )
 WHERE s.screen_id = (SELECT screen_id FROM shows WHERE id = $1);
 
--- Index to support this query:
+-- Partial index — only indexes active bookings, not millions of expired ones
 CREATE INDEX idx_bookings_show_active
     ON bookings(show_id, status)
     WHERE status IN ('locked', 'confirmed');`}}
+  </div>
+</details>
 
 {{table "Storage Decisions" (rows
   (row "Entity" "Store" "Rationale")
@@ -435,9 +493,9 @@ CREATE INDEX idx_bookings_show_active
   (row "Booking history" "Postgres read replicas" "User sees last 12 months of bookings. 3 replicas for read scalability.")
 )}}
 
-{{hint "seat_ids as UUID array" "Storing seat_ids as a Postgres array (<strong>UUID</strong>[] — UUID = Universally Unique Identifier, a randomly generated 128-bit ID) avoids a join table for the common query 'which seats does this booking hold'. The downside: you can't index individual seat IDs within an array. For the availability query, we use the reverse lookup: show all bookings that contain this seat, which requires a <strong>GIN</strong> (Generalized Inverted iNdex — a Postgres index type that can index array and JSON contents, enabling 'does this array contain value X?' queries) index on seat_ids."}}
+{{hint "seat_ids as UUID array" "Storing seat_ids as a Postgres UUID[] array avoids a join table for 'which seats does this booking hold?'. Downside: you can't index individual elements. For 'which bookings contain seat X?', you need a <strong>GIN index</strong> (a Postgres index type that can search inside arrays and JSON)."}}
 
-{{caveat "The partial index WHERE status IN ('locked', 'confirmed') is critical — without it, the seat availability query scans all historical bookings including millions of expired/cancelled rows, degrading from 10ms to 500ms+."}}
+{{caveat "The partial index (WHERE status IN ('locked', 'confirmed')) is critical. Without it, the availability query scans millions of expired/cancelled rows, degrading from 10ms to 500ms+."}}
 
 {{goodToKnow "GIN index on seat_ids array enables 'which bookings contain seat X?' queries — needed for the availability JOIN but adds ~20% write overhead on booking inserts" "Booking state machine is monotonic: available → locked → confirmed | expired — no backward transitions, which simplifies conflict detection"}}
 
@@ -454,18 +512,26 @@ CREATE INDEX idx_bookings_show_active
 
 {{diagram "tb-rush-handling"}}
 
+<p>A {{fundLink "messaging/message-queues" "message queue"}} meters user admission to prevent overload.</p>
+
 {{compare "Rush Traffic Control" (options
-  (best "Virtual queue (SQS FIFO + position token)" "Fair <strong>FIFO</strong> (First-In, First-Out — users who arrived earliest get served first) ordering, user sees queue position, metered dequeue prevents service overload. Works even if all 100K users arrive in the same second.")
-  (alt "Rate limiting at API gateway (token bucket)" "Simple but unfair — fast refreshers get in, slow connections are blocked. No queue position feedback. Users experience silent drops.")
-  (nofit "CAPTCHA-only" "Slows bot traffic but doesn't help with 100K legitimate users all clicking simultaneously. The fundamental problem is concurrent load, not bot traffic.")
+  (best "Virtual queue (SQS FIFO + position token)" "Fair FIFO ordering (first-come, first-served), users see their position, and metered dequeue prevents service overload. Works even if all 100K users arrive in the same second.")
+  (alt "Rate limiting at API gateway (token bucket)" "Simple but unfair — users with fast connections get in, others are silently dropped. No queue position feedback.")
+  (nofit "CAPTCHA-only" "Slows bots but doesn't help with 100K legitimate users clicking at once. The problem is concurrent load, not bots.")
 )}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Virtual queue implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{code "python" `# Virtual queue implementation
 # Step 1: User enters queue, gets position token
 def enter_queue(show_id: str, user_id: str) -> dict:
     position = redis.incr(f"queue:show:{show_id}:counter")  # atomic increment
     redis.setex(f"queue:token:{show_id}:{user_id}", 1800, str(position))
-    queue_depth = int(redis.get(f"queue:show:{show_id}:counter"))
     wait_seconds = max(0, (position - 500) // 1000)  # 1K dequeued/sec
     return {"position": position, "wait_seconds": wait_seconds, "token": user_id}
 
@@ -474,27 +540,27 @@ def dequeue_batch(show_id: str, batch_size=1000):
     current_head = int(redis.get(f"queue:show:{show_id}:head") or 0)
     new_head = current_head + batch_size
     redis.set(f"queue:show:{show_id}:head", new_head)
-    # Notify users with positions in [current_head+1, new_head]
-    # via SSE or WebSocket push
+    # Notify users in [current_head+1, new_head] via WebSocket
 
 # Step 3: User gets "your turn" notification, proceeds to seat selection
-# Lock must be acquired within 5 minutes of notification`}}
+# Must acquire lock within 5 minutes of notification`}}
 
-{{think "Why 1K dequeues/second for 500 seats? 500 seats × average 2 seats per booking = ~250 concurrent lock attempts. We dequeue 1K/second to ensure the locking layer sees 4x the number of real competitors per second — fast enough to fill all seats in 1-2 seconds, slow enough to keep Redis lock latency &lt; 10ms."
-  (whatIf "user's internet disconnects while in queue" "Queue position is server-side. When user reconnects (same session or new browser tab), they poll GET /queue/status with their user_id. Server returns their current position. Queue is not browser-state."
-  )
+{{think "Why 1K dequeues/second for 500 seats? At ~2 seats per booking, we need ~250 lock attempts to fill the venue. Dequeuing 1K/sec gives 4x the competitors — fast enough to fill seats in 1-2 seconds, slow enough to keep Redis lock latency under 10ms."
+  (whatIf "user's internet disconnects while in queue" "Queue position is server-side. On reconnect, the user polls GET /queue/status with their user_id and gets their current position. The queue doesn't depend on the browser staying connected.")
 }}
+  </div>
+</details>
 
 {{hint "~15% of locks expire" "Empirically: 15% of users who successfully acquire a seat lock abandon before completing payment. These seats return to the pool after 10 minutes. If there's a waitlist, waitlisted users get push notifications. This is why showing 'only 3 seats left' with a queue model is tricky — 15% of those 'taken' seats will return."}}
 
 {{triggerQs "Questions about rush handling"
-  "What happens if the queue system itself becomes a bottleneck?"
-  "The queue is backed by Redis INCR (atomic counter) which handles 1M+ ops/sec per node. The real bottleneck is the downstream booking service, not the queue. If Redis itself fails, degrade to direct rate limiting at the API gateway — less fair (no FIFO ordering) but still prevents service overload."
-  "How do you prevent queue position manipulation or users jumping the queue?"
-  "Queue position is server-side only — the client gets a position number but cannot modify it. The dequeue process runs server-side and emits 'your turn' notifications based on position order. There is no client-side trust in the queue logic. Additionally, one user_id gets one queue position — duplicate entries are rejected via the Redis SETNX pattern."
+  "What if the queue system itself becomes a bottleneck?"
+  "The queue uses Redis INCR (atomic counter), which handles 1M+ ops/sec per node — it won't be the bottleneck. If Redis fails entirely, fall back to rate limiting at the API gateway. Less fair but still prevents overload."
+  "How do you prevent users from jumping the queue?"
+  "Queue position is server-side only — the client receives a number but can't change it. One user_id gets one position (enforced via SETNX). The dequeue process runs server-side and notifies users in order."
 }}
 
-{{caveat "Without a virtual queue, 100K simultaneous lock attempts create a thundering herd on Redis and the booking service. The queue is not just a UX feature — it is a load protection mechanism that meters admission to 1K/sec."}}
+{{caveat "Without a virtual queue, 100K simultaneous lock attempts create a thundering herd. The queue isn't just a UX feature — it's a load protection mechanism that meters admission to 1K/sec."}}
 
 {{goodToKnow "~15% of seat locks expire without payment completion — these seats re-enter the pool automatically via TTL, feeding the waitlist" "Queue position is calculated as (position - available_seats) / dequeue_rate — gives users an accurate wait estimate"}}
 
@@ -512,11 +578,18 @@ def dequeue_batch(show_id: str, batch_size=1000):
 
 {{diagram "tb-payment-flow"}}
 
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">Payment webhook handler implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
 {{code "python" `# Payment confirmation handler (called from webhook)
 import hmac, hashlib
 
 def handle_payment_webhook(request):
-    # 1. Verify webhook signature (Stripe-Signature header or Razorpay X-Razorpay-Signature)
+    # 1. Verify webhook signature
     signature = request.headers.get('Stripe-Signature')
     payload = request.body
     expected = hmac.new(WEBHOOK_SECRET.encode(), payload, hashlib.sha256).hexdigest()
@@ -529,54 +602,47 @@ def handle_payment_webhook(request):
         payment_id = event['data']['object']['id']
         lock_token = event['data']['object']['metadata']['lock_token']
 
-        # 2. Find booking by lock_token
+        # 2. Find booking — return 200 if already confirmed (idempotent)
         booking = db.query("SELECT * FROM bookings WHERE lock_token = %s", lock_token)
         if not booking or booking.status == 'confirmed':
-            return Response(status=200)  # Idempotent — already processed
+            return Response(status=200)
 
-        # 3. Verify seat locks still held (guard against expiry edge case)
+        # 3. Re-check seat locks (guard against expiry edge case)
         for seat_id in booking.seat_ids:
             lock_val = redis.get(f"lock:show:{booking.show_id}:seat:{seat_id}")
             if not lock_val or not lock_val.decode().startswith(lock_token):
-                # Lock expired; check if seat is still unbooked in Postgres
                 existing = db.query("""
                     SELECT 1 FROM bookings
                     WHERE show_id=%s AND %s = ANY(seat_ids) AND status='confirmed'
                 """, booking.show_id, seat_id)
                 if existing:
-                    # Seat genuinely taken — auto-refund
-                    gateway.refund(payment_id)
+                    gateway.refund(payment_id)  # Seat taken — auto-refund
                     return Response(status=200)
 
-        # 4. Atomic confirm in Postgres
+        # 4. Confirm in Postgres (atomic transaction)
         with db.transaction():
-            db.execute("""
-                UPDATE bookings SET status='confirmed', confirmed_at=NOW()
-                WHERE id=%s AND status='locked'
-            """, booking.id)
-            db.execute("""
-                INSERT INTO payments (booking_id, gateway_txn_id, amount_cents, status)
-                VALUES (%s, %s, %s, 'success')
-            """, booking.id, payment_id, booking.total_cents)
+            db.execute("UPDATE bookings SET status='confirmed' WHERE id=%s", booking.id)
+            db.execute("INSERT INTO payments (booking_id, gateway_txn_id, amount_cents, status) VALUES (%s, %s, %s, 'success')",
+                booking.id, payment_id, booking.total_cents)
 
-        # 5. Release Redis locks (now redundant — Postgres is source of truth)
+        # 5. Release Redis locks (Postgres is now source of truth)
         for seat_id in booking.seat_ids:
             release_lock(booking.show_id, [seat_id], lock_token)
 
-        # 6. Async: generate QR ticket
-        sqs.send_message(QueueUrl=TICKET_QUEUE, MessageBody=json.dumps({
-            "booking_id": str(booking.id)
-        }))
+        # 6. Queue async QR ticket generation
+        sqs.send_message(QueueUrl=TICKET_QUEUE, MessageBody=json.dumps({"booking_id": str(booking.id)}))
 
-    return Response(status=200)`}}
+    return Response(status=200)  # Always 200 to gateway`}}
+  </div>
+</details>
 
-{{hint "why check lock again in webhook handler" "The webhook might arrive after the 10-minute lock TTL expires. If User B locked the same seat in the gap, confirming User A's booking would double-book. The re-check guards this edge case. If it happens, auto-refund is the correct outcome — never double-book."}}
+{{hint "why re-check locks in the webhook handler" "The webhook might arrive after the 10-minute lock expires. If User B locked the same seat in the gap, confirming User A would double-book. The re-check catches this — if the seat was taken, auto-refund User A."}}
 
 {{triggerQs "Questions about payment"
-  "What happens if the payment webhook is never received?"
-  "The seat lock has a 10-minute TTL. If the webhook never arrives (gateway outage, network failure), the lock expires and the seat returns to the pool. No orphaned bookings. For the user: the booking service polls the payment gateway every 60 seconds for pending bookings. If the gateway confirms payment but the webhook was lost, the polling mechanism catches it and completes the booking. If the gateway shows no payment, the booking is abandoned."
-  "How do you handle partial refunds for multi-seat bookings where one seat became unavailable?"
-  "Never partially book. If any seat in a multi-seat booking is unavailable at confirmation time, refund the entire payment. The user re-books with available seats. This avoids the complexity of partial orders and ensures the user gets the seats they want together. The auto-refund happens in under 5 seconds — most users don't notice."
+  "What if the payment webhook never arrives?"
+  "The seat lock expires after 10 minutes and the seat returns to the pool. A reconciliation job polls the gateway every 60 seconds for pending bookings. If the gateway says 'paid' but the webhook was lost, the job catches it and completes the booking."
+  "How do you handle partial refunds for multi-seat bookings?"
+  "Never partially book. If any seat is unavailable at confirmation, refund the entire payment. The user re-books with available seats. Auto-refund takes under 5 seconds."
 }}
 
 {{collapseSection "Payment Gateway Integration Details" `
@@ -594,45 +660,56 @@ def handle_payment_webhook(request):
 
 {{phase 8 "Real-Time Seats" "4 min"}}
 
-{{say `Real-time seat map uses <strong>Redis Pub/Sub</strong> (Publish/Subscribe — a messaging pattern where one publisher sends a message and all subscribers on that channel receive it immediately) to fan out seat state changes:
+<p>Real-time updates use {{fundLink "networking/websockets" "WebSockets"}} powered by {{fundLink "storage/redis" "Redis"}} Pub/Sub.</p>
+
+{{say `Real-time seat map uses <strong>Redis Pub/Sub</strong> (publish/subscribe) to push seat changes to all connected clients:
 <ul>
-  <li>Every lock/release publishes to <code>seat:show:{show_id}</code> channel — sub-ms delivery</li>
-  <li>All WebSocket-connected seat map sessions receive the update immediately</li>
-  <li>Fine-grained events: <code>{seat_id, status: "locked"|"available"|"booked", ts}</code></li>
-  <li>On reconnect: fetch fresh seat map state first, then subscribe to channel for deltas</li>
+  <li>Every lock/release publishes to <code>seat:show:{show_id}</code> channel — delivered in under 1ms</li>
+  <li>All WebSocket-connected clients see the update immediately</li>
+  <li>Events are fine-grained: <code>{seat_id, status: "locked"|"available"|"booked", ts}</code></li>
+  <li>On reconnect: fetch full seat map first, then subscribe for deltas</li>
 </ul>`}}
 
 {{diagram "tb-real-time-seats"}}
 
-{{code "python" `# When a seat lock is acquired (in lock_seats function)
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">WebSocket + Pub/Sub implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{code "python" `# Publish seat change (called from lock_seats / release_lock)
 def publish_seat_update(show_id: str, seat_id: str, status: str):
     channel = f"seat:show:{show_id}"
     message = json.dumps({
         "seat_id": seat_id,
-        "status": status,          # "locked", "available", "booked"
+        "status": status,  # "locked", "available", "booked"
         "ts": int(time.time() * 1000)
     })
-    redis.publish(channel, message)  # Sub-ms delivery
+    redis.publish(channel, message)
 
 # WebSocket handler — one per client connection
 async def seat_map_ws(websocket, show_id: str):
     pubsub = redis.pubsub()
     pubsub.subscribe(f"seat:show:{show_id}")
 
-    # Send initial state (from Redis cache or read replica)
+    # Send full seat map first (from cache or read replica)
     initial_state = get_seat_map(show_id)
     await websocket.send(json.dumps({"type": "init", "seats": initial_state}))
 
-    # Stream updates
+    # Then stream incremental updates
     async for message in pubsub.listen():
         if message["type"] == "message":
             await websocket.send(message["data"])`}}
 
-{{think "Pub/Sub fan-out for a popular show: 50K users on the seat map simultaneously. Each seat lock/release → 1 Redis PUBLISH → 50K WebSocket pushes across N WebSocket servers, each subscribed to the channel. Redis handles PUBLISH at > 1M/sec. WebSocket servers push concurrently — each server fans out to its connected clients in parallel."
-  (whyNot "polling seat map every 2 seconds" "50K users × 1 poll/2s = 25K requests/sec just for seat map refresh. At 500 bytes per response = 12.5 MB/sec. With WebSocket Pub/Sub: 1 publish + fan-out via subscriptions — 1/25000th the request load.")
+{{think "For a popular show with 50K users viewing the seat map: each lock/release triggers 1 Redis PUBLISH, which fans out to 50K WebSocket connections across multiple servers."
+  (whyNot "polling the seat map every 2 seconds" "50K users x 1 poll/2s = 25K requests/sec just for seat map refreshes. With Pub/Sub: 1 publish fans out to all subscribers — 25,000x fewer requests.")
 }}
+  </div>
+</details>
 
-{{hint "handling WebSocket reconnects" "If a client disconnects and reconnects, they might have missed seat events. On reconnect, the client fetches fresh seat map state (GET /shows/{id}/seats from Redis cache). Then subscribes to Pub/Sub for deltas. This 'initial state + deltas' pattern is standard for real-time collaborative UIs."}}
+{{hint "handling WebSocket reconnects" "If a client disconnects and reconnects, they may have missed events. On reconnect: fetch the full seat map first, then subscribe for deltas. This 'initial state + deltas' pattern is standard for any real-time UI."}}
 
 {{caveat "Redis Pub/Sub is fire-and-forget — if a WebSocket server is down when an event publishes, those clients miss the update permanently. The 'initial state + deltas' reconnect pattern is mandatory, not optional."}}
 
@@ -640,12 +717,14 @@ async def seat_map_ws(websocket, show_id: str):
 
 {{phase 9 "Scaling" "4 min"}}
 
+<p>Scaling leverages {{fundLink "distributed/consistent-hashing" "consistent hashing"}} to shard seat locks across Redis nodes.</p>
+
 {{say `Two distinct scaling paths:
 <ul>
   <li><strong>Read path</strong> — CDN for show listings, Redis cache for seat maps, read replicas for queries; scales horizontally</li>
   <li><strong>Write path</strong> — Redis Cluster for locks, PostgreSQL primary for confirms; these are the two bottlenecks</li>
 </ul>
-Redis is sharded by <strong>show_id</strong> (hash tags) so one popular show doesn't starve others — and all seat locks for one show stay on one shard for atomic multi-seat operations.`}}
+Redis is sharded by <strong>show_id</strong> (hash tags) so all seat locks for one show stay on one shard — enabling atomic multi-seat operations.`}}
 
 {{diagram "tb-scaling"}}
 
@@ -659,13 +738,13 @@ Redis is sharded by <strong>show_id</strong> (hash tags) so one popular show doe
   (row "QR generation" "500 async/sec" "575 async/sec" "SQS + Lambda/ECS workers")
 )}}
 
-{{hint "shard Redis by show_id" "Redis Cluster shards keys by hash slot. If all seat locks for all shows hash to the same slot, one Redis shard handles all rush traffic. Force all locks for a show onto one shard by using hash tags: key = {show_id}:seat:{seat_id}. All locks for one show are on one shard, enabling atomic multi-seat lock operations within a show."}}
+{{hint "shard Redis by show_id" "Redis Cluster shards keys by hash slot. Use hash tags in the key — {show_id}:seat:{seat_id} — so all locks for one show land on one shard. This enables atomic multi-seat operations within a show."}}
 
 {{triggerQs "Questions about scaling"
-  "How do you prevent a single popular show from overwhelming the entire system?"
-  "Redis hash tags ({show_id}:seat:{seat_id}) isolate one show's seat locks onto a single shard. A viral show overloads one shard, not the whole cluster. The virtual queue further limits concurrent lock attempts to 1K/sec regardless of demand. Other shows on other shards are unaffected. For extreme cases (Taylor Swift-level demand), spin up a dedicated Redis cluster for that single show."
-  "What is the maximum number of concurrent bookings the system can handle?"
-  "The bottleneck is PostgreSQL write throughput for booking confirmations. A tuned Postgres primary on db.r6g.2xlarge handles approximately 2,000 confirmed writes/sec with connection pooling. At 2 seats per booking, that is 4,000 seats confirmed per second. For events larger than this, batch multiple seat confirmations into a single transaction or use DynamoDB for the confirmation layer."
+  "How do you prevent one viral show from overwhelming everything?"
+  "Hash tags isolate one show's locks to one Redis shard. A viral show overloads one shard, not the cluster. The virtual queue also caps lock attempts at 1K/sec. For extreme cases (Taylor Swift-level), spin up a dedicated Redis cluster for that show."
+  "What's the max concurrent booking throughput?"
+  "The bottleneck is Postgres writes for confirmations: ~2,000 writes/sec on a tuned primary. At 2 seats per booking, that's 4,000 seats/sec. For bigger events, batch confirmations or use DynamoDB for the confirm layer."
 }}
 
 {{collapseSection "Infrastructure Cost Estimates" `
@@ -685,67 +764,63 @@ Redis is sharded by <strong>show_id</strong> (hash tags) so one popular show doe
 
 {{phase 10 "QR Generation" "3 min"}}
 
-{{say `QR codes generated <strong>asynchronously</strong> after payment confirmation:
+{{say `QR codes are generated <strong>asynchronously</strong> after payment confirmation:
 <ul>
-  <li>Token: <span class="hl-blue">HMAC-SHA256</span> (<strong>HMAC</strong> = Hash-based Message Authentication Code — a cryptographic signature that proves a message was created by someone who knows the secret key; SHA-256 is the hash function used)(<code>booking_id + secret + show_date</code>) — unforgeable without the secret key</li>
-  <li>QR image: PNG stored in <strong>S3</strong>, delivered via <strong>CloudFront</strong> — static, immutable once generated</li>
-  <li>Venue validation: <code>GET /tickets/validate?token=...</code> — the <strong>only endpoint</strong> that needs to be online at the venue</li>
+  <li>Token: <span class="hl-blue">HMAC-SHA256</span> (a cryptographic signature using a secret key) of <code>booking_id + show_date</code> — unforgeable without the secret</li>
+  <li>QR image: PNG stored in <strong>S3</strong>, delivered via <strong>CloudFront</strong> — static and immutable</li>
+  <li>Venue validation: <code>GET /tickets/validate?token=...</code> — the only endpoint needed at the venue</li>
 </ul>`}}
 
 {{diagram "tb-qr-generation"}}
 
-{{code "python" `import hmac, hashlib, base64
+<details class="deep-dive">
+  <summary class="deep-dive-summary">
+    <svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span class="deep-dive-label">QR generation + validation implementation</span>
+    <span class="deep-dive-badge">Deep Dive</span>
+  </summary>
+  <div class="deep-dive-body">
+{{code "python" `import hmac, hashlib
 from qrcode import QRCode
 
 SECRET_KEY = os.environ['TICKET_SIGNING_SECRET']
 
 def generate_ticket_token(booking_id: str, show_date: str) -> str:
-    # Unforgeable: requires HMAC secret
     message = f"{booking_id}:{show_date}".encode()
-    token = hmac.new(SECRET_KEY.encode(), message, hashlib.sha256).hexdigest()
-    return token  # 64-char hex string
+    return hmac.new(SECRET_KEY.encode(), message, hashlib.sha256).hexdigest()
 
 def generate_qr_image(booking_id: str, seat_info: list, show_date: str) -> str:
     token = generate_ticket_token(booking_id, show_date)
-
-    # QR payload: compact JSON (200 bytes → Version 6 QR, 41×41 modules)
+    # Compact JSON payload (~200 bytes)
     payload = json.dumps({
-        "t": token[:16],    # first 16 chars enough for lookup
-        "b": str(booking_id)[-8:],  # last 8 chars of booking UUID
+        "t": token[:16],
+        "b": str(booking_id)[-8:],
         "s": [s["seat_label"] for s in seat_info]
     })
-
     qr = QRCode(version=6, error_correction=ERROR_CORRECT_M)
     qr.add_data(payload)
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
-
-    # Upload to S3
     buffer = BytesIO()
     img.save(buffer, format="PNG")
-    s3.put_object(
-        Bucket="tickets-bucket",
-        Key=f"{booking_id}/qr.png",
-        Body=buffer.getvalue(),
-        ContentType="image/png"
-    )
+    s3.put_object(Bucket="tickets-bucket", Key=f"{booking_id}/qr.png",
+                  Body=buffer.getvalue(), ContentType="image/png")
     return f"https://cdn.tickets.com/{booking_id}/qr.png"
 
 def validate_ticket(token_prefix: str, booking_id_suffix: str) -> dict:
-    # Venue scanner calls this — must work offline-ish
     ticket = db.query("""
-        SELECT t.*, b.show_id, b.seat_ids, b.confirmed_at
-        FROM tickets t JOIN bookings b ON t.booking_id = b.id
+        SELECT t.*, b.show_id, b.seat_ids FROM tickets t
+        JOIN bookings b ON t.booking_id = b.id
         WHERE t.qr_token LIKE %s AND b.id LIKE %s
     """, f"{token_prefix}%", f"%{booking_id_suffix}")
-
     if not ticket or ticket.status == 'used':
         return {"valid": False, "reason": "already scanned or not found"}
-
     db.execute("UPDATE tickets SET scanned_at=NOW(), status='used' WHERE id=%s", ticket.id)
     return {"valid": True, "seat_ids": ticket.seat_ids}`}}
+  </div>
+</details>
 
-{{hint "why HMAC not UUID for QR token" "A UUID is random but doesn't bind to specific booking data — a stolen UUID is a valid ticket for any booking. HMAC binds the token to (booking_id + show_date + secret). Without the secret, an attacker can't forge a valid token even if they know the booking_id."}}
+{{hint "why HMAC not UUID for QR token" "A UUID is random — a stolen UUID is a valid ticket. HMAC binds the token to (booking_id + show_date + secret). Without the secret, an attacker can't forge a token even if they know the booking_id."}}
 
 {{collapseSection "QR Code Technical Specifications" `
 <ul>
@@ -765,12 +840,12 @@ def validate_ticket(token_prefix: str, booking_id_suffix: str) -> dict:
 
 {{say `Bot scalpers try to buy all premium seats for resale — defense is layered:
 <ul>
-  <li><strong>WAF</strong> (Web Application Firewall — a layer that inspects incoming HTTP requests and blocks known bot patterns, malicious IPs, and abusive traffic before they reach the application) — rate limits at edge: <span class="hl">100 requests/min per IP</span> for booking endpoints</li>
-  <li><strong>reCAPTCHA v3</strong> — score &gt; 0.7 required for lock attempts on high-demand shows <small>(reCAPTCHA runs invisibly in the background, scoring user behavior 0.0–1.0; a score below 0.7 suggests automated traffic)</small></li>
+  <li><strong>WAF</strong> (Web Application Firewall) — blocks known bot patterns at the edge: <span class="hl">100 requests/min per IP</span> on booking endpoints</li>
+  <li><strong>reCAPTCHA v3</strong> — runs invisibly, scores user behavior 0.0-1.0; score &gt; 0.7 required for lock attempts on high-demand shows</li>
   <li><strong>Device fingerprinting</strong> — max 3 accounts per device for high-demand bookings</li>
-  <li><strong>Business logic</strong> — max <span class="hl">6 tickets</span> per user per show; max 3 lock attempts per session per show</li>
+  <li><strong>Business logic</strong> — max <span class="hl">6 tickets</span> per user per show; max 3 lock attempts per session</li>
 </ul>
-Bot traffic detected by behavior patterns: <span class="hl-red">sub-second lock attempts across multiple accounts from the same IP cluster</span>.`}}
+Key bot signal: <span class="hl-red">sub-second lock attempts across multiple accounts from the same IP cluster</span>.`}}
 
 {{diagram "tb-anti-scalping"}}
 
@@ -780,13 +855,13 @@ Bot traffic detected by behavior patterns: <span class="hl-red">sub-second lock 
   (nofit "IP-based rate limiting only" "Scalpers use residential proxy networks with millions of IPs. IP rate limiting is trivially bypassed. Fine as a cheap first layer but not sufficient alone.")
 )}}
 
-{{think "The hard tradeoff: anti-scalping measures that are too aggressive block legitimate users. A family of 4 using 4 phones (4 different device fingerprints) for a IPL final should succeed. Business logic: 6 tickets per user_id per show is the real limit — devices and IPs are signals, not blockers."
-  (whyNot "requiring ID verification for every booking" "ID verification adds 30–60 seconds of friction. For a 500-seat rush lasting 10 seconds, this would mean all users are still in verification when seats sell out. ID verification is appropriate for secondary market prevention (link ticket to ID), not for primary booking.")
+{{think "The hard tradeoff: too-aggressive anti-bot measures block legitimate users. A family of 4 on 4 phones for an IPL final should succeed. The business limit (6 tickets per user per show) is the real enforcement — device/IP signals are just scoring inputs."
+  (whyNot "requiring ID verification for every booking" "ID verification adds 30-60 seconds of friction. During a 500-seat rush that lasts 10 seconds, users would still be verifying when seats sell out. ID verification works for secondary market prevention, not primary booking.")
 }}
 
 {{checklist "Anti-scalping checklist" "WAF rate limit: 100 requests/minute per IP for booking endpoints" "reCAPTCHA v3 score > 0.7 required for lock attempts on high-demand shows" "Max 6 seats per user per show enforced at API layer" "Device fingerprint: max 3 accounts per device for high-demand bookings" "Session velocity: max 3 lock attempts per session per show" "Purchase history: flag accounts with > 20 bookings/month for review"}}
 
-{{caveat "Anti-scalping measures that are too aggressive block legitimate users — a family of 4 on 4 phones is not a bot ring. Device fingerprints and IPs are signals for scoring, not hard blockers. The business limit (6 tickets per user per show) is the real enforcement."}}
+{{caveat "A family of 4 on 4 phones is not a bot ring. Device/IP signals feed a score, not a hard block. The business limit (6 tickets per user per show) is the real enforcement."}}
 
 {{goodToKnow "reCAPTCHA v3 is score-based (0.0-1.0) and invisible — no checkbox friction; threshold of 0.7 balances false positive rate vs bot detection" "ID verification for ticket-to-person binding prevents secondary market resale but adds 30-60 seconds of friction — only appropriate for high-value events"}}
 

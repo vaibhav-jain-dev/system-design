@@ -41,6 +41,14 @@ func FuncMap(diagramReg *diagrams.Registry) template.FuncMap {
 		"caveat":         caveat,
 		"collapseSection": collapseSection,
 
+		// Clickable cross-reference links
+		"fundLink":    fundLink,
+		"algoLink":    algoLink,
+		"patternLink": patternLink,
+
+		// Collapsible deep-dive sections
+		"deepDive": deepDive,
+
 		// Helpers for building structured data in templates
 		"options": optionsList,
 		"best":    optBest,
@@ -70,6 +78,14 @@ func slugImagePath(kind, slug string) string {
 		"problem:url-shortener":               "/static/img/tech/problem-url-shortener.svg",
 		"problem:rate-limiter":                "/static/img/tech/problem-rate-limiter.svg",
 		"problem:instagram":                   "/static/img/tech/problem-instagram.svg",
+		"problem:chat-system":                 "/static/img/tech/problem-chat-system.svg",
+		"problem:food-delivery":               "/static/img/tech/problem-food-delivery.svg",
+		"problem:ticket-booking":              "/static/img/tech/problem-ticket-booking.svg",
+		"problem:twitter-feed":                "/static/img/tech/problem-twitter-feed.svg",
+		"problem:ride-hailing":                "/static/img/tech/problem-ride-hailing.svg",
+		"problem:google-calendar":             "/static/img/tech/problem-google-calendar.svg",
+		"problem:search-autocomplete":         "/static/img/tech/problem-search-autocomplete.svg",
+		"problem:payment-system":              "/static/img/tech/problem-payment-system.svg",
 		"fundamental:storage/redis":           "/static/img/tech/fund-redis.svg",
 		"fundamental:storage/dynamodb":        "/static/img/tech/fund-dynamodb.svg",
 		"fundamental:networking/load-balancing": "/static/img/tech/fund-load-balancer.svg",
@@ -653,6 +669,51 @@ func collapseSection(title, content string) template.HTML {
 	return template.HTML(fmt.Sprintf(
 		`<details class="collapse-section"><summary class="collapse-section-summary"><svg class="collapse-section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg> %s</summary><div class="collapse-section-body">%s</div></details>`,
 		title, content))
+}
+
+// ── Cross-Reference Link Macros ─────────────────────────────────
+
+// fundLink renders an inline clickable link to a fundamental page.
+// Usage: {{fundLink "storage/redis" "Redis"}}
+func fundLink(slug, title string) template.HTML {
+	return template.HTML(fmt.Sprintf(
+		`<a href="/fund/%s" hx-get="/fund/%s" hx-target="#detail" hx-swap="innerHTML" hx-push-url="true" class="xref-link xref-fund" title="%s">%s<svg class="xref-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg></a>`,
+		slug, slug, title, title))
+}
+
+// algoLink renders an inline clickable link to an algorithm page.
+// Usage: {{algoLink "consistent-hashing" "Consistent Hashing"}}
+func algoLink(slug, title string) template.HTML {
+	return template.HTML(fmt.Sprintf(
+		`<a href="/algo/%s" hx-get="/algo/%s" hx-target="#detail" hx-swap="innerHTML" hx-push-url="true" class="xref-link xref-algo" title="%s">%s<svg class="xref-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></a>`,
+		slug, slug, title, title))
+}
+
+// patternLink renders an inline clickable link to a pattern page.
+// Usage: {{patternLink "rag" "RAG"}}
+func patternLink(slug, title string) template.HTML {
+	return template.HTML(fmt.Sprintf(
+		`<a href="/pattern/%s" hx-get="/pattern/%s" hx-target="#detail" hx-swap="innerHTML" hx-push-url="true" class="xref-link xref-pattern" title="%s">%s<svg class="xref-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/></svg></a>`,
+		slug, slug, title, title))
+}
+
+// ── Collapsible Deep-Dive Sections ─────────────────────────────
+
+// deepDive renders a collapsible section for advanced content.
+// Closed by default — users expand when they want to go deeper.
+// Usage: {{deepDive "Advanced: Consistent Hashing Details" "detailed HTML content"}}
+func deepDive(title, content string) template.HTML {
+	return template.HTML(fmt.Sprintf(
+		`<details class="deep-dive">
+			<summary class="deep-dive-summary">
+				<svg class="deep-dive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M12 19V5M5 12l7-7 7 7"/>
+				</svg>
+				<span class="deep-dive-label">%s</span>
+				<span class="deep-dive-badge">Deep Dive</span>
+			</summary>
+			<div class="deep-dive-body">%s</div>
+		</details>`, title, content))
 }
 
 // ── Thought Process Macros ─────────────────────────────────────
