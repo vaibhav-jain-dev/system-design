@@ -1360,4 +1360,168 @@ func registerURLShortener(r *Registry) {
   </div>
 </div>`,
 	})
+
+	r.Register(&Diagram{
+		Slug:        "url-db-scale-journey",
+		Title:       "Database Scale Journey: 3 Stages",
+		Description: "When to stay on Postgres, add read replicas, and migrate to DynamoDB — with exact QPS thresholds.",
+		ContentFile: "problems/url-shortener",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+  <div class="d-flow" style="align-items:stretch; gap:8px;">
+
+    <!-- Stage 1 -->
+    <div class="d-col" style="flex:1;">
+      <div class="d-group" style="height:100%;">
+        <div class="d-group-title" style="background:var(--green-bg,#dcfce7); color:#166534;">Stage 1 — MVP</div>
+        <div class="d-flow-v" style="gap:6px; padding:4px 0;">
+          <div class="d-box green" style="font-size:0.85em;"><strong>&lt; 10K QPS</strong></div>
+          <div class="d-box green" style="font-size:0.82em;" data-tip="Single db.r6g.large handles 5–10K simple reads/s with a B-tree index on short_code.">Single Postgres RDS</div>
+          <div class="d-box green" style="font-size:0.82em;" data-tip="No PgBouncer, no replicas, no sharding config. Full SQL + ACID transactions.">No sharding, full SQL</div>
+          <div class="d-box green" style="font-size:0.82em;" data-tip="db.r6g.large = ~$200/month in us-east-1 (on-demand). 1 node, no replication cost.">~$200/month</div>
+        </div>
+        <div class="d-tag green" style="margin-top:4px;">Start here</div>
+      </div>
+    </div>
+
+    <!-- Arrow -->
+    <div class="d-flow-v" style="justify-content:center; align-items:center; padding:0 4px; gap:2px;">
+      <div style="font-size:0.7em; color:#6b7280; text-align:center;">Writes &gt; 5K/s<br>or reads &gt; 10K/s</div>
+      <div class="d-arrow">&#8594;</div>
+    </div>
+
+    <!-- Stage 2 -->
+    <div class="d-col" style="flex:1;">
+      <div class="d-group" style="height:100%;">
+        <div class="d-group-title" style="background:var(--blue-bg,#dbeafe); color:#1e40af;">Stage 2 — Growth</div>
+        <div class="d-flow-v" style="gap:6px; padding:4px 0;">
+          <div class="d-box blue" style="font-size:0.85em;"><strong>10K–30K QPS</strong></div>
+          <div class="d-box blue" style="font-size:0.82em;" data-tip="2–4 read replicas behind PgBouncer pool. Reads scale; writes still go to single primary.">Postgres + 2–4 read replicas</div>
+          <div class="d-box blue" style="font-size:0.82em;" data-tip="PgBouncer pools connections (transaction mode). Without it, 10K connections would OOM Postgres.">PgBouncer connection pool</div>
+          <div class="d-box amber" style="font-size:0.82em;" data-tip="Replication lag = new URL might return 404 on a replica immediately after creation. Fix: route writes + immediate reads to primary.">Watch: 10–100ms replication lag</div>
+        </div>
+        <div class="d-tag blue" style="margin-top:4px;">Add replicas</div>
+      </div>
+    </div>
+
+    <!-- Arrow -->
+    <div class="d-flow-v" style="justify-content:center; align-items:center; padding:0 4px; gap:2px;">
+      <div style="font-size:0.7em; color:#6b7280; text-align:center;">Writes &gt; 10–15K/s<br>or 3+ shards needed</div>
+      <div class="d-arrow">&#8594;</div>
+    </div>
+
+    <!-- Stage 3 -->
+    <div class="d-col" style="flex:1;">
+      <div class="d-group" style="height:100%;">
+        <div class="d-group-title" style="background:var(--purple-bg,#f3e8ff); color:#6b21a8;">Stage 3 — Scale ← we are here</div>
+        <div class="d-flow-v" style="gap:6px; padding:4px 0;">
+          <div class="d-box purple" style="font-size:0.85em;"><strong>&gt; 30K QPS (our 57K RPS)</strong></div>
+          <div class="d-box purple" style="font-size:0.82em;" data-tip="DynamoDB auto-partitions by short_code. No manual shard config, no rebalancing. Adding capacity = adjust WCU/RCU or switch to on-demand.">DynamoDB — auto-shards</div>
+          <div class="d-box purple" style="font-size:0.82em;" data-tip="expires_at attribute + TTL enabled on the table. DynamoDB background scanner deletes within 48h at zero cost.">Built-in TTL for expiration</div>
+          <div class="d-box purple" style="font-size:0.82em;" data-tip="DynamoDB Global Tables replicate across regions with ~1s lag. Multi-master writes. No manual replication setup.">Global Tables for multi-region</div>
+        </div>
+        <div class="d-tag purple" style="margin-top:4px;">Target for interview</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Migration trigger summary bar -->
+  <div class="d-group" style="margin-top:8px;">
+    <div class="d-group-title">Migration Triggers (hard signals)</div>
+    <div class="d-flow" style="gap:8px; flex-wrap:wrap;">
+      <div class="d-box amber" style="font-size:0.82em;" data-tip="Write QPS hits the primary hard. Replicas don't help writes. You'd need to shard Postgres manually — DynamoDB does it automatically.">Sustained writes &gt; 10–15K/s &#8594; go DynamoDB</div>
+      <div class="d-box amber" style="font-size:0.82em;" data-tip="5+ replicas means PgBouncer tuning, replica lag monitoring, failover scripts. Ops cost outweighs DynamoDB pricing.">5+ read replicas needed &#8594; go DynamoDB</div>
+      <div class="d-box amber" style="font-size:0.82em;" data-tip="Once you'd be running 3+ Postgres shards with a custom shard key, you're doing DynamoDB's job manually.">Manual sharding begins &#8594; go DynamoDB</div>
+      <div class="d-box amber" style="font-size:0.82em;" data-tip="DynamoDB Global Tables give multi-master replication across regions. Postgres streaming replication is single-master only.">Multi-region writes needed &#8594; go DynamoDB</div>
+    </div>
+  </div>
+</div>`,
+	})
+
+	r.Register(&Diagram{
+		Slug:        "url-gsi-explained",
+		Title:       "DynamoDB GSI: What It Is and Why It Exists",
+		Description: "Visual explanation of Global Secondary Index — partition key, sort key, projection, and when to use it.",
+		ContentFile: "problems/url-shortener",
+		Type:        TypeHTML,
+		HTML: `<div class="d-flow-v">
+
+  <!-- Main table -->
+  <div class="d-cols" style="gap:12px;">
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">Primary Table: <code>urls</code></div>
+        <div class="d-entity">
+          <div class="d-entity-header indigo">urls</div>
+          <div class="d-entity-body">
+            <div class="pk" data-tip="Partition key = the hash function input. DynamoDB hashes short_code to pick which physical partition stores this item. GetItem(PK=short_code) is always O(1).">short_code <span style="font-size:0.75em; color:#6366f1;">(PK — partition key)</span></div>
+            <div>original_url</div>
+            <div class="idx idx-gsi" data-tip="user_id is indexed in the GSI. Not the primary table PK — it's just a regular attribute here, but the GSI treats it as its own partition key.">user_id <span style="font-size:0.75em; color:#9333ea;">(GSI PK)</span></div>
+            <div>created_at <span style="font-size:0.75em; color:#9333ea;">(GSI SK)</span></div>
+            <div>expires_at</div>
+            <div>click_count</div>
+          </div>
+        </div>
+        <div class="d-label" style="margin-top:6px;">&#128269; Only query by <strong>short_code</strong> directly<br>&#10060; Cannot query by user_id on primary table</div>
+      </div>
+    </div>
+
+    <div class="d-flow-v" style="justify-content:center; align-items:center;">
+      <div style="font-size:0.75em; color:#6b7280; text-align:center; max-width:90px;">DynamoDB maintains a separate internal copy — auto-updated on every write</div>
+      <div class="d-arrow">&#8594;</div>
+    </div>
+
+    <div class="d-col">
+      <div class="d-group">
+        <div class="d-group-title">GSI: <code>user-urls-index</code></div>
+        <div class="d-entity">
+          <div class="d-entity-header purple">user-urls-index</div>
+          <div class="d-entity-body">
+            <div class="pk" data-tip="The GSI's own partition key. DynamoDB hashes user_id separately from the main table. All URLs by user_id land in the same GSI partition.">user_id <span style="font-size:0.75em; color:#6366f1;">(GSI PK)</span></div>
+            <div class="pk" data-tip="Sort key within the GSI partition. All items with the same user_id are stored sorted by created_at. This makes ORDER BY free — no extra sort step needed.">created_at <span style="font-size:0.75em; color:#6366f1;">(GSI SK — sorted)</span></div>
+            <div style="background:#f3e8ff; border-radius:4px; padding:4px 6px; margin-top:4px;">
+              <div style="font-size:0.75em; font-weight:600; color:#6b21a8; margin-bottom:3px;">Projected attributes (ALL):</div>
+              <div style="font-size:0.8em;">short_code</div>
+              <div style="font-size:0.8em;">original_url</div>
+              <div style="font-size:0.8em;">click_count</div>
+              <div style="font-size:0.8em; color:#9ca3af; font-style:italic;">(+ all other attrs)</div>
+            </div>
+          </div>
+        </div>
+        <div class="d-label" style="margin-top:6px;">&#128269; Query: <code>user_id = "u123"</code><br>&#128200; Returns URLs sorted newest-first<br>&#128196; Full item data — no extra read needed</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Projection explanation -->
+  <div class="d-group" style="margin-top:8px;">
+    <div class="d-group-title">Projection: What Gets Copied into the GSI?</div>
+    <div class="d-cols" style="gap:8px;">
+      <div class="d-col">
+        <div class="d-box green" data-tip="GSI stores a full copy of every item. Query returns everything in one read. Cost: double storage (usually negligible for small items).">
+          <strong>ALL</strong> — copy every attribute<br>
+          <span style="font-size:0.82em;">One GSI read = full item. Used here.</span>
+        </div>
+      </div>
+      <div class="d-col">
+        <div class="d-box amber" data-tip="GSI stores only the PK + SK + specified attributes. If you need other fields, you must do a separate GetItem per result row — N reads instead of 1.">
+          <strong>INCLUDE</strong> — copy specific fields<br>
+          <span style="font-size:0.82em;">Cheaper storage, but requires follow-up GetItem for missing fields.</span>
+        </div>
+      </div>
+      <div class="d-col">
+        <div class="d-box red" data-tip="GSI stores only PK + SK. Useful only to check existence or get counts. Any other field requires a GetItem lookup per row.">
+          <strong>KEYS_ONLY</strong> — copy nothing extra<br>
+          <span style="font-size:0.82em;">Cheapest, but forces 1 extra read per item. Bad for dashboard queries.</span>
+        </div>
+      </div>
+    </div>
+    <div class="d-box blue" style="margin-top:6px; font-size:0.85em;" data-tip="For the user dashboard, ALL projection means Query(user-urls-index, user_id='u123') returns all URL data in a single call. KEYS_ONLY would mean 1 Query + N GetItem calls — N being the number of URLs per page.">
+      &#x2714; We use <strong>ALL projection</strong> — user dashboard Query returns 20 URLs per page in <strong>1 read</strong> instead of 1 + 20 reads.
+    </div>
+  </div>
+
+</div>`,
+	})
 }
