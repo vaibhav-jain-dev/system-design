@@ -259,24 +259,87 @@
             });
         }
 
-        // ── Sidebar auto-collapse ─────────────────
+        // ── Sidebar section state persistence ────────
+        var SIDEBAR_SECTIONS_KEY = 'sd-sidebar-sections';
+        function saveSectionStates() {
+            var states = {};
+            document.querySelectorAll('.sidebar-section[data-section-type]').forEach(function(s) {
+                var t = s.getAttribute('data-section-type');
+                if (t) states[t] = s.classList.contains('collapsed');
+            });
+            try { localStorage.setItem(SIDEBAR_SECTIONS_KEY, JSON.stringify(states)); } catch(e) {}
+        }
+
+        // ── Sidebar auto-collapse (smart + persistent) ────────
         function collapseSidebarSections() {
             var path = window.location.pathname;
             var activeType = '';
-            if (path.startsWith('/problem/')) activeType = 'problem';
-            else if (path.startsWith('/fund/')) activeType = 'fundamental';
-            else if (path.startsWith('/algo/')) activeType = 'algorithm';
-            else if (path.startsWith('/pattern/')) activeType = 'pattern';
+            if (path.startsWith('/problem/'))  activeType = 'problem';
+            else if (path.startsWith('/fund/'))     activeType = 'fundamental';
+            else if (path.startsWith('/algo/'))     activeType = 'algorithm';
+            else if (path.startsWith('/pattern/'))  activeType = 'pattern';
+            else if (path.startsWith('/concept/'))  activeType = 'concept';
+            else if (path.startsWith('/quick'))     activeType = 'quick';
 
-            document.querySelectorAll('.sidebar-section').forEach(function(section) {
+            var saved = {};
+            try { saved = JSON.parse(localStorage.getItem(SIDEBAR_SECTIONS_KEY) || '{}'); } catch(e) {}
+
+            document.querySelectorAll('.sidebar-section[data-section-type]').forEach(function(section) {
                 var type = section.getAttribute('data-section-type');
                 if (!type) return;
-                if (activeType && type !== activeType) {
-                    section.classList.add('collapsed');
-                } else {
+                // 'problem' and 'distributed' always expand together
+                var isActive = type === activeType ||
+                    (activeType === 'problem'     && type === 'distributed') ||
+                    (activeType === 'distributed' && type === 'problem');
+
+                if (isActive) {
                     section.classList.remove('collapsed');
+                } else if (type in saved) {
+                    section.classList.toggle('collapsed', saved[type]);
+                }
+                // No saved state and not active → leave as HTML default
+            });
+            scrollActiveSidebarItem();
+            expandActiveSidebarTree();
+        }
+
+        // ── Scroll active sidebar item into view ────────
+        function scrollActiveSidebarItem() {
+            requestAnimationFrame(function() {
+                var active = document.querySelector('.sidebar-nav .sidebar-item.active');
+                if (!active) return;
+                var sidebar = document.querySelector('.sidebar');
+                if (!sidebar) return;
+                var sRect = sidebar.getBoundingClientRect();
+                var iRect = active.getBoundingClientRect();
+                if (iRect.bottom > sRect.bottom - 16 || iRect.top < sRect.top + 70) {
+                    active.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
                 }
             });
+        }
+
+        // ── Expand Alpine tree ancestors of active sidebar item ────────
+        // Works framework-agnostically by clicking closed tree-toggle buttons.
+        function expandActiveSidebarTree() {
+            setTimeout(function() {
+                var active = document.querySelector('.sidebar-nav .sidebar-item.active');
+                if (!active) return;
+                var el = active.parentElement;
+                while (el && !el.classList.contains('sidebar-nav')) {
+                    if (el.classList.contains('sidebar-children')) {
+                        var hidden = el.style.display === 'none' ||
+                            window.getComputedStyle(el).display === 'none';
+                        if (hidden) {
+                            var prev = el.previousElementSibling;
+                            if (prev) {
+                                var toggle = prev.querySelector('.tree-toggle');
+                                if (toggle) toggle.click();
+                            }
+                        }
+                    }
+                    el = el.parentElement;
+                }
+            }, 80); // after Alpine initialises
         }
 
         // ── Stage Nav auto-highlight ─────────────
@@ -1677,6 +1740,16 @@
         }
 
         initSidebarSearch();
+
+        // ── Persist section state when user manually collapses/expands ────────
+        var sidebarNav = document.querySelector('.sidebar-nav');
+        if (sidebarNav) {
+            sidebarNav.addEventListener('click', function(e) {
+                if (e.target.closest('.sidebar-section-title')) {
+                    setTimeout(saveSectionStates, 0);
+                }
+            });
+        }
     })();
     </script>
 </body>
