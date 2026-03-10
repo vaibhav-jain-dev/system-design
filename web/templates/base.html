@@ -1120,8 +1120,9 @@
         }
 
         // ── buildSummaryHTML ─────────────────────────────────────────────────
-        // Cheat-sheet SVG: extracts real content from pages and renders
-        // a 2-column card grid with key facts, decisions, and numbers.
+        // Flow-diagram cheat sheet: phase boxes with real extracted content,
+        // connected by arrows. Key decisions in green, numbers in amber badges,
+        // "up next" as dashed continuation boxes.
         function buildSummaryHTML(data) {
             var PC = ['#6366f1','#3b82f6','#10b981','#f59e0b','#8b5cf6','#ef4444',
                        '#06b6d4','#f97316','#84cc16','#ec4899','#14b8a6','#a855f7'];
@@ -1133,35 +1134,49 @@
             var nPrev  = data.prevChapters ? data.prevChapters.length : 0;
             var nNext  = data.nextPhases   ? data.nextPhases.length   : 0;
 
-            // ── Layout constants ─────────────────────────────────────────
-            var W = 1060, MX = 28;
-            var COL_W = 490, COL_GAP = 24;
-            var c1X = MX, c2X = MX + COL_W + COL_GAP;
-            var BH = 17;                // bullet line height
-            var CARD_TOP = 28;          // phase header height
-            var CARD_PAD = 14;          // bottom padding
+            // ── Layout: flow diagram with 2–3 boxes per row ─────────────
+            var W = 1060, MX = 22;
+            var usable = W - MX * 2;
+            var nPh = phases.length || 1;
+            var cols = nPh <= 2 ? nPh : (nPh <= 4 ? 2 : 3);
+            var ARROW_W = 28;               // horizontal arrow width
+            var boxW = Math.floor((usable - (cols - 1) * ARROW_W) / cols);
+            var BH = 16;                    // bullet line height
+            var BOX_HEAD = 32;              // header area in each box
+            var BOX_PAD  = 10;              // bottom padding
 
-            // ── Calculate card positions (2-col grid) ────────────────────
-            var titleH = 38 + (nPrev > 0 ? 30 : 0); // title area height
-            var cards = [];
-            var rowY = titleH;
-            for (var ci = 0; ci < phases.length; ci += 2) {
-                var l = phases[ci], r = phases[ci + 1];
-                var lH = CARD_TOP + Math.max(l.bullets.length, 1) * BH + CARD_PAD;
-                var rH = r ? CARD_TOP + Math.max(r.bullets.length, 1) * BH + CARD_PAD : 0;
-                var rw = Math.max(lH, rH);
-                cards.push({ ph: l, x: c1X, y: rowY, w: COL_W, h: rw });
-                if (r) cards.push({ ph: r, x: c2X, y: rowY, w: COL_W, h: rw });
-                rowY += rw + 10;
+            // Calculate per-phase box height
+            phases.forEach(function(ph) {
+                ph._h = BOX_HEAD + Math.max(ph.bullets.length, 1) * BH + BOX_PAD;
+            });
+
+            // Build rows of phases
+            var rows = [];
+            for (var ri = 0; ri < phases.length; ri += cols) {
+                var row = phases.slice(ri, ri + cols);
+                var maxH = 0;
+                row.forEach(function(ph) { if (ph._h > maxH) maxH = ph._h; });
+                rows.push({ phases: row, h: maxH });
             }
 
-            // "Up next" + prompt positions
-            var upY = rowY + 6;
-            var nxtH = nNext > 0 ? 22 : 0;
-            var promptY = upY + nxtH + 10;
-            var H = promptY + 44;
+            // Y positions
+            var titleH = 34 + (nPrev > 0 ? 26 : 0);
+            var ROW_GAP = 14;
+            var ROW_ARROW_H = 22;           // vertical arrow between rows
+            var curY = titleH;
+            rows.forEach(function(r, i) {
+                r.y = curY;
+                curY += r.h + ROW_GAP;
+                if (i < rows.length - 1) curY += ROW_ARROW_H;
+            });
 
-            // ── SVG ──────────────────────────────────────────────────────
+            // "Up next" + prompt
+            var upY = curY + 2;
+            var nxtRowH = nNext > 0 ? 40 : 0;
+            var promptY = upY + nxtRowH + 10;
+            var H = promptY + 38;
+
+            // ── SVG start ────────────────────────────────────────────────
             var s = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+W+' '+H+'"'
                   + ' style="width:100%;height:auto;display:block"'
                   + ' font-family="Inter,system-ui,sans-serif">';
@@ -1169,71 +1184,117 @@
             // ── Previous chapter pills ───────────────────────────────────
             if (nPrev > 0) {
                 var px = MX;
-                data.prevChapters.forEach(function(ch, i) {
-                    s += '<rect x="'+px+'" y="6" width="68" height="22" rx="11"'
-                       + ' fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.07)"/>';
-                    s += '<text x="'+(px+34)+'" y="20" text-anchor="middle"'
-                       + ' fill="rgba(255,255,255,0.30)" font-size="9.5" font-weight="700">'
+                data.prevChapters.forEach(function(ch) {
+                    s += '<rect x="'+px+'" y="5" width="64" height="19" rx="9.5"'
+                       + ' fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.06)"/>';
+                    s += '<text x="'+(px+32)+'" y="17" text-anchor="middle"'
+                       + ' fill="rgba(255,255,255,0.22)" font-size="8.5" font-weight="700">'
                        + 'Ch.'+ch.num+' p.'+ch.startPage+'\u2013'+ch.endPage+'</text>';
-                    px += 76;
+                    px += 72;
                 });
             }
 
-            // ── Title bar ────────────────────────────────────────────────
-            var tY = nPrev > 0 ? 50 : 26;
-            s += '<text x="'+MX+'" y="'+tY+'" fill="rgba(255,255,255,0.15)" font-size="11"'
+            // ── Title ────────────────────────────────────────────────────
+            var tY = nPrev > 0 ? 44 : 22;
+            s += '<text x="'+MX+'" y="'+tY+'" fill="rgba(255,255,255,0.12)" font-size="9.5"'
                + ' font-weight="800" letter-spacing="2">QUICK REVISION</text>';
-            s += '<text x="'+(MX+130)+'" y="'+tY+'" fill="#fff" font-size="17" font-weight="800"'
-               + ' letter-spacing="-0.3">Chapter '+data.chapterNum+'</text>';
-            var rX = MX + 130 + (data.chapterNum >= 10 ? 108 : 95);
-            s += '<text x="'+rX+'" y="'+tY+'" fill="rgba(255,255,255,0.22)" font-size="12">'
+            s += '<text x="'+(MX+114)+'" y="'+tY+'" fill="#fff" font-size="15" font-weight="800">'
+               + 'Chapter '+data.chapterNum+'</text>';
+            s += '<text x="'+(MX+114+(data.chapterNum>=10?90:76))+'" y="'+tY+'"'
+               + ' fill="rgba(255,255,255,0.2)" font-size="10.5">'
                + 'p.'+data.startPage+'\u2013'+data.endPage+'</text>';
 
-            // ── Phase cards ──────────────────────────────────────────────
-            cards.forEach(function(cd) {
-                var ph = cd.ph;
-                var color = PC[(parseInt(ph.num)||0) % PC.length];
+            // ── Phase flow boxes ─────────────────────────────────────────
+            rows.forEach(function(row, rowIdx) {
+                row.phases.forEach(function(ph, colIdx) {
+                    var bx = MX + colIdx * (boxW + ARROW_W);
+                    var by = row.y;
+                    var bh = row.h;
+                    var color = PC[(parseInt(ph.num) || colIdx) % PC.length];
+                    var maxChars = Math.floor((boxW - 28) / 6);
 
-                // Card background
-                s += '<rect x="'+cd.x+'" y="'+cd.y+'" width="'+cd.w+'" height="'+cd.h+'"'
-                   + ' rx="8" fill="rgba(255,255,255,0.025)" stroke="rgba(255,255,255,0.06)"/>';
+                    // ── Box background ──────────────────────────────
+                    s += '<rect x="'+bx+'" y="'+by+'" width="'+boxW+'" height="'+bh+'"'
+                       + ' rx="8" fill="rgba(255,255,255,0.025)" stroke="rgba(255,255,255,0.07)"/>';
 
-                // Phase number badge + title
-                var hY = cd.y + 18;
-                s += '<circle cx="'+(cd.x+18)+'" cy="'+(hY-4)+'" r="9" fill="'+color+'"/>';
-                s += '<text x="'+(cd.x+18)+'" y="'+(hY-1)+'" text-anchor="middle"'
-                   + ' fill="#fff" font-size="9" font-weight="800">'+esc(ph.num)+'</text>';
-                s += '<text x="'+(cd.x+34)+'" y="'+hY+'" fill="'+color+'" font-size="12.5"'
-                   + ' font-weight="700">'+esc(cap(ph.title, 44))+'</text>';
+                    // ── Colored top accent ──────────────────────────
+                    s += '<rect x="'+bx+'" y="'+by+'" width="'+boxW+'" height="3" rx="8" fill="'+color+'" opacity="0.65"/>';
+                    s += '<rect x="'+bx+'" y="'+(by+2)+'" width="'+boxW+'" height="1" fill="'+color+'" opacity="0.65"/>';
 
-                // Bullets — real extracted content
-                if (ph.bullets.length === 0) {
-                    s += '<text x="'+(cd.x+16)+'" y="'+(hY+20)+'" fill="rgba(255,255,255,0.2)"'
-                       + ' font-size="10.5" font-style="italic">(diagram / visual content)</text>';
-                } else {
-                    ph.bullets.forEach(function(b, bi) {
-                        var by = hY + 20 + bi * BH;
-                        // Icon
-                        s += '<text x="'+(cd.x+16)+'" y="'+by+'" fill="'+b.c+'"'
-                           + ' font-size="11">'+esc(b.i)+'</text>';
-                        // Content text (truncated to fit column)
-                        s += '<text x="'+(cd.x+30)+'" y="'+by+'" fill="rgba(255,255,255,0.62)"'
-                           + ' font-size="10.5">'+esc(cap(b.t, 72))+'</text>';
-                    });
+                    // ── Phase number circle + title ─────────────────
+                    var hy = by + 20;
+                    s += '<circle cx="'+(bx+16)+'" cy="'+(hy-4)+'" r="9" fill="'+color+'"/>';
+                    s += '<text x="'+(bx+16)+'" y="'+(hy-1)+'" text-anchor="middle"'
+                       + ' fill="#fff" font-size="9" font-weight="800">'+esc(ph.num)+'</text>';
+                    s += '<text x="'+(bx+32)+'" y="'+hy+'" fill="'+color+'" font-size="11.5"'
+                       + ' font-weight="700">'+esc(cap(ph.title, Math.floor(maxChars*0.85)))+'</text>';
+
+                    // ── Content bullets ──────────────────────────────
+                    if (ph.bullets.length === 0) {
+                        s += '<text x="'+(bx+14)+'" y="'+(hy+18)+'" fill="rgba(255,255,255,0.15)"'
+                           + ' font-size="9.5" font-style="italic">(visual content)</text>';
+                    } else {
+                        ph.bullets.forEach(function(b, bi) {
+                            var ly = hy + 18 + bi * BH;
+                            s += '<text x="'+(bx+14)+'" y="'+ly+'" fill="'+b.c+'" font-size="10">'
+                               + esc(b.i)+'</text>';
+                            s += '<text x="'+(bx+26)+'" y="'+ly+'" fill="rgba(255,255,255,0.58)"'
+                               + ' font-size="9.5">'+esc(cap(b.t, maxChars))+'</text>';
+                        });
+                    }
+
+                    // ── Horizontal arrow to next box ────────────────
+                    if (colIdx < row.phases.length - 1) {
+                        var ax1 = bx + boxW + 4;
+                        var ax2 = ax1 + ARROW_W - 8;
+                        var ay = by + bh / 2;
+                        s += '<line x1="'+ax1+'" y1="'+ay+'" x2="'+ax2+'" y2="'+ay+'"'
+                           + ' stroke="rgba(255,255,255,0.14)" stroke-width="1.5"/>';
+                        s += '<polygon points="'+ax2+','+(ay-4)+' '+(ax2+6)+','+ay+' '+ax2+','+(ay+4)+'"'
+                           + ' fill="rgba(255,255,255,0.14)"/>';
+                    }
+                });
+
+                // ── Curved arrow between rows ───────────────────────
+                if (rowIdx < rows.length - 1) {
+                    var lastCol = row.phases.length - 1;
+                    var fromX = MX + lastCol * (boxW + ARROW_W) + boxW / 2;
+                    var fromY = row.y + row.h + 2;
+                    var toX   = MX + boxW / 2;
+                    var toY   = rows[rowIdx + 1].y - 2;
+                    var midY  = (fromY + toY) / 2;
+                    s += '<path d="M'+fromX+','+fromY+' C'+fromX+','+midY+' '+toX+','+midY+' '+toX+','+toY+'"'
+                       + ' fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="1.5" stroke-dasharray="4,3"/>';
+                    s += '<polygon points="'+(toX-3)+','+(toY-5)+' '+toX+','+toY+' '+(toX+3)+','+(toY-5)+'"'
+                       + ' fill="rgba(255,255,255,0.10)"/>';
                 }
             });
 
-            // ── Dashed separator ─────────────────────────────────────────
-            s += '<line x1="'+MX+'" y1="'+(upY-4)+'" x2="'+(W-MX)+'" y2="'+(upY-4)+'"'
-               + ' stroke="rgba(255,255,255,0.06)" stroke-dasharray="5,3"/>';
+            // ── Separator ────────────────────────────────────────────────
+            s += '<line x1="'+MX+'" y1="'+(upY-2)+'" x2="'+(W-MX)+'" y2="'+(upY-2)+'"'
+               + ' stroke="rgba(255,255,255,0.05)" stroke-dasharray="4,3"/>';
 
-            // ── Up-next one-liner ────────────────────────────────────────
+            // ── "Up next" as dashed continuation boxes ───────────────────
             if (nNext > 0) {
-                var nxTxt = data.nextPhases.map(function(p) { return p.num+' '+cap(p.title,18); }).join('  \u2192  ');
-                s += '<text x="'+MX+'" y="'+upY+'" fill="rgba(255,255,255,0.22)" font-size="10.5"'
-                   + ' font-weight="700" letter-spacing="0.6">\u25B7 NEXT</text>';
-                s += '<text x="'+(MX+55)+'" y="'+upY+'" fill="rgba(255,255,255,0.35)" font-size="10.5">'
-                   + esc(cap(nxTxt, 90))+'</text>';
+                var nxW = Math.min(140, Math.floor((usable - 60) / Math.min(nNext, 4)));
+                var nxGap = 10;
+                s += '<text x="'+MX+'" y="'+(upY+14)+'" fill="rgba(255,255,255,0.18)" font-size="9"'
+                   + ' font-weight="800" letter-spacing="1.5">\u25B7 NEXT</text>';
+                var nx = MX + 48;
+                data.nextPhases.slice(0, 4).forEach(function(ph, i) {
+                    // Dashed box
+                    s += '<rect x="'+nx+'" y="'+(upY+2)+'" width="'+nxW+'" height="30" rx="6"'
+                       + ' fill="none" stroke="rgba(255,255,255,0.07)" stroke-dasharray="4,3"/>';
+                    s += '<text x="'+(nx+10)+'" y="'+(upY+21)+'" fill="rgba(255,255,255,0.22)"'
+                       + ' font-size="9.5">'+esc(ph.num)+' '+esc(cap(ph.title, Math.floor(nxW/7)))+'</text>';
+                    // Small arrow
+                    if (i < Math.min(nNext, 4) - 1) {
+                        var axx = nx + nxW + 1;
+                        s += '<text x="'+axx+'" y="'+(upY+21)+'" fill="rgba(255,255,255,0.08)"'
+                           + ' font-size="10">\u2192</text>';
+                    }
+                    nx += nxW + nxGap + 10;
+                });
             }
 
             // ── Interviewer prompt ───────────────────────────────────────
@@ -1244,13 +1305,13 @@
                 '"Should I focus on failure modes or the optimisation layer next?"'
             ];
             var prompt = prompts[(data.chapterNum - 1) % prompts.length];
-            var bW = 560, bX = (W - bW) / 2;
-            s += '<rect x="'+bX+'" y="'+promptY+'" width="'+bW+'" height="30"'
-               + ' rx="15" fill="rgba(99,102,241,0.08)" stroke="rgba(99,102,241,0.20)"/>';
-            s += '<text x="'+(bX+14)+'" y="'+(promptY+19)+'" fill="rgba(99,102,241,0.6)"'
-               + ' font-size="13">\uD83D\uDCAC</text>';
-            s += '<text x="'+(bX+34)+'" y="'+(promptY+19)+'" fill="rgba(255,255,255,0.45)"'
-               + ' font-size="10.5" font-style="italic">'+esc(prompt)+'</text>';
+            var bW = 520, bX = (W - bW) / 2;
+            s += '<rect x="'+bX+'" y="'+promptY+'" width="'+bW+'" height="26"'
+               + ' rx="13" fill="rgba(99,102,241,0.06)" stroke="rgba(99,102,241,0.16)"/>';
+            s += '<text x="'+(bX+12)+'" y="'+(promptY+17)+'" fill="rgba(99,102,241,0.45)"'
+               + ' font-size="11">\uD83D\uDCAC</text>';
+            s += '<text x="'+(bX+28)+'" y="'+(promptY+17)+'" fill="rgba(255,255,255,0.35)"'
+               + ' font-size="9.5" font-style="italic">'+esc(prompt)+'</text>';
 
             s += '</svg>';
             return s;
