@@ -1599,4 +1599,371 @@ var revisionSVGs = map[string]string{
   <rect x="200" y="515" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
   <text x="550" y="528" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: Never pre-expand recurring events — store RRULE once, expand on-the-fly for O(1) edits</text>
 </svg>`,
+
+// ─────────────────────────────────────────────────────────────────────
+// ID GENERATOR
+// ─────────────────────────────────────────────────────────────────────
+"id-generator": `<svg viewBox="0 0 1100 620" xmlns="http://www.w3.org/2000/svg" font-family="Inter,system-ui,sans-serif">
+  <defs>
+    <marker id="id-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa0a6"/></marker>
+    <filter id="id-sh"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.08"/></filter>
+  </defs>
+  <rect width="1100" height="620" rx="12" fill="#fafbfd"/>
+  <text x="550" y="32" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">Distributed ID Generator (Snowflake) — Architecture Decision Map</text>
+
+  <!-- ═══ BIT LAYOUT ═══ -->
+  <text x="550" y="60" text-anchor="middle" font-size="12" font-weight="600" fill="#4285f4" letter-spacing="1">64-BIT SNOWFLAKE ID LAYOUT</text>
+
+  <!-- Bit field visualization -->
+  <rect x="50" y="75" width="20" height="40" rx="3" fill="#f1f3f4" stroke="#dadce0" stroke-width="1"/>
+  <text x="60" y="100" text-anchor="middle" font-size="8" font-weight="600" fill="#5f6368">0</text>
+  <text x="60" y="126" text-anchor="middle" font-size="7" fill="#5f6368">sign</text>
+
+  <rect x="72" y="75" width="380" height="40" rx="3" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2"/>
+  <text x="262" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">41 bits — timestamp (ms since custom epoch)</text>
+  <text x="262" y="126" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">69.7 years lifespan</text>
+
+  <rect x="454" y="75" width="120" height="40" rx="3" fill="#e6f4ea" stroke="#34a853" stroke-width="1.2"/>
+  <text x="514" y="95" text-anchor="middle" font-size="9" font-weight="600" fill="#137333">5 bits DC</text>
+  <text x="514" y="108" text-anchor="middle" font-size="8" fill="#5f6368">32 DCs</text>
+
+  <rect x="576" y="75" width="120" height="40" rx="3" fill="#e6f4ea" stroke="#34a853" stroke-width="1.2"/>
+  <text x="636" y="95" text-anchor="middle" font-size="9" font-weight="600" fill="#137333">5 bits worker</text>
+  <text x="636" y="108" text-anchor="middle" font-size="8" fill="#5f6368">32 workers</text>
+
+  <rect x="698" y="75" width="180" height="40" rx="3" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.2"/>
+  <text x="788" y="95" text-anchor="middle" font-size="9" font-weight="600" fill="#7627bb">12 bits sequence</text>
+  <text x="788" y="108" text-anchor="middle" font-size="8" fill="#5f6368">4096/ms/worker</text>
+
+  <rect x="900" y="75" width="180" height="40" rx="3" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="990" y="95" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">= 4M IDs/sec total</text>
+  <text x="990" y="108" text-anchor="middle" font-size="8" fill="#5f6368">1024 nodes × 4096</text>
+
+  <!-- ═══ KEY DECISIONS ═══ -->
+  <line x1="20" y1="145" x2="1080" y2="145" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="170" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">KEY DECISIONS</text>
+
+  <rect x="20" y="185" width="340" height="80" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#id-sh)"/>
+  <text x="190" y="205" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Snowflake (chosen)</text>
+  <text x="190" y="220" text-anchor="middle" font-size="9" fill="#202124">64-bit: fits SQL BIGINT, JSON number</text>
+  <text x="190" y="233" text-anchor="middle" font-size="9" fill="#202124">time-ordered: newer ID &gt; older ID</text>
+  <text x="190" y="246" text-anchor="middle" font-size="9" fill="#202124">no coordination after startup</text>
+  <text x="190" y="259" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">4096 IDs/ms/worker, zero network calls</text>
+
+  <rect x="380" y="185" width="340" height="80" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2"/>
+  <text x="550" y="205" text-anchor="middle" font-size="9" font-weight="600" fill="#c5221f">✗ UUID v4 (128-bit, random)</text>
+  <text x="550" y="220" text-anchor="middle" font-size="8" fill="#202124">no time ordering → can't sort by creation</text>
+  <text x="550" y="233" text-anchor="middle" font-size="8" fill="#202124">128 bits = 2x storage, bad for B-tree indexes</text>
+  <text x="550" y="246" text-anchor="middle" font-size="8" fill="#202124">random → poor cache locality on insert</text>
+  <text x="550" y="259" text-anchor="middle" font-size="8" fill="#ea4335">✗ DB auto-increment: single point of failure</text>
+
+  <rect x="740" y="185" width="340" height="80" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#id-sh)"/>
+  <text x="910" y="205" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">ZooKeeper for Worker IDs</text>
+  <text x="910" y="220" text-anchor="middle" font-size="9" fill="#202124">ephemeral nodes: auto-reclaim on crash</text>
+  <text x="910" y="233" text-anchor="middle" font-size="9" fill="#202124">guarantees at most one node per worker ID</text>
+  <text x="910" y="246" text-anchor="middle" font-size="9" fill="#202124">used ONCE at startup, not per-ID</text>
+  <text x="910" y="259" text-anchor="middle" font-size="8" fill="#5f6368">1M IDs/sec through ZK would be impossible</text>
+
+  <!-- ═══ CLOCK SAFETY ═══ -->
+  <line x1="20" y1="285" x2="1080" y2="285" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="310" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">CLOCK SAFETY (THE HARDEST PROBLEM)</text>
+
+  <rect x="20" y="325" width="340" height="65" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2" filter="url(#id-sh)"/>
+  <text x="190" y="345" text-anchor="middle" font-size="10" font-weight="700" fill="#c5221f">Backward Clock = Duplicate IDs</text>
+  <text x="190" y="360" text-anchor="middle" font-size="9" fill="#202124">NTP correction or VM live migration</text>
+  <text x="190" y="373" text-anchor="middle" font-size="9" fill="#202124">clock goes back 5ms → same timestamp range</text>
+  <text x="190" y="383" text-anchor="middle" font-size="8" fill="#ea4335">same timestamp + same worker = collision</text>
+
+  <line x1="360" y1="357" x2="400" y2="357" stroke="#34a853" stroke-width="1.5" marker-end="url(#id-arr)"/>
+
+  <rect x="402" y="325" width="340" height="65" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#id-sh)"/>
+  <text x="572" y="345" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Monotonic Clock (solution)</text>
+  <text x="572" y="360" text-anchor="middle" font-size="9" fill="#202124">anchored to wall time at startup</text>
+  <text x="572" y="373" text-anchor="middle" font-size="9" fill="#202124">never goes backward within a process</text>
+  <text x="572" y="383" text-anchor="middle" font-size="8" fill="#5f6368">start_epoch_ms + (monotonic_ns - start_ns) / 1M</text>
+
+  <rect x="762" y="325" width="318" height="65" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2" filter="url(#id-sh)"/>
+  <text x="921" y="345" text-anchor="middle" font-size="10" font-weight="700" fill="#e37400">JSON: Return as String</text>
+  <text x="921" y="360" text-anchor="middle" font-size="9" fill="#202124">JS Number = IEEE 754 = 53-bit precision</text>
+  <text x="921" y="373" text-anchor="middle" font-size="9" fill="#202124">Snowflake uses 63 bits → precision loss</text>
+  <text x="921" y="383" text-anchor="middle" font-size="8" fill="#5f6368">Twitter learned this the hard way</text>
+
+  <!-- ═══ KEY NUMBERS ═══ -->
+  <line x1="20" y1="410" x2="1080" y2="410" stroke="#e2e8f0" stroke-width="1"/>
+
+  <rect x="20" y="430" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="97" y="448" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">64-bit total</text>
+  <text x="97" y="462" text-anchor="middle" font-size="8" fill="#5f6368">fits BIGINT everywhere</text>
+
+  <rect x="190" y="430" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="267" y="448" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">4096 IDs/ms</text>
+  <text x="267" y="462" text-anchor="middle" font-size="8" fill="#5f6368">per worker node</text>
+
+  <rect x="360" y="430" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="437" y="448" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">1024 workers</text>
+  <text x="437" y="462" text-anchor="middle" font-size="8" fill="#5f6368">32 DC × 32 nodes</text>
+
+  <rect x="530" y="430" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="607" y="448" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">69.7 years</text>
+  <text x="607" y="462" text-anchor="middle" font-size="8" fill="#5f6368">41-bit timestamp life</text>
+
+  <rect x="700" y="430" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="777" y="448" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">&lt;1us generation</text>
+  <text x="777" y="462" text-anchor="middle" font-size="8" fill="#5f6368">embedded library</text>
+
+  <rect x="870" y="430" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="947" y="448" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">~0.5ms overhead</text>
+  <text x="947" y="462" text-anchor="middle" font-size="8" fill="#5f6368">service mode (network)</text>
+
+  <rect x="200" y="490" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
+  <text x="550" y="503" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: Time-ordered + no coordination after startup = Snowflake. The only hard problem is clock safety.</text>
+</svg>`,
+
+// ─────────────────────────────────────────────────────────────────────
+// TICKET BOOKING
+// ─────────────────────────────────────────────────────────────────────
+"ticket-booking": `<svg viewBox="0 0 1100 680" xmlns="http://www.w3.org/2000/svg" font-family="Inter,system-ui,sans-serif">
+  <defs>
+    <marker id="tb-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa0a6"/></marker>
+    <filter id="tb-sh"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.08"/></filter>
+  </defs>
+  <rect width="1100" height="680" rx="12" fill="#fafbfd"/>
+  <text x="550" y="32" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">Ticket Booking (BookMyShow) — Architecture Decision Map</text>
+
+  <!-- ═══ TWO-PHASE BOOKING ═══ -->
+  <text x="550" y="60" text-anchor="middle" font-size="12" font-weight="600" fill="#4285f4" letter-spacing="1">TWO-PHASE BOOKING: LOCK THEN CONFIRM</text>
+
+  <rect x="20" y="80" width="100" height="40" rx="6" fill="#f1f3f4" stroke="#dadce0" stroke-width="1" filter="url(#tb-sh)"/>
+  <text x="70" y="104" text-anchor="middle" font-size="10" font-weight="500" fill="#202124">User</text>
+
+  <line x1="120" y1="100" x2="155" y2="100" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#tb-arr)"/>
+
+  <rect x="157" y="76" width="150" height="48" rx="6" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#tb-sh)"/>
+  <text x="232" y="96" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">1. Lock Seats</text>
+  <text x="232" y="108" text-anchor="middle" font-size="8" fill="#202124">Redis SET NX, O(1)</text>
+  <text x="232" y="118" text-anchor="middle" font-size="7" fill="#f9ab00">TTL 10min auto-expire</text>
+
+  <line x1="307" y1="100" x2="342" y2="100" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#tb-arr)"/>
+  <text x="324" y="93" font-size="7" fill="#5f6368">2-5s</text>
+
+  <rect x="344" y="76" width="150" height="48" rx="6" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2" filter="url(#tb-sh)"/>
+  <text x="419" y="96" text-anchor="middle" font-size="10" font-weight="700" fill="#e37400">2. Pay</text>
+  <text x="419" y="108" text-anchor="middle" font-size="8" fill="#202124">async webhook from gateway</text>
+  <text x="419" y="118" text-anchor="middle" font-size="7" fill="#5f6368">Razorpay/Stripe callback</text>
+
+  <line x1="494" y1="100" x2="529" y2="100" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#tb-arr)"/>
+
+  <rect x="531" y="76" width="150" height="48" rx="6" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#tb-sh)"/>
+  <text x="606" y="96" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">3. Confirm</text>
+  <text x="606" y="108" text-anchor="middle" font-size="8" fill="#202124">Postgres SERIALIZABLE</text>
+  <text x="606" y="118" text-anchor="middle" font-size="7" fill="#5f6368">atomic DB write</text>
+
+  <line x1="681" y1="100" x2="716" y2="100" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#tb-arr)"/>
+
+  <rect x="718" y="76" width="150" height="48" rx="6" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.2" filter="url(#tb-sh)"/>
+  <text x="793" y="96" text-anchor="middle" font-size="10" font-weight="600" fill="#7627bb">QR Ticket</text>
+  <text x="793" y="108" text-anchor="middle" font-size="8" fill="#202124">HMAC-SHA256 (not UUID)</text>
+  <text x="793" y="118" text-anchor="middle" font-size="7" fill="#5f6368">unforgeable without secret</text>
+
+  <!-- Why two-phase -->
+  <rect x="890" y="76" width="190" height="48" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1"/>
+  <text x="985" y="94" text-anchor="middle" font-size="9" font-weight="600" fill="#c5221f">✗ Single Atomic Call</text>
+  <text x="985" y="108" text-anchor="middle" font-size="8" fill="#202124">DB txn held 5s during payment</text>
+  <text x="985" y="120" text-anchor="middle" font-size="8" fill="#ea4335">blocks all other seat operations</text>
+
+  <!-- ═══ RUSH TRAFFIC ═══ -->
+  <line x1="20" y1="145" x2="1080" y2="145" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="170" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">RUSH TRAFFIC: 100K USERS → 500 SEATS (200:1 CONTENTION)</text>
+
+  <rect x="20" y="185" width="340" height="70" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#tb-sh)"/>
+  <text x="190" y="205" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Virtual Queue (chosen)</text>
+  <text x="190" y="220" text-anchor="middle" font-size="9" fill="#202124">FIFO ordering — fair, users see position</text>
+  <text x="190" y="233" text-anchor="middle" font-size="9" fill="#202124">metered dequeue: 1K users/sec</text>
+  <text x="190" y="246" text-anchor="middle" font-size="8" fill="#5f6368">backed by Redis INCR (1M+ ops/sec)</text>
+
+  <rect x="380" y="185" width="340" height="70" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2"/>
+  <text x="550" y="205" text-anchor="middle" font-size="10" font-weight="700" fill="#c5221f">✗ Raw Rate Limiting</text>
+  <text x="550" y="220" text-anchor="middle" font-size="9" fill="#202124">unfair: fast connections win</text>
+  <text x="550" y="233" text-anchor="middle" font-size="9" fill="#202124">others silently dropped with 429</text>
+  <text x="550" y="246" text-anchor="middle" font-size="8" fill="#ea4335">users don't know where they stand</text>
+
+  <rect x="740" y="185" width="340" height="70" rx="8" fill="#e0f7fa" stroke="#00897b" stroke-width="1.2" filter="url(#tb-sh)"/>
+  <text x="910" y="205" text-anchor="middle" font-size="10" font-weight="700" fill="#00695c">Real-Time Seat Map</text>
+  <text x="910" y="220" text-anchor="middle" font-size="9" fill="#202124">Redis Pub/Sub + WebSocket</text>
+  <text x="910" y="233" text-anchor="middle" font-size="9" fill="#202124">1 publish → all subscribers</text>
+  <text x="910" y="246" text-anchor="middle" font-size="8" fill="#5f6368">vs 50K polling @ 2s = 25K req/sec saved</text>
+
+  <!-- ═══ KEY DECISIONS ═══ -->
+  <line x1="20" y1="275" x2="1080" y2="275" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="300" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">KEY TECHNOLOGY CHOICES</text>
+
+  <rect x="20" y="315" width="250" height="70" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#tb-sh)"/>
+  <text x="145" y="335" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Redis SET NX for Locks</text>
+  <text x="145" y="350" text-anchor="middle" font-size="9" fill="#202124">atomic, O(1), no retry storm</text>
+  <text x="145" y="363" text-anchor="middle" font-size="8" fill="#5f6368">fallback: Redlock (3 Redis)</text>
+  <text x="145" y="376" text-anchor="middle" font-size="8" fill="#ea4335">✗ PG optimistic lock: 5-10 retries</text>
+
+  <rect x="290" y="315" width="250" height="70" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#tb-sh)"/>
+  <text x="415" y="335" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">Postgres SERIALIZABLE</text>
+  <text x="415" y="350" text-anchor="middle" font-size="9" fill="#202124">booking confirmation: full ACID</text>
+  <text x="415" y="363" text-anchor="middle" font-size="8" fill="#5f6368">foreign keys: seat→booking→payment</text>
+  <text x="415" y="376" text-anchor="middle" font-size="8" fill="#ea4335">✗ DDB: 25-item txn limit, awkward</text>
+
+  <rect x="560" y="315" width="250" height="70" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2" filter="url(#tb-sh)"/>
+  <text x="685" y="335" text-anchor="middle" font-size="10" font-weight="700" fill="#e37400">HMAC-SHA256 QR Tickets</text>
+  <text x="685" y="350" text-anchor="middle" font-size="9" fill="#202124">binds to booking_id + show_date</text>
+  <text x="685" y="363" text-anchor="middle" font-size="8" fill="#5f6368">unforgeable without secret key</text>
+  <text x="685" y="376" text-anchor="middle" font-size="8" fill="#ea4335">✗ UUID: random → stolen = valid</text>
+
+  <rect x="830" y="315" width="250" height="70" rx="8" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.2" filter="url(#tb-sh)"/>
+  <text x="955" y="335" text-anchor="middle" font-size="10" font-weight="700" fill="#7627bb">Anti-Scalping Layers</text>
+  <text x="955" y="350" text-anchor="middle" font-size="9" fill="#202124">WAF + reCAPTCHA v3 + fingerprint</text>
+  <text x="955" y="363" text-anchor="middle" font-size="8" fill="#202124">business limits: 6 tickets/user</text>
+  <text x="955" y="376" text-anchor="middle" font-size="8" fill="#5f6368">IP-only rate limit trivially bypassed</text>
+
+  <!-- ═══ KEY NUMBERS ═══ -->
+  <line x1="20" y1="405" x2="1080" y2="405" stroke="#e2e8f0" stroke-width="1"/>
+
+  <rect x="20" y="425" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="97" y="443" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">200:1 ratio</text>
+  <text x="97" y="457" text-anchor="middle" font-size="8" fill="#5f6368">100K users, 500 seats</text>
+
+  <rect x="190" y="425" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="267" y="443" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">10min lock TTL</text>
+  <text x="267" y="457" text-anchor="middle" font-size="8" fill="#5f6368">auto-expire if no pay</text>
+
+  <rect x="360" y="425" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="437" y="443" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">1K users/sec</text>
+  <text x="437" y="457" text-anchor="middle" font-size="8" fill="#5f6368">queue dequeue rate</text>
+
+  <rect x="530" y="425" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="607" y="443" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">2-5s payment</text>
+  <text x="607" y="457" text-anchor="middle" font-size="8" fill="#5f6368">async webhook</text>
+
+  <rect x="700" y="425" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="777" y="443" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">SET NX O(1)</text>
+  <text x="777" y="457" text-anchor="middle" font-size="8" fill="#5f6368">~1ms seat lock</text>
+
+  <rect x="870" y="425" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="947" y="443" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">6 tickets max</text>
+  <text x="947" y="457" text-anchor="middle" font-size="8" fill="#5f6368">anti-scalping limit</text>
+
+  <rect x="200" y="485" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
+  <text x="550" y="498" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: Two-phase (lock then pay then confirm) prevents holding DB transactions during payment</text>
+</svg>`,
+
+// ─────────────────────────────────────────────────────────────────────
+// RIDE HAILING
+// ─────────────────────────────────────────────────────────────────────
+"ride-hailing": `<svg viewBox="0 0 1100 700" xmlns="http://www.w3.org/2000/svg" font-family="Inter,system-ui,sans-serif">
+  <defs>
+    <marker id="rh-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa0a6"/></marker>
+    <filter id="rh-sh"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.08"/></filter>
+  </defs>
+  <rect width="1100" height="700" rx="12" fill="#fafbfd"/>
+  <text x="550" y="32" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">Ride Hailing (Uber/Lyft) — Architecture Decision Map</text>
+
+  <!-- ═══ FOUR-PLANE ARCHITECTURE ═══ -->
+  <text x="550" y="60" text-anchor="middle" font-size="12" font-weight="600" fill="#4285f4" letter-spacing="1">FOUR-PLANE ARCHITECTURE</text>
+
+  <rect x="20" y="80" width="240" height="65" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#rh-sh)"/>
+  <text x="140" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">API Plane</text>
+  <text x="140" y="115" text-anchor="middle" font-size="9" fill="#202124">REST (riders) + WebSocket (drivers)</text>
+  <text x="140" y="128" text-anchor="middle" font-size="8" fill="#5f6368">stateless, horizontally scalable</text>
+  <text x="140" y="139" text-anchor="middle" font-size="8" fill="#ea4335">✗ SSE: server→client only, drivers need bidi</text>
+
+  <rect x="280" y="80" width="240" height="65" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.2" filter="url(#rh-sh)"/>
+  <text x="400" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Matching Plane</text>
+  <text x="400" y="115" text-anchor="middle" font-size="9" fill="#202124">geospatial query + scoring + dispatch</text>
+  <text x="400" y="128" text-anchor="middle" font-size="8" fill="#5f6368">stateless: crash → any server resumes</text>
+  <text x="400" y="139" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">sequential offers (not parallel)</text>
+
+  <rect x="540" y="80" width="240" height="65" rx="8" fill="#e0f7fa" stroke="#00897b" stroke-width="1.2" filter="url(#rh-sh)"/>
+  <text x="660" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#00695c">Tracking Plane</text>
+  <text x="660" y="115" text-anchor="middle" font-size="9" fill="#202124">Redis GEO + WebSocket fan-out</text>
+  <text x="660" y="128" text-anchor="middle" font-size="8" fill="#5f6368">1.25M location writes/sec</text>
+  <text x="660" y="139" text-anchor="middle" font-size="8" fill="#ea4335">✗ PostGIS: can't sustain 1.25M upserts/sec</text>
+
+  <rect x="800" y="80" width="280" height="65" rx="8" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.2" filter="url(#rh-sh)"/>
+  <text x="940" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#7627bb">Data Plane</text>
+  <text x="940" y="115" text-anchor="middle" font-size="9" fill="#202124">Postgres (rides), Kafka (events)</text>
+  <text x="940" y="128" text-anchor="middle" font-size="8" fill="#5f6368">Cassandra (GPS history, time-series)</text>
+  <text x="940" y="139" text-anchor="middle" font-size="8" fill="#5f6368">each consumer reads events at own pace</text>
+
+  <!-- ═══ CITY-BASED SHARDING ═══ -->
+  <line x1="20" y1="165" x2="1080" y2="165" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="190" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">CITY-BASED SHARDING (A RIDE NEVER CROSSES CITY BOUNDARIES)</text>
+
+  <rect x="20" y="205" width="340" height="70" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#rh-sh)"/>
+  <text x="190" y="225" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">City = Shard (chosen)</text>
+  <text x="190" y="240" text-anchor="middle" font-size="9" fill="#202124">each city: own Redis, Postgres, matchers</text>
+  <text x="190" y="253" text-anchor="middle" font-size="9" fill="#202124">Mumbai failure doesn't affect NYC</text>
+  <text x="190" y="266" text-anchor="middle" font-size="8" fill="#5f6368">pickup coords → polygon → city_id → shard</text>
+
+  <rect x="380" y="205" width="340" height="70" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2"/>
+  <text x="550" y="225" text-anchor="middle" font-size="10" font-weight="700" fill="#c5221f">✗ Global Redis Cluster</text>
+  <text x="550" y="240" text-anchor="middle" font-size="9" fill="#202124">5M drivers in one cluster</text>
+  <text x="550" y="253" text-anchor="middle" font-size="9" fill="#202124">hot cities overwhelm single shards</text>
+  <text x="550" y="266" text-anchor="middle" font-size="8" fill="#ea4335">one bad city takes down everything</text>
+
+  <!-- Redis GEO details -->
+  <rect x="740" y="205" width="340" height="70" rx="8" fill="#e0f7fa" stroke="#00897b" stroke-width="1.2" filter="url(#rh-sh)"/>
+  <text x="910" y="225" text-anchor="middle" font-size="10" font-weight="700" fill="#00695c">Redis GEO for Drivers</text>
+  <text x="910" y="240" text-anchor="middle" font-size="9" fill="#202124">52-bit geohash (~0.6m accuracy)</text>
+  <text x="910" y="253" text-anchor="middle" font-size="9" fill="#202124">GEOADD O(log N), GEORADIUS O(N log N)</text>
+  <text x="910" y="266" text-anchor="middle" font-size="8" fill="#5f6368">separate TTL key/driver (30s heartbeat)</text>
+
+  <!-- ═══ MATCHING ═══ -->
+  <line x1="20" y1="295" x2="1080" y2="295" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="320" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">MATCHING: SEQUENTIAL OFFERS (NOT PARALLEL BROADCAST)</text>
+
+  <rect x="20" y="335" width="340" height="70" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#rh-sh)"/>
+  <text x="190" y="355" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Sequential (chosen)</text>
+  <text x="190" y="370" text-anchor="middle" font-size="9" fill="#202124">offer to #1 best driver → 15s timeout</text>
+  <text x="190" y="383" text-anchor="middle" font-size="9" fill="#202124">decline/timeout → offer to #2</text>
+  <text x="190" y="396" text-anchor="middle" font-size="8" fill="#5f6368">exactly 1 driver per ride, no conflicts</text>
+
+  <rect x="380" y="335" width="340" height="70" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2"/>
+  <text x="550" y="355" text-anchor="middle" font-size="10" font-weight="700" fill="#c5221f">✗ Parallel Broadcast</text>
+  <text x="550" y="370" text-anchor="middle" font-size="9" fill="#202124">3 drivers accept simultaneously</text>
+  <text x="550" y="383" text-anchor="middle" font-size="9" fill="#202124">2 get cancelled → bad driver experience</text>
+  <text x="550" y="396" text-anchor="middle" font-size="8" fill="#ea4335">leads to driver churn</text>
+
+  <!-- Scoring factors -->
+  <rect x="740" y="335" width="340" height="70" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2" filter="url(#rh-sh)"/>
+  <text x="910" y="355" text-anchor="middle" font-size="10" font-weight="700" fill="#e37400">Driver Scoring</text>
+  <text x="910" y="370" text-anchor="middle" font-size="9" fill="#202124">0.5 × proximity + 0.2 × rating</text>
+  <text x="910" y="383" text-anchor="middle" font-size="9" fill="#202124">+ 0.2 × acceptance rate + 0.1 × ETA</text>
+  <text x="910" y="396" text-anchor="middle" font-size="8" fill="#5f6368">ETA from Roads API, cached for hot routes</text>
+
+  <!-- ═══ KEY NUMBERS ═══ -->
+  <line x1="20" y1="425" x2="1080" y2="425" stroke="#e2e8f0" stroke-width="1"/>
+
+  <rect x="20" y="445" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="97" y="463" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">5M drivers</text>
+  <text x="97" y="477" text-anchor="middle" font-size="8" fill="#5f6368">city-sharded</text>
+
+  <rect x="190" y="445" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="267" y="463" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">1.25M loc/sec</text>
+  <text x="267" y="477" text-anchor="middle" font-size="8" fill="#5f6368">GPS writes to Redis</text>
+
+  <rect x="360" y="445" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="437" y="463" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">30s heartbeat</text>
+  <text x="437" y="477" text-anchor="middle" font-size="8" fill="#5f6368">TTL key auto-expire</text>
+
+  <rect x="530" y="445" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="607" y="463" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">15s offer timeout</text>
+  <text x="607" y="477" text-anchor="middle" font-size="8" fill="#5f6368">then next driver</text>
+
+  <rect x="700" y="445" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="777" y="463" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">~0.6m accuracy</text>
+  <text x="777" y="477" text-anchor="middle" font-size="8" fill="#5f6368">52-bit geohash</text>
+
+  <rect x="870" y="445" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="947" y="463" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">sequential offers</text>
+  <text x="947" y="477" text-anchor="middle" font-size="8" fill="#5f6368">no double-accept</text>
+
+  <rect x="200" y="505" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
+  <text x="550" y="518" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: City-based sharding (rides don't cross cities) + Redis GEO for sub-ms geospatial at 1.25M writes/sec</text>
+</svg>`,
 }
