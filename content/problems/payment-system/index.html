@@ -714,39 +714,39 @@
 <div class="dqa-item">
   <div class="dqa-q">How do you prevent double charging a customer?</div>
   <div class="dqa-a">
-    <span class="hl-blue">Idempotency keys</span> stored in Redis with <span class="hl">24h TTL</span> using <code>SET NX</code>. Every write request requires an <code>Idempotency-Key</code> header. On arrival, the API Gateway checks Redis — if the key exists, it returns the cached response immediately without touching the ledger. If the key is new, the payment is processed and the response is stored in Redis before returning to the client.
+    <span class="hl-blue">Idempotency keys</span> in Redis with <span class="hl">24h TTL</span> using <code>SET NX</code>. Every write request needs an <code>Idempotency-Key</code> header. If the key exists in Redis, return the cached response — no ledger writes. If it's new, process normally and cache the response.
     <ul>
-      <li>The sentinel value <code>"processing"</code> is stored first (SET NX); replaced with the full response on completion</li>
-      <li>If Redis is down, the PostgreSQL ledger has a <code>UNIQUE(idempotency_key)</code> constraint as a secondary guard</li>
-      <li>24h TTL covers all mobile client retry windows — no client retries after 24 hours</li>
+      <li>Store a <code>"processing"</code> sentinel first via SET NX; replace with full response on completion</li>
+      <li>If Redis is down, PostgreSQL's <code>UNIQUE(idempotency_key)</code> constraint catches duplicates</li>
+      <li>24h TTL covers all realistic retry windows</li>
     </ul>
   </div>
   <div class="dqa-sub">
-    <div class="dqa-sub-q">What if a client accidentally reuses an idempotency key for a different payment amount?</div>
-    <div class="dqa-sub-a">Return <code>422 Unprocessable Entity</code> with <code>"idempotency_key_reuse"</code>. Store a hash of the original request body alongside the response in Redis. On retry, compare hashes — if they differ, reject immediately. Same key must always mean same request.</div>
+    <div class="dqa-sub-q">What if a client reuses an idempotency key for a different amount?</div>
+    <div class="dqa-sub-a">Return <code>422</code> with <code>"idempotency_key_reuse"</code>. Store a hash of the original request body alongside the response. Compare hashes on retry — reject if they differ.</div>
     <div class="dqa-deep">
-      <div class="dqa-deep-q">What is the correct idempotency key format to recommend to clients?</div>
-      <div class="dqa-deep-a"><code>{client_id}:{uuid_v4}</code> where the UUID is freshly generated per payment intent. Never derive the key from the payment amount or timestamp — those can collide. The UUID must come from a cryptographically secure random source to prevent guessing attacks.</div>
+      <div class="dqa-deep-q">What's the right idempotency key format?</div>
+      <div class="dqa-deep-a"><code>{client_id}:{uuid_v4}</code> — fresh UUID per payment intent. Never derive from amount or timestamp (collisions). UUID must be cryptographically random.</div>
     </div>
   </div>
 </div>
 
 <div class="dqa-item">
-  <div class="dqa-q">Why use the Saga pattern instead of two-phase commit for payment transactions?</div>
+  <div class="dqa-q">Why Saga pattern instead of two-phase commit?</div>
   <div class="dqa-a">
-    Two-phase commit requires all participants to implement the <span class="hl-blue">prepare/commit</span> protocol. Bank APIs (Visa, Mastercard) are external black boxes — they expose <code>authorize</code> and <code>void</code>, not <code>prepare</code> and <code>commit</code>. You cannot force Visa to participate in your 2PC protocol.
+    2PC requires all participants to support <span class="hl-blue">prepare/commit</span>. Bank APIs only expose <code>authorize</code> and <code>void</code> — you can't make Visa participate in 2PC.
     <ul>
-      <li><span class="hl-red">2PC coordinator is a SPOF</span>: if it crashes after sending prepare but before commit, all participants block indefinitely</li>
-      <li><span class="hl-red">2PC is a blocking protocol</span>: participants hold locks until the coordinator decides — catastrophic under contention</li>
-      <li><span class="hl-blue">Saga</span>: each step commits locally and publishes an event; failure triggers compensating transactions in reverse order</li>
+      <li><span class="hl-red">2PC coordinator is a SPOF</span>: crash after prepare = all participants blocked indefinitely</li>
+      <li><span class="hl-red">2PC holds locks</span> until the coordinator decides — disastrous under contention</li>
+      <li><span class="hl-blue">Saga</span>: each step commits locally; failures trigger compensating transactions in reverse</li>
     </ul>
   </div>
   <div class="dqa-sub">
-    <div class="dqa-sub-q">What is a compensating transaction and what makes it hard to implement correctly?</div>
-    <div class="dqa-sub-a">A compensating transaction reverses the effect of a prior Saga step — void reverses authorize, release-reserve reverses reserve. The hard part: compensating transactions must be <span class="hl">idempotent</span> (the orchestrator retries on failure) and must handle the case where the original step's effect is partially applied.</div>
+    <div class="dqa-sub-q">What makes compensating transactions hard?</div>
+    <div class="dqa-sub-a">A compensating transaction undoes a prior step (void undoes authorize). The hard part: they must be <span class="hl">idempotent</span> (orchestrator retries) and must handle partially-applied effects.</div>
     <div class="dqa-deep">
-      <div class="dqa-deep-q">How does the orchestration-based Saga handle a crash mid-Saga?</div>
-      <div class="dqa-deep-a">The orchestrator persists its state machine in PostgreSQL after each step. On restart, it queries for payments in <code>processing</code> state and resumes from the last confirmed step. Each step is idempotent, so resuming from step N never double-executes step N-1.</div>
+      <div class="dqa-deep-q">How does the orchestrator recover from a crash mid-Saga?</div>
+      <div class="dqa-deep-a">State machine is persisted in PostgreSQL after each step. On restart, query for payments in <code>processing</code> state and resume from the last completed step. Each step is idempotent, so no double-execution.</div>
     </div>
   </div>
 </div>
@@ -754,61 +754,59 @@
 <div class="dqa-item">
   <div class="dqa-q">How do you ensure the ledger is always balanced?</div>
   <div class="dqa-a">
-    <span class="hl-blue">Double-entry bookkeeping</span>: every payment creates exactly two ledger entries — a debit and a credit of equal magnitude. The invariant <code>SELECT SUM(amount) FROM ledger_entries</code> must always equal <span class="hl">exactly 0</span>.
+    <span class="hl-blue">Double-entry bookkeeping</span>: every payment = two entries (debit + credit). <code>SELECT SUM(amount) FROM ledger_entries</code> must always equal <span class="hl">exactly 0</span>.
     <ul>
-      <li>PostgreSQL <span class="hl-blue">SERIALIZABLE isolation</span> prevents phantom reads — two concurrent payments cannot both read the same balance and both overdraw</li>
-      <li><code>CHECK (balance &gt;= 0)</code> constraint on the accounts table is a database-level guard against overdrafts</li>
-      <li>Row-level locks acquired in ascending <code>account_id</code> order — deterministic ordering prevents deadlocks</li>
-      <li>A scheduled job runs <code>SELECT SUM(amount)</code> every hour and alerts on any non-zero result</li>
+      <li><span class="hl-blue">SERIALIZABLE isolation</span> prevents two payments from reading the same balance and both spending it</li>
+      <li><code>CHECK (balance &gt;= 0)</code> on accounts table prevents overdrafts at the DB level</li>
+      <li>Lock accounts in ascending <code>account_id</code> order to prevent deadlocks</li>
+      <li>Hourly <code>SELECT SUM(amount)</code> job alerts on any non-zero result</li>
     </ul>
   </div>
   <div class="dqa-sub">
-    <div class="dqa-sub-q">Why SERIALIZABLE isolation instead of READ COMMITTED for the ledger?</div>
-    <div class="dqa-sub-a">READ COMMITTED allows two transactions to read the same balance concurrently, both approve charges, and both commit — leaving the account overdrawn. SERIALIZABLE detects this write-write conflict and aborts one transaction. The application retries the aborted transaction. Serialization failures are rare (<1% under normal load) and retrying is safe because payments are idempotent.</div>
+    <div class="dqa-sub-q">Why SERIALIZABLE instead of READ COMMITTED?</div>
+    <div class="dqa-sub-a">READ COMMITTED lets two transactions read the same balance, both approve charges, both commit — account goes negative. SERIALIZABLE detects the conflict and aborts one. Retrying is safe because payments are idempotent. Failures are rare (&lt;1% under normal load).</div>
     <div class="dqa-deep">
-      <div class="dqa-deep-q">What is the performance cost of SERIALIZABLE isolation at 1000 TPS?</div>
-      <div class="dqa-deep-a">PostgreSQL's SSI (Serializable Snapshot Isolation) implementation tracks read/write conflicts in memory. At 1000 TPS, the overhead is approximately 10-15% higher CPU vs READ COMMITTED. Throughput drops by roughly the same amount. For a payment ledger, this is an acceptable tradeoff — correctness over throughput.</div>
+      <div class="dqa-deep-q">Performance cost of SERIALIZABLE at 1000 TPS?</div>
+      <div class="dqa-deep-a">~10-15% higher CPU vs READ COMMITTED. PostgreSQL's SSI tracks conflicts in memory. Acceptable tradeoff — correctness over throughput for a payment ledger.</div>
     </div>
   </div>
 </div>
 
 <div class="dqa-item">
-  <div class="dqa-q">How do you handle a partial payment Saga failure — what if capture succeeds but settlement fails?</div>
+  <div class="dqa-q">What if capture succeeds but settlement fails?</div>
   <div class="dqa-a">
-    <span class="hl-blue">Compensating transactions in reverse order</span>, each retried with exponential backoff until successful. If settle fails: retry settle 3× with backoff (1s, 2s, 4s). If all retries fail: move to dead-letter queue, create ops ticket, human resolves within SLA.
+    Run <span class="hl-blue">compensating transactions in reverse</span>, each retried with exponential backoff. If settle fails 3x: dead-letter queue + ops ticket for human resolution.
     <ul>
-      <li>Capture cannot be compensated with a void after 24h — it must be a refund instead</li>
-      <li>The orchestrator tracks the compensation state separately — if a compensating transaction fails, it needs its own compensation</li>
-      <li>The <span class="hl-red">hardest case</span>: capture succeeded (money moved) but settlement failed (bank not notified). The money is in limbo. A reconciliation job detects this within 24h and re-queues the settlement.</li>
+      <li>After 24h, a void won't work — must issue a refund instead</li>
+      <li><span class="hl-red">Hardest case</span>: money moved (capture) but bank not notified (settlement failed). Reconciliation job detects and re-queues within 24h</li>
     </ul>
   </div>
   <div class="dqa-sub">
-    <div class="dqa-sub-q">What is the maximum time a payment can be in an unresolved state before it must be escalated?</div>
-    <div class="dqa-sub-a">30 minutes for automated resolution (sweeper retries). After 30 minutes without resolution, an ops alert fires. After 4 hours, a human escalation ticket is created. Card authorizations expire in 7 days — this is the hard deadline for resolving any stuck payment before the auth becomes void.</div>
+    <div class="dqa-sub-q">How long can a payment stay unresolved before escalation?</div>
+    <div class="dqa-sub-a">30 min for automated recovery (sweeper). After 30 min: ops alert. After 4 hours: human ticket. Card auths expire in 7 days — that's the hard deadline.</div>
     <div class="dqa-deep">
-      <div class="dqa-deep-q">How do you test Saga failure and compensation in staging?</div>
-      <div class="dqa-deep-a">Chaos injection: a flag in the payment orchestrator can force failure at any step (authorize_fail, reserve_fail, capture_fail, settle_fail). Integration tests cover all 2^N failure combinations for N=4 steps (16 scenarios). Compensation correctness is verified by asserting SUM(ledger_entries) = 0 after each test.</div>
+      <div class="dqa-deep-q">How do you test Saga failures in staging?</div>
+      <div class="dqa-deep-a">Chaos injection flags force failure at any step. Integration tests cover all 16 failure combinations (2^4 steps). Verify SUM(ledger_entries) = 0 after each test.</div>
     </div>
   </div>
 </div>
 
 <div class="dqa-item">
-  <div class="dqa-q">What is tokenization and why is it required for PCI DSS compliance?</div>
+  <div class="dqa-q">What is tokenization and why is it required?</div>
   <div class="dqa-a">
-    <span class="hl-blue">Tokenization</span> replaces a real card number (PAN — Primary Account Number) with an opaque, randomly generated token. Merchants store and transmit tokens; the real card number lives only inside a <span class="hl-blue">Hardware Security Module (HSM)</span>.
+    <span class="hl-blue">Tokenization</span> replaces the real card number with a random opaque token. Merchants store tokens; the real number lives only inside the <span class="hl-blue">HSM</span> (Hardware Security Module).
     <ul>
-      <li>A breached merchant database contains only tokens — useless to an attacker without the HSM</li>
-      <li>The HSM will process lookup requests but will <span class="hl-red">never export its internal token↔PAN mapping</span> — hardware-enforced</li>
-      <li>PCI DSS <strong>requires</strong> tokenization or equivalent controls for any system storing card data</li>
-      <li>CVV/CVV2 cannot be stored even encrypted — PCI DSS explicitly prohibits it after authorization</li>
+      <li>Breached database contains only tokens — useless without the HSM</li>
+      <li>HSM processes lookups but <span class="hl-red">never exports its internal mapping</span> — hardware-enforced</li>
+      <li>CVV cannot be stored at all, even encrypted — PCI DSS prohibits it after authorization</li>
     </ul>
   </div>
   <div class="dqa-sub">
-    <div class="dqa-sub-q">How does the tokenization flow work for a new card entry?</div>
-    <div class="dqa-sub-a">Customer enters card in browser → Stripe.js sends card data directly to Stripe's servers over TLS (never touches merchant's servers) → Stripe HSM stores PAN, returns token → token sent to merchant's backend → merchant stores token for future charges. The merchant's PCI scope is reduced to SAQ A (22 controls) because they never handle raw card data.</div>
+    <div class="dqa-sub-q">How does tokenization work for a new card?</div>
+    <div class="dqa-sub-a">Card entered in browser → Stripe.js sends it directly to Stripe over TLS (never touches merchant servers) → HSM stores card, returns token → merchant stores token only. PCI scope drops to SAQ A (22 controls).</div>
     <div class="dqa-deep">
-      <div class="dqa-deep-q">What happens to the token if the HSM cluster is permanently lost?</div>
-      <div class="dqa-deep-a">All stored tokens become invalid — merchants would need to recollect card information from all customers. This is a catastrophic data loss scenario. HSMs are operated in geo-redundant active-active clusters with encrypted backups, and have a hardware failure rate of ~0.1% per year. Recovery point objective for HSM data is zero — synchronous replication to the secondary cluster on every write.</div>
+      <div class="dqa-deep-q">What if the HSM cluster is permanently lost?</div>
+      <div class="dqa-deep-a">All tokens become invalid — merchants must recollect cards. That's why HSMs run in geo-redundant active-active clusters with synchronous replication. Hardware failure rate ~0.1%/year. RPO is zero.</div>
     </div>
   </div>
 </div>
