@@ -77,8 +77,8 @@ func registerRateLimiter(r *Registry) {
       <div class="d-flow-v">
         <div class="d-box blue" data-tip="Baseline steady-state. Each request triggers one rate limit check (one Lua EVAL call).">100K RPS across all services <span class="d-metric throughput">100K RPS</span></div>
         <div class="d-box blue" data-tip="Marketing events, flash sales, or viral traffic spikes. Cluster must handle this without degradation.">Peak (5x) = 500K checks/sec <span class="d-metric throughput">500K peak</span></div>
-        <div class="d-box purple" data-tip="Sliding window: INCR current + GET prev = 2 ops. Token bucket: HMGET + HMSET = 2 ops. Lua bundles all into 1 round-trip.">2-3 Redis ops per check</div>
-        <div class="d-box purple" data-tip="Upper bound assumes all checks hit Redis (no local cache). With 10ms local cache, most repeat keys skip Redis entirely.">= 300K&#8211;1.5M Redis ops/sec peak <span class="d-metric throughput">1.5M ops/sec</span></div>
+        <div class="d-box purple" data-tip="Sliding window counter: INCR (current window) + GET (previous window) = 2 ops. Token bucket: HMGET (read tokens + timestamp) + HMSET (write back) = 2 ops. Sliding window log (sorted set): ZREMRANGEBYSCORE + ZCARD + ZADD = 3 ops. Lua script bundles all into 1 round-trip — no intermediate state is exposed.">2–3 Redis ops per check (algorithm-dependent)</div>
+        <div class="d-box purple" data-tip="Range spans baseline to peak: lower = 100K baseline RPS × 3 ops = 300K ops/sec (steady state); upper = 500K peak RPS × 3 ops = 1.5M ops/sec (5x traffic spike). With a 10ms local in-process cache, repeat keys for the same user bypass Redis entirely — effective Redis load drops to 20–40% of these numbers.">= 300K (100K×3, baseline) to 1.5M (500K×3, peak) Redis ops/sec <span class="d-metric throughput">1.5M peak</span></div>
       </div>
     </div>
   </div>
@@ -88,7 +88,7 @@ func registerRateLimiter(r *Registry) {
       <div class="d-flow-v">
         <div class="d-box amber" data-tip="Redis HASH key overhead (~64B) + field names (~20B) + values (~16B). Actual measured ~80-120B per token bucket entry.">~100 bytes per counter <span class="d-metric size">~100B</span></div>
         <div class="d-box amber" data-tip="10M daily active users each tracked on 5 distinct rate-limited endpoints (login, search, upload, API, admin).">10M active users &#215; 5 endpoints</div>
-        <div class="d-box amber" data-tip="Well within r6g.large capacity (13 GB). With TTL expiry, active memory is typically 40-60% of theoretical max.">= 50M keys &#215; 100B = 5 GB <span class="d-metric size">5 GB</span></div>
+        <div class="d-box amber" data-tip="Step by step: 10M users × 5 endpoints = 50M keys. Each key: ~100B overhead = 50M × 100B = 5,000,000,000 B = 5 GB. r6g.large has 13 GB RAM — well within capacity. With TTL expiry on inactive users, active memory is typically 40–60% of max: ~2–3 GB live.">= 50M keys × 100B = 5,000M B = 5 GB <span class="d-metric size">5 GB</span></div>
       </div>
     </div>
     <div class="d-group">
@@ -96,7 +96,7 @@ func registerRateLimiter(r *Registry) {
       <div class="d-flow-v">
         <div class="d-box green" data-tip="r6g.large benchmarked at 100-150K ops/sec for simple string/hash ops. Lua scripts are slightly slower (~80K/sec).">100K+ ops/sec per node <span class="d-metric throughput">100K/node</span></div>
         <div class="d-box green" data-tip="Handles baseline 100K RPS comfortably. Add replica per shard for read scaling and failover.">3-node cluster = 300K ops/sec <span class="d-metric throughput">300K ops/sec</span></div>
-        <div class="d-box green" data-tip="Double the shards. AWS ElastiCache online resharding allows shard expansion without downtime.">6 nodes for 500K peak <div class="d-tag green">&#10003; recommended</div></div>
+        <div class="d-box green" data-tip="Need to handle 1.5M ops/sec peak. r6g.large does ~100K ops/sec → 1.5M / 100K = 15 nodes min. But 6 nodes with ~250K ops/sec each (Lua scripts ~80–100K/sec with pipelining) — use 6 as baseline, add replicas for read HA. AWS ElastiCache online resharding allows shard expansion without downtime.">6 nodes for 500K peak (1.5M ops / 250K per-node capacity) <div class="d-tag green">&#10003; recommended</div></div>
       </div>
     </div>
   </div>

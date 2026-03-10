@@ -115,10 +115,10 @@ func registerURLShortener(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">Scale Math</div>
       <div class="d-flow-v">
-        <div class="d-box purple" data-tip="100M / 86,400s = 1,157 avg. 5x safety factor for peak bursts during viral events.">100M new URLs/day = <span class="d-metric throughput">1,157 write QPS</span> (5x peak = <span class="d-metric throughput">5,785</span>)</div>
-        <div class="d-box purple" data-tip="10:1 read-to-write ratio is typical for link shorteners. Most traffic is redirects, not URL creation.">10:1 read:write = <span class="d-metric throughput">11,570 read QPS</span> (5x peak = <span class="d-metric throughput">57,850</span>)</div>
+        <div class="d-box purple" data-tip="100M new URLs/day ÷ 86,400 seconds/day = 1,157 avg write QPS. Peak = 1,157 × 5 = 5,785 QPS. 5x safety factor accounts for viral traffic spikes (e.g., a popular link shared on social media driving 5x normal creation rate).">100M new URLs/day = <span class="d-metric throughput">1,157 write QPS</span> (5x peak = <span class="d-metric throughput">5,785</span>)</div>
+        <div class="d-box purple" data-tip="10:1 read-to-write ratio: 1,157 write QPS × 10 = 11,570 avg read QPS. Peak: 11,570 × 5 = 57,850 peak read QPS. 10:1 is typical for link shorteners — most traffic is redirects, not URL creation.">10:1 read:write = <span class="d-metric throughput">11,570 read QPS</span> (5x peak = <span class="d-metric throughput">57,850</span>)</div>
         <div class="d-box purple" data-tip="5-year horizon is the default TTL. After 5 years URLs auto-expire unless explicitly renewed.">5 years: 100M &#215; 365 &#215; 5 = <span class="d-metric size">182.5B</span> total URLs</div>
-        <div class="d-box amber" data-tip="500 bytes per row: short_code (7B) + original_url (200B) + metadata (293B). DynamoDB max item 400KB — no concern.">Storage: 182.5B &#215; 500B = <span class="d-metric size">~91 TB</span> over 5 years</div>
+        <div class="d-box amber" data-tip="500 bytes per row: short_code (7B) + original_url (200B) + metadata (293B). Storage: 182.5B URLs × 500 B = 91,250 GB ÷ 1,000 = 91.25 TB ≈ 91 TB over 5 years. DynamoDB max item 400KB — no concern.">Storage: 182.5B &#215; 500B = <span class="d-metric size">~91 TB</span> over 5 years</div>
       </div>
       <div class="d-flow">
         <div class="d-number"><div class="d-number-value">100M</div><div class="d-number-label">URLs/day</div></div>
@@ -148,10 +148,10 @@ func registerURLShortener(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">Bandwidth Estimation</div>
       <div class="d-flow-v">
-        <div class="d-box blue" data-tip="500B per redirect response: short_code lookup + 301 Location header. Average, not peak.">Read: 11,570 RPS &#215; 500B = <span class="d-metric throughput">5.8 MB/s avg</span></div>
+        <div class="d-box blue" data-tip="11,570 avg read RPS × 500 bytes per redirect response (short_code + 301 Location header + minimal headers) = 5,785,000 B/s ÷ 1,000,000 = 5.8 MB/s. This is average, not peak. 500B is the redirect response size — not the destination page (which is never served by this system).">Read: 11,570 RPS &#215; 500B = 5,785,000 B/s = <span class="d-metric throughput">5.8 MB/s avg</span></div>
         <div class="d-box blue" data-tip="5x safety factor applied to average RPS. CloudFront absorbs most of this at edge.">Peak read bandwidth: 57,850 &#215; 500B = <span class="d-metric throughput">29 MB/s</span></div>
         <div class="d-box blue" data-tip="1KB request body: URL string + metadata. Write path is 10x less traffic than reads.">Write: 1,157 RPS &#215; 1KB (req body) = <span class="d-metric throughput">1.2 MB/s</span></div>
-        <div class="d-box amber" data-tip="At $0.085/GB CloudFront egress: ~$42.50/day or ~$1,275/mo just for egress. Budget for this.">Daily egress: 5.8 MB/s &#215; 86,400 = <span class="d-metric size">~500 GB/day</span></div>
+        <div class="d-box amber" data-tip="5.8 MB/s × 86,400 s/day = 501,120 MB/day ÷ 1,000 = 501 GB/day ≈ 500 GB/day. At CloudFront egress: $0.085/GB × 500 GB = $42.50/day = $1,275/mo. This is for average traffic only — peak days (viral events) can spike 5× to $212/day.">Daily egress: 5.8 MB/s × 86,400 s = 501,120 MB = <span class="d-metric size">~500 GB/day</span> ($42.50/day egress cost)</div>
       </div>
     </div>
     <div class="d-group">
@@ -160,7 +160,7 @@ func registerURLShortener(r *Registry) {
         <div class="d-box green" data-tip="Pareto principle: top 20% of URLs (viral content, popular links) account for 80% of redirect traffic.">20% hot URLs generate 80% traffic</div>
         <div class="d-box green" data-tip="Daily active set resets each day. Cumulative storage grows but working set stays ~20M URLs.">Daily URLs to cache: 100M &#215; 0.2 = <span class="d-metric size">20M URLs</span></div>
         <div class="d-box green" data-tip="r6g.large = 13 GB RAM, ~$150/mo on-demand. Comfortably holds 20M × 500B = 10 GB working set.">Cache memory: 20M &#215; 500B = <span class="d-metric size">10 GB</span> (fits 1 Redis node)</div>
-        <div class="d-box purple" data-tip="95% cache hit means 5% of 57K peak = ~2.9K RPS actually reach DynamoDB. Well within on-demand limits.">At 90% cache hit: only <span class="d-metric throughput">1,157 RPS</span> reach DB</div>
+        <div class="d-box purple" data-tip="At 90% cache hit, miss rate = 10%. 10% × 11,570 avg read RPS = 1,157 RPS reach DynamoDB. Note: 10% × (10 × write_QPS) = write_QPS — the numbers coincide because the read:write ratio is exactly 10:1. Well within DynamoDB on-demand limits.">At 90% cache hit: only <span class="d-metric throughput">1,157 RPS</span> reach DB</div>
       </div>
     </div>
   </div>
@@ -168,10 +168,10 @@ func registerURLShortener(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">Infrastructure Sizing</div>
       <div class="d-flow-v">
-        <div class="d-box indigo" data-tip="ECS Fargate tasks, 2 vCPU / 4 GB each. Auto-scale on CPU 60%. Stateless — scale horizontally without coordination.">API Servers: <span class="d-metric throughput">4-6 instances</span> (each handles 2-3K RPS)</div>
-        <div class="d-box indigo" data-tip="On-demand billing: $1.25/M reads, $1.25/M writes. Switch to provisioned + reserved at 10K+ sustained RPS to save ~70%.">Database: DynamoDB on-demand (auto-scales)</div>
-        <div class="d-box indigo" data-tip="r6g.large: 13 GB RAM, ~$150/mo on-demand. Cluster mode: 3 primary + 2 replicas each = 9 nodes for HA and read scaling.">Cache: 1x r6g.large (<span class="d-metric size">13 GB</span>) &#8594; 3-node cluster at scale</div>
-        <div class="d-box indigo" data-tip="CloudFront absorbs 60%+ of reads at the edge. Each cache hit saves a DynamoDB read (~$0.00000125).">CDN: CloudFront 750+ PoPs (absorbs <span class="d-metric throughput">60%+</span> reads)</div>
+        <div class="d-box indigo" data-tip="Sizing: after CloudFront absorbs 60%+ of reads, origin sees at most 40% × 57,850 peak = ~23,140 RPS. Go redirect service on 2 vCPU Fargate handles ~5K RPS (mostly I/O-bound: Redis lookup + 301 response). Need: 23,140 / 5K ≈ 5 instances. 4–6 with auto-scale on CPU>60%.">API Servers: <span class="d-metric throughput">4-6 instances</span> (each handles ~5K RPS after CDN offload)</div>
+        <div class="d-box indigo" data-tip="On-demand billing: $1.25/M reads, $1.25/M writes. With 90% cache hit, only 1,157 read RPS reach DB: 1,157 × 86,400 s/day = 100M reads/day × $1.25/M = $125/day ($3,750/mo reads). Writes: 1,157 RPS × 86,400 = 100M/day × $1.25/M = $125/day. Switch to provisioned + reserved capacity at 10K+ sustained RPS to save ~70%.">Database: DynamoDB on-demand (auto-scales &mdash; ~$250/day at baseline load)</div>
+        <div class="d-box indigo" data-tip="Sizing: 20M hot URLs × 500B each = 10 GB working set. r6g.large has 13 GB RAM — fits with 3 GB headroom. At scale: 3-node cluster (3 primaries + 1 replica each = 6 nodes) handles 300K+ ops/sec and adds replication for HA. Cost: 1 node = ~$150/mo, 6-node cluster = ~$900/mo.">Cache: 1x r6g.large (<span class="d-metric size">13 GB</span>, fits 20M × 500B = 10 GB working set) &rarr; 3-node cluster at scale</div>
+        <div class="d-box indigo" data-tip="CloudFront caches the 301 redirect response (Location header) with TTL=1h. Top 20% hot URLs serve 80% of traffic from edge. Cache hit rate: ~90% for hot URLs, ~60% overall. 60% edge absorption: 60% × 57,850 peak = 34,710 RPS never reach origin. Each edge hit saves: DynamoDB read ($0.00000125) + Redis lookup ($0.00001) + compute. At 34,710 RPS × $0.00001125 = $0.39/sec = $33,636/day in saved origin costs.">CDN: CloudFront 750+ PoPs (absorbs <span class="d-metric throughput">60%+</span> reads, saving ~$33K/day in origin costs)</div>
         <div class="d-box indigo" data-tip="KGS pre-generates key batches of 1000. Lambda invocations cost ~$0.0000002 each. 2 instances for HA.">KGS: 2 Lambda instances + DynamoDB table</div>
       </div>
     </div>
