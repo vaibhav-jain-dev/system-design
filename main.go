@@ -65,6 +65,7 @@ func main() {
 	r.Get("/concept/{slug}", h.ConceptDetail)
 	r.Get("/practice", h.Practice)
 	r.Get("/highlights", h.HighlightsDashboard)
+	r.Get("/revision", h.RevisionDiagrams)
 	r.Get("/quick", h.QuickAll)
 	r.Get("/quick/{slug}", h.QuickCategoryDetail)
 

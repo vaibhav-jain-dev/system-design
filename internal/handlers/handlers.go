@@ -44,6 +44,7 @@ func New(reg *registry.Registry, templateFS, contentFS fs.FS, funcMap template.F
 			"web/templates/detail_practice.html",
 			"web/templates/detail_highlights.html",
 			"web/templates/search_results.html",
+			"web/templates/detail_revision.html",
 		))
 
 	return &Handler{
@@ -502,6 +503,37 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.templates.ExecuteTemplate(w, "search_results.html", data); err != nil {
 		log.Printf("search template error: %v", err)
+	}
+}
+
+// RevisionDiagrams renders the visual revision notes page with SVG diagrams.
+func (h *Handler) RevisionDiagrams(w http.ResponseWriter, r *http.Request) {
+	data := h.baseData()
+	data["ActiveSlug"] = "revision"
+	data["PageType"] = "revision"
+
+	// Build SVG map from the revision package
+	svgs := make(map[string]template.HTML)
+	for _, p := range h.reg.Problems {
+		if svg, ok := revisionSVGs[p.Slug]; ok {
+			svgs[p.Slug] = template.HTML(svg)
+		} else {
+			svgs[p.Slug] = template.HTML(`<svg viewBox="0 0 900 200" xmlns="http://www.w3.org/2000/svg"><rect width="900" height="200" rx="8" fill="#fafbfd"/><text x="450" y="105" text-anchor="middle" font-family="Inter,sans-serif" font-size="14" fill="#94a3b8">Revision diagram coming soon</text></svg>`)
+		}
+	}
+	data["RevisionSVGs"] = svgs
+
+	tmpl := "detail_revision.html"
+	if isHTMX(r) {
+		if err := h.templates.ExecuteTemplate(w, tmpl, data); err != nil {
+			log.Printf("Template error: %v", err)
+			http.Error(w, "Internal error", 500)
+		}
+		return
+	}
+	if err := h.templates.ExecuteTemplate(w, "base.html", data); err != nil {
+		log.Printf("Template error: %v", err)
+		http.Error(w, "Internal error", 500)
 	}
 }
 
