@@ -63,11 +63,11 @@ func registerInstagram(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">Back-of-Envelope Math</div>
       <div class="d-flow-v">
-        <div class="d-box purple" data-tip="500M &#215; 10 = 5B/day ÷ 86400s = 57,870 RPS. Round to 58K. Peak 10x = 580K RPS. This drives the caching and fan-out architecture.">500M DAU &#215; 10 loads/day = 5B feed req/day &#8776; <span class="d-metric throughput">58K RPS</span></div>
-        <div class="d-box purple" data-tip="100M ÷ 86400 = 1,157 uploads/sec baseline. 5x peak = 5,785/sec. Pre-signed URLs offload this traffic from app servers to S3 directly.">100M photos/day &#8776; <span class="d-metric throughput">1,150 uploads/sec</span> (5x peak = 5,750/sec)</div>
+        <div class="d-box purple" data-tip="500M DAU &#215; 10 feed loads/day = 5B requests/day ÷ 86,400 s/day = 57,870 RPS &asymp; 58K avg. Peak uses 10x multiplier (vs 5x for URL shortener) because feed traffic follows time-of-day spikes (commute, lunch, live events): 10x peak = 580K RPS. This drives the need for fan-out caching and horizontal autoscaling.">500M DAU &#215; 10 loads/day = 5B feed req/day &#8776; <span class="d-metric throughput">58K RPS</span></div>
+        <div class="d-box purple" data-tip="100M photos/day ÷ 86,400 s/day = 1,157 uploads/sec baseline. Peak = 1,157 &#215; 5 = 5,785/sec (5x safety factor for viral posts or campaigns). Pre-signed S3 URLs offload upload bytes from app servers directly to S3 &mdash; app server only issues the signed URL, never handles the 2MB payload.">100M photos/day &#8776; <span class="d-metric throughput">1,150 uploads/sec</span> (5x peak = 5,750/sec)</div>
         <div class="d-box purple" data-tip="Likes + comments are ~10x photo count. Each like is a DB write (DynamoDB) and a Redis INCR. Total write RPS ~6K sustained, 60K peak.">Likes/comments add 10x writes &#8594; total <span class="d-metric throughput">~6K write RPS</span></div>
-        <div class="d-box amber" data-tip="100M photos &#215; 2MB = 200TB raw. After 4-size resize pipeline: thumbnail(15KB)+small(40KB)+medium(120KB)+full(300KB) = 475KB total per photo. Actual: ~47TB/day.">100M/day &#215; 2MB avg = <span class="d-metric size">200 TB/day new media</span></div>
-        <div class="d-box amber" data-tip="200TB &#215; 365 = 73PB/year. S3 Standard: $23/TB = $1.7M/mo. S3 Intelligent-Tiering moves cold data to cheaper tiers automatically.">Year 1 storage: <span class="d-metric size">~73 PB</span> (200TB &#215; 365)</div>
+        <div class="d-box amber" data-tip="100M photos &#215; 2MB = 200TB raw ingress into the resize pipeline. After resizing into 4 variants: thumbnail(15KB) + small(40KB) + medium(120KB) + full(300KB) = 475KB stored per photo. Actual stored: 100M &#215; 475KB = 47.5TB/day. 200TB is upload bandwidth; 47.5TB is what S3 actually stores.">100M/day &#215; 2MB raw upload = <span class="d-metric size">200 TB/day ingress</span> &rarr; <span class="d-metric size">~47.5 TB/day stored</span></div>
+        <div class="d-box amber" data-tip="Raw ingress: 200TB/day &#215; 365 = 73PB processed/year. Stored: 47.5TB/day &#215; 365 = ~17.3PB stored/year. Cost on S3 Standard: 17.3PB &#215; $23/TB = ~$400K/mo. S3 Intelligent-Tiering automatically moves cold data (&gt;30 days) to cheaper tiers &mdash; cuts storage cost ~40%.">Year 1: <span class="d-metric size">~73 PB</span> processed (200TB &#215; 365) / <span class="d-metric size">~17 PB</span> stored (47.5TB &#215; 365)</div>
       </div>
     </div>
   </div>
@@ -130,8 +130,8 @@ func registerInstagram(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">Compute</div>
       <div class="d-flow-v">
-        <div class="d-box green" data-tip="2 Fargate tasks, each 2 vCPU 4GB RAM. Auto-scales to 8 tasks at CPU>70%. Stateless — sessions in Redis. $120/mo baseline.">ECS Fargate: 2&#215; t3.large &#8212; <span class="d-metric cost">$120/mo</span></div>
-        <div class="d-box purple" data-tip="Layer 7 load balancer with TLS termination. Health checks every 10s. Connection draining 30s. Cross-zone enabled.">ALB (Load Balancer) &#8212; <span class="d-metric cost">$25/mo</span> <div class="d-tag blue">recommended</div></div>
+        <div class="d-box green" data-tip="2 baseline tasks, each 2 vCPU 4GB RAM. At 58K avg feed RPS, CDN absorbs ~90% of media = only API calls reach origin: ~6K RPS avg. At ~3K RPS per task, need 2 tasks at avg load. Auto-scales to 8 tasks at CPU>70% (handles 24K RPS peak). Stateless — sessions in Redis. $120/mo baseline; $480/mo at 8 tasks.">ECS Fargate: 2&#215; t3.large (auto-scales to 8 at peak) &#8212; <span class="d-metric cost">$120/mo baseline</span></div>
+        <div class="d-box purple" data-tip="Layer 7 ALB: TLS termination (saves ~2ms CPU per handshake on app servers), health checks every 10s, 30s connection drain on deploys. Cost = $16.43 base + $0.008/LCU/hr. At 6K RPS: ~1 LCU = $25/mo. At 60K peak: ~10 LCUs = $250/mo.">ALB (Load Balancer) &#8212; <span class="d-metric cost">$25/mo avg</span> (up to $250/mo at peak) <div class="d-tag blue">recommended</div></div>
       </div>
     </div>
   </div>
@@ -139,7 +139,7 @@ func registerInstagram(r *Registry) {
     <div class="d-group">
       <div class="d-group-title">Storage</div>
       <div class="d-flow-v">
-        <div class="d-box indigo" data-tip="db.r6g.large: 2 vCPU, 16GB RAM. gp3 500GB SSD. Multi-AZ standby for failover. Upgrade to r6g.2xlarge when connections exceed 1K/sec.">RDS Postgres db.r6g.large &#8212; <span class="d-metric cost">$200/mo</span></div>
+        <div class="d-box indigo" data-tip="db.r6g.large: 2 vCPU, 16 GB RAM, gp3 500 GB SSD. At 6K write RPS, with 10:1 read:write and Redis absorbing 95% of reads, only ~300 read RPS + 600 write RPS reach Postgres = ~900 RPS. r6g.large handles up to 4K connections. Multi-AZ standby for failover (RTO &lt;60s). Upgrade to r6g.2xlarge (8 vCPU) when p99 &gt; 20ms.">RDS Postgres db.r6g.large (handles ~900 RPS to DB) &#8212; <span class="d-metric cost">$200/mo</span> Multi-AZ</div>
         <div class="d-box red" data-tip="t4g.medium: 2 vCPU, 4GB RAM. Sufficient for &lt;1M users. Upgrade to cluster when memory exceeds 80% or latency &gt;5ms.">ElastiCache Redis t4g.medium &#8212; <span class="d-metric cost">$50/mo</span></div>
       </div>
     </div>
@@ -149,12 +149,12 @@ func registerInstagram(r *Registry) {
       <div class="d-group-title">Media &amp; Delivery</div>
       <div class="d-flow-v">
         <div class="d-box amber" data-tip="S3 Standard: 11 nines durability. Pre-signed URL upload bypasses app server. Use Intelligent-Tiering at &gt;10TB to move cold objects to cheaper tiers.">S3 Standard &#8212; <span class="d-metric cost">$23/TB/mo</span> <div class="d-tag blue">S3</div></div>
-        <div class="d-box purple" data-tip="$85/10TB outbound from edge. 750+ PoPs. Origin Shield adds ~$10/TB but cuts origin load by 90%. Cache-Control: max-age=31536000 for immutable assets.">CloudFront CDN &#8212; <span class="d-metric cost">$85/10TB</span></div>
+        <div class="d-box purple" data-tip="$85/10TB outbound from edge (first 10TB/mo free tier included). Media: 47.5TB/day stored; CDN serves ~90% = 42.75TB/day edge-served. 42.75TB × $0.085/GB... wait: daily = $3.63K/day. Monthly: ~$109K/mo for media CDN alone. Origin Shield: +$10/TB but collapses 400 PoP misses to 1 origin fetch (saves 90% of origin egress). Cache-Control: max-age=31536000 for immutable media assets.">CloudFront CDN &#8212; <span class="d-metric cost">~$109K/mo</span> media egress ($85/10TB at scale)</div>
       </div>
     </div>
   </div>
 </div>
-<div class="d-box blue" data-tip="$500/mo total: Compute $145 + Storage $250 + CDN $85 + misc. Scales linearly to ~$5K/mo at 10M users before optimization.">Total: &#8776;<span class="d-metric cost">$500/mo</span> for &lt;1M users <div class="d-tag green">MVP budget</div></div>`,
+<div class="d-box blue" data-tip="$500/mo breakdown: Compute (2 ECS tasks $120 + ALB $25 = $145) + Storage (RDS $200 + ElastiCache $50 = $250) + CDN (10TB CloudFront $85) + misc $20. This is MVP at &lt;1M users. At 10M users: ~$5K/mo. At Instagram scale (2B MAU): ~$100K/mo+ for CDN alone.">Total: &#8776;<span class="d-metric cost">$500/mo</span> for &lt;1M users <div class="d-tag green">MVP budget</div></div>`,
 	})
 
 	r.Register(&Diagram{

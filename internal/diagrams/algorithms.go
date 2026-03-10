@@ -119,7 +119,7 @@ func registerAlgorithms(r *Registry) {
 <div class="d-label" style="margin-bottom: 0.5rem;">Bit Array (m = 16 bits), k = 3 hash functions <span class="d-metric size">16 bits</span> <span class="d-metric latency">O(k) per op</span></div>
 <div class="d-group" style="margin-bottom: 1rem;">
   <div class="d-group-title"><span class="d-step">1</span> Initial state: all zeros</div>
-  <div class="d-bit-array" data-tip="In production, m is sized by: m = -(n * ln p) / (ln 2)^2. For 1B items at 1% FP rate: m = 1.2 GB.">
+  <div class="d-bit-array" data-tip="Sizing formula: m = −(n × ln p) / (ln 2)². Worked example for n=1B items at p=1% FP rate: ln(0.01) = −4.605; (ln 2)² = 0.480; m = −(1B × −4.605) / 0.480 = 4.605B / 0.480 = 9.59B bits ÷ 8 = 1.2 GB.">
     <div class="d-bit off">0</div><div class="d-bit off">1</div><div class="d-bit off">2</div><div class="d-bit off">3</div>
     <div class="d-bit off">4</div><div class="d-bit off">5</div><div class="d-bit off">6</div><div class="d-bit off">7</div>
     <div class="d-bit off">8</div><div class="d-bit off">9</div><div class="d-bit off">10</div><div class="d-bit off">11</div>
@@ -147,13 +147,13 @@ func registerAlgorithms(r *Registry) {
 <div class="d-flow" style="flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem;">
   <div class="d-box green" data-tip="All 3 bits set — element may be in set. Bloom filters never produce false negatives."><span class="d-step">4</span> QUERY "hello": bits 2,7,13 all = 1 → POSSIBLY IN SET <span class="d-status active"></span> <div class="d-tag green">true positive</div></div>
   <div class="d-box blue" data-tip="Any single bit = 0 is conclusive proof of absence. This is the key property that makes Bloom filters useful."><span class="d-step">5</span> QUERY "cat": bit[5]=0 → DEFINITELY NOT IN SET <div class="d-tag indigo">guaranteed</div></div>
-  <div class="d-box red" data-tip="Bits 1,7,11 happen to be set by other insertions. FP rate = (1 - e^(-kn/m))^k ≈ 1% with proper sizing."><span class="d-step">6</span> QUERY "fake": bits 1,7,11 all = 1 → FALSE POSITIVE! <span class="d-status error"></span> <div class="d-tag amber">~1% rate</div></div>
+  <div class="d-box red" data-tip="Bits 1,7,11 happen to be set by other insertions. FP rate formula: (1 − e^(−k×n/m))^k. With k=7, n/m=1/9.6: (1 − e^(−7/9.6))^7 = (1 − e^(−0.729))^7 = (1 − 0.482)^7 = 0.518^7 ≈ 0.82% ≈ 1% with proper sizing."><span class="d-step">6</span> QUERY "fake": bits 1,7,11 all = 1 → FALSE POSITIVE! <span class="d-status error"></span> <div class="d-tag amber">~1% rate</div></div>
 </div>
 <div class="d-legend">
   <div class="d-bit on" style="display:inline-block; width:18px; height:18px; vertical-align:middle;"></div> = bit set (1)
   <div class="d-bit off" style="display:inline-block; width:18px; height:18px; vertical-align:middle; margin-left:1rem;"></div> = bit unset (0)
 </div>
-<div class="d-caption">No false negatives, ever. False positives are tunable: optimal k = (m/n) * ln 2. Cannot delete elements — use counting Bloom filters (4 bits per slot) if deletion is needed.</div>`,
+<div class="d-caption">No false negatives, ever. False positives are tunable via bit count (m) and hash count (k). Optimal k = (m/n) × ln 2. For 9.6 bits/element: k = 9.6 × 0.693 ≈ 6.6 → round to 7 hash functions. Cannot delete elements — use counting Bloom filters (4 bits per slot) if deletion is needed.</div>`,
 	})
 
 	r.Register(&Diagram{
@@ -170,7 +170,7 @@ func registerAlgorithms(r *Registry) {
 <div class="d-flow-v" style="align-items: center;">
   <div class="d-box blue" data-tip="Any existence check: 'does short code X exist?', 'has user U seen item I?'. Bloom filter answers in ~100ns."><span class="d-step">1</span> Request: "Does key X exist?"</div>
   <div class="d-arrow-down">↓</div>
-  <div class="d-box purple" data-tip="Entire filter lives in memory. At 10 bits/element with k=7 hashes, FP rate is 0.82%. Checking 7 bits takes ~100ns vs ~5ms for a DB query."><span class="d-step">2</span> Bloom Filter <span class="d-metric size">1.2 GB for 1B elements</span> <span class="d-metric latency">O(k) in-memory</span> <div class="d-tag indigo">k=7 hashes</div></div>
+  <div class="d-box purple" data-tip="Entire filter lives in memory. Sizing: m = −(n × ln p) / (ln 2)² = 9.6 bits/element for p=1% FP. Optimal k = (m/n) × ln 2 = 9.6 × 0.693 ≈ 7 hash functions. Resulting FP rate: (1 − e^(−7/9.6))^7 = 0.518^7 ≈ 0.82%. Checking 7 memory addresses takes ~100ns vs ~5ms for a DB query."><span class="d-step">2</span> Bloom Filter <span class="d-metric size">1.2 GB for 1B elements</span> <span class="d-metric latency">O(k) in-memory</span> <div class="d-tag indigo">k=7 hashes</div></div>
   <div class="d-arrow-down">↓</div>
   <div class="d-branch">
     <div class="d-branch-arm">
@@ -238,7 +238,7 @@ func registerAlgorithms(r *Registry) {
 </div>
 <div class="d-group" style="margin-bottom: 1.5rem;">
   <div class="d-group-title">Without virtual nodes (3 physical nodes) — Unbalanced! <div class="d-tag amber">avoid</div></div>
-  <div class="d-bit-array" data-tip="With only 3 points on a 2^32 ring, random placement creates huge variance. One node may own 60% of the key space.">
+  <div class="d-bit-array" data-tip="With only 3 random points on a 2^32 ring, mean range per node = 2^32 / 3 ≈ 1.43B positions, but variance is huge. Load coefficient of variation (CV) = std dev / mean ≈ 1 / √V where V = vnodes per node. With V=1 (no vnodes): CV ≈ 100% theoretical, measured ≈ 58%. One node ends up owning 60%+ of the ring.">
     <div class="d-bit on" style="background: var(--blue, #3b82f6); flex: 6;">A: 60%</div>
     <div class="d-bit on" style="background: var(--green, #22c55e); flex: 1.5;">B: 15%</div>
     <div class="d-bit on" style="background: var(--purple, #a855f7); flex: 2.5;">C: 25%</div>
@@ -263,14 +263,14 @@ func registerAlgorithms(r *Registry) {
     <div class="d-box green" data-tip="~33% of hash slots assigned to Node B.">B: ~33% <span class="d-status active"></span></div>
     <div class="d-box purple" data-tip="~33% of hash slots assigned to Node C.">C: ~33% <span class="d-status active"></span></div>
   </div>
-  <div class="d-label">Standard deviation drops from ~58% to ~5%. <span class="d-metric latency">Std dev ~5%</span></div>
+  <div class="d-label" data-tip="CV = std dev / mean. With 150 vnodes per node: CV ≈ 1/√150 ≈ 8.2% theoretical, ≈5% measured (vnodes use hash-based placement so distribution is near-uniform). More vnodes → lower CV, diminishing returns past ~150.">Standard deviation drops from ~58% to ~5% (CV formula: 1/√V). <span class="d-metric latency">Std dev ~5%</span></div>
 </div>
 <div class="d-legend">
   <span style="display:inline-block; width:12px; height:12px; background:var(--blue, #3b82f6); vertical-align:middle;"></span> Node A
   <span style="display:inline-block; width:12px; height:12px; background:var(--green, #22c55e); vertical-align:middle; margin-left:1rem;"></span> Node B
   <span style="display:inline-block; width:12px; height:12px; background:var(--purple, #a855f7); vertical-align:middle; margin-left:1rem;"></span> Node C
 </div>
-<div class="d-caption">150 vnodes per physical node is the sweet spot (used by Cassandra). Fewer vnodes = worse balance. More vnodes = diminishing returns + larger ring metadata. Memory cost: ~6 bytes per vnode entry in a sorted array.</div>`,
+<div class="d-caption">150 vnodes per physical node is the sweet spot (used by Cassandra). Load CV ≈ 1/√V: V=1 → ~100% (unbalanced), V=10 → ~32%, V=150 → ~8% theoretical / ~5% measured. More vnodes = diminishing returns past 150 + larger ring map (3 nodes × 150 = 450 sorted entries). Memory: ~6 bytes per vnode entry.</div>`,
 	})
 
 	r.Register(&Diagram{
@@ -329,7 +329,7 @@ func registerAlgorithms(r *Registry) {
     <div class="d-bitfield-bits"><span class="d-metric size">1 bit</span></div>
     <div class="d-bitfield-name">Sign (0)</div>
   </div>
-  <div class="d-bitfield-segment blue" data-tip="Milliseconds since custom epoch (e.g., 2015-01-01). 2^41 ms = 69.7 years. Custom epoch extends usable range vs Unix epoch (which would exhaust by 2039).">
+  <div class="d-bitfield-segment blue" data-tip="Milliseconds since custom epoch (e.g., 2015-01-01). 2^41 = 2,199,023,255,552 ms ÷ 1,000 ÷ 60 ÷ 60 ÷ 24 ÷ 365 = 69.7 years. Custom epoch extends usable range vs Unix epoch (which would exhaust by ~2039 under Unix epoch).">
     <div class="d-bitfield-bits"><span class="d-metric size">41 bits</span></div>
     <div class="d-bitfield-name">Timestamp (ms since epoch)</div>
   </div>
@@ -348,7 +348,7 @@ func registerAlgorithms(r *Registry) {
   <div class="d-box green" data-tip="1,024 machines generating independently with zero coordination. No single point of failure."><span class="d-metric size">1,024 machines</span> <div class="d-tag green">no coordination</div></div>
   <div class="d-box purple" data-tip="4,096 per ms per machine = 4,096,000/sec/machine. 1,024 machines = 4 billion IDs/sec globally."><span class="d-metric throughput">4,096 IDs/ms</span></div>
 </div>
-<div class="d-label" style="margin-top: 0.75rem; text-align: center;">Total: 1 + 41 + 10 + 12 = 64 bits. Fits in a single int64. Max: 4,096,000 IDs/sec per machine.</div>
+<div class="d-label" style="margin-top: 0.75rem; text-align: center;">Total: 1 + 41 + 10 + 12 = 64 bits. Fits in a single int64. Max: 2^12 = 4,096 IDs/ms × 1,000 ms/sec = 4,096,000 IDs/sec per machine; 1,024 machines × 4,096,000 = ~4.2B IDs/sec globally.</div>
 <div class="d-caption">Time-ordered IDs enable B-tree append-only writes (no page splits), range queries by time, and rough chronological sorting without a secondary index. Trade-off: clock skew can cause duplicate IDs if NTP jumps backward.</div>`,
 	})
 

@@ -12,7 +12,7 @@ func registerFundamentals(r *Registry) {
 		ContentFile: "fundamentals/networking/cdn",
 		Type:        TypeHTML,
 		HTML: `<div class="d-flow" style="gap: 1.5rem; margin-bottom: 0.75rem; flex-wrap: wrap;">
-  <div class="d-number"><div class="d-number-value">95%</div><div class="d-number-label">Requests served from edge</div></div>
+  <div class="d-number" data-tip="95% edge hit rate = only 5% of requests reach origin. For 100K RPS: 95K served at &lt;20ms from edge, 5K reach origin. Without CDN all 100K would hit origin. This is why CDN is non-negotiable for media-heavy apps."><div class="d-number-value">95%</div><div class="d-number-label">Requests served from edge (5% reach origin)</div></div>
   <div class="d-number"><div class="d-number-value">400+</div><div class="d-number-label">Global PoPs</div></div>
 </div>
 <div class="d-flow-v">
@@ -22,7 +22,7 @@ func registerFundamentals(r *Registry) {
   </div>
   <div class="d-arrow-down"><span class="d-step">1</span> ↓</div>
   <div class="d-row">
-    <div class="d-box amber" data-tip="400+ global PoPs. Serves cached content with sub-20ms latency. Cache capacity ~1-10 TB per PoP.">Edge PoP - Sydney <span class="d-metric latency">5-20ms</span> <div class="d-tag green">~95% hit rate</div></div>
+    <div class="d-box amber" data-tip="400+ global PoPs. Cache capacity: ~1–10 TB per PoP SSD (CloudFront) or 50+ TB (Akamai Tier 1). 95% edge hit rate means: for 58K RPS, 55,100 RPS served from edge at &lt;20ms, only 2,900 RPS reach origin. Each edge hit saves ~100–300ms vs origin round trip.">Edge PoP - Sydney <span class="d-metric latency">5-20ms</span> <div class="d-tag green">~95% hit rate</div></div>
     <div class="d-box amber" data-tip="400+ global PoPs. Serves cached content with sub-20ms latency. Cache capacity ~1-10 TB per PoP.">Edge PoP - London <span class="d-metric latency">5-20ms</span></div>
   </div>
   <div class="d-label">HIT = Return cached response <span class="d-status active"></span></div>
@@ -30,7 +30,7 @@ func registerFundamentals(r *Registry) {
   <div class="d-box green" data-tip="Single regional cache layer between edge PoPs and origin. Collapses duplicate origin requests. Reduces origin load by up to 90%.">Regional Cache (Origin Shield) <span class="d-metric latency">30-60ms</span> <div class="d-tag green">90% origin reduction</div></div>
   <div class="d-arrow-down"><span class="d-step">3</span> ↓ MISS (only ~1%)</div>
   <div class="d-box purple" data-tip="S3 for static assets, ALB for dynamic content. Full round-trip includes TLS negotiation + compute time.">Origin Server (S3 / ALB) <span class="d-metric latency">100-300ms</span></div>
-  <div class="d-caption">Each cache layer reduces origin load exponentially: edge PoPs handle ~95% of requests, Origin Shield catches ~4%, only ~1% reaches origin.</div>
+  <div class="d-caption">Cache hit math example: 58K RPS total. Edge PoPs (95% hit): 55,100 served at edge, 2,900 miss. Origin Shield (80% of misses): 2,320 served from regional cache, 580 miss. Origin sees only 580 RPS (1% of total). Cost savings: each edge hit avoids origin compute + DB read (≈$0.00001/req) = $0.58/sec = $50K/day saved on origin infrastructure.</div>
 </div>`,
 	})
 
@@ -51,7 +51,7 @@ func registerFundamentals(r *Registry) {
 <div class="d-flow-v">
   <div class="d-box blue" data-tip="Global user base. CloudFront uses anycast to route each user to the lowest-latency edge PoP.">Users (global)</div>
   <div class="d-arrow-down">&#8595;</div>
-  <div class="d-box indigo" data-tip="400+ edge locations across 90+ cities. Supports HTTP/3, TLS 1.3, WebSocket. Up to 250K RPS per distribution.">CloudFront (400+ edge PoPs) <span class="d-metric throughput">250K RPS</span> <div class="d-tag indigo">HTTP/3 + TLS 1.3</div></div>
+  <div class="d-box indigo" data-tip="400+ edge locations across 90+ cities. Supports HTTP/3, TLS 1.3, WebSocket. Default limit: 250K RPS per distribution (can be raised to unlimited via AWS support). Each PoP is an Anycast IP — DNS automatically routes users to nearest PoP (usually within 50ms). A request from Sydney goes to Sydney PoP, not US-EAST-1.">CloudFront (400+ edge PoPs) <span class="d-metric throughput">250K RPS</span> <div class="d-tag indigo">HTTP/3 + TLS 1.3</div></div>
   <div class="d-arrow-down">&#8595;</div>
   <div class="d-branch">
     <div class="d-branch-arm">
@@ -130,7 +130,7 @@ func registerFundamentals(r *Registry) {
   <div class="d-box purple" data-tip="Choose the region closest to your origin. Acts as a single funnel: collapses multiple edge misses into one origin fetch. Incremental cost: ~$0.0075/10K requests.">Origin Shield (us-east-1) <span class="d-metric throughput">90% origin reduction</span> <div class="d-tag green">recommended</div></div>
   <div class="d-arrow-down"><span class="d-step">2</span> &#8595; MISS (only ~10%)</div>
   <div class="d-box green" data-tip="Origin receives only ~10% of total requests. Best paired with S3 for static or ALB with auto-scaling for dynamic.">Origin (S3/ALB) <span class="d-metric throughput">~10% of requests</span></div>
-  <div class="d-caption">Without Origin Shield, 400 PoPs each miss independently = 400 origin fetches. With Origin Shield, those collapse to 1 fetch.</div>
+  <div class="d-caption">Without Origin Shield: 400 PoPs, each with independent cache. If an object expires, up to 400 concurrent misses hit origin simultaneously (thundering herd). With Origin Shield: all 400 PoP misses are held and deduplicated — only 1 origin fetch happens. Cost: ~$0.0075/10K requests to Origin Shield, but saves 399 origin fetches per cache miss.</div>
 </div>`,
 	})
 
