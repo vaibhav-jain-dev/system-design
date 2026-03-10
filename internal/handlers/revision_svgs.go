@@ -1966,4 +1966,346 @@ var revisionSVGs = map[string]string{
   <rect x="200" y="505" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
   <text x="550" y="518" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: City-based sharding (rides don't cross cities) + Redis GEO for sub-ms geospatial at 1.25M writes/sec</text>
 </svg>`,
+
+// ─────────────────────────────────────────────────────────────────────
+// SEARCH AUTOCOMPLETE
+// ─────────────────────────────────────────────────────────────────────
+"search-autocomplete": `<svg viewBox="0 0 1100 650" xmlns="http://www.w3.org/2000/svg" font-family="Inter,system-ui,sans-serif">
+  <defs>
+    <marker id="sa-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa0a6"/></marker>
+    <filter id="sa-sh"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.08"/></filter>
+  </defs>
+  <rect width="1100" height="650" rx="12" fill="#fafbfd"/>
+  <text x="550" y="32" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">Search Autocomplete — Architecture Decision Map</text>
+
+  <!-- ═══ THREE-LAYER READ PATH ═══ -->
+  <text x="550" y="60" text-anchor="middle" font-size="12" font-weight="600" fill="#4285f4" letter-spacing="1">THREE-LAYER READ PATH (CDN → REDIS → TRIE → ES FALLBACK)</text>
+
+  <rect x="20" y="80" width="90" height="40" rx="6" fill="#f1f3f4" stroke="#dadce0" stroke-width="1" filter="url(#sa-sh)"/>
+  <text x="65" y="104" text-anchor="middle" font-size="10" font-weight="500" fill="#202124">User types</text>
+
+  <line x1="110" y1="100" x2="145" y2="100" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#sa-arr)"/>
+  <text x="127" y="93" font-size="7" fill="#5f6368">GET</text>
+
+  <rect x="147" y="76" width="150" height="48" rx="6" fill="#e0f7fa" stroke="#00897b" stroke-width="1.2" filter="url(#sa-sh)"/>
+  <text x="222" y="95" text-anchor="middle" font-size="10" font-weight="600" fill="#00695c">CDN (CloudFront)</text>
+  <text x="222" y="108" text-anchor="middle" font-size="8" fill="#202124">top 10K prefixes, 60s TTL</text>
+  <text x="222" y="118" text-anchor="middle" font-size="7" fill="#34a853" font-weight="600">~90% hit rate</text>
+
+  <line x1="297" y1="100" x2="332" y2="100" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#sa-arr)" stroke-dasharray="4,3"/>
+  <text x="314" y="93" font-size="7" fill="#ea4335">miss</text>
+
+  <rect x="334" y="76" width="130" height="48" rx="6" fill="#e0f7fa" stroke="#00897b" stroke-width="1" filter="url(#sa-sh)"/>
+  <text x="399" y="95" text-anchor="middle" font-size="10" font-weight="600" fill="#00695c">Redis</text>
+  <text x="399" y="108" text-anchor="middle" font-size="8" fill="#5f6368">popular prefixes</text>
+  <text x="399" y="118" text-anchor="middle" font-size="7" fill="#f9ab00">~8ms</text>
+
+  <line x1="464" y1="100" x2="499" y2="100" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#sa-arr)" stroke-dasharray="4,3"/>
+  <text x="481" y="93" font-size="7" fill="#ea4335">miss</text>
+
+  <rect x="501" y="76" width="150" height="48" rx="6" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#sa-sh)"/>
+  <text x="576" y="95" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">In-Memory Trie</text>
+  <text x="576" y="108" text-anchor="middle" font-size="8" fill="#202124">pre-computed top-K per node</text>
+  <text x="576" y="118" text-anchor="middle" font-size="7" fill="#f9ab00">O(prefix) + O(1), ~12ms</text>
+
+  <line x1="651" y1="100" x2="686" y2="100" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#sa-arr)" stroke-dasharray="4,3"/>
+  <text x="668" y="93" font-size="7" fill="#ea4335">&lt;5%</text>
+
+  <rect x="688" y="76" width="140" height="48" rx="6" fill="#f1f3f4" stroke="#dadce0" stroke-width="1" filter="url(#sa-sh)"/>
+  <text x="758" y="95" text-anchor="middle" font-size="9" font-weight="600" fill="#5f6368">Elasticsearch</text>
+  <text x="758" y="108" text-anchor="middle" font-size="8" fill="#5f6368">fallback, fuzzy match</text>
+  <text x="758" y="118" text-anchor="middle" font-size="7" fill="#5f6368">40-60ms</text>
+
+  <!-- Why GET -->
+  <rect x="860" y="76" width="220" height="48" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1"/>
+  <text x="970" y="94" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">Why GET (not POST)?</text>
+  <text x="970" y="108" text-anchor="middle" font-size="8" fill="#202124">POST responses never cached by CDN</text>
+  <text x="970" y="120" text-anchor="middle" font-size="8" fill="#5f6368">290K QPS → need CDN cache</text>
+
+  <!-- ═══ KEY DECISIONS ═══ -->
+  <line x1="20" y1="145" x2="1080" y2="145" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="170" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">KEY DECISIONS</text>
+
+  <rect x="20" y="185" width="340" height="75" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#sa-sh)"/>
+  <text x="190" y="205" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Trie (not Hash Map)</text>
+  <text x="190" y="220" text-anchor="middle" font-size="9" fill="#202124">shares prefix structure — path IS the key</text>
+  <text x="190" y="233" text-anchor="middle" font-size="9" fill="#202124">~1.5GB vs ~4GB hash for 3M prefixes</text>
+  <text x="190" y="246" text-anchor="middle" font-size="8" fill="#5f6368">pre-computed top-K: no subtree scan at query</text>
+  <text x="190" y="256" text-anchor="middle" font-size="8" fill="#ea4335">✗ searching subtree for "a" scans millions: 5-10ms</text>
+
+  <rect x="380" y="185" width="340" height="75" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#sa-sh)"/>
+  <text x="550" y="205" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">Blue/Green Swap (never edit live)</text>
+  <text x="550" y="220" text-anchor="middle" font-size="9" fill="#202124">in-place edits corrupt in-flight requests</text>
+  <text x="550" y="233" text-anchor="middle" font-size="9" fill="#202124">locking slows reads 20-40%</text>
+  <text x="550" y="246" text-anchor="middle" font-size="8" fill="#5f6368">full hourly rebuild in background: 60s</text>
+  <text x="550" y="256" text-anchor="middle" font-size="8" fill="#5f6368">atomic pointer swap when ready</text>
+
+  <rect x="740" y="185" width="340" height="75" rx="8" fill="#e0f7fa" stroke="#00897b" stroke-width="1.2" filter="url(#sa-sh)"/>
+  <text x="910" y="205" text-anchor="middle" font-size="10" font-weight="700" fill="#00695c">One Trie Per Language</text>
+  <text x="910" y="220" text-anchor="middle" font-size="9" fill="#202124">combined multi-language = 8-10GB</text>
+  <text x="910" y="233" text-anchor="middle" font-size="9" fill="#202124">too large for CPU L3 cache</text>
+  <text x="910" y="246" text-anchor="middle" font-size="8" fill="#5f6368">per-language: 300MB-1.5GB, fits in memory</text>
+  <text x="910" y="256" text-anchor="middle" font-size="8" fill="#5f6368">independent update schedules</text>
+
+  <!-- ═══ PERSONALIZATION ═══ -->
+  <line x1="20" y1="280" x2="1080" y2="280" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="305" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">PERSONALIZATION: SERVICE LAYER, NOT CDN</text>
+
+  <rect x="20" y="320" width="520" height="55" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.2" filter="url(#sa-sh)"/>
+  <text x="280" y="340" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">CDN = global top-10, service blends personalization from Redis in &lt;2ms</text>
+  <text x="280" y="355" text-anchor="middle" font-size="9" fill="#202124">write: Kafka fire-and-forget → Flink/Spark aggregate → hourly rebuild</text>
+  <text x="280" y="368" text-anchor="middle" font-size="8" fill="#5f6368">daily-salted SHA-256 user IDs for GDPR compliance</text>
+
+  <rect x="560" y="320" width="520" height="55" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2"/>
+  <text x="820" y="340" text-anchor="middle" font-size="10" font-weight="700" fill="#c5221f">✗ uid in CDN cache key</text>
+  <text x="820" y="355" text-anchor="middle" font-size="9" fill="#202124">100M users × 1K prefixes = 100B cache entries</text>
+  <text x="820" y="368" text-anchor="middle" font-size="8" fill="#ea4335">makes CDN useless, 0% hit rate</text>
+
+  <!-- ═══ KEY NUMBERS ═══ -->
+  <line x1="20" y1="395" x2="1080" y2="395" stroke="#e2e8f0" stroke-width="1"/>
+
+  <rect x="20" y="415" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="95" y="433" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">290K QPS</text>
+  <text x="95" y="447" text-anchor="middle" font-size="8" fill="#5f6368">autocomplete requests</text>
+
+  <rect x="185" y="415" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="260" y="433" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">~90% CDN hit</text>
+  <text x="260" y="447" text-anchor="middle" font-size="8" fill="#5f6368">→ 29K origin QPS</text>
+
+  <rect x="350" y="415" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="425" y="433" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">~1.5GB trie</text>
+  <text x="425" y="447" text-anchor="middle" font-size="8" fill="#5f6368">3M prefixes</text>
+
+  <rect x="515" y="415" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="590" y="433" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">O(prefix)+O(1)</text>
+  <text x="590" y="447" text-anchor="middle" font-size="8" fill="#5f6368">pre-computed top-K</text>
+
+  <rect x="680" y="415" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="755" y="433" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">60s rebuild</text>
+  <text x="755" y="447" text-anchor="middle" font-size="8" fill="#5f6368">hourly blue/green</text>
+
+  <rect x="845" y="415" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="920" y="433" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">GET not POST</text>
+  <text x="920" y="447" text-anchor="middle" font-size="8" fill="#5f6368">CDN-cacheable</text>
+
+  <rect x="200" y="475" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
+  <text x="550" y="488" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: Pre-computed top-K per trie node turns read from O(subtree) to O(1); blue/green swap avoids locking</text>
+</svg>`,
+
+// ─────────────────────────────────────────────────────────────────────
+// RECOMMENDATION SYSTEM
+// ─────────────────────────────────────────────────────────────────────
+"recommendation-system": `<svg viewBox="0 0 1100 550" xmlns="http://www.w3.org/2000/svg" font-family="Inter,system-ui,sans-serif">
+  <defs>
+    <marker id="rc-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa0a6"/></marker>
+    <filter id="rc-sh"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.08"/></filter>
+  </defs>
+  <rect width="1100" height="550" rx="12" fill="#fafbfd"/>
+  <text x="550" y="32" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">Recommendation System — Architecture Decision Map</text>
+
+  <!-- ═══ TWO-STAGE PIPELINE ═══ -->
+  <text x="550" y="60" text-anchor="middle" font-size="12" font-weight="600" fill="#4285f4" letter-spacing="1">UNIVERSAL PATTERN: CANDIDATE GENERATION → RANKING</text>
+
+  <rect x="20" y="80" width="100" height="40" rx="6" fill="#f1f3f4" stroke="#dadce0" stroke-width="1" filter="url(#rc-sh)"/>
+  <text x="70" y="104" text-anchor="middle" font-size="10" font-weight="500" fill="#202124">User Request</text>
+
+  <line x1="120" y1="100" x2="155" y2="100" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#rc-arr)"/>
+
+  <rect x="157" y="74" width="260" height="52" rx="6" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#rc-sh)"/>
+  <text x="287" y="94" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">Stage 1: Candidate Generation</text>
+  <text x="287" y="108" text-anchor="middle" font-size="9" fill="#202124">millions → ~1000 candidates via ANN</text>
+  <text x="287" y="120" text-anchor="middle" font-size="8" fill="#5f6368">two-tower model: user tower + item tower</text>
+
+  <line x1="417" y1="100" x2="452" y2="100" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#rc-arr)"/>
+  <text x="434" y="93" font-size="7" fill="#5f6368">~1000</text>
+
+  <rect x="454" y="74" width="260" height="52" rx="6" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#rc-sh)"/>
+  <text x="584" y="94" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Stage 2: Ranking</text>
+  <text x="584" y="108" text-anchor="middle" font-size="9" fill="#202124">gradient boosted trees score each candidate</text>
+  <text x="584" y="120" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">expensive model, but only on ~1000 items</text>
+
+  <line x1="714" y1="100" x2="749" y2="100" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#rc-arr)"/>
+
+  <rect x="751" y="80" width="140" height="40" rx="6" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2" filter="url(#rc-sh)"/>
+  <text x="821" y="104" text-anchor="middle" font-size="10" font-weight="600" fill="#e37400">Top-N results</text>
+
+  <!-- Contextual bandits -->
+  <rect x="920" y="74" width="160" height="52" rx="8" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.2" filter="url(#rc-sh)"/>
+  <text x="1000" y="92" text-anchor="middle" font-size="9" font-weight="600" fill="#7627bb">Contextual Bandits</text>
+  <text x="1000" y="106" text-anchor="middle" font-size="8" fill="#202124">explore vs exploit balance</text>
+  <text x="1000" y="118" text-anchor="middle" font-size="8" fill="#5f6368">Netflix: homepage layout</text>
+
+  <!-- ═══ REAL WORLD PATTERNS ═══ -->
+  <line x1="20" y1="145" x2="1080" y2="145" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="170" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">INDUSTRY PATTERNS</text>
+
+  <rect x="20" y="185" width="250" height="85" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#rc-sh)"/>
+  <text x="145" y="205" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">Flipkart</text>
+  <text x="145" y="220" text-anchor="middle" font-size="9" fill="#202124">two-tower neural net (retrieval)</text>
+  <text x="145" y="233" text-anchor="middle" font-size="9" fill="#202124">GBT for ranking</text>
+  <text x="145" y="246" text-anchor="middle" font-size="8" fill="#5f6368">Flink real-time features: +15% CTR</text>
+  <text x="145" y="259" text-anchor="middle" font-size="8" fill="#5f6368">towers independent → precompute offline</text>
+
+  <rect x="290" y="185" width="250" height="85" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.2" filter="url(#rc-sh)"/>
+  <text x="415" y="205" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Meesho (social commerce)</text>
+  <text x="415" y="220" text-anchor="middle" font-size="9" fill="#202124">collab filtering (Spark offline)</text>
+  <text x="415" y="233" text-anchor="middle" font-size="9" fill="#202124">Redis social graph at serving time</text>
+  <text x="415" y="246" text-anchor="middle" font-size="8" fill="#5f6368">"X of your contacts bought this"</text>
+  <text x="415" y="259" text-anchor="middle" font-size="8" fill="#5f6368">social trust > browsing history</text>
+
+  <rect x="560" y="185" width="250" height="85" rx="8" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.2" filter="url(#rc-sh)"/>
+  <text x="685" y="205" text-anchor="middle" font-size="10" font-weight="700" fill="#7627bb">Nykaa (beauty)</text>
+  <text x="685" y="220" text-anchor="middle" font-size="9" fill="#202124">CNN visual similarity</text>
+  <text x="685" y="233" text-anchor="middle" font-size="9" fill="#202124">Neo4j knowledge graph</text>
+  <text x="685" y="246" text-anchor="middle" font-size="8" fill="#5f6368">product chemistry causality</text>
+  <text x="685" y="259" text-anchor="middle" font-size="8" fill="#5f6368">Vitamin C → sunscreen (KG > co-purchase)</text>
+
+  <rect x="830" y="185" width="250" height="85" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2" filter="url(#rc-sh)"/>
+  <text x="955" y="205" text-anchor="middle" font-size="10" font-weight="700" fill="#e37400">Netflix</text>
+  <text x="955" y="220" text-anchor="middle" font-size="9" fill="#202124">two-stage: candidate gen → ranking</text>
+  <text x="955" y="233" text-anchor="middle" font-size="9" fill="#202124">contextual bandits for layout</text>
+  <text x="955" y="246" text-anchor="middle" font-size="8" fill="#5f6368">personalized thumbnails: same movie,</text>
+  <text x="955" y="259" text-anchor="middle" font-size="8" fill="#5f6368">different cover per user → higher CTR</text>
+
+  <!-- ═══ KEY NUMBERS ═══ -->
+  <line x1="20" y1="290" x2="1080" y2="290" stroke="#e2e8f0" stroke-width="1"/>
+
+  <rect x="20" y="310" width="170" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="105" y="328" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">millions → 1000</text>
+  <text x="105" y="342" text-anchor="middle" font-size="8" fill="#5f6368">candidate generation</text>
+
+  <rect x="205" y="310" width="170" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="290" y="328" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">ANN O(1) lookup</text>
+  <text x="290" y="342" text-anchor="middle" font-size="8" fill="#5f6368">approximate nearest neighbor</text>
+
+  <rect x="390" y="310" width="170" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="475" y="328" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">two-tower model</text>
+  <text x="475" y="342" text-anchor="middle" font-size="8" fill="#5f6368">independent towers</text>
+
+  <rect x="575" y="310" width="170" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="660" y="328" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">Flink real-time</text>
+  <text x="660" y="342" text-anchor="middle" font-size="8" fill="#5f6368">in-session features</text>
+
+  <rect x="760" y="310" width="170" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="845" y="328" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">explore/exploit</text>
+  <text x="845" y="342" text-anchor="middle" font-size="8" fill="#5f6368">contextual bandits</text>
+
+  <rect x="200" y="370" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
+  <text x="550" y="383" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: Two-stage (cheap retrieval → expensive ranking on ~1000) is the universal pattern</text>
+</svg>`,
+
+// ─────────────────────────────────────────────────────────────────────
+// FOOD DELIVERY
+// ─────────────────────────────────────────────────────────────────────
+"food-delivery": `<svg viewBox="0 0 1100 700" xmlns="http://www.w3.org/2000/svg" font-family="Inter,system-ui,sans-serif">
+  <defs>
+    <marker id="fd-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa0a6"/></marker>
+    <filter id="fd-sh"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.08"/></filter>
+  </defs>
+  <rect width="1100" height="700" rx="12" fill="#fafbfd"/>
+  <text x="550" y="32" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">Food Delivery (Swiggy/Zomato) — Architecture Decision Map</text>
+
+  <!-- ═══ FIVE SERVICES ═══ -->
+  <text x="550" y="60" text-anchor="middle" font-size="12" font-weight="600" fill="#4285f4" letter-spacing="1">5 MICROSERVICES (EACH SCALES INDEPENDENTLY)</text>
+
+  <rect x="20" y="80" width="190" height="65" rx="6" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#fd-sh)"/>
+  <text x="115" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">Order Service</text>
+  <text x="115" y="115" text-anchor="middle" font-size="8" fill="#202124">state machine, Postgres ACID</text>
+  <text x="115" y="128" text-anchor="middle" font-size="8" fill="#5f6368">350 writes/sec</text>
+  <text x="115" y="138" text-anchor="middle" font-size="7" fill="#5f6368">saga pattern for cross-svc txn</text>
+
+  <rect x="230" y="80" width="190" height="65" rx="6" fill="#e0f7fa" stroke="#00897b" stroke-width="1.2" filter="url(#fd-sh)"/>
+  <text x="325" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#00695c">Location Service</text>
+  <text x="325" y="115" text-anchor="middle" font-size="8" fill="#202124">Redis + Cassandra + Kafka</text>
+  <text x="325" y="128" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">125K GPS pings/sec</text>
+  <text x="325" y="138" text-anchor="middle" font-size="7" fill="#5f6368">350x order writes — must decouple</text>
+
+  <rect x="440" y="80" width="190" height="65" rx="6" fill="#e6f4ea" stroke="#34a853" stroke-width="1.2" filter="url(#fd-sh)"/>
+  <text x="535" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Matching Service</text>
+  <text x="535" y="115" text-anchor="middle" font-size="8" fill="#202124">greedy GEORADIUS + scoring</text>
+  <text x="535" y="128" text-anchor="middle" font-size="8" fill="#5f6368">~350 matches/sec</text>
+  <text x="535" y="138" text-anchor="middle" font-size="7" fill="#5f6368">CPU-bound, scales independently</text>
+
+  <rect x="650" y="80" width="190" height="65" rx="6" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2" filter="url(#fd-sh)"/>
+  <text x="745" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#e37400">ETA Service</text>
+  <text x="745" y="115" text-anchor="middle" font-size="8" fill="#202124">Haversine + traffic multiplier</text>
+  <text x="745" y="128" text-anchor="middle" font-size="8" fill="#5f6368">stateless, pure compute</text>
+  <text x="745" y="138" text-anchor="middle" font-size="7" fill="#5f6368">accurate to ±25%, 2ms</text>
+
+  <rect x="860" y="80" width="220" height="65" rx="6" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.2" filter="url(#fd-sh)"/>
+  <text x="970" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#7627bb">Notification Service</text>
+  <text x="970" y="115" text-anchor="middle" font-size="8" fill="#202124">Kafka consumer → APNs/FCM/SSE</text>
+  <text x="970" y="128" text-anchor="middle" font-size="8" fill="#5f6368">decoupled: delay OK for notifs</text>
+  <text x="970" y="138" text-anchor="middle" font-size="7" fill="#5f6368">order placement must NOT be delayed</text>
+
+  <!-- Kafka bus -->
+  <rect x="150" y="155" width="800" height="22" rx="11" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
+  <text x="550" y="170" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Kafka — partitioned by city_zone (spike in one city doesn't affect another)</text>
+
+  <!-- ═══ KEY DECISIONS ═══ -->
+  <line x1="20" y1="195" x2="1080" y2="195" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="220" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">KEY DECISIONS</text>
+
+  <rect x="20" y="235" width="340" height="70" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#fd-sh)"/>
+  <text x="190" y="255" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Saga (not 2PC)</text>
+  <text x="190" y="270" text-anchor="middle" font-size="9" fill="#202124">local txn + compensating rollbacks</text>
+  <text x="190" y="283" text-anchor="middle" font-size="8" fill="#5f6368">2PC: 350 orders/s × 5s pay = 1750 dist locks</text>
+  <text x="190" y="296" text-anchor="middle" font-size="8" fill="#ea4335">✗ 2PC grinds system to a halt</text>
+
+  <rect x="380" y="235" width="340" height="70" rx="8" fill="#e0f7fa" stroke="#00897b" stroke-width="1.2" filter="url(#fd-sh)"/>
+  <text x="550" y="255" text-anchor="middle" font-size="10" font-weight="700" fill="#00695c">SSE for Customers, WS for Partners</text>
+  <text x="550" y="270" text-anchor="middle" font-size="9" fill="#202124">customers: receive-only → SSE simpler</text>
+  <text x="550" y="283" text-anchor="middle" font-size="9" fill="#202124">partners: push GPS + receive orders → WS</text>
+  <text x="550" y="296" text-anchor="middle" font-size="8" fill="#5f6368">different protocols for different needs</text>
+
+  <rect x="740" y="235" width="340" height="70" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2" filter="url(#fd-sh)"/>
+  <text x="910" y="255" text-anchor="middle" font-size="10" font-weight="700" fill="#e37400">Redis TTL for Offline Detection</text>
+  <text x="910" y="270" text-anchor="middle" font-size="9" fill="#202124">60s TTL per partner — auto-expires</text>
+  <text x="910" y="283" text-anchor="middle" font-size="9" fill="#202124">~40% of offline transitions are unannounced</text>
+  <text x="910" y="296" text-anchor="middle" font-size="8" fill="#5f6368">tunnels, dead batteries, crashed apps</text>
+
+  <!-- ═══ MATCHING ═══ -->
+  <line x1="20" y1="325" x2="1080" y2="325" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="350" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">MATCHING: GREEDY (NOT DIJKSTRA)</text>
+
+  <rect x="20" y="365" width="520" height="60" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#fd-sh)"/>
+  <text x="280" y="385" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Greedy + Haversine + Constraints (chosen)</text>
+  <text x="280" y="400" text-anchor="middle" font-size="9" fill="#202124">GEORADIUS → filter (vehicle, status, load) → score → assign</text>
+  <text x="280" y="413" text-anchor="middle" font-size="8" fill="#5f6368">accurate to ±25%, 2ms per match, fits in 2s SLA</text>
+
+  <rect x="560" y="365" width="520" height="60" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2"/>
+  <text x="820" y="385" text-anchor="middle" font-size="10" font-weight="700" fill="#c5221f">✗ Dijkstra on City Road Graph</text>
+  <text x="820" y="400" text-anchor="middle" font-size="9" fill="#202124">100-500ms per query × 20 candidates × 350 orders/sec = 7000 Dijkstra/sec</text>
+  <text x="820" y="413" text-anchor="middle" font-size="8" fill="#ea4335">infeasible within 2s SLA at scale</text>
+
+  <!-- ═══ KEY NUMBERS ═══ -->
+  <line x1="20" y1="445" x2="1080" y2="445" stroke="#e2e8f0" stroke-width="1"/>
+
+  <rect x="20" y="465" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="97" y="483" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">125K GPS/sec</text>
+  <text x="97" y="497" text-anchor="middle" font-size="8" fill="#5f6368">location writes</text>
+
+  <rect x="190" y="465" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="267" y="483" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">350 orders/sec</text>
+  <text x="267" y="497" text-anchor="middle" font-size="8" fill="#5f6368">Postgres sweet spot</text>
+
+  <rect x="360" y="465" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="437" y="483" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">60s TTL</text>
+  <text x="437" y="497" text-anchor="middle" font-size="8" fill="#5f6368">partner heartbeat</text>
+
+  <rect x="530" y="465" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="607" y="483" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">2ms match</text>
+  <text x="607" y="497" text-anchor="middle" font-size="8" fill="#5f6368">greedy GEORADIUS</text>
+
+  <rect x="700" y="465" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="777" y="483" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">city_zone partition</text>
+  <text x="777" y="497" text-anchor="middle" font-size="8" fill="#5f6368">Kafka isolation</text>
+
+  <rect x="870" y="465" width="155" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="947" y="483" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">SSE + WS</text>
+  <text x="947" y="497" text-anchor="middle" font-size="8" fill="#5f6368">protocol per use case</text>
+
+  <rect x="200" y="525" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
+  <text x="550" y="538" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: Location ingestion (125K/s) is 350x order writes — must be a separate service from order state machine</text>
+</svg>`,
 }
