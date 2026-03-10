@@ -608,6 +608,7 @@
                 book.active       = false;
                 book.srcNodes     = [];
                 book.pages        = [];
+                book.spreads      = [];
                 book.spread       = 0;
                 book.totalSpreads = 0;
 
@@ -686,6 +687,7 @@
             spread:       0,
             totalSpreads: 0,
             pages:        [],   // pages[i] = array of original elements for page i
+            spreads:      [],   // spreads[i] = {type:'normal',left,right} or {type:'summary',data:{...}}
             srcNodes:     []    // saved childNodes for destroyBook restore
         };
         var BOOK_MIN_WIDTH  = 1024;
@@ -798,7 +800,118 @@
             });
             if (curPage.length > 0) book.pages.push(curPage);
 
-            book.totalSpreads = Math.ceil(book.pages.length / 2);
+            // ── Orphan control: phase headers at page bottom ───────────────
+            // If a phase-header is the last element on a page and there is a
+            // next page, move it to the top of the next page so the header is
+            // always followed by its content (no widowed section titles).
+            for (var pi = 0; pi < book.pages.length - 1; pi++) {
+                var pg = book.pages[pi];
+                if (pg.length === 0) continue;
+                var last = pg[pg.length - 1];
+                if (last.classList && last.classList.contains('phase-header')) {
+                    pg.pop();
+                    book.pages[pi + 1].unshift(last);
+                    // If removing the header left the page empty, remove it entirely
+                    if (pg.length === 0) {
+                        book.pages.splice(pi, 1);
+                        pi--; // recheck at same index
+                    }
+                }
+            }
+
+            // ── Build spreads array with summary cards at ~20% intervals ──
+            var totalPages = book.pages.length;
+            if (!totalPages) return;
+
+            // Helper: extract phase {num, title} from a range of pages
+            function extractPhasesFromPages(startPg, endPg) {
+                var phases = [], seen = {};
+                for (var p2 = startPg; p2 <= endPg; p2++) {
+                    if (!book.pages[p2]) continue;
+                    book.pages[p2].forEach(function(el) {
+                        if (!el.classList || !el.classList.contains('phase-header')) return;
+                        var numEl   = el.querySelector('.phase-number');
+                        var titleEl = el.querySelector('.phase-title');
+                        var key = numEl ? numEl.textContent.trim() : '';
+                        if (!seen[key]) {
+                            seen[key] = true;
+                            phases.push({ num: key, title: titleEl ? titleEl.textContent.trim() : '' });
+                        }
+                    });
+                }
+                return phases;
+            }
+
+            // Snap summary insertion to the nearest phase boundary (page that
+            // STARTS a new phase), choosing the boundary just at or before target%.
+            var phaseBoundaryPages = [];
+            for (var pb = 0; pb < totalPages; pb++) {
+                var pg0 = book.pages[pb];
+                if (pg0 && pg0.length > 0 && pg0[0].classList && pg0[0].classList.contains('phase-header')) {
+                    phaseBoundaryPages.push(pb);
+                }
+            }
+
+            // Determine summary insertion points: pages just BEFORE each boundary
+            // nearest to 20%, 40%, 60%, 80% of total pages.
+            // Only add summaries for content with at least 8 pages.
+            var summarySet = {};
+            if (totalPages >= 8) [0.20, 0.40, 0.60, 0.80].forEach(function(pct) {
+                var target = Math.floor(totalPages * pct);
+                if (target >= totalPages - 2) return; // skip if too near the end
+                // Find nearest phase boundary at or before target, giving up a page to
+                // keep summary BETWEEN phases (insert after boundary-1).
+                var best = -1;
+                for (var bi = phaseBoundaryPages.length - 1; bi >= 0; bi--) {
+                    var bp = phaseBoundaryPages[bi] - 1; // last page before this phase
+                    if (bp >= 1 && bp <= target) { best = bp; break; }
+                }
+                if (best < 0) best = Math.max(0, target - 1);
+                // Don't place two summaries within 4 pages of each other
+                var tooClose = Object.keys(summarySet).some(function(k) {
+                    return Math.abs(parseInt(k) - best) < 4;
+                });
+                if (!tooClose && best > 0) summarySet[best] = true;
+            }); // end if (totalPages >= 8)
+
+            // Build spreads
+            book.spreads = [];
+            var chapterStart = 0, chapterNum = 0, prevChapters = [];
+
+            for (var pp = 0; pp < totalPages; pp++) {
+                if (!summarySet[pp]) continue; // not a summary boundary yet
+
+                chapterNum++;
+                var chPhases   = extractPhasesFromPages(chapterStart, pp);
+                // Look ahead for "up next" phases (next ~20% of pages)
+                var nextEnd    = Math.min(pp + 1 + Math.max(1, Math.floor(totalPages * 0.22)), totalPages - 1);
+                var nextPhases = extractPhasesFromPages(pp + 1, nextEnd);
+
+                // Flush normal page-pairs for this chapter
+                for (var lp = chapterStart; lp <= pp; lp += 2) {
+                    book.spreads.push({ type: 'normal', left: lp, right: (lp + 1 <= pp) ? lp + 1 : null });
+                }
+                // Insert summary spread
+                book.spreads.push({
+                    type: 'summary',
+                    data: {
+                        chapterNum:   chapterNum,
+                        startPage:    chapterStart + 1,
+                        endPage:      pp + 1,
+                        phases:       chPhases,
+                        nextPhases:   nextPhases,
+                        prevChapters: prevChapters.slice()
+                    }
+                });
+                prevChapters.push({ num: chapterNum, phases: chPhases, startPage: chapterStart + 1, endPage: pp + 1 });
+                chapterStart = pp + 1;
+            }
+            // Remaining pages after last summary (or all pages if no summaries)
+            for (var lp = chapterStart; lp < totalPages; lp += 2) {
+                book.spreads.push({ type: 'normal', left: lp, right: (lp + 1 < totalPages) ? lp + 1 : null });
+            }
+
+            book.totalSpreads = book.spreads.length;
             if (!book.totalSpreads) return;
 
             // ── Build reader UI ────────────────────────────────────────────
@@ -815,8 +928,14 @@
             rightEl.className = 'book-page book-page-right';
             rightEl.id        = 'book-right';
 
+            // Full-width summary page (hidden by default, shown on summary spreads)
+            var summaryPageEl = document.createElement('div');
+            summaryPageEl.className = 'book-summary-page';
+            summaryPageEl.id        = 'book-summary-page';
+
             readerEl.appendChild(leftEl);
             readerEl.appendChild(rightEl);
+            readerEl.appendChild(summaryPageEl);
             d.appendChild(readerEl);
 
             var ctrlEl = document.createElement('div');
@@ -825,7 +944,7 @@
                 '<button class="book-btn" id="book-prev" disabled title="Previous spread (← / PageUp)">' +
                 '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>' +
                 '</button>' +
-                '<span class="book-page-info" id="book-info">Page 1–2 of ' + book.pages.length + '</span>' +
+                '<span class="book-page-info" id="book-info">Page 1–2 of ' + totalPages + '</span>' +
                 '<button class="book-btn" id="book-next" title="Next spread (→ / PageDown)">' +
                 '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>' +
                 '</button>';
@@ -854,19 +973,18 @@
             if (idx >= book.totalSpreads) idx = book.totalSpreads - 1;
             book.spread = idx;
 
-            var leftEl  = document.getElementById('book-left');
-            var rightEl = document.getElementById('book-right');
+            var leftEl     = document.getElementById('book-left');
+            var rightEl    = document.getElementById('book-right');
+            var summaryEl  = document.getElementById('book-summary-page');
             if (!leftEl || !rightEl) return;
 
-            // Populate pages with deep clones of the original elements.
-            // Syntax highlighting is already baked into the cloned innerHTML.
+            // Populate a normal page with deep clones of the original elements.
             function fillPage(container, pageIdx) {
                 container.innerHTML = '';
-                if (!book.pages[pageIdx]) return;
+                if (pageIdx == null || !book.pages[pageIdx]) return;
                 book.pages[pageIdx].forEach(function(el) {
                     container.appendChild(el.cloneNode(true));
                 });
-                // Re-run hljs on any code blocks that weren't highlighted (safety)
                 if (typeof hljs !== 'undefined') {
                     container.querySelectorAll('pre code:not(.hljs)').forEach(function(b) {
                         hljs.highlightElement(b);
@@ -874,24 +992,117 @@
                 }
             }
 
-            fillPage(leftEl,  idx * 2);
-            fillPage(rightEl, idx * 2 + 1);
+            var spread = book.spreads[idx];
+            if (!spread) return;
 
-            // Update controls
-            var totalPages = book.pages.length;
-            var leftNum    = idx * 2 + 1;
-            var rightNum   = Math.min(idx * 2 + 2, totalPages);
-            var infoEl = document.getElementById('book-info');
-            if (infoEl) {
-                infoEl.textContent = rightNum < totalPages
-                    ? 'Pages ' + leftNum + '–' + rightNum + ' of ' + totalPages
-                    : (leftNum === totalPages ? 'Page ' + leftNum + ' of ' + totalPages
-                                              : 'Pages ' + leftNum + '–' + rightNum + ' of ' + totalPages);
+            if (spread.type === 'summary') {
+                // Full-width summary spread — hide normal pages, show summary
+                leftEl.style.display   = 'none';
+                rightEl.style.display  = 'none';
+                if (summaryEl) {
+                    summaryEl.style.display = 'flex';
+                    summaryEl.innerHTML = buildSummaryHTML(spread.data);
+                }
+                var infoEl = document.getElementById('book-info');
+                if (infoEl) infoEl.innerHTML = 'Summary &middot; Chapter&nbsp;' + spread.data.chapterNum;
+            } else {
+                // Normal two-page spread
+                leftEl.style.display  = '';
+                rightEl.style.display = '';
+                if (summaryEl) summaryEl.style.display = 'none';
+
+                fillPage(leftEl,  spread.left);
+                fillPage(rightEl, spread.right);
+
+                var pgTotal  = book.pages.length;
+                var leftNum  = spread.left + 1;
+                var rightNum = (spread.right != null) ? spread.right + 1 : leftNum;
+                var infoEl   = document.getElementById('book-info');
+                if (infoEl) {
+                    infoEl.textContent = (spread.right != null && spread.right !== spread.left)
+                        ? 'Pages ' + leftNum + '–' + rightNum + ' of ' + pgTotal
+                        : 'Page ' + leftNum + ' of ' + pgTotal;
+                }
             }
+
             var prevBtn = document.getElementById('book-prev');
             var nextBtn = document.getElementById('book-next');
             if (prevBtn) prevBtn.disabled = idx === 0;
             if (nextBtn) nextBtn.disabled = idx >= book.totalSpreads - 1;
+        }
+
+        // ── buildSummaryHTML ─────────────────────────────────────────────────
+        // Generates the ADHD-friendly visual chapter summary spread.
+        // Covered phases: glowing colored circles with numbers + short titles.
+        // "Up next": same layout, muted dashed circles.
+        // Previous chapters: compact breadcrumb pills at top.
+        function buildSummaryHTML(data) {
+            var NODE_COLORS = [
+                '#6366f1','#3b82f6','#10b981','#f59e0b',
+                '#8b5cf6','#ef4444','#06b6d4','#f97316',
+                '#84cc16','#ec4899','#14b8a6','#a855f7'
+            ];
+            function cap(s, n) { return (!s || s.length <= n) ? (s||'') : s.slice(0, n-1) + '…'; }
+
+            var h = '<div class="bsum-inner">';
+
+            // ── Previous chapters breadcrumb ──────────────────────────────
+            if (data.prevChapters && data.prevChapters.length > 0) {
+                h += '<div class="bsum-breadcrumb"><span class="bsum-bc-label">Before</span>';
+                data.prevChapters.forEach(function(ch) {
+                    h += '<div class="bsum-bc-chip">';
+                    h += '<span class="bsum-bc-num">Ch.' + ch.num + '</span>';
+                    h += '<span class="bsum-bc-range">p.' + ch.startPage + '–' + ch.endPage + '</span>';
+                    if (ch.phases && ch.phases.length > 0) {
+                        h += '<span class="bsum-bc-dots">';
+                        ch.phases.slice(0, 5).forEach(function() { h += '<span class="bsum-bc-dot"></span>'; });
+                        h += '</span>';
+                    }
+                    h += '</div>';
+                });
+                h += '</div>';
+            }
+
+            // ── Chapter header ─────────────────────────────────────────────
+            h += '<div class="bsum-chapter-label">';
+            h += '<span class="bsum-check">✓</span>';
+            h += '<span class="bsum-chapter-title">Chapter ' + data.chapterNum + '</span>';
+            h += '<span class="bsum-page-range">p.' + data.startPage + '–' + data.endPage + '</span>';
+            h += '</div>';
+
+            // ── Covered phases journey ─────────────────────────────────────
+            if (data.phases && data.phases.length > 0) {
+                h += '<div class="bsum-journey bsum-covered">';
+                data.phases.forEach(function(ph, i) {
+                    var c = NODE_COLORS[i % NODE_COLORS.length];
+                    h += '<div class="bsum-node bsum-node-done" style="--nc:' + c + '">';
+                    h += '<div class="bsum-node-circle">' + (ph.num || (i+1)) + '</div>';
+                    h += '<div class="bsum-node-title">' + cap(ph.title, 15) + '</div>';
+                    h += '</div>';
+                    if (i < data.phases.length - 1) h += '<div class="bsum-arrow">▶</div>';
+                });
+                h += '</div>';
+            }
+
+            // ── Divider ────────────────────────────────────────────────────
+            h += '<div class="bsum-divider"></div>';
+
+            // ── Up-next preview ────────────────────────────────────────────
+            if (data.nextPhases && data.nextPhases.length > 0) {
+                h += '<div class="bsum-next-label">▷&nbsp;&nbsp;Up next</div>';
+                h += '<div class="bsum-journey bsum-upcoming">';
+                data.nextPhases.forEach(function(ph, i) {
+                    h += '<div class="bsum-node bsum-node-next">';
+                    h += '<div class="bsum-node-circle">' + (ph.num || '?') + '</div>';
+                    h += '<div class="bsum-node-title">' + cap(ph.title, 15) + '</div>';
+                    h += '</div>';
+                    if (i < data.nextPhases.length - 1) h += '<div class="bsum-arrow bsum-arrow-next">▶</div>';
+                });
+                h += '</div>';
+            }
+
+            h += '</div>';
+            return h;
         }
 
         // ── destroyBook ──────────────────────────────────────────────────────
@@ -908,6 +1119,7 @@
             book.active       = false;
             book.srcNodes     = [];
             book.pages        = [];
+            book.spreads      = [];
             book.spread       = 0;
             book.totalSpreads = 0;
 
