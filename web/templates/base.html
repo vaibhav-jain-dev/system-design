@@ -908,12 +908,13 @@
                         chapterNum:   chapterNum,
                         startPage:    chapterStart + 1,
                         endPage:      pp + 1,
-                        phases:       chPhases,
+                        _pgStart:     chapterStart,   // 0-indexed for content extraction
+                        _pgEnd:       pp,             // 0-indexed for content extraction
                         nextPhases:   nextPhases,
                         prevChapters: prevChapters.slice()
                     }
                 });
-                prevChapters.push({ num: chapterNum, phases: chPhases, startPage: chapterStart + 1, endPage: pp + 1 });
+                prevChapters.push({ num: chapterNum, startPage: chapterStart + 1, endPage: pp + 1 });
                 chapterStart = pp + 1;
             }
             // Remaining pages after last summary (or all pages if no summaries)
@@ -1041,178 +1042,215 @@
             if (nextBtn) nextBtn.disabled = idx >= book.totalSpreads - 1;
         }
 
+        // ── extractChapterContent ──────────────────────────────────────────
+        // Walk page elements and extract real content per phase:
+        // decisions (compare-best), key takeaways, checklist facts,
+        // core reasoning (think-main), and interview speech (say).
+        function extractChapterContent(startPg, endPg) {
+            var phases = [], cur = null;
+            for (var p2 = startPg; p2 <= endPg; p2++) {
+                if (!book.pages[p2]) continue;
+                book.pages[p2].forEach(function(el) {
+                    if (!el || el.nodeType !== 1) return;
+                    // ── Phase header: start a new phase ──────────────
+                    if (el.classList.contains('phase-header')) {
+                        var nE = el.querySelector('.phase-number');
+                        var tE = el.querySelector('.phase-title');
+                        cur = { num: nE ? nE.textContent.trim() : '',
+                                title: tE ? tE.textContent.trim() : '',
+                                bullets: [] };
+                        phases.push(cur);
+                        return;
+                    }
+                    if (!cur) { cur = { num: '', title: 'Overview', bullets: [] }; phases.push(cur); }
+                    if (cur.bullets.length >= 5) return;
+
+                    // ── Key takeaway  → ★ amber ──────────────────────
+                    if (el.classList.contains('key-takeaway')) {
+                        var t = el.textContent.replace(/^[\s✓★KEY\s]*/i,'').replace(/\s+/g,' ').trim();
+                        if (t.length > 5) cur.bullets.push({ i:'★', c:'#f59e0b', t:t });
+                        return;
+                    }
+                    // ── Compare-best  → ✦ green ──────────────────────
+                    if (el.classList.contains('compare-card')) {
+                        var b = el.querySelector('.compare-best');
+                        if (b) {
+                            var st = b.querySelector('strong');
+                            var lab = st ? st.textContent.trim() : '';
+                            var rest = b.textContent.replace(lab,'').replace(/^[\s✓—–\-]+/,'').replace(/\s+/g,' ').trim();
+                            if (lab) cur.bullets.push({ i:'✦', c:'#10b981', t:lab+' \u2014 '+rest });
+                        }
+                        return;
+                    }
+                    // ── Checklist items → • white ────────────────────
+                    if (el.classList.contains('checklist')) {
+                        el.querySelectorAll('li').forEach(function(li) {
+                            if (cur.bullets.length >= 5) return;
+                            var t = li.textContent.replace(/\s+/g,' ').trim();
+                            if (t.length > 5) cur.bullets.push({ i:'\u2022', c:'rgba(255,255,255,0.45)', t:t });
+                        });
+                        return;
+                    }
+                    // ── Think-main    → ◎ blue ──────────────────────
+                    if (el.classList.contains('think-block')) {
+                        var m = el.querySelector('.think-main');
+                        if (m) {
+                            var t = m.textContent.replace(/\s+/g,' ').trim();
+                            if (t.length > 10) cur.bullets.push({ i:'\u25CE', c:'#3b82f6', t:t });
+                        }
+                        return;
+                    }
+                    // ── Say block (first sentence) → ▸ teal ─────────
+                    if (el.classList.contains('say-box')) {
+                        var raw = el.textContent.replace(/^[\sSAY💬]*/i,'').replace(/\s+/g,' ').trim();
+                        var fm = raw.match(/^[^.!?]+[.!?]/);
+                        var t = fm ? fm[0] : raw.slice(0,80);
+                        if (t.length > 15) cur.bullets.push({ i:'\u25B8', c:'#06b6d4', t:t });
+                        return;
+                    }
+                    // ── Highlighted numbers (first .hl per element) ──
+                    var hl = el.querySelector('.hl');
+                    if (hl && cur.bullets.length < 5) {
+                        var ctx = (hl.parentElement || hl).textContent.replace(/\s+/g,' ').trim();
+                        if (ctx.length > 8) cur.bullets.push({ i:'#', c:'#f59e0b', t:ctx });
+                    }
+                });
+            }
+            return phases;
+        }
+
         // ── buildSummaryHTML ─────────────────────────────────────────────────
-        // Generates a full SVG diagram for the chapter summary spread.
-        // Horizontal flow: glowing phase-node circles connected by arrows.
-        // Previous chapters: compact pill rectangles at top.
-        // "Up next": muted dashed circles with dashed connectors.
+        // Cheat-sheet SVG: extracts real content from pages and renders
+        // a 2-column card grid with key facts, decisions, and numbers.
         function buildSummaryHTML(data) {
-            var C = [
-                '#6366f1','#3b82f6','#10b981','#f59e0b',
-                '#8b5cf6','#ef4444','#06b6d4','#f97316',
-                '#84cc16','#ec4899','#14b8a6','#a855f7'
-            ];
-            function cap(s, n) { return (!s || s.length <= n) ? (s||'') : s.slice(0, n-1) + '\u2026'; }
+            var PC = ['#6366f1','#3b82f6','#10b981','#f59e0b','#8b5cf6','#ef4444',
+                       '#06b6d4','#f97316','#84cc16','#ec4899','#14b8a6','#a855f7'];
             function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+            function cap(s, n) { return (!s || s.length <= n) ? (s||'') : s.slice(0,n-1)+'\u2026'; }
 
-            var nCov  = data.phases      ? data.phases.length      : 0;
-            var nNext = data.nextPhases   ? data.nextPhases.length  : 0;
-            var nPrev = data.prevChapters ? data.prevChapters.length : 0;
+            // ── Extract content from the actual page elements ────────────
+            var phases = extractChapterContent(data._pgStart, data._pgEnd);
+            var nPrev  = data.prevChapters ? data.prevChapters.length : 0;
+            var nNext  = data.nextPhases   ? data.nextPhases.length   : 0;
 
-            // ── SVG layout constants ─────────────────────────────────────
-            var W  = 1060;          // viewBox width
-            var MX = 60;            // horizontal margin
-            var R  = 22;            // circle radius
-            var usable = W - MX * 2;
+            // ── Layout constants ─────────────────────────────────────────
+            var W = 1060, MX = 28;
+            var COL_W = 490, COL_GAP = 24;
+            var c1X = MX, c2X = MX + COL_W + COL_GAP;
+            var BH = 17;                // bullet line height
+            var CARD_TOP = 28;          // phase header height
+            var CARD_PAD = 14;          // bottom padding
 
-            // Adaptive spacing: shrink if many phases
-            var maxN   = Math.max(nCov, nNext, 1);
-            var gap    = Math.min(110, usable / maxN);
+            // ── Calculate card positions (2-col grid) ────────────────────
+            var titleH = 38 + (nPrev > 0 ? 30 : 0); // title area height
+            var cards = [];
+            var rowY = titleH;
+            for (var ci = 0; ci < phases.length; ci += 2) {
+                var l = phases[ci], r = phases[ci + 1];
+                var lH = CARD_TOP + Math.max(l.bullets.length, 1) * BH + CARD_PAD;
+                var rH = r ? CARD_TOP + Math.max(r.bullets.length, 1) * BH + CARD_PAD : 0;
+                var rw = Math.max(lH, rH);
+                cards.push({ ph: l, x: c1X, y: rowY, w: COL_W, h: rw });
+                if (r) cards.push({ ph: r, x: c2X, y: rowY, w: COL_W, h: rw });
+                rowY += rw + 10;
+            }
 
-            // Y offsets
-            var prevH  = nPrev > 0 ? 50 : 0;
-            var titleY = prevH + 36;
-            var covY   = titleY + 70;
-            var labY   = covY + R + 20;
-            var divY   = labY + 28;
-            var nxtLblY = divY + 24;
-            var nxtY   = nxtLblY + 44;
-            var nxtLabY = nxtY + R + 20;
-            // Interviewer prompt section at the very bottom
-            var promptY = (nNext > 0 ? nxtLabY + 36 : divY + 30);
-            var H = promptY + 56;
+            // "Up next" + prompt positions
+            var upY = rowY + 6;
+            var nxtH = nNext > 0 ? 22 : 0;
+            var promptY = upY + nxtH + 10;
+            var H = promptY + 44;
 
-            // Center rows horizontally
-            function startX(n) { return (W - (n - 1) * gap) / 2; }
-
-            var s = '';
-
-            // ── SVG open + defs ──────────────────────────────────────────
-            s += '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '"'
-               + ' style="width:100%;height:auto;max-height:100%;display:block"'
-               + ' font-family="Inter,system-ui,sans-serif">';
-            s += '<defs>'
-               + '<marker id="ad" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">'
-               + '<path d="M0,0 L8,3 L0,6" fill="rgba(255,255,255,0.30)"/></marker>'
-               + '<marker id="an" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">'
-               + '<path d="M0,0 L8,3 L0,6" fill="rgba(255,255,255,0.12)"/></marker>'
-               + '<filter id="gl"><feGaussianBlur stdDeviation="6" result="b"/>'
-               + '<feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>'
-               + '</defs>';
+            // ── SVG ──────────────────────────────────────────────────────
+            var s = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+W+' '+H+'"'
+                  + ' style="width:100%;height:auto;display:block"'
+                  + ' font-family="Inter,system-ui,sans-serif">';
 
             // ── Previous chapter pills ───────────────────────────────────
             if (nPrev > 0) {
-                var chipW = 72, chipH = 26, chipGap = 10;
-                var chipStartX = MX;
+                var px = MX;
                 data.prevChapters.forEach(function(ch, i) {
-                    var cx = chipStartX + i * (chipW + chipGap);
-                    s += '<rect x="' + cx + '" y="12" width="' + chipW + '" height="' + chipH + '"'
-                       + ' rx="13" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.08)"/>';
-                    s += '<text x="' + (cx + chipW / 2) + '" y="29" text-anchor="middle"'
-                       + ' fill="rgba(255,255,255,0.35)" font-size="10" font-weight="700">'
-                       + 'Ch.' + ch.num + '</text>';
-                    // Phase dots
-                    ch.phases.slice(0, 4).forEach(function(_, di) {
-                        s += '<circle cx="' + (cx + chipW + 5 + di * 7) + '" cy="25" r="2.5"'
-                           + ' fill="rgba(99,102,241,0.35)"/>';
+                    s += '<rect x="'+px+'" y="6" width="68" height="22" rx="11"'
+                       + ' fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.07)"/>';
+                    s += '<text x="'+(px+34)+'" y="20" text-anchor="middle"'
+                       + ' fill="rgba(255,255,255,0.30)" font-size="9.5" font-weight="700">'
+                       + 'Ch.'+ch.num+' p.'+ch.startPage+'\u2013'+ch.endPage+'</text>';
+                    px += 76;
+                });
+            }
+
+            // ── Title bar ────────────────────────────────────────────────
+            var tY = nPrev > 0 ? 50 : 26;
+            s += '<text x="'+MX+'" y="'+tY+'" fill="rgba(255,255,255,0.15)" font-size="11"'
+               + ' font-weight="800" letter-spacing="2">QUICK REVISION</text>';
+            s += '<text x="'+(MX+130)+'" y="'+tY+'" fill="#fff" font-size="17" font-weight="800"'
+               + ' letter-spacing="-0.3">Chapter '+data.chapterNum+'</text>';
+            var rX = MX + 130 + (data.chapterNum >= 10 ? 108 : 95);
+            s += '<text x="'+rX+'" y="'+tY+'" fill="rgba(255,255,255,0.22)" font-size="12">'
+               + 'p.'+data.startPage+'\u2013'+data.endPage+'</text>';
+
+            // ── Phase cards ──────────────────────────────────────────────
+            cards.forEach(function(cd) {
+                var ph = cd.ph;
+                var color = PC[(parseInt(ph.num)||0) % PC.length];
+
+                // Card background
+                s += '<rect x="'+cd.x+'" y="'+cd.y+'" width="'+cd.w+'" height="'+cd.h+'"'
+                   + ' rx="8" fill="rgba(255,255,255,0.025)" stroke="rgba(255,255,255,0.06)"/>';
+
+                // Phase number badge + title
+                var hY = cd.y + 18;
+                s += '<circle cx="'+(cd.x+18)+'" cy="'+(hY-4)+'" r="9" fill="'+color+'"/>';
+                s += '<text x="'+(cd.x+18)+'" y="'+(hY-1)+'" text-anchor="middle"'
+                   + ' fill="#fff" font-size="9" font-weight="800">'+esc(ph.num)+'</text>';
+                s += '<text x="'+(cd.x+34)+'" y="'+hY+'" fill="'+color+'" font-size="12.5"'
+                   + ' font-weight="700">'+esc(cap(ph.title, 44))+'</text>';
+
+                // Bullets — real extracted content
+                if (ph.bullets.length === 0) {
+                    s += '<text x="'+(cd.x+16)+'" y="'+(hY+20)+'" fill="rgba(255,255,255,0.2)"'
+                       + ' font-size="10.5" font-style="italic">(diagram / visual content)</text>';
+                } else {
+                    ph.bullets.forEach(function(b, bi) {
+                        var by = hY + 20 + bi * BH;
+                        // Icon
+                        s += '<text x="'+(cd.x+16)+'" y="'+by+'" fill="'+b.c+'"'
+                           + ' font-size="11">'+esc(b.i)+'</text>';
+                        // Content text (truncated to fit column)
+                        s += '<text x="'+(cd.x+30)+'" y="'+by+'" fill="rgba(255,255,255,0.62)"'
+                           + ' font-size="10.5">'+esc(cap(b.t, 72))+'</text>';
                     });
-                });
-            }
-
-            // ── Chapter title ────────────────────────────────────────────
-            s += '<text x="' + MX + '" y="' + titleY + '" fill="#10b981" font-size="20" font-weight="800">'
-               + '\u2713</text>';
-            s += '<text x="' + (MX + 28) + '" y="' + titleY + '" fill="#fff" font-size="22" font-weight="800"'
-               + ' letter-spacing="-0.5">Chapter ' + data.chapterNum + '</text>';
-            var rangeX = MX + 28 + (data.chapterNum >= 10 ? 140 : 125);
-            s += '<rect x="' + rangeX + '" y="' + (titleY - 14) + '" width="72" height="22"'
-               + ' rx="11" fill="rgba(255,255,255,0.06)"/>';
-            s += '<text x="' + (rangeX + 36) + '" y="' + (titleY - 1) + '" text-anchor="middle"'
-               + ' fill="rgba(255,255,255,0.30)" font-size="11">p.' + data.startPage + '\u2013' + data.endPage + '</text>';
-
-            // ── Covered phase nodes ──────────────────────────────────────
-            if (nCov > 0) {
-                var sx = startX(nCov);
-                // Connecting lines
-                for (var i = 0; i < nCov - 1; i++) {
-                    var x1 = sx + i * gap + R + 4;
-                    var x2 = sx + (i + 1) * gap - R - 4;
-                    s += '<line x1="' + x1 + '" y1="' + covY + '" x2="' + x2 + '" y2="' + covY + '"'
-                       + ' stroke="rgba(255,255,255,0.18)" stroke-width="2" marker-end="url(#ad)"/>';
                 }
-                // Nodes
-                data.phases.forEach(function(ph, i) {
-                    var cx = sx + i * gap;
-                    var c  = C[i % C.length];
-                    // Glow
-                    s += '<circle cx="' + cx + '" cy="' + covY + '" r="' + (R + 8) + '"'
-                       + ' fill="' + c + '" opacity="0.12" filter="url(#gl)"/>';
-                    // Solid circle
-                    s += '<circle cx="' + cx + '" cy="' + covY + '" r="' + R + '" fill="' + c + '"/>';
-                    // Number
-                    s += '<text x="' + cx + '" y="' + (covY + 6) + '" text-anchor="middle"'
-                       + ' fill="#fff" font-size="14" font-weight="800">' + esc(ph.num || '' + (i + 1)) + '</text>';
-                    // Title label
-                    s += '<text x="' + cx + '" y="' + labY + '" text-anchor="middle"'
-                       + ' fill="rgba(255,255,255,0.60)" font-size="10.5">' + esc(cap(ph.title, 15)) + '</text>';
-                });
-            }
+            });
 
-            // ── Dashed divider ───────────────────────────────────────────
-            s += '<line x1="' + MX + '" y1="' + divY + '" x2="' + (W - MX) + '" y2="' + divY + '"'
-               + ' stroke="rgba(255,255,255,0.07)" stroke-width="1" stroke-dasharray="6,4"/>';
+            // ── Dashed separator ─────────────────────────────────────────
+            s += '<line x1="'+MX+'" y1="'+(upY-4)+'" x2="'+(W-MX)+'" y2="'+(upY-4)+'"'
+               + ' stroke="rgba(255,255,255,0.06)" stroke-dasharray="5,3"/>';
 
-            // ── Up-next nodes ────────────────────────────────────────────
+            // ── Up-next one-liner ────────────────────────────────────────
             if (nNext > 0) {
-                s += '<text x="' + MX + '" y="' + nxtLblY + '"'
-                   + ' fill="rgba(255,255,255,0.28)" font-size="12" font-weight="700"'
-                   + ' letter-spacing="0.8">\u25B7  UP NEXT</text>';
-
-                var nx = startX(nNext);
-                // Dashed connecting lines
-                for (var i = 0; i < nNext - 1; i++) {
-                    var x1 = nx + i * gap + R + 4;
-                    var x2 = nx + (i + 1) * gap - R - 4;
-                    s += '<line x1="' + x1 + '" y1="' + nxtY + '" x2="' + x2 + '" y2="' + nxtY + '"'
-                       + ' stroke="rgba(255,255,255,0.07)" stroke-width="1.5" stroke-dasharray="4,3"'
-                       + ' marker-end="url(#an)"/>';
-                }
-                // Dashed circle nodes
-                data.nextPhases.forEach(function(ph, i) {
-                    var cx = nx + i * gap;
-                    s += '<circle cx="' + cx + '" cy="' + nxtY + '" r="' + R + '"'
-                       + ' fill="none" stroke="rgba(255,255,255,0.14)" stroke-width="2"'
-                       + ' stroke-dasharray="5,3"/>';
-                    s += '<text x="' + cx + '" y="' + (nxtY + 5) + '" text-anchor="middle"'
-                       + ' fill="rgba(255,255,255,0.28)" font-size="13" font-weight="700">'
-                       + esc(ph.num || '?') + '</text>';
-                    s += '<text x="' + cx + '" y="' + nxtLabY + '" text-anchor="middle"'
-                       + ' fill="rgba(255,255,255,0.22)" font-size="9.5">'
-                       + esc(cap(ph.title, 15)) + '</text>';
-                });
+                var nxTxt = data.nextPhases.map(function(p) { return p.num+' '+cap(p.title,18); }).join('  \u2192  ');
+                s += '<text x="'+MX+'" y="'+upY+'" fill="rgba(255,255,255,0.22)" font-size="10.5"'
+                   + ' font-weight="700" letter-spacing="0.6">\u25B7 NEXT</text>';
+                s += '<text x="'+(MX+55)+'" y="'+upY+'" fill="rgba(255,255,255,0.35)" font-size="10.5">'
+                   + esc(cap(nxTxt, 90))+'</text>';
             }
 
-            // ── Interviewer interaction prompt ────────────────────────────
-            // Contextual prompts that vary by chapter to keep the
-            // conversation with the interviewer alive.
+            // ── Interviewer prompt ───────────────────────────────────────
             var prompts = [
-                'Good checkpoint \u2014 "Does this direction align with your priorities before I dive deeper?"',
-                '"I\u2019ve covered the core path. Would you like me to go deeper on any trade-off before I move on?"',
-                '"Before scaling, anything you\u2019d change about the data model?"',
-                '"Should I prioritise failure modes or jump to the optimisation layer next?"'
+                '"Does this direction align with your priorities before I dive deeper?"',
+                '"Shall I go deeper on any trade-off before moving on?"',
+                '"Anything you\u2019d change about the data model before we scale?"',
+                '"Should I focus on failure modes or the optimisation layer next?"'
             ];
             var prompt = prompts[(data.chapterNum - 1) % prompts.length];
-
-            // Speech-bubble rounded rect + icon + text
-            var bblW = 640, bblH = 36, bblX = (W - bblW) / 2;
-            s += '<rect x="' + bblX + '" y="' + promptY + '" width="' + bblW + '" height="' + bblH + '"'
-               + ' rx="18" fill="rgba(99,102,241,0.10)" stroke="rgba(99,102,241,0.25)"/>';
-            s += '<text x="' + (bblX + 16) + '" y="' + (promptY + bblH / 2 + 1) + '"'
-               + ' fill="rgba(99,102,241,0.7)" font-size="15" dominant-baseline="middle">'
-               + '\uD83D\uDCAC</text>';  // 💬
-            s += '<text x="' + (bblX + 38) + '" y="' + (promptY + bblH / 2 + 1) + '"'
-               + ' fill="rgba(255,255,255,0.55)" font-size="11.5" font-style="italic"'
-               + ' dominant-baseline="middle">' + esc(prompt) + '</text>';
+            var bW = 560, bX = (W - bW) / 2;
+            s += '<rect x="'+bX+'" y="'+promptY+'" width="'+bW+'" height="30"'
+               + ' rx="15" fill="rgba(99,102,241,0.08)" stroke="rgba(99,102,241,0.20)"/>';
+            s += '<text x="'+(bX+14)+'" y="'+(promptY+19)+'" fill="rgba(99,102,241,0.6)"'
+               + ' font-size="13">\uD83D\uDCAC</text>';
+            s += '<text x="'+(bX+34)+'" y="'+(promptY+19)+'" fill="rgba(255,255,255,0.45)"'
+               + ' font-size="10.5" font-style="italic">'+esc(prompt)+'</text>';
 
             s += '</svg>';
             return s;
