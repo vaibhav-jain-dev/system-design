@@ -335,18 +335,22 @@
 
 {{phase 3 "Data Model & Database Choice" "5 min"}}
 
-{{say `Core data model: <strong>short_code → long URL</strong>. The access pattern drives every database decision:
+{{say `Core data model: <strong>short_code → long URL</strong>. Before picking a database, walk through the journey — not just the end state:
 <ul>
-  <li><span class='hl'>99%</span> of reads are single-key lookups by short_code — no joins, no aggregations needed</li>
-  <li>Writes are single-row inserts with a conditional uniqueness check</li>
-  <li><strong>Start with Postgres</strong> — it handles this access pattern well up to ~10K QPS on a single instance. At our stated scale of <span class='hl'>57K RPS</span>, DynamoDB becomes the right call: manual sharding with Postgres at this volume is painful to operate, and DynamoDB handles it automatically.</li>
-  <li>Rule of thumb: <span class='hl-blue'>Postgres up to 10K QPS → read replicas up to 30K QPS → DynamoDB when you'd be managing multiple shard instances</span></li>
+  <li><span class='hl'>99%</span> of reads are <strong>single-key lookups</strong> by short_code — no JOINs, no aggregations, no range scans on the hot path</li>
+  <li>Writes are <strong>single-row inserts</strong> with a conditional uniqueness check (only fail if the code already exists)</li>
+  <li>Three stages: <strong>Stage 1</strong> — single Postgres RDS (&lt;10K QPS, $200/mo); <strong>Stage 2</strong> — add read replicas (10K–30K QPS); <strong>Stage 3</strong> — migrate to DynamoDB (&gt;30K QPS or sustained writes &gt;10–15K/s)</li>
+  <li>At our stated <span class='hl'>57K RPS</span>, we're squarely in <strong>Stage 3</strong> — DynamoDB is the right call, but the interviewer wants to hear you know <em>why you'd migrate</em>, not just that DynamoDB exists</li>
 </ul>`}}
 
+{{diagram "url-db-scale-journey"}}
+
+{{hint "state the stage before picking the DB" "Most interviewers don't care which DB you pick — they care whether you can justify it at the stated scale. Walk through: 'At 57K RPS, Postgres would need 10+ read replicas and manual sharding on the write side. That's the inflection point where DynamoDB pays for itself.' Two sentences, and the interviewer knows you understand the tradeoffs."}}
+
 {{compare "Database Choice" (options
-  (best "Postgres (start here)" "Single instance handles 5–10K QPS easily — enough for most URL shorteners. Add read replicas (RDS) to reach 30K+ QPS. Zero sharding complexity, full SQL, ACID transactions, and $200/month on RDS vs DynamoDB variable pricing. Start here; migrate to DynamoDB only when write throughput consistently exceeds 10–15K WPS or you need auto-managed global replication.")
-  (alt "DynamoDB (at our stated 57K RPS scale)" "Every read is a single-key lookup — DynamoDB's strong point. Auto-scales with no manual sharding. Built-in TTL for URL expiration. Global Tables for multi-region. At 57K RPS with a 10:1 read:write ratio: ~52K reads/s + ~5K writes/s — DynamoDB handles this without any sharding config. Switch to this when Postgres read replicas are no longer enough.")
-  (nofit "Cassandra" "Handles writes well but operational complexity is high: compaction tuning, repair cycles, JVM GC pauses. DynamoDB gives the same key-value performance without the ops burden. Only consider Cassandra if you need multi-cloud or are already running it.")
+  (best "Postgres → migrate when writes exceed 10–15K/s" "Start here. Single db.r6g.large handles 5–10K QPS with full SQL, ACID, and $200/month. Add 2–4 read replicas (RDS Multi-AZ) for 10–30K reads/s. Migrate to DynamoDB only when: (a) write throughput consistently exceeds 10–15K WPS, or (b) you'd need 3+ manual Postgres shards, or (c) you need multi-region active-active writes.")
+  (alt "DynamoDB — our target at 57K RPS" "Every redirect is a single GetItem(PK=short_code) — O(1) regardless of table size. Auto-shards with no manual config. Built-in TTL for URL expiration (zero code). Global Tables for multi-region writes. At 57K RPS (10:1 read:write): ~52K reads/s + ~5K writes/s — handled without any sharding setup.")
+  (nofit "Cassandra" "Handles writes well but operational complexity is high: compaction tuning, repair cycles, JVM GC pauses. DynamoDB gives the same key-value performance without the ops burden. Only consider if you need multi-cloud or are already running it.")
   (nofit "MongoDB" "Replica set management, config servers, mongos routing. No advantage over DynamoDB for simple key-value lookups. Postgres JSONB gives all the flexibility MongoDB offers without losing SQL.")
 )}}
 
@@ -356,7 +360,37 @@
   (whatIf "you need ad-hoc SQL queries for analytics" "Never force analytics queries into the hot-path database. Stream click events through Kinesis into S3 as Parquet files, then query with Athena at $5/TB scanned. You get full SQL power for analytics without adding load to DynamoDB — or Postgres.")
 }}
 
-{{hint "why single-table design?" "DynamoDB charges per request, not per table. But each table has its own auto-scaling configuration, alarms, and backup policies. One table with a clean partition key (short_code) is simpler to operate than splitting URLs and metadata across multiple tables. Single-table design also enables DynamoDB transactions across URL creation and idempotency tracking."}}
+{{details "Zero-downtime migration: Postgres → DynamoDB (5 phases)" "text" `Phase 1 — Dual-write (1 week):
+  - Write every new URL to BOTH Postgres and DynamoDB simultaneously
+  - All reads still served from Postgres (source of truth)
+  - DynamoDB write failures are logged but non-blocking (fail-safe)
+  - Goal: DynamoDB accumulates new data without risk
+
+Phase 2 — Backfill historical data (1–3 days):
+  - Stream existing Postgres rows to DynamoDB using AWS DMS or a custom script
+  - Use created_at cursor to process in chunks — avoids full table lock
+  - Verify: row counts + random sample spot-checks match after backfill
+
+Phase 3 — Shadow reads (3 days):
+  - On every redirect, read from BOTH Postgres (response) and DynamoDB (shadow)
+  - Compare results and log mismatches — don't fail on them yet
+  - Target: zero mismatches over 24 consecutive hours of production traffic
+
+Phase 4 — Gradual read flip (blue/green):
+  - Feature flag: route 1% → 10% → 50% → 100% of reads to DynamoDB
+  - Monitor p99 latency and error rate per cohort after each step
+  - Rollback time: flip feature flag back — under 30 seconds
+
+Phase 5 — Drain Postgres:
+  - Disable dual-write; Postgres becomes read-only backup
+  - Keep Postgres alive for 7 days (emergency rollback window)
+  - Decommission after zero alerts for 7 days`}}
+
+{{hint "why dual-write before backfill?" "If you backfill first then enable dual-write, you have a gap: URLs created between backfill completion and dual-write enabling are in Postgres only. Dual-write first ensures every new URL lands in DynamoDB from day one. The backfill then only needs to catch up historical data — no gap window."}}
+
+{{hint "why single-table design?" "DynamoDB charges per request, not per table. But each table has its own auto-scaling config, alarms, and backup policies. One table with a clean partition key (short_code) is simpler to operate than splitting URLs and metadata across multiple tables. Single-table design also enables DynamoDB transactions across URL creation and idempotency tracking."}}
+
+{{diagram "url-gsi-explained"}}
 
 {{diagram "url-data-model"}}
 
@@ -372,8 +406,8 @@
   (row "Analytics increment"   "click_analytics"    "UpdateItem atomic ADD"                "O(1)"       "&lt;5ms")
 )}}
 
-{{think "The index projection matters for cost. Using ALL projection (full item copy) means the user dashboard query returns all fields in a single read. KEYS_ONLY would require a follow-up lookup per URL, turning one read into many reads."
-  (whyNot "a separate analytics table query from the main table" "Analytics queries (clicks by country, device) have completely different access patterns than URL redirects. Mixing them in the same table creates hot partitions: a viral URL with 10M clicks/day would have 10M writes competing with redirect reads on the same partition. Separate tables isolate the workloads.")
+{{think "The GSI projection matters for both cost and correctness. Choosing ALL projection means the user dashboard Query returns full item data in one read. Choosing KEYS_ONLY would mean 1 Query + 1 GetItem per URL row — turning a 20-item page into 21 reads."
+  (whyNot "mixing analytics writes into the urls table" "Analytics queries (clicks by country, device) have completely different access patterns than URL redirects. Mixing them creates hot partitions: a viral URL with 10M clicks/day would have 10M UpdateItem writes competing with redirect reads on the same partition. Separate tables isolate the workloads.")
   (how "handle a viral URL (hot partition)" "DynamoDB adaptive capacity kicks in within minutes, redistributing throughput to hot partitions. But the real defense is the cache: a viral URL has 95%+ cache hit rate, so only 5% of reads reach DynamoDB. For a URL getting 10M clicks/day, that is only 500K DB reads/day — well within a single partition's 3,000 RCU capacity (3,000 reads/sec max for ≤4KB items).")
 }}
 
@@ -410,13 +444,23 @@ CREATE INDEX idx_urls_expires ON urls(expires_at) WHERE expires_at IS NOT NULL;
 -- don't support composite keys, and B-tree is just as fast for equality.
 `}}
 
+{{triggerQs "Questions about database choice and migration"
+  "When exactly would you migrate from Postgres to DynamoDB?"
+  "Three hard signals: (1) Sustained writes consistently above 10–15K/s — Postgres primary tops out and you'd need manual sharding. (2) You'd need 5+ read replicas — PgBouncer tuning, replication lag monitoring, and failover scripts become full-time ops work. (3) You need multi-region active-active writes — Postgres replication is single-master only; DynamoDB Global Tables handle this natively. At 57K RPS with 10:1 read:write, signal 1 is the trigger."
+  "How would you migrate Postgres to DynamoDB with zero downtime?"
+  "Five phases: dual-write first (write to both, read from Postgres), then backfill historical data, then shadow-read DynamoDB to verify correctness, then gradually flip reads with a feature flag (1% → 100%), then drain Postgres over 7 days. The key insight: dual-write before backfill prevents a gap window where new URLs exist only in Postgres."
+  "What is a GSI and why do you need one here?"
+  "A GSI (Global Secondary Index) is a separate copy of your data that DynamoDB maintains, with a different partition key and sort key than the main table. The primary table is keyed on short_code — perfect for redirect lookups. But the user dashboard needs 'all URLs for user_id, sorted by created_at' — a query the primary table can't answer without a full scan. The GSI keys on user_id (partition) + created_at (sort), so DynamoDB can answer that query in O(n) with a paginated cursor. Cost: double storage and ~double write cost for items that hit the GSI — acceptable for a dashboard that's accessed far less than the redirect path."
+}}
+
 {{caveat "DynamoDB conditional writes (attribute_not_exists) are strongly consistent within a single region but do NOT prevent cross-region conflicts during network partitions when using Global Tables."}}
 
 {{mustKnow
-  "Access pattern is 99% single-key lookup — this drives the choice toward a key-value store over relational"
+  "Access pattern is 99% single-key lookup — drives the choice toward a key-value store over relational"
   "DynamoDB partition key = short_code gives O(1) reads at any scale with no manual sharding"
   "DynamoDB TTL handles URL expiration automatically — zero application code, zero cost"
-  "GSI on user_id with ALL projection avoids follow-up lookups for user dashboard queries"
+  "GSI on user_id with ALL projection: 1 Query = full page of URL data, no follow-up reads needed"
+  "Migration path: dual-write → backfill → shadow reads → gradual read flip → drain Postgres"
 }}
 
 {{goodToKnow
