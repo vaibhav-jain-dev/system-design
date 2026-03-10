@@ -1199,4 +1199,404 @@ var revisionSVGs = map[string]string{
   <rect x="200" y="600" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
   <text x="550" y="613" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: Content-addressable storage + chunked upload enables dedup, resumability, and delta sync</text>
 </svg>`,
+
+// ─────────────────────────────────────────────────────────────────────
+// NOTIFICATION SYSTEM
+// ─────────────────────────────────────────────────────────────────────
+"notification-system": `<svg viewBox="0 0 1100 680" xmlns="http://www.w3.org/2000/svg" font-family="Inter,system-ui,sans-serif">
+  <defs>
+    <marker id="ns-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa0a6"/></marker>
+    <filter id="ns-sh"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.08"/></filter>
+  </defs>
+  <rect width="1100" height="680" rx="12" fill="#fafbfd"/>
+  <text x="550" y="32" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">Notification System — Architecture Decision Map</text>
+
+  <!-- ═══ DELIVERY PIPELINE ═══ -->
+  <text x="550" y="60" text-anchor="middle" font-size="12" font-weight="600" fill="#4285f4" letter-spacing="1">FULLY ASYNC PIPELINE (TRIGGERING SERVICE NEVER WAITS)</text>
+
+  <rect x="20" y="80" width="110" height="44" rx="6" fill="#f1f3f4" stroke="#dadce0" stroke-width="1" filter="url(#ns-sh)"/>
+  <text x="75" y="98" text-anchor="middle" font-size="10" font-weight="500" fill="#202124">Trigger Event</text>
+  <text x="75" y="112" text-anchor="middle" font-size="8" fill="#5f6368">like, comment, OTP</text>
+
+  <line x1="130" y1="102" x2="160" y2="102" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#ns-arr)"/>
+
+  <rect x="162" y="76" width="140" height="52" rx="6" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.2" filter="url(#ns-sh)"/>
+  <text x="232" y="96" text-anchor="middle" font-size="10" font-weight="600" fill="#7627bb">Kafka Topics</text>
+  <text x="232" y="108" text-anchor="middle" font-size="8" fill="#202124">notif.high / medium / low</text>
+  <text x="232" y="120" text-anchor="middle" font-size="7" fill="#f9ab00">partition by recipient user_id</text>
+
+  <line x1="302" y1="102" x2="332" y2="102" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#ns-arr)"/>
+
+  <rect x="334" y="76" width="150" height="52" rx="6" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#ns-sh)"/>
+  <text x="409" y="94" text-anchor="middle" font-size="10" font-weight="600" fill="#1a73e8">Priority Router</text>
+  <text x="409" y="108" text-anchor="middle" font-size="8" fill="#202124">high first (timeout=0)</text>
+  <text x="409" y="120" text-anchor="middle" font-size="7" fill="#5f6368">OTP never starved by marketing</text>
+
+  <line x1="484" y1="102" x2="514" y2="102" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#ns-arr)"/>
+
+  <rect x="516" y="76" width="140" height="52" rx="6" fill="#e6f4ea" stroke="#34a853" stroke-width="1.2" filter="url(#ns-sh)"/>
+  <text x="586" y="94" text-anchor="middle" font-size="10" font-weight="600" fill="#137333">Dedup + Rate Limit</text>
+  <text x="586" y="108" text-anchor="middle" font-size="8" fill="#202124">Redis SET NX + counters</text>
+  <text x="586" y="120" text-anchor="middle" font-size="7" fill="#5f6368">at-least-once → dedup at receiver</text>
+
+  <!-- Fan-out to channels -->
+  <line x1="656" y1="90" x2="700" y2="80" stroke="#9aa0a6" stroke-width="1.2" marker-end="url(#ns-arr)"/>
+  <line x1="656" y1="102" x2="700" y2="102" stroke="#9aa0a6" stroke-width="1.2" marker-end="url(#ns-arr)"/>
+  <line x1="656" y1="114" x2="700" y2="124" stroke="#9aa0a6" stroke-width="1.2" marker-end="url(#ns-arr)"/>
+
+  <rect x="702" y="60" width="110" height="32" rx="6" fill="#e0f7fa" stroke="#00897b" stroke-width="1" filter="url(#ns-sh)"/>
+  <text x="757" y="80" text-anchor="middle" font-size="9" font-weight="600" fill="#00695c">Push (APNs/FCM)</text>
+
+  <rect x="702" y="96" width="110" height="32" rx="6" fill="#e8f0fe" stroke="#4285f4" stroke-width="1" filter="url(#ns-sh)"/>
+  <text x="757" y="116" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Email (SES)</text>
+
+  <rect x="702" y="132" width="110" height="32" rx="6" fill="#fef7e0" stroke="#f9ab00" stroke-width="1" filter="url(#ns-sh)"/>
+  <text x="757" y="152" text-anchor="middle" font-size="9" font-weight="600" fill="#e37400">SMS (SNS/Twilio)</text>
+
+  <line x1="812" y1="76" x2="845" y2="100" stroke="#9aa0a6" stroke-width="1" marker-end="url(#ns-arr)"/>
+  <line x1="812" y1="112" x2="845" y2="105" stroke="#9aa0a6" stroke-width="1" marker-end="url(#ns-arr)"/>
+  <line x1="812" y1="148" x2="845" y2="110" stroke="#9aa0a6" stroke-width="1" marker-end="url(#ns-arr)"/>
+
+  <!-- DynamoDB log -->
+  <rect x="847" y="80" width="140" height="48" rx="6" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.2" filter="url(#ns-sh)"/>
+  <text x="917" y="100" text-anchor="middle" font-size="10" font-weight="600" fill="#7627bb">DynamoDB Log</text>
+  <text x="917" y="112" text-anchor="middle" font-size="8" fill="#5f6368">TTL 30d auto-delete</text>
+  <text x="917" y="122" text-anchor="middle" font-size="7" fill="#5f6368">append-only audit trail</text>
+
+  <!-- ═══ KEY DECISIONS ═══ -->
+  <line x1="20" y1="185" x2="1080" y2="185" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="210" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">KEY DECISIONS</text>
+
+  <rect x="20" y="225" width="340" height="70" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#ns-sh)"/>
+  <text x="190" y="245" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Kafka (not SQS) — chosen</text>
+  <text x="190" y="260" text-anchor="middle" font-size="9" fill="#202124">7-day replay: recover from outage</text>
+  <text x="190" y="273" text-anchor="middle" font-size="9" fill="#202124">multi-consumer: push, email, SMS, analytics</text>
+  <text x="190" y="286" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">per-partition ordering by user_id</text>
+
+  <rect x="380" y="225" width="340" height="70" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#ns-sh)"/>
+  <text x="550" y="245" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">Separate Topics per Priority</text>
+  <text x="550" y="260" text-anchor="middle" font-size="9" fill="#202124">high: OTP, payments (poll timeout=0ms)</text>
+  <text x="550" y="273" text-anchor="middle" font-size="9" fill="#202124">low: marketing (poll timeout=100ms)</text>
+  <text x="550" y="286" text-anchor="middle" font-size="8" fill="#5f6368">one topic at 167K/s makes priority impossible</text>
+
+  <rect x="740" y="225" width="340" height="70" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2" filter="url(#ns-sh)"/>
+  <text x="910" y="245" text-anchor="middle" font-size="10" font-weight="700" fill="#e37400">At-Least-Once (not Exactly-Once)</text>
+  <text x="910" y="260" text-anchor="middle" font-size="9" fill="#202124">exactly-once across push networks is impossible</text>
+  <text x="910" y="273" text-anchor="middle" font-size="9" fill="#202124">FCM may deliver twice during its own retries</text>
+  <text x="910" y="286" text-anchor="middle" font-size="8" fill="#5f6368">dedup at receiver: idempotency key per notif</text>
+
+  <!-- ═══ SCALE ═══ -->
+  <line x1="20" y1="315" x2="1080" y2="315" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="340" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">SCALE CHALLENGES</text>
+
+  <rect x="20" y="355" width="340" height="65" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2" filter="url(#ns-sh)"/>
+  <text x="190" y="375" text-anchor="middle" font-size="10" font-weight="700" fill="#c5221f">Fan-out Problem</text>
+  <text x="190" y="390" text-anchor="middle" font-size="9" fill="#202124">10M-follower celebrity posts a photo</text>
+  <text x="190" y="403" text-anchor="middle" font-size="9" fill="#202124">sync: 10M × 1ms FCM = 2.7 hours</text>
+  <text x="190" y="413" text-anchor="middle" font-size="8" fill="#ea4335">triggering action must complete in &lt;500ms</text>
+
+  <line x1="360" y1="387" x2="400" y2="387" stroke="#34a853" stroke-width="1.5" marker-end="url(#ns-arr)"/>
+
+  <rect x="402" y="355" width="340" height="65" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#ns-sh)"/>
+  <text x="572" y="375" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Solution: Async + Batch + Rate Limit</text>
+  <text x="572" y="390" text-anchor="middle" font-size="9" fill="#202124">Kafka decouples trigger from delivery</text>
+  <text x="572" y="403" text-anchor="middle" font-size="9" fill="#202124">batch FCM calls (500 tokens/request)</text>
+  <text x="572" y="413" text-anchor="middle" font-size="8" fill="#5f6368">exponential backoff on channel failures</text>
+
+  <rect x="762" y="355" width="318" height="65" rx="8" fill="#e0f7fa" stroke="#00897b" stroke-width="1.2" filter="url(#ns-sh)"/>
+  <text x="921" y="375" text-anchor="middle" font-size="10" font-weight="700" fill="#00695c">User Preferences</text>
+  <text x="921" y="390" text-anchor="middle" font-size="9" fill="#202124">per-user: channel, frequency, quiet hours</text>
+  <text x="921" y="403" text-anchor="middle" font-size="9" fill="#202124">DynamoDB: simple key-value by user_id</text>
+  <text x="921" y="413" text-anchor="middle" font-size="8" fill="#5f6368">checked before every delivery attempt</text>
+
+  <!-- ═══ KEY NUMBERS ═══ -->
+  <line x1="20" y1="440" x2="1080" y2="440" stroke="#e2e8f0" stroke-width="1"/>
+
+  <rect x="20" y="460" width="160" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="100" y="478" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">167K notifs/sec</text>
+  <text x="100" y="492" text-anchor="middle" font-size="8" fill="#5f6368">peak throughput</text>
+
+  <rect x="195" y="460" width="160" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="275" y="478" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">3 priority levels</text>
+  <text x="275" y="492" text-anchor="middle" font-size="8" fill="#5f6368">high / medium / low</text>
+
+  <rect x="370" y="460" width="160" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="450" y="478" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">7-day replay</text>
+  <text x="450" y="492" text-anchor="middle" font-size="8" fill="#5f6368">Kafka retention</text>
+
+  <rect x="545" y="460" width="160" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="625" y="478" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">30-day TTL</text>
+  <text x="625" y="492" text-anchor="middle" font-size="8" fill="#5f6368">DynamoDB auto-delete</text>
+
+  <rect x="720" y="460" width="160" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="800" y="478" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">at-least-once</text>
+  <text x="800" y="492" text-anchor="middle" font-size="8" fill="#5f6368">dedup at receiver</text>
+
+  <rect x="895" y="460" width="160" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="975" y="478" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">500 tokens/batch</text>
+  <text x="975" y="492" text-anchor="middle" font-size="8" fill="#5f6368">FCM batch API</text>
+
+  <rect x="200" y="520" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
+  <text x="550" y="533" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: Priority-based Kafka topics ensure OTP notifications are never starved by marketing volume</text>
+</svg>`,
+
+// ─────────────────────────────────────────────────────────────────────
+// PAYMENT SYSTEM
+// ─────────────────────────────────────────────────────────────────────
+"payment-system": `<svg viewBox="0 0 1100 720" xmlns="http://www.w3.org/2000/svg" font-family="Inter,system-ui,sans-serif">
+  <defs>
+    <marker id="ps-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa0a6"/></marker>
+    <filter id="ps-sh"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.08"/></filter>
+  </defs>
+  <rect width="1100" height="720" rx="12" fill="#fafbfd"/>
+  <text x="550" y="32" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">Payment System — Architecture Decision Map</text>
+
+  <!-- ═══ PAYMENT FLOW ═══ -->
+  <text x="550" y="60" text-anchor="middle" font-size="12" font-weight="600" fill="#4285f4" letter-spacing="1">ASYNC SAGA: POST RETURNS 201 "PENDING" IMMEDIATELY</text>
+
+  <rect x="20" y="80" width="100" height="40" rx="6" fill="#f1f3f4" stroke="#dadce0" stroke-width="1" filter="url(#ps-sh)"/>
+  <text x="70" y="104" text-anchor="middle" font-size="10" font-weight="500" fill="#202124">Client</text>
+
+  <line x1="120" y1="100" x2="155" y2="100" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#ps-arr)"/>
+  <text x="137" y="93" font-size="7" fill="#5f6368">POST</text>
+
+  <rect x="157" y="76" width="130" height="48" rx="6" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#ps-sh)"/>
+  <text x="222" y="96" text-anchor="middle" font-size="10" font-weight="600" fill="#1a73e8">API + Idempotency</text>
+  <text x="222" y="108" text-anchor="middle" font-size="8" fill="#202124">Redis SET NX check</text>
+  <text x="222" y="118" text-anchor="middle" font-size="7" fill="#5f6368">before ANY side effects</text>
+
+  <line x1="287" y1="100" x2="322" y2="100" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#ps-arr)"/>
+  <text x="304" y="93" font-size="7" fill="#5f6368">saga</text>
+
+  <rect x="324" y="74" width="150" height="52" rx="6" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#ps-sh)"/>
+  <text x="399" y="92" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Saga Orchestrator</text>
+  <text x="399" y="106" text-anchor="middle" font-size="8" fill="#202124">state machine in Postgres</text>
+  <text x="399" y="118" text-anchor="middle" font-size="7" fill="#5f6368">crash recovery: read state on restart</text>
+
+  <!-- Saga steps -->
+  <line x1="474" y1="88" x2="520" y2="78" stroke="#9aa0a6" stroke-width="1" marker-end="url(#ps-arr)"/>
+  <line x1="474" y1="100" x2="520" y2="100" stroke="#9aa0a6" stroke-width="1" marker-end="url(#ps-arr)"/>
+  <line x1="474" y1="112" x2="520" y2="122" stroke="#9aa0a6" stroke-width="1" marker-end="url(#ps-arr)"/>
+
+  <rect x="522" y="60" width="130" height="28" rx="5" fill="#fef7e0" stroke="#f9ab00" stroke-width="1"/>
+  <text x="587" y="78" text-anchor="middle" font-size="8" font-weight="600" fill="#e37400">1. Authorize card</text>
+
+  <rect x="522" y="92" width="130" height="28" rx="5" fill="#fef7e0" stroke="#f9ab00" stroke-width="1"/>
+  <text x="587" y="110" text-anchor="middle" font-size="8" font-weight="600" fill="#e37400">2. Debit ledger</text>
+
+  <rect x="522" y="124" width="130" height="28" rx="5" fill="#fef7e0" stroke="#f9ab00" stroke-width="1"/>
+  <text x="587" y="142" text-anchor="middle" font-size="8" font-weight="600" fill="#e37400">3. Credit merchant</text>
+
+  <!-- Ledger -->
+  <line x1="652" y1="106" x2="700" y2="106" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#ps-arr)"/>
+
+  <rect x="702" y="78" width="180" height="56" rx="6" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.5" filter="url(#ps-sh)"/>
+  <text x="792" y="98" text-anchor="middle" font-size="10" font-weight="700" fill="#7627bb">Postgres Ledger</text>
+  <text x="792" y="112" text-anchor="middle" font-size="8" fill="#202124">double-entry bookkeeping</text>
+  <text x="792" y="124" text-anchor="middle" font-size="7" fill="#5f6368">SUM(all entries) = 0 always</text>
+  <text x="792" y="130" text-anchor="middle" font-size="7" fill="#ea4335">append-only: no UPDATE, no DELETE</text>
+
+  <!-- SERIALIZABLE -->
+  <rect x="905" y="78" width="180" height="56" rx="6" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2" filter="url(#ps-sh)"/>
+  <text x="995" y="96" text-anchor="middle" font-size="9" font-weight="700" fill="#c5221f">SERIALIZABLE isolation</text>
+  <text x="995" y="110" text-anchor="middle" font-size="8" fill="#202124">READ COMMITTED: two $80 debits</text>
+  <text x="995" y="122" text-anchor="middle" font-size="8" fill="#202124">on $100 balance → -$60</text>
+  <text x="995" y="130" text-anchor="middle" font-size="8" fill="#ea4335">correctness &gt; throughput for money</text>
+
+  <!-- ═══ KEY DECISIONS ═══ -->
+  <line x1="20" y1="170" x2="1080" y2="170" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="195" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">KEY DECISIONS</text>
+
+  <rect x="20" y="210" width="340" height="80" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#ps-sh)"/>
+  <text x="190" y="230" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Saga Orchestration (chosen)</text>
+  <text x="190" y="245" text-anchor="middle" font-size="9" fill="#202124">central state machine, one place to debug</text>
+  <text x="190" y="258" text-anchor="middle" font-size="9" fill="#202124">crash recovery: persistent state in Postgres</text>
+  <text x="190" y="271" text-anchor="middle" font-size="8" fill="#ea4335">✗ 2PC: bank APIs don't support prepare/commit</text>
+  <text x="190" y="282" text-anchor="middle" font-size="8" fill="#ea4335">✗ Choreography: no single source of truth</text>
+
+  <rect x="380" y="210" width="340" height="80" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#ps-sh)"/>
+  <text x="550" y="230" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">Double-Entry Bookkeeping</text>
+  <text x="550" y="245" text-anchor="middle" font-size="9" fill="#202124">every payment = exactly 2 ledger entries</text>
+  <text x="550" y="258" text-anchor="middle" font-size="9" fill="#202124">debit + credit, sum always = 0</text>
+  <text x="550" y="271" text-anchor="middle" font-size="8" fill="#5f6368">corrections are new reversal entries</text>
+  <text x="550" y="282" text-anchor="middle" font-size="8" fill="#ea4335">✗ single table: can't represent multi-account moves</text>
+
+  <rect x="740" y="210" width="340" height="80" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2" filter="url(#ps-sh)"/>
+  <text x="910" y="230" text-anchor="middle" font-size="10" font-weight="700" fill="#e37400">Idempotency (critical)</text>
+  <text x="910" y="245" text-anchor="middle" font-size="9" fill="#202124">Redis SET NX with 24h TTL</text>
+  <text x="910" y="258" text-anchor="middle" font-size="9" fill="#202124">check BEFORE any side effects</text>
+  <text x="910" y="271" text-anchor="middle" font-size="8" fill="#202124">card charge takes 200-800ms → timeouts</text>
+  <text x="910" y="282" text-anchor="middle" font-size="8" fill="#ea4335">retry without idempotency = double charge</text>
+
+  <!-- ═══ WHY POSTGRES ═══ -->
+  <line x1="20" y1="310" x2="1080" y2="310" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="335" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">WHY POSTGRES FOR PAYMENTS (NOT NOSQL)</text>
+
+  <rect x="20" y="350" width="520" height="65" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#ps-sh)"/>
+  <text x="280" y="370" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Postgres — chosen</text>
+  <text x="280" y="385" text-anchor="middle" font-size="9" fill="#202124">true multi-row ACID: payment touches 3+ accounts (customer, merchant, fee)</text>
+  <text x="280" y="398" text-anchor="middle" font-size="9" fill="#202124">Stripe runs Postgres at tens of thousands TPS (PgBouncer + read replicas + partitioning)</text>
+  <text x="280" y="410" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">SERIALIZABLE isolation prevents double-spend</text>
+
+  <rect x="560" y="350" width="250" height="65" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2"/>
+  <text x="685" y="370" text-anchor="middle" font-size="9" font-weight="600" fill="#c5221f">✗ DynamoDB</text>
+  <text x="685" y="385" text-anchor="middle" font-size="8" fill="#202124">eventually consistent by default</text>
+  <text x="685" y="398" text-anchor="middle" font-size="8" fill="#202124">Transactions API: 25 items/4MB limit</text>
+  <text x="685" y="410" text-anchor="middle" font-size="8" fill="#5f6368">no multi-row ACID across partitions</text>
+
+  <rect x="830" y="350" width="250" height="65" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2"/>
+  <text x="955" y="370" text-anchor="middle" font-size="9" font-weight="600" fill="#c5221f">✗ Cassandra</text>
+  <text x="955" y="385" text-anchor="middle" font-size="8" fill="#202124">no multi-row ACID</text>
+  <text x="955" y="398" text-anchor="middle" font-size="8" fill="#202124">LWT: single-partition only</text>
+  <text x="955" y="410" text-anchor="middle" font-size="8" fill="#5f6368">slow under contention</text>
+
+  <!-- ═══ KEY NUMBERS ═══ -->
+  <line x1="20" y1="435" x2="1080" y2="435" stroke="#e2e8f0" stroke-width="1"/>
+
+  <rect x="20" y="455" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="95" y="473" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">1000 TPS</text>
+  <text x="95" y="487" text-anchor="middle" font-size="8" fill="#5f6368">payment throughput</text>
+
+  <rect x="185" y="455" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="260" y="473" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">200-800ms</text>
+  <text x="260" y="487" text-anchor="middle" font-size="8" fill="#5f6368">card auth latency</text>
+
+  <rect x="350" y="455" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="425" y="473" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">SERIALIZABLE</text>
+  <text x="425" y="487" text-anchor="middle" font-size="8" fill="#5f6368">~10-15% more CPU</text>
+
+  <rect x="515" y="455" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="590" y="473" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">SUM = 0</text>
+  <text x="590" y="487" text-anchor="middle" font-size="8" fill="#5f6368">double-entry invariant</text>
+
+  <rect x="680" y="455" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="755" y="473" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">24h TTL</text>
+  <text x="755" y="487" text-anchor="middle" font-size="8" fill="#5f6368">idempotency key expiry</text>
+
+  <rect x="845" y="455" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="920" y="473" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">append-only</text>
+  <text x="920" y="487" text-anchor="middle" font-size="8" fill="#5f6368">no UPDATE/DELETE</text>
+
+  <rect x="200" y="515" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
+  <text x="550" y="528" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: Payments need ACID (Postgres + SERIALIZABLE), not NoSQL — correctness over throughput</text>
+</svg>`,
+
+// ─────────────────────────────────────────────────────────────────────
+// GOOGLE CALENDAR
+// ─────────────────────────────────────────────────────────────────────
+"google-calendar": `<svg viewBox="0 0 1100 680" xmlns="http://www.w3.org/2000/svg" font-family="Inter,system-ui,sans-serif">
+  <defs>
+    <marker id="gc-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9aa0a6"/></marker>
+    <filter id="gc-sh"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.08"/></filter>
+  </defs>
+  <rect width="1100" height="680" rx="12" fill="#fafbfd"/>
+  <text x="550" y="32" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">Google Calendar — Architecture Decision Map</text>
+
+  <!-- ═══ CORE: RECURRING EVENTS ═══ -->
+  <text x="550" y="60" text-anchor="middle" font-size="12" font-weight="600" fill="#4285f4" letter-spacing="1">CORE CHALLENGE: RECURRING EVENTS (RRULE)</text>
+
+  <rect x="20" y="80" width="340" height="75" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#gc-sh)"/>
+  <text x="190" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Store RRULE Once, Expand On-the-Fly</text>
+  <text x="190" y="115" text-anchor="middle" font-size="9" fill="#202124">weekly × 1 year = 52 occurrences</text>
+  <text x="190" y="128" text-anchor="middle" font-size="9" fill="#202124">~1us each = 52us CPU total</text>
+  <text x="190" y="141" text-anchor="middle" font-size="8" fill="#5f6368">edit master → instant, O(1)</text>
+  <text x="190" y="151" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">exceptions stored separately</text>
+
+  <rect x="380" y="80" width="340" height="75" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2"/>
+  <text x="550" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#c5221f">✗ Pre-Expand All Occurrences</text>
+  <text x="550" y="115" text-anchor="middle" font-size="9" fill="#202124">weekly with no end = infinite rows</text>
+  <text x="550" y="128" text-anchor="middle" font-size="9" fill="#202124">COUNT=52 at 2B events × 40% recurring</text>
+  <text x="550" y="141" text-anchor="middle" font-size="9" fill="#202124">= 41B rows/year</text>
+  <text x="550" y="151" text-anchor="middle" font-size="8" fill="#ea4335">editing master = update all N rows: O(N)</text>
+
+  <!-- PUT not POST -->
+  <rect x="740" y="80" width="340" height="75" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#gc-sh)"/>
+  <text x="910" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#1a73e8">PUT (not POST) for Events</text>
+  <text x="910" y="115" text-anchor="middle" font-size="9" fill="#202124">client generates UUID before sending</text>
+  <text x="910" y="128" text-anchor="middle" font-size="9" fill="#202124">same UUID on retry = upsert, not duplicate</text>
+  <text x="910" y="141" text-anchor="middle" font-size="8" fill="#5f6368">mobile networks drop ACKs frequently</text>
+  <text x="910" y="151" text-anchor="middle" font-size="8" fill="#ea4335">POST would create duplicate events on retry</text>
+
+  <!-- ═══ TECHNOLOGY ═══ -->
+  <line x1="20" y1="175" x2="1080" y2="175" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="200" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">TECHNOLOGY CHOICES</text>
+
+  <rect x="20" y="215" width="340" height="70" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#gc-sh)"/>
+  <text x="190" y="235" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">Postgres (not DynamoDB)</text>
+  <text x="190" y="250" text-anchor="middle" font-size="9" fill="#202124">range scans: "all events in March"</text>
+  <text x="190" y="263" text-anchor="middle" font-size="9" fill="#202124">JOINs: master events + exceptions</text>
+  <text x="190" y="276" text-anchor="middle" font-size="8" fill="#5f6368">ACID for master + exception atomic update</text>
+
+  <rect x="380" y="215" width="340" height="70" rx="8" fill="#e0f7fa" stroke="#00897b" stroke-width="1.2" filter="url(#gc-sh)"/>
+  <text x="550" y="235" text-anchor="middle" font-size="10" font-weight="700" fill="#00695c">Redis for Free/Busy</text>
+  <text x="550" y="250" text-anchor="middle" font-size="9" fill="#202124">sorted set per user per day</text>
+  <text x="550" y="263" text-anchor="middle" font-size="9" fill="#202124">ZRANGEBYSCORE for busy blocks</text>
+  <text x="550" y="276" text-anchor="middle" font-size="8" fill="#5f6368">10-person meeting = 10 queries × 5ms each in PG</text>
+  <text x="550" y="280" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">Redis absorbs &gt;95% of reads</text>
+
+  <rect x="740" y="215" width="340" height="70" rx="8" fill="#f3e8fd" stroke="#9334e6" stroke-width="1.2" filter="url(#gc-sh)"/>
+  <text x="910" y="235" text-anchor="middle" font-size="10" font-weight="700" fill="#7627bb">Kafka for Notifications</text>
+  <text x="910" y="250" text-anchor="middle" font-size="9" fill="#202124">100 recurring events = 5,200 reminders</text>
+  <text x="910" y="263" text-anchor="middle" font-size="9" fill="#202124">async: reminder failures don't block saves</text>
+  <text x="910" y="276" text-anchor="middle" font-size="8" fill="#5f6368">decouples event creation from notification</text>
+
+  <!-- ═══ SYNC ENGINE ═══ -->
+  <line x1="20" y1="305" x2="1080" y2="305" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="550" y="330" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b" letter-spacing="1">SYNC: DELTA SYNC TOKEN (NOT WEBSOCKET, NOT FULL SYNC)</text>
+
+  <rect x="20" y="345" width="320" height="70" rx="8" fill="#e6f4ea" stroke="#34a853" stroke-width="1.5" filter="url(#gc-sh)"/>
+  <text x="180" y="365" text-anchor="middle" font-size="10" font-weight="700" fill="#137333">sync_token (chosen)</text>
+  <text x="180" y="380" text-anchor="middle" font-size="9" fill="#202124">Base64(calendar_id + last_modified_at)</text>
+  <text x="180" y="393" text-anchor="middle" font-size="9" fill="#202124">95% of syncs return &lt;10 events</text>
+  <text x="180" y="406" text-anchor="middle" font-size="8" font-weight="600" fill="#f9ab00">~5-50KB per sync vs ~5MB full</text>
+
+  <rect x="360" y="345" width="250" height="70" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2"/>
+  <text x="485" y="365" text-anchor="middle" font-size="9" font-weight="600" fill="#c5221f">✗ Full Sync</text>
+  <text x="485" y="380" text-anchor="middle" font-size="8" fill="#202124">10K events (~5MB) every open</text>
+  <text x="485" y="393" text-anchor="middle" font-size="8" fill="#202124">unsustainable at 350K RPS</text>
+  <text x="485" y="406" text-anchor="middle" font-size="8" fill="#5f6368">wastes bandwidth, slow on mobile</text>
+
+  <rect x="630" y="345" width="250" height="70" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="1.2"/>
+  <text x="755" y="365" text-anchor="middle" font-size="9" font-weight="600" fill="#c5221f">✗ WebSockets</text>
+  <text x="755" y="380" text-anchor="middle" font-size="8" fill="#202124">500M persistent connections</text>
+  <text x="755" y="393" text-anchor="middle" font-size="8" fill="#202124">sticky LBs + per-conn state</text>
+  <text x="755" y="406" text-anchor="middle" font-size="8" fill="#5f6368">calendar doesn't need real-time push</text>
+
+  <!-- ETag + Soft Delete -->
+  <rect x="900" y="345" width="180" height="70" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2" filter="url(#gc-sh)"/>
+  <text x="990" y="365" text-anchor="middle" font-size="9" font-weight="700" fill="#1a73e8">ETag Optimistic Lock</text>
+  <text x="990" y="380" text-anchor="middle" font-size="8" fill="#202124">v5 conflict → 412 re-fetch</text>
+  <text x="990" y="393" text-anchor="middle" font-size="8" fill="#202124">stateless: MD5(updated_at)</text>
+  <text x="990" y="406" text-anchor="middle" font-size="8" fill="#5f6368">+ soft deletes for sync</text>
+
+  <!-- ═══ KEY NUMBERS ═══ -->
+  <line x1="20" y1="435" x2="1080" y2="435" stroke="#e2e8f0" stroke-width="1"/>
+
+  <rect x="20" y="455" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="95" y="473" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">2B events/day</text>
+  <text x="95" y="487" text-anchor="middle" font-size="8" fill="#5f6368">creation volume</text>
+
+  <rect x="185" y="455" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="260" y="473" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">350K RPS</text>
+  <text x="260" y="487" text-anchor="middle" font-size="8" fill="#5f6368">sync requests</text>
+
+  <rect x="350" y="455" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="425" y="473" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">40% recurring</text>
+  <text x="425" y="487" text-anchor="middle" font-size="8" fill="#5f6368">RRULE expand on fly</text>
+
+  <rect x="515" y="455" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="590" y="473" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">52us expand</text>
+  <text x="590" y="487" text-anchor="middle" font-size="8" fill="#5f6368">weekly × 1 year</text>
+
+  <rect x="680" y="455" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="755" y="473" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">PUT not POST</text>
+  <text x="755" y="487" text-anchor="middle" font-size="8" fill="#5f6368">client-gen UUID</text>
+
+  <rect x="845" y="455" width="150" height="42" rx="8" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.2"/>
+  <text x="920" y="473" text-anchor="middle" font-size="9" font-weight="700" fill="#e37400">delta sync</text>
+  <text x="920" y="487" text-anchor="middle" font-size="8" fill="#5f6368">95% → &lt;10 events</text>
+
+  <rect x="200" y="515" width="700" height="18" rx="9" fill="#e8f0fe" stroke="#4285f4" stroke-width="1"/>
+  <text x="550" y="528" text-anchor="middle" font-size="9" font-weight="600" fill="#1a73e8">Core insight: Never pre-expand recurring events — store RRULE once, expand on-the-fly for O(1) edits</text>
+</svg>`,
 }
